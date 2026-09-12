@@ -1,0 +1,46 @@
+# ШАБЛОН юнита панели. Рабочий файл собирает harness/scripts/unit-paneli.sh
+# из паспорта установки: путь проекта у каждого свой, и вшитый сюда
+# чужой путь уронил бы службу на старте (код 200/CHDIR).
+[Unit]
+# Веб-панель управления харнесом: переключатели владельцу без терминала.
+# Слушает ТОЛЬКО 127.0.0.1 — наружу ведёт отдельный server-блок nginx со своим
+# именем (общий origin с продуктом отдал бы панель чужому скрипту).
+Description=Harness web panel (переключатели владельцу)
+After=network.target
+
+[Service]
+Type=simple
+User=harness-panel
+Group=harness-panel
+WorkingDirectory=@PROJECT_DIR@
+# Каталог секретов панели (токены входа, сессии, ключ подписи). Он ОБЩИЙ со
+# стороной диспетчера: ссылку выдаёт диспетчер от своего пользователя, а
+# обменивает её служба от своего — смотри они в разные каталоги, выданная
+# ссылка не открывала бы ничего (поймано живой попыткой владельца 11.09).
+Environment=PANEL_SECRETS_DIR=/var/lib/harness/panel-state
+# Общий каталог состояния: ожидания подтверждений заводит служба, а разбирает
+# ответ владельца диспетчер под другим пользователем — смотреть они обязаны в
+# одно место.
+Environment=PANEL_STATE_DIR=/var/lib/harness/panel-state
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 @PROJECT_DIR@/harness/panel/server.py --порт 8787
+Restart=always
+RestartSec=5
+
+# Ограничения. NoNewPrivileges НЕ ставится намеренно: запись разрешённого ключа
+# идёт через единственную строку sudoers, а этот флаг запретил бы sudo вовсе —
+# то есть панель перестала бы переключать что-либо. Остальное урезано.
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+# /etc/harness — потому что панель переключает ключи в нём: ProtectSystem=strict
+# делает /etc только для чтения ДЛЯ ВСЕХ потомков, включая поднятого через sudo
+# root (улика 11.09.2026: запись уходила в бесконечный круг попыток).
+# ProtectSystem=strict делает ВСЮ файловую систему только для чтения, кроме
+# перечисленного здесь, — и это верно даже для поднятого через sudo root.
+# Поэтому пульт шагов (он лежит в репозитории) назван явно: без него включение
+# шага молча падало с кодом 1 (улика 11.09.2026).
+ReadWritePaths=/var/lib/harness/panel-state /var/log/harness /etc/harness @PROJECT_DIR@/harness/config @PROJECT_DIR@/память
+
+[Install]
+WantedBy=multi-user.target
