@@ -1,0 +1,20 @@
+# Записи памяти, которые достаются НОВОЙ установке харнеса.
+# Владелец 11.09.2026: «сделать те что будут по умолчанию после установки».
+#
+# Список — то, что видит и правит панель (в пакет она заглянуть не может:
+# он в домашнем каталоге, а служба живёт с ProtectHome). Файлы в пакет
+# кладёт scripts/pamyat-v-paket.py от имени агента.
+MEMORY.md
+feedback-code-bar.md
+feedback-command-bans.md
+feedback-communication.md
+feedback-data-via-scripts.md
+feedback-effort-max.md
+feedback-handover-discipline.md
+feedback-semi-auto.md
+feedback-test-not-done.md
+УКАЗАНИЯ.md
+анонс-не-команда.md
+кириллица-в-именах-bash.md
+лок-утёк-в-потомка.md
+указание-умерло-с-сессией.md

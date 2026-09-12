@@ -1,0 +1,40 @@
+{
+  "$comment": "Хуки проекта. Лежат в репозитории, а не в настройках пользователя: они про этот проект, версионируются вместе с ним и переносятся вместе с ним. Скрипты — scripts/hooks/, каждый закрывает грабли, которые здесь уже случались (см. CLAUDE.md §18, 11-ЛОВУШКИ.md).",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/scripts/hooks/session_state.sh",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 $CLAUDE_PROJECT_DIR/scripts/hooks/guard_bash.py",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/scripts/hooks/stop_reminder.sh",
+            "timeout": 20
+          }
+        ]
+      }
+    ]
+  }
+}

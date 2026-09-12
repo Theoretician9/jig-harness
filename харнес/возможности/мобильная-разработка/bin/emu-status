@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+#
+# emu-status — состояние эмулятора одной таблицей: сессия, устройство,
+# загрузка ОС, лок, память процесса, установленное приложение.
+#
+# Зачем отдельная команда: «adb devices» показывает устройство ещё до того, как
+# ОС догрузилась, — и на этом ловятся все первые прогоны («тест упал» вместо
+# «система ещё грузится»).
+#
+# Запуск: emu-status
+# Код возврата: 0 — устройство загружено, 1 — нет.
+set -euo pipefail
+
+CONF="${HARNESS_MOBILE_CONF:-$HOME/.config/harness-mobile.conf}"
+[[ -r "$CONF" ]] || { echo "нет $CONF — возможность не установлена"; exit 1; }
+# shellcheck disable=SC1090
+source "$CONF"
+LOG_DIR="${LOG_DIR:-/var/log/harness}"
+LOCK="$LOG_DIR/locks/${SERVICE_LOCKS_SUBDIR:-services}/${SERVICE_LOCK:-emulator}.lock"
+ADB="$ANDROID_HOME/platform-tools/adb"
+SESSION="${EMU_TMUX_SESSION:-emulator}"
+
+row() { printf '  %-22s %s\n' "$1" "$2"; }
+
+echo "Эмулятор «${AVD_NAME:-?}»:"
+row "tmux-сессия" "$(tmux has-session -t "$SESSION" 2>/dev/null && echo "есть ($SESSION)" || echo "нет")"
+if "$ADB" get-state >/dev/null 2>&1; then
+  row "устройство" "$("$ADB" devices | awk 'NR==2{print $1" "$2}')"
+  boot=$("$ADB" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')
+  row "ОС загружена" "$([[ "$boot" == "1" ]] && echo да || echo "НЕТ — идёт загрузка")"
+  row "версия Android" "$("$ADB" shell getprop ro.build.version.release 2>/dev/null | tr -d '\r')"
+  if [[ -n "${APP_PACKAGE:-}" ]]; then
+    row "пакет $APP_PACKAGE" "$("$ADB" shell pm list packages "$APP_PACKAGE" 2>/dev/null | tr -d '\r' | grep -q . && echo установлен || echo "не установлен")"
+  fi
+else
+  row "устройство" "нет (adb не видит)"
+  boot=""
+fi
+row "память процесса" "$(ps -eo rss=,args= 2>/dev/null | awk '/qemu-system|emulator/ && !/awk/ {s+=$1} END{printf "%d МБ", s/1024}')"
+row "потолок памяти" "${EMULATOR_MEM_MB:-2048} МБ (паспорт возможности)"
+row "сервисный лок" "$([[ -f "$LOCK" ]] && sed -n 2p "$LOCK" || echo "нет")"
+row "лог эмулятора" "$LOG_DIR/mobile/emulator.log"
+
+[[ "$boot" == "1" ]] || exit 1

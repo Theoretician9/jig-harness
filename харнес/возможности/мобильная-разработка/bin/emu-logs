@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+#
+# emu-logs — последние строки logcat, отфильтрованные по пакету приложения.
+#
+# Без фильтра logcat даёт десятки тысяч строк системного шума: читать его в
+# контекст запрещено ([[feedback-data-via-scripts]]) — фильтр здесь для того,
+# чтобы в контекст попал вердикт, а не поток.
+#
+# Запуск: emu-logs [строк] [--all]
+set -euo pipefail
+
+CONF="${HARNESS_MOBILE_CONF:-$HOME/.config/harness-mobile.conf}"
+[[ -r "$CONF" ]] || { echo "нет $CONF — возможность не установлена"; exit 1; }
+# shellcheck disable=SC1090
+source "$CONF"
+ADB="$ANDROID_HOME/platform-tools/adb"
+N="${1:-200}"; [[ "$N" == "--all" ]] && N=200
+ALL=0; [[ "${1:-}" == "--all" || "${2:-}" == "--all" ]] && ALL=1
+
+"$ADB" get-state >/dev/null 2>&1 || { echo "устройства нет — сначала emu-start"; exit 1; }
+
+if (( ALL )) || [[ -z "${APP_PACKAGE:-}" ]]; then
+  [[ -z "${APP_PACKAGE:-}" ]] && echo "# APP_PACKAGE не задан в $CONF — показываю ошибки и падения целиком"
+  "$ADB" logcat -d -v time '*:E' | tail -n "$N"
+  exit 0
+fi
+
+PID=$("$ADB" shell pidof "$APP_PACKAGE" 2>/dev/null | tr -d '\r' | awk '{print $1}')
+if [[ -n "$PID" ]]; then
+  "$ADB" logcat -d -v time --pid "$PID" | tail -n "$N"
+else
+  # Процесса нет — это НЕ «логов нет»: приложение могло упасть при старте, и
+  # самое ценное как раз в общем потоке. Говорим об этом вслух.
+  echo "# процесса $APP_PACKAGE нет (не запущено или упало) — показываю падения из общего потока"
+  "$ADB" logcat -d -v time | grep -E "FATAL|AndroidRuntime|$APP_PACKAGE" | tail -n "$N"
+fi

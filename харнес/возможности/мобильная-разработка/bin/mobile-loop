@@ -1,0 +1,158 @@
+#!/usr/bin/env bash
+#
+# mobile-loop — петля проверки мобильного приложения ОДНОЙ КОМАНДОЙ:
+#   сборка → установка на эмулятор → сценарии Maestro → скриншоты → вердикт.
+#
+# Зачем скриптом, а не правилом «после любой правки собери, поставь, прогони».
+# Правило из пяти шагов держится на памяти модели — то есть до первого забывшего.
+# Скрипт держится сам: он либо прошёл целиком, либо назвал, где встал. Кроме
+# того, он оставляет СЛЕД — $LOG_DIR/mobile/последняя-петля.json, — и по этому
+# следу гейт коммита проверяет, что петля вообще была (И-4: «тест зелёный» ≠
+# «я это видел»).
+#
+# Скрипт НЕ смотрит на скриншоты за агента: посмотреть — это прочитать
+# картинку глазами модели. Поэтому в конце он печатает пути снимков отдельным
+# блоком и прямо требует их открыть. Пропущенный просмотр = отчёт «готово» без
+# живой проверки, то есть нарушение И-4.
+#
+# Запуск:
+#   mobile-loop                     полная петля со всеми сценариями
+#   mobile-loop --flow flows/x.yaml один сценарий
+#   mobile-loop --no-build          без пересборки (только прогон по стоящему APK)
+#   mobile-loop --selftest          проверка самого скрипта без Android
+#
+# Код возврата: 0 — петля прошла целиком; 1 — встала (шаг и улика названы).
+set -euo pipefail
+
+CONF="${HARNESS_MOBILE_CONF:-$HOME/.config/harness-mobile.conf}"
+
+if [[ "${1:-}" == "--selftest" ]]; then
+  # Больной случай: приложение не задано — петля обязана отказать ЧЕСТНО,
+  # с адресом, а не «пройти» на пустом месте.
+  T=$(mktemp -d); ok_flag=1
+  cat > "$T/conf" <<EOF
+ANDROID_HOME="$T/android"
+AVD_NAME="dev"
+LOG_DIR="$T/log"
+APP_DIR=""
+BUILD_CMD=""
+APP_PACKAGE=""
+EOF
+  out=$(HARNESS_MOBILE_CONF="$T/conf" bash "$0" 2>&1) && rc=0 || rc=$?
+  (( rc == 1 )) || { echo "SELFTEST: пустая настройка приложения не остановила петлю (rc=$rc)"; ok_flag=0; }
+  grep -q 'APP_DIR' <<< "$out" || { echo "SELFTEST: отказ не назвал, что именно не заполнено"; ok_flag=0; }
+  [[ -f "$T/log/mobile/последняя-петля.json" ]] && { echo "SELFTEST: неудачная петля оставила след «ок»"; ok_flag=0; }
+  rm -rf "$T"
+  (( ok_flag )) && { echo "SELFTEST: зелёный (больной случай: настройка пуста → честный отказ)"; exit 0; }
+  exit 1
+fi
+
+[[ -r "$CONF" ]] || { echo "нет $CONF — возможность «мобильная-разработка» не установлена"; exit 1; }
+# shellcheck disable=SC1090
+source "$CONF"
+LOG_DIR="${LOG_DIR:-/var/log/harness}"
+TRACE="$LOG_DIR/mobile/последняя-петля.json"
+ADB="$ANDROID_HOME/platform-tools/adb"
+
+FLOW=""; DO_BUILD=1
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --flow) FLOW="${2:?--flow требует путь к сценарию}"; shift 2 ;;
+    --no-build) DO_BUILD=0; shift ;;
+    *) echo "неизвестный флаг «$1» — mobile-loop [--flow файл] [--no-build]"; exit 1 ;;
+  esac
+done
+
+# Приложения на момент установки возможности ещё нет — ключи пустые, как
+# STACK_* в harness.conf. Пустой ключ = честный отказ с адресом, не молчание.
+missing=""
+[[ -z "${APP_DIR:-}" ]] && missing+=" APP_DIR"
+[[ -z "${BUILD_CMD:-}" ]] && missing+=" BUILD_CMD"
+[[ -z "${APP_PACKAGE:-}" ]] && missing+=" APP_PACKAGE"
+if [[ -n "$missing" ]]; then
+  echo "петля не может идти: в $CONF не заполнено:$missing"
+  echo "адрес: заполнить ВМЕСТЕ (сборка без имени пакета не проверяется), пример:"
+  echo '  APP_DIR="$PROJECT_DIR/app"'
+  echo '  BUILD_CMD="npx expo run:android --variant debug --no-install"'
+  echo '  APP_PACKAGE="kz.example.app"'
+  echo "Заполняется первой задачей мобильного приложения — это часть её закрытия."
+  exit 1
+fi
+
+step() { printf '\n=== %s\n' "$*"; }
+fail() { echo "ПЕТЛЯ ВСТАЛА на шаге «$1»: $2" >&2; exit 1; }
+
+mkdir -p "$LOG_DIR/mobile"
+STARTED=$(date -Is)
+
+step "1/5 эмулятор"
+emu-start || fail "эмулятор" "не поднялся; улики: $LOG_DIR/mobile/emulator.log"
+
+APK=""
+if (( DO_BUILD )); then
+  step "2/5 сборка: $BUILD_CMD"
+  ( cd "$APP_DIR" && bash -c "$BUILD_CMD" ) || fail "сборка" "команда сборки вернула не ноль"
+  # APK ищем ВЕЩЬЮ (самый свежий файл), а не по угаданному пути: путь зависит
+  # от варианта сборки и версии Expo, и захардкоженный путь врёт при первой смене.
+  APK=$(find "$APP_DIR" -name '*.apk' -newermt "-30 minutes" -print0 2>/dev/null \
+        | xargs -0 -r ls -t 2>/dev/null | head -n1 || true)
+  [[ -n "$APK" ]] || fail "сборка" "APK не найден в $APP_DIR за последние 30 минут — сборка отчиталась успехом, но файла нет"
+  echo "APK: $APK"
+else
+  step "2/5 сборка пропущена (--no-build)"
+fi
+
+step "3/5 установка на устройство"
+if [[ -n "$APK" ]]; then
+  "$ADB" install -r "$APK" || fail "установка" "adb install не прошёл (несовпадение подписи? adb uninstall $APP_PACKAGE)"
+else
+  "$ADB" shell pm list packages "$APP_PACKAGE" | tr -d '\r' | grep -q . \
+    || fail "установка" "APK не собирался (--no-build), а на устройстве пакета $APP_PACKAGE нет"
+fi
+
+step "4/5 сценарии Maestro"
+FLOWS_DIR="${MAESTRO_FLOWS_DIR:-$APP_DIR/flows}"
+MAESTRO="${MAESTRO_BIN:-$HOME/.maestro/bin/maestro}"
+flows_verdict="пропущено"
+if [[ ! -x "$MAESTRO" ]] && ! command -v maestro >/dev/null 2>&1; then
+  # Пропуск с АДРЕСОМ: пропуск без адреса — тихое отключение проверки.
+  echo "Maestro не найден — сценарии ПРОПУЩЕНЫ."
+  echo "адрес: bash харнес/возможности/мобильная-разработка/установить.sh (шаг Maestro)"
+  flows_verdict="нет Maestro"
+else
+  [[ -x "$MAESTRO" ]] || MAESTRO=$(command -v maestro)
+  if [[ -n "$FLOW" ]]; then
+    "$MAESTRO" test "$FLOW" || fail "сценарий" "$FLOW красный — улики в выводе выше и в emu-logs"
+    flows_verdict="1 сценарий"
+  elif [[ -d "$FLOWS_DIR" ]] && compgen -G "$FLOWS_DIR/*.y*ml" >/dev/null; then
+    "$MAESTRO" test "$FLOWS_DIR" || fail "сценарии" "каталог $FLOWS_DIR красный"
+    flows_verdict="$(ls "$FLOWS_DIR"/*.y*ml | wc -l) сценариев"
+  else
+    echo "сценариев нет ($FLOWS_DIR пуст) — ПРОПУСК."
+    echo "адрес: первый сценарий на главный экран пишется вместе с первой задачей UI"
+    flows_verdict="нет сценариев"
+  fi
+fi
+
+step "5/5 снимки экрана"
+SHOT=$(emu-shot "loop") || fail "снимок" "screencap не дал годного PNG"
+
+python3 - "$TRACE" "$STARTED" "$flows_verdict" "$SHOT" "${APK:-}" <<'PY'
+import json, sys, datetime
+trace, started, flows, shot, apk = sys.argv[1:6]
+with open(trace, "w", encoding="utf-8") as fh:
+    json.dump({"начало": started, "конец": datetime.datetime.now().astimezone().isoformat(),
+               "итог": "ок", "сценарии": flows, "снимок": shot, "apk": apk},
+              fh, ensure_ascii=False)
+    fh.write("\n")
+PY
+
+cat <<EOF
+
+ПЕТЛЯ ПРОШЛА. Сценарии: $flows_verdict. След: $TRACE
+
+ОТКРЫТЬ И ПОСМОТРЕТЬ (это часть петли, не её оформление):
+  $SHOT
+Смотреть на: кнопка на месте, текст не обрезан, отступы не поехали, нет заглушек.
+Отчёт владельцу без просмотра снимка — это «тест зелёный» вместо «работает» (И-4).
+EOF

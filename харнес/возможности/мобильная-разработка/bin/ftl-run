@@ -1,0 +1,115 @@
+#!/usr/bin/env bash
+#
+# ftl-run — прогон сборки на РЕАЛЬНЫХ устройствах в Firebase Test Lab.
+#
+# Единственный разрешённый способ обращаться к Test Lab: сторож guard_bash
+# отбивает «gcloud firebase test …» без --timeout. Причина не в стиле, а в
+# деньгах: бесплатная квота — 60 минут в сутки на виртуальных устройствах и 30
+# на физических, дальше поминутно. Прогон без потолка тратит квоту и счёт
+# владельца молча.
+#
+# Что делает: заливает APK, гоняет Robo-тест на моделях из паспорта, забирает
+# результаты (логи, видео, скриншоты) локально и вынимает кадры из видео через
+# ffmpeg — чтобы их можно было ПОСМОТРЕТЬ, а не «упомянуть».
+#
+# Запуск:
+#   ftl-run <путь-к-apk> [--timeout 10m] [--devices "model=...,version=..."]
+#   ftl-run --selftest
+set -euo pipefail
+
+CONF="${HARNESS_MOBILE_CONF:-$HOME/.config/harness-mobile.conf}"
+
+if [[ "${1:-}" == "--selftest" ]]; then
+  T=$(mktemp -d); ok_flag=1
+  printf 'LOG_DIR="%s/log"\nFTL_TIMEOUT="15m"\nFTL_DEVICES="model=X,version=33"\n' "$T" > "$T/conf"
+  # больной случай 1: нет APK-аргумента
+  out=$(HARNESS_MOBILE_CONF="$T/conf" bash "$0" 2>&1) && rc=0 || rc=$?
+  (( rc == 1 )) && grep -q 'путь к APK' <<< "$out" || { echo "SELFTEST: пустой аргумент не отбит"; ok_flag=0; }
+  # больной случай 2: APK не существует
+  out=$(HARNESS_MOBILE_CONF="$T/conf" bash "$0" "$T/нет.apk" 2>&1) && rc=0 || rc=$?
+  (( rc == 1 )) && grep -q 'не существует' <<< "$out" || { echo "SELFTEST: несуществующий APK не отбит"; ok_flag=0; }
+  # больной случай 3: пустой таймаут в конфиге — прогон запрещён
+  printf 'LOG_DIR="%s/log"\nFTL_TIMEOUT=""\n' "$T" > "$T/conf2"
+  : > "$T/пустой.apk"
+  out=$(HARNESS_MOBILE_CONF="$T/conf2" bash "$0" "$T/пустой.apk" 2>&1) && rc=0 || rc=$?
+  (( rc == 1 )) && grep -q 'FTL_TIMEOUT' <<< "$out" || { echo "SELFTEST: пустой таймаут не отбит (это деньги владельца)"; ok_flag=0; }
+  rm -rf "$T"
+  (( ok_flag )) && { echo "SELFTEST: зелёный (3 больных случая: нет пути, нет файла, нет таймаута)"; exit 0; }
+  exit 1
+fi
+
+[[ -r "$CONF" ]] || { echo "нет $CONF — возможность не установлена"; exit 1; }
+# shellcheck disable=SC1090
+source "$CONF"
+LOG_DIR="${LOG_DIR:-/var/log/harness}"
+
+APK="${1:-}"
+[[ -n "$APK" ]] || { echo "нужен путь к APK: ftl-run <путь-к-apk> [--timeout 10m]"; exit 1; }
+shift
+[[ -f "$APK" ]] || { echo "файла «$APK» не существует — сначала сборка (mobile-loop)"; exit 1; }
+
+TIMEOUT="${FTL_TIMEOUT:-}"
+DEVICES="${FTL_DEVICES:-}"
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --timeout) TIMEOUT="${2:?}"; shift 2 ;;
+    --devices) DEVICES="${2:?}"; shift 2 ;;
+    *) echo "неизвестный флаг «$1»"; exit 1 ;;
+  esac
+done
+# Потолок — жёсткое условие, не значение по умолчанию: пустой FTL_TIMEOUT
+# означает «квота потратится вся», и это отказ, а не предупреждение.
+[[ -n "$TIMEOUT" ]] || { echo "FTL_TIMEOUT пуст в $CONF и не передан флагом — прогон без потолка запрещён (квота 60 мин/сутки, дальше поминутно)"; exit 1; }
+[[ -n "$DEVICES" ]] || { echo "FTL_DEVICES пуст в $CONF — на чём гонять, не задано"; exit 1; }
+
+command -v gcloud >/dev/null 2>&1 || { echo "gcloud не установлен — шаг Test Lab в установить.sh был пропущен; адрес: переустановить возможность"; exit 1; }
+gcloud auth list --filter=status:ACTIVE --format='value(account)' 2>/dev/null | grep -q . \
+  || { echo "нет активного аккаунта gcloud: сервисный ключ не активирован. адрес: gcloud auth activate-service-account --key-file=\$SECRETS_DIR/ftl-key.json"; exit 1; }
+
+DEV_FLAGS=()
+while IFS= read -r d; do
+  [[ -z "$d" ]] && continue
+  DEV_FLAGS+=(--device "$d")
+done <<< "$DEVICES"
+
+STAMP=$(date +%Y%m%d-%H%M%S)
+OUT="$LOG_DIR/mobile/ftl/$STAMP"
+mkdir -p "$OUT"
+BUCKET_DIR="ftl-$STAMP"
+
+echo "прогон Test Lab: ${#DEV_FLAGS[@]} моделей, потолок $TIMEOUT, результаты → $OUT"
+rc=0
+gcloud firebase test android run \
+  --type robo --app "$APK" --timeout "$TIMEOUT" \
+  "${DEV_FLAGS[@]}" --results-dir="$BUCKET_DIR" \
+  2>&1 | tee "$OUT/gcloud.log" || rc=$?
+
+# Ссылку на хранилище результатов gcloud печатает в вывод — забираем оттуда,
+# а не угадываем имя бакета: имя зависит от проекта и региона.
+GS=$(grep -oE 'gs://[^ ]+' "$OUT/gcloud.log" | head -n1 || true)
+if [[ -n "$GS" ]]; then
+  gcloud storage cp -r "$GS" "$OUT/" >/dev/null 2>&1 \
+    || echo "результаты не скачались — они остались в $GS (адрес: gcloud storage cp -r '$GS' '$OUT/')"
+fi
+
+# Кадры из видео: смотреть mp4 агент не умеет, а PNG — умеет.
+shots=0
+while IFS= read -r v; do
+  [[ -z "$v" ]] && continue
+  base="$OUT/кадры-$(basename "$(dirname "$v")")"
+  mkdir -p "$base"
+  if ffmpeg -nostdin -loglevel error -i "$v" -vf fps=1/5 "$base/кадр-%03d.png" 2>/dev/null; then
+    shots=$(( shots + $(find "$base" -name '*.png' | wc -l) ))
+  else
+    echo "ffmpeg не разобрал $v — видео осталось как есть"
+  fi
+done < <(find "$OUT" -name '*.mp4' 2>/dev/null)
+
+cat <<EOF
+
+Test Lab: код $rc. Результаты: $OUT
+Кадров для просмотра: $shots (каталоги «кадры-*»)
+ПОСМОТРЕТЬ хотя бы по одному кадру с каждой модели — падение на реальном
+устройстве часто видно только глазом (шрифт, вырез экрана, тёмная тема).
+EOF
+exit "$rc"

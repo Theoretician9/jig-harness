@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+#
+# emu-shot — снимок экрана эмулятора с меткой времени; печатает путь.
+#
+# Печатает путь ОДНОЙ СТРОКОЙ и последним — чтобы вызывающий скрипт мог взять
+# его через $(emu-shot). Правило петли: снимок не «упомянуть», а ПОСМОТРЕТЬ
+# (агент читает файл инструментом чтения изображений), поэтому путь обязан быть
+# машинно пригодным.
+#
+# Запуск: emu-shot [метка]
+set -euo pipefail
+
+CONF="${HARNESS_MOBILE_CONF:-$HOME/.config/harness-mobile.conf}"
+[[ -r "$CONF" ]] || { echo "нет $CONF — возможность не установлена" >&2; exit 1; }
+# shellcheck disable=SC1090
+source "$CONF"
+ADB="$ANDROID_HOME/platform-tools/adb"
+SHOTS="${SHOTS_DIR:-/tmp/shots}"
+LABEL="${1:-экран}"
+# Метка в имени файла — только латиница/цифры/дефис: кириллица в именах ломает
+# половину инструментов на пути «файл → HTTP → вложение» (UNIFIED/08, тип 7).
+SAFE=$(printf '%s' "$LABEL" | tr -c 'A-Za-z0-9._-' '-' | cut -c1-40)
+
+"$ADB" get-state >/dev/null 2>&1 || { echo "устройства нет — сначала emu-start" >&2; exit 1; }
+[[ "$("$ADB" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" == "1" ]] \
+  || { echo "ОС ещё грузится — снимок будет пустым; сначала emu-start (он ждёт загрузки)" >&2; exit 1; }
+
+mkdir -p "$SHOTS"
+OUT="$SHOTS/$(date +%Y%m%d-%H%M%S)-$SAFE.png"
+"$ADB" exec-out screencap -p > "$OUT"
+# Пустой или обрезанный PNG — частая беда screencap на холодном устройстве;
+# проверяем ВЕЩЬ (размер и подпись файла), а не код возврата adb.
+if [[ ! -s "$OUT" ]] || [[ "$(head -c 8 "$OUT" | od -An -tx1 | tr -d ' \n')" != "89504e470d0a1a0a" ]]; then
+  echo "снимок вышел негодным (пустой или не PNG): $OUT" >&2
+  exit 1
+fi
+printf '%s\n' "$OUT"

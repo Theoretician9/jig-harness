@@ -1,0 +1,99 @@
+#!/usr/bin/env bash
+#
+# emu-start — поднять эмулятор Android как постоянный ресурс сервера.
+#
+# Почему не «запусти emulator -avd dev»: эмулятор, поднятый в текущей оболочке,
+# умирает вместе с ходом агента, а поднятый второй раз — съедает вторые 2 ГБ и
+# уносит сервер вместе с сессией. Поэтому: tmux (переживает ход), проверка
+# «уже поднят» ПЕРЕД запуском (идемпотентность), сервисный лок и ожидание
+# ПОЛНОЙ загрузки, а не факта запуска процесса.
+#
+# Идемпотентен: повторный вызов при живом устройстве ничего не делает и выходит
+# нулём. Лок кладётся в $LOG_DIR/locks/services/ — там его НЕ видят ворота
+# выката (решение Б-1): эмулятор живёт сутками, выкат от этого не запрещён.
+#
+# Запуск: emu-start [--timeout СЕК] [--холодный]
+#   --холодный — не поднимать снапшот, грузиться с нуля. Нужен, когда
+#   восстановленный снапшот приходит битым: 12.08.2026 эмулятор поднялся
+#   БЕЗ СЕТЕВОГО ИНТЕРФЕЙСА (в системе только lo, «Network is unreachable»),
+#   и вернуть ему сеть было нечем — svc wifi enable по пустому месту не
+#   работает, а флага сброса у этого скрипта не было.
+# Код возврата: 0 — устройство загружено, 1 — не загрузилось (адрес в выводе).
+set -euo pipefail
+
+CONF="${HARNESS_MOBILE_CONF:-$HOME/.config/harness-mobile.conf}"
+[[ -r "$CONF" ]] || { echo "нет $CONF — возможность «мобильная-разработка» не установлена"; exit 1; }
+# shellcheck disable=SC1090
+source "$CONF"
+: "${ANDROID_HOME:?пуст ANDROID_HOME в конфиге}" "${AVD_NAME:?пуст AVD_NAME}"
+
+COLD=""
+ARGS=("$@")
+for ((i = 0; i < ${#ARGS[@]}; i++)); do
+  [[ "${ARGS[i]}" == "--холодный" ]] && COLD="-no-snapshot-load"
+done
+BOOT_TIMEOUT=""
+for ((i = 0; i < ${#ARGS[@]}; i++)); do
+  [[ "${ARGS[i]}" == "--timeout" ]] && BOOT_TIMEOUT="${ARGS[i+1]:-}"
+done
+BOOT_TIMEOUT="${BOOT_TIMEOUT:-${EMU_BOOT_TIMEOUT_SEC:-300}}"
+LOG_DIR="${LOG_DIR:-/var/log/harness}"
+LOCK_DIR="$LOG_DIR/locks/${SERVICE_LOCKS_SUBDIR:-services}"
+LOCK="$LOCK_DIR/${SERVICE_LOCK:-emulator}.lock"
+ADB="$ANDROID_HOME/platform-tools/adb"
+EMULATOR="$ANDROID_HOME/emulator/emulator"
+SESSION="${EMU_TMUX_SESSION:-emulator}"
+
+booted() {  # 0 — устройство есть И ОС догрузилась
+  "$ADB" get-state >/dev/null 2>&1 || return 1
+  [[ "$("$ADB" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" == "1" ]]
+}
+
+if booted; then
+  echo "эмулятор уже поднят и загружен ($("$ADB" devices | awk 'NR==2{print $1}'))"
+  exit 0
+fi
+
+# KVM проверяется ВЕЩЬЮ, а не «установлен ли qemu»: без доступа к устройству
+# эмулятор поднимется программной эмуляцией и будет медленнее в десятки раз —
+# лучше честный отказ с адресом, чем прогон, который не дождётся никто.
+if [[ ! -r /dev/kvm || ! -w /dev/kvm ]]; then
+  echo "нет доступа к /dev/kvm — локальный эмулятор не поднимется с приемлемой скоростью."
+  echo "адрес: sudo usermod -aG kvm $(id -un) и перезайти в сессию;"
+  echo "       если /dev/kvm нет вовсе — у VPS нет вложенной виртуализации,"
+  echo "       проверять на реальных устройствах: ftl-run"
+  exit 1
+fi
+
+mkdir -p "$LOCK_DIR" "$LOG_DIR/mobile"
+if tmux has-session -t "$SESSION" 2>/dev/null; then
+  echo "tmux-сессия «$SESSION» есть, но устройство не отвечает — сношу и поднимаю заново"
+  tmux kill-session -t "$SESSION" 2>/dev/null || true
+  sleep 2
+fi
+
+# -no-window: сервер без экрана; -gpu swiftshader_indirect: программный GPU;
+# снапшот НЕ отключаем — быстрый повторный старт берётся из quickboot,
+# который эмулятор сохраняет при корректном завершении (emu-stop).
+tmux new-session -d -s "$SESSION" \
+  "'$EMULATOR' -avd '$AVD_NAME' -no-window -no-audio -no-boot-anim $COLD \
+   -gpu swiftshader_indirect -memory ${EMULATOR_MEM_MB:-2048} \
+   > '$LOG_DIR/mobile/emulator.log' 2>&1"
+
+echo "поднимаю «$AVD_NAME» в tmux-сессии «$SESSION», жду загрузки (потолок ${BOOT_TIMEOUT} с)…"
+"$ADB" start-server >/dev/null 2>&1 || true
+deadline=$(( $(date +%s) + BOOT_TIMEOUT ))
+while (( $(date +%s) < deadline )); do
+  booted && break
+  sleep 5
+done
+
+if ! booted; then
+  echo "эмулятор НЕ загрузился за ${BOOT_TIMEOUT} с."
+  echo "улики: $LOG_DIR/mobile/emulator.log (последние строки ниже), tmux attach -t $SESSION"
+  tail -n 20 "$LOG_DIR/mobile/emulator.log" 2>/dev/null | sed 's/^/  /' || true
+  exit 1
+fi
+
+printf '%s\n%s\n' "$$" "эмулятор $AVD_NAME, tmux-сессия $SESSION, поднят $(date -Is)" > "$LOCK"
+echo "готово: устройство $("$ADB" devices | awk 'NR==2{print $1}') загружено; лок $LOCK"

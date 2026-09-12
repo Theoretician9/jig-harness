@@ -1,0 +1,22 @@
+# Логи харнеса. Заведено 10.09.2026 по ревизии: /var/log/harness вырос до
+# 121 МБ, ротации не было вовсе — session-warden.log 5,8 МБ (612 строк в
+# сутки), smoke-лог 7 МБ. В таком логе тонут события, ради которых он есть.
+#
+# copytruncate обязателен: часть писателей — долгоживущие процессы
+# (tg-dispatcher, фоновые прогоны через setsid nohup), они держат файл
+# открытым и после переименования писали бы в невидимый inode.
+#
+# .jsonl НЕ ротируются намеренно: это журналы событий, их читают демоны и
+# гейты целиком (rotation.jsonl — сторож команд, gates.jsonl — сводка,
+# tokens-*.jsonl уже разбиты по месяцам самим коллектором).
+/var/log/harness/*.log {
+    daily
+    rotate 7
+    size 5M
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+    su agent agent
+}

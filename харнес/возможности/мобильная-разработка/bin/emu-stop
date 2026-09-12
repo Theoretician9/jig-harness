@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+#
+# emu-stop — погасить эмулятор КОРРЕКТНО, с сохранением быстрого снапшота.
+#
+# «tmux kill-session» гасит процесс, но эмулятор не успевает записать quickboot,
+# и следующий старт идёт с холодной загрузки — минуты вместо секунд. Поэтому
+# сначала `adb emu kill` (штатное завершение), и только если не помогло —
+# снос сессии.
+#
+# Запуск: emu-stop
+set -euo pipefail
+
+CONF="${HARNESS_MOBILE_CONF:-$HOME/.config/harness-mobile.conf}"
+[[ -r "$CONF" ]] || { echo "нет $CONF — возможность не установлена"; exit 1; }
+# shellcheck disable=SC1090
+source "$CONF"
+LOG_DIR="${LOG_DIR:-/var/log/harness}"
+LOCK="$LOG_DIR/locks/${SERVICE_LOCKS_SUBDIR:-services}/${SERVICE_LOCK:-emulator}.lock"
+ADB="$ANDROID_HOME/platform-tools/adb"
+SESSION="${EMU_TMUX_SESSION:-emulator}"
+
+if ! "$ADB" get-state >/dev/null 2>&1 && ! tmux has-session -t "$SESSION" 2>/dev/null; then
+  echo "эмулятор и так погашен"
+  rm -f "$LOCK"
+  exit 0
+fi
+
+if "$ADB" get-state >/dev/null 2>&1; then
+  echo "штатное завершение (снапшот сохранится)…"
+  "$ADB" emu kill >/dev/null 2>&1 || true
+  for _ in $(seq 1 30); do
+    "$ADB" get-state >/dev/null 2>&1 || break
+    sleep 2
+  done
+fi
+
+if tmux has-session -t "$SESSION" 2>/dev/null; then
+  # Сессия жива после штатного завершения — это уже отказ, а не норма:
+  # называем его вслух, чтобы «погасил» не значило «оставил висеть».
+  echo "ВНИМАНИЕ: tmux-сессия «$SESSION» жива после adb emu kill — снимаю принудительно,"
+  echo "быстрый снапшот в этот раз не сохранён (следующий старт будет холодным)."
+  tmux kill-session -t "$SESSION" 2>/dev/null || true
+fi
+
+rm -f "$LOCK"
+echo "эмулятор погашен, лок снят"

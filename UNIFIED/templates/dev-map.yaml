@@ -1,0 +1,99 @@
+version: 1
+
+# Эталон объёма работы (ЕР) — рыночная средняя задача ИИ-кодинга.
+# ВЫБИРАЕТСЯ ОДИН РАЗ И НАВСЕГДА. Плавающая калибровка от средних проекта немонотонна:
+# закрытие крупной задачи поднимает средний масштаб и РОНЯЕТ показатель «Сделано».
+calibration: { loc_ref: 500, c_ref: 4, tokens_ref_k: 300, set_at: "market" }
+
+# Строки кода до внедрения трейлеров Dev-Map — отдельной строкой, честно.
+# Приписывать их задачам задним числом нельзя: история опубликована.
+unattributed_loc: 0
+
+# Вехи проекта — маркеры на ленте истории. summary ОБЯЗАТЕЛЕН.
+milestones:
+  - { id: ms.start, date: "YYYY-MM-DD", label: "Старт проекта",
+      summary: "Что произошло — словами владельца продукта, без жаргона." }
+
+# «Дальше по плану» — упорядоченный список id задач.
+# Задача, ушедшая в done/test, удаляется отсюда при следующей правке манифеста.
+queue: []
+
+layers:
+  - { id: product,  label: "Продукт",                  color: "#2b9bd6" }
+  - { id: platform, label: "Платформа",                color: "#8b6cf0" }
+  - { id: infra,    label: "Инфраструктура · сквозное", color: "#5aa06a" }
+
+# Модель (готовность направления = среднее % по его задачам):
+#   done — готово И протестировано владельцем (100%)
+#   test — сделано агентом, ждёт живого теста владельца (90%)
+#   wip  — дорабатывается (% по checklist)
+#   plan — не начато (0%)
+#
+# Здесь ПОЛНАЯ история всех реализованных фич, а не только текущая работа:
+# карта — реестр, а не трекер задач.
+
+lines:
+  # ─────────── Приоритетная линия (исключается из сумм проекта) ───────────
+  - id: main_flow
+    layer: product
+    name: "<Главный путь пользователя: вход → результат>"
+    short: "<Короткое имя>"
+    note: "Главное, что отслеживаем. Шаги пересекаются с направлениями ниже, поэтому в суммы не входят."
+    weight: 0
+    pipeline: true
+    tasks:
+      - id: flow.entry
+        group: "1. Заход"
+        status: done
+        title: "<Название задачи — понятное владельцу>"
+        summary: "Что изменилось и почему это было нужно. Без жаргона и без имён файлов."
+        when: { started: "YYYY-MM-DD", done: "YYYY-MM-DD", tested: "YYYY-MM-DD", estimated: false }
+        volume: { loc: 900, complexity: 4, tokens_k: 2500, estimated: true }
+
+      - id: flow.next
+        group: "2. <Фаза>"
+        status: wip
+        title: "<Название>"
+        summary: "<...>"
+        when: { started: "YYYY-MM-DD", estimated: true }
+        volume: { loc: 1200, complexity: 5, tokens_k: 3000, estimated: true }
+        checklist:
+          # done:true ОБЯЗАН иметь done_at и summary — держится тест-гейтом
+          - { label: "<Что сделано>", done: true, done_at: "YYYY-MM-DD",
+              summary: "<Что это дало пользователю.>",
+              volume: { loc: 240, complexity: 3, tokens_k: 900, estimated: true } }
+          - { label: "<Что осталось>", done: false,
+              summary: "<Что это даст.>" }
+        verify:
+          # soft (по умолчанию): расхождение → флаг, статус НЕ понижается
+          # strict: расхождение понижает статус
+          mode: soft
+
+  # ─────────── Обычные направления ───────────
+  - id: platform_core
+    layer: platform
+    name: "<Направление>"
+    short: "<Короткое имя>"
+    weight: 1
+    tasks:
+      # owner_testable: false — внутренняя работа (рефакторинг, гейты, инструменты).
+      # Гейт запрещает такой задаче статус test: владельцу нечего проверять, ставим done.
+      - { id: core.refactor, status: done, owner_testable: false, title: "<...>",
+          summary: "<...>",
+          when: { done: "YYYY-MM-DD", estimated: true },
+          volume: { loc: 800, complexity: 5, tokens_k: 2000, estimated: true } }
+      - { id: core.auth, status: done, title: "<...>",
+          summary: "<...>",
+          when: { done: "YYYY-MM-DD", tested: "YYYY-MM-DD", estimated: false },
+          volume: { loc: 600, complexity: 5, tokens_k: 1800, estimated: true } }
+
+  - id: infra
+    layer: infra
+    name: "Инфраструктура · DevOps"
+    short: "Инфраструктура"
+    weight: 1
+    tasks:
+      - { id: in.deploy, status: done, title: "Деплой одним скриптом",
+          summary: "Выкатка идёт одной командой в гарантированном порядке: сборка, миграции, проверка живости.",
+          when: { done: "YYYY-MM-DD", estimated: true },
+          volume: { loc: 120, complexity: 3, tokens_k: 400, estimated: true } }
