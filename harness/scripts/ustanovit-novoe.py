@@ -26,6 +26,9 @@ import subprocess
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
+import konf as конф_модуль                             # noqa: E402
+
 КОРЕНЬ = Path(__file__).resolve().parent.parent
 ДАННЫЕ = КОРЕНЬ / "harness" / "config" / "системные-задания.yaml"
 HARNESS_CONF = os.environ.get("HARNESS_CONF", "/etc/harness/harness.conf")
@@ -65,16 +68,20 @@ def дополнить_расписание(было: str, задания: list,
 
 def дополнить_периоды(конфиг: str, метки: dict) -> str:
     """HEARTBEAT_PERIODS с дописанными недостающими метками."""
-    найдено = re.search(r'^HEARTBEAT_PERIODS="([^"]*)"', конфиг, re.MULTILINE)
-    если_было = найдено.group(1).split() if найдено else []
+    # Значение читает общий загрузчик: своя регулярка здесь была одной из
+    # десяти копий разбора конфига (ревизия лаконичности 12.09.2026).
+    если_было = конф_модуль.из_текста(конфиг).get("HEARTBEAT_PERIODS", "").split()
     имена = {с.split(":")[0] for с in если_было}
     добавка = [f"{имя}:{период}" for имя, период in метки.items()
                if имя not in имена]
     if not добавка:
         return конфиг
     строка = " ".join(если_было + добавка)
-    if найдено:
-        return конфиг[:найдено.start(1)] + строка + конфиг[найдено.end(1):]
+    # Подменяем ЗНАЧЕНИЕ на месте, а не строку целиком: рядом могут стоять
+    # комментарии, и переписать их нельзя. Строки нет вовсе — дописываем.
+    образец = re.compile(r'^(HEARTBEAT_PERIODS=")([^"]*)(")', re.MULTILINE)
+    if образец.search(конфиг):
+        return образец.sub(lambda m: m.group(1) + строка + m.group(3), конфиг, count=1)
     return конфиг.rstrip("\n") + f'\nHEARTBEAT_PERIODS="{строка}"\n'
 
 

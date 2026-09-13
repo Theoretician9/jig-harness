@@ -33,29 +33,29 @@ import re
 import sys
 from pathlib import Path
 
+import sys as _sys
+_sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
+import konf as конф_модуль                             # noqa: E402
+import kartochki as карточки                            # noqa: E402
+
 КОРЕНЬ = Path(__file__).resolve().parent.parent
 КАРТА = КОРЕНЬ / "dev-map.yaml"
 ПОДРОБНОСТИ = КОРЕНЬ / "docs" / "dev-map-подробности.yaml"
 ССЫЛКА = "Подробности: docs/dev-map-подробности.yaml"
 
-# Отступ — КЛАССОМ [ \t], а не \s (он включает перевод строки): иначе у
-# карточки с пустой строкой перед ней отступ на единицу больше, и границы
-# блоков разъезжаются — 12.09.2026 так архиватор унёс одиннадцать чужих задач.
-НАЧАЛО = re.compile(r"^([ \t]+)- id:\s*(\S+)\s*$", re.M)
+# Границы карточки — общий разбор (scripts/lib/kartochki.py): своя копия
+# регулярки здесь была буквальным дублем архиваторной.
+НАЧАЛО = карточки.НАЧАЛО
 СТРОКА_SUMMARY = re.compile(r'^(\s*)summary:\s*"(.*)"\s*$')
 
 
 def потолок() -> int:
     """DEVMAP_SUMMARY_MAX из harness.conf — данные, не код."""
     путь = os.environ.get("HARNESS_CONF", "/etc/harness/harness.conf")
-    try:
-        for строка in Path(путь).read_text(encoding="utf-8").splitlines():
-            m = re.match(r"\s*DEVMAP_SUMMARY_MAX\s*=\s*\"?(\d+)\"?", строка)
-            if m:
-                return int(m.group(1))
-    except OSError:
-        pass
-    return 1200
+    # Разбор — общим загрузчиком: своя регулярка была десятой копией одного и
+    # того же чтения (ревизия лаконичности 12.09.2026).
+    значение = конф_модуль.из_файла(путь).get("DEVMAP_SUMMARY_MAX", "")
+    return int(значение) if значение.isdigit() else 1200
 
 
 def карточки(текст: str) -> list[tuple[str, int, int]]:

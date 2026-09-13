@@ -342,6 +342,29 @@ def svyazat_s_obolochkoj(out_root: Path) -> tuple:
     return (создано, убрано)
 
 
+def sverit(rendered: dict, out_root: Path) -> list:
+    """Чем собранное в памяти расходится с тем, что лежит на диске.
+
+    Скил — копия куска главы, и генератор зовут КОМАНДОЙ: поправил главу,
+    забыл перегенерировать — агент работает по устаревшему правилу и уверен,
+    что прав. Механизм, который держится на чьей-то памяти, — не механизм
+    (владелец 11.09.2026: «Внимание модели — последний носитель правила, а не
+    первый»). Отсюда сверка: собрать в памяти и сравнить с диском.
+    """
+    расхождения = []
+    for имя, текст in sorted(rendered.items()):
+        файл = out_root / имя / "SKILL.md"
+        if not файл.exists():
+            расхождения.append(f"{имя}: собран из главы, но на диске его нет")
+        elif файл.read_text(encoding="utf-8") != текст:
+            расхождения.append(f"{имя}: на диске не то, что собирается из главы")
+    лишние = sorted(п.name for п in out_root.iterdir()
+                    if п.is_dir() and п.name not in rendered) if out_root.is_dir() else []
+    расхождения += [f"{имя}: лежит в скилах, но ни из какой главы не собирается"
+                    for имя in лишние]
+    return расхождения
+
+
 def main() -> None:
     # «--где-главы» печатает найденный каталог и выходит. Нужен не для удобства:
     # после переноса глав в служебный подкаталог публичной сборки (12.09.2026)
@@ -354,6 +377,17 @@ def main() -> None:
     out_root = Path(__file__).resolve().parent / "skills"
     rendered = render(chapters)     # dry: всё в памяти
     verify(rendered)                # отказ — до любой записи
+    # «--сверить» ничего не пишет: это гейт для ворот и pre-commit.
+    if "--сверить" in sys.argv[1:]:
+        расхождения = sverit(rendered, out_root)
+        if расхождения:
+            print(f"СКИЛЫ РАЗОШЛИСЬ С ГЛАВАМИ: {len(расхождения)}")
+            for строка in расхождения:
+                print("   ", строка)
+            print("Починка: python3 harness/SBORKA-SKILOV.py")
+            sys.exit(1)
+        print(f"скилы: все {len(rendered)} совпадают с главами")
+        return
     write_atomic(rendered, out_root)
     создано, убрано = svyazat_s_obolochkoj(out_root)
     print(f"СБОРКА-СКИЛОВ: собрано {len(rendered)} скилов из {chapters} → {out_root}; "

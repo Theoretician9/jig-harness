@@ -23,16 +23,16 @@
 Код возврата: 0 — записано; 2 — ключа нет в реестре или он запрещён;
 3 — значение не по реестру; 4 — копия не удалась; 5 — конфиг не прочитан.
 """
-import datetime
 import fnmatch
-import json
 import os
 import re
-import subprocess
 import sys
 from pathlib import Path
 
 import yaml
+
+sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
+import pisatel_paneli as писатель                      # noqa: E402
 
 КОРЕНЬ = Path(__file__).resolve().parent.parent
 РЕЕСТР = Path(os.environ.get("HARNESS_PERECLUCHATELI")
@@ -49,8 +49,7 @@ LOG_DIR = Path(os.environ.get("LOG_DIR", "/var/log/harness"))
 
 
 def отказ(код: int, причина: str) -> int:
-    print(f"[запись-ключа] отказ: {причина}", file=sys.stderr)
-    return код
+    return писатель.отказ("запись-ключа", код, причина)
 
 
 def строка_реестра(реестр: dict, ключ: str):
@@ -91,9 +90,8 @@ def значение_годится(строка: dict, значение: str) -
 
 
 def прежнее(текст: str, ключ: str) -> str | None:
-    найдено = re.search(rf'^\s*{re.escape(ключ)}=["\']?([^"\'\n#]*)',
-                        текст, re.MULTILINE)
-    return найдено.group(1).strip() if найдено else None
+    """Что стоит сейчас. Разбор — общий (scripts/lib/konf.py)."""
+    return писатель.конф.из_текста(текст).get(ключ)
 
 
 def заменить(текст: str, ключ: str, значение: str) -> str:
@@ -103,38 +101,6 @@ def заменить(текст: str, ключ: str, значение: str) -> s
         return образец.sub(rf'\g<1>{ключ}={значение}', текст, count=1)
     хвост = "" if текст.endswith("\n") else "\n"
     return f"{текст}{хвост}{ключ}={значение}\n"
-
-
-def снять_копию(файл: Path) -> Path:
-    """Копия прежнего файла ДО записи (И-1). Без неё запись не начинается."""
-    каталог = LOG_DIR / "панель-копии"
-    каталог.mkdir(parents=True, exist_ok=True)
-    метка = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-    копия = каталог / f"{файл.name}.{метка}"
-    копия.write_bytes(файл.read_bytes())
-    return копия
-
-
-def записать_журнал(ключ: str, было, стало: str, файл: str) -> None:
-    """Кто, когда, что и из чего во что. Единственный ответ на вопрос
-    «почему харнес вдруг ведёт себя иначе»."""
-    запись = {"ts": datetime.datetime.now().isoformat(timespec="seconds"),
-              "ключ": ключ, "было": было, "стало": стало, "файл": файл,
-              "кто": os.environ.get("SUDO_USER") or os.environ.get("USER") or "?"}
-    try:
-        LOG_DIR.mkdir(parents=True, exist_ok=True)
-        with open(LOG_DIR / "панель.jsonl", "a", encoding="utf-8") as fh:
-            fh.write(json.dumps(запись, ensure_ascii=False) + "\n")
-    except OSError as беда:
-        print(f"[запись-ключа] журнал не записан: {беда}", file=sys.stderr)
-
-
-def _вернуть_хозяина(новый_файл: Path, прежний: os.stat_result) -> None:
-    """Оставить файлу прежних владельца и группу. Не наш файл — молчим."""
-    try:
-        os.chown(новый_файл, прежний.st_uid, прежний.st_gid)
-    except (PermissionError, OSError):
-        pass
 
 
 def main(argv: list[str]) -> int:
@@ -165,20 +131,8 @@ def main(argv: list[str]) -> int:
     # без прав (находка C5). Не можем писать сами — переисполняемся через sudo
     # по единственной разрешённой строке sudoers. Флаг PANEL_NO_SUDO нужен
     # проверкам: там файл свой, и лишний sudo сбросил бы подменённые пути.
-    if (not os.access(файл, os.W_OK) and not os.environ.get("PANEL_NO_SUDO")
-            and "--под-sudo" not in sys.argv):
-        # Флаг «--под-sudo» — защита от бесконечного круга: sudo сбрасывает
-        # окружение, поэтому признак «уже поднимались» обязан ехать доводом.
-        # Улика 11.09.2026: служба панели под ProtectSystem=strict не могла
-        # писать в /etc даже как root, и попытки шли лавиной, пока запрос не
-        # отвалился по таймауту.
-        готово = subprocess.run(
-            ["sudo", "-n", "/usr/bin/python3", str(Path(__file__).resolve()),
-             ключ, значение, "--под-sudo"],
-            capture_output=True, text=True, timeout=60)
-        sys.stdout.write(готово.stdout)
-        sys.stderr.write(готово.stderr)
-        return готово.returncode
+    if писатель.надо_поднять_права([файл]) and "--под-sudo" not in sys.argv:
+        return писатель.поднять_права(Path(__file__).resolve(), [ключ, значение])
     if not os.access(файл, os.W_OK):
         return отказ(5, f"нет права записи в {файл} даже после попытки поднять "
                         f"права — проверь ProtectSystem у службы и sudoers")
@@ -188,23 +142,20 @@ def main(argv: list[str]) -> int:
         return отказ(5, f"конфиг не прочитан: {беда}")
 
     try:
-        копия = снять_копию(файл)
+        копия = писатель.снять_копию(файл, LOG_DIR)
     except OSError as беда:
         return отказ(4, f"копия прежнего конфига не снята: {беда}")
 
     было = прежнее(текст, ключ)
     новый = заменить(текст, ключ, значение)
-    прежний = os.stat(файл)
-    врем = файл.with_suffix(файл.suffix + ".tmp")
-    врем.write_text(новый, encoding="utf-8")
-    os.chmod(врем, прежний.st_mode & 0o7777)
-    # Хозяин прежний: запись идёт через sudo, и иначе конфиг молча переходит к
-    # root — следующая правка тем же путём ещё пройдёт, а раскладка пакета и
-    # обычные инструменты уже нет.
-    _вернуть_хозяина(врем, прежний)
-    os.replace(врем, файл)
+    try:
+        писатель.записать_атомарно(файл, новый)
+    except OSError as беда:
+        return отказ(5, f"записать не вышло ({беда}); прежний конфиг — в {копия}")
 
-    записать_журнал(ключ, было, значение, строка["файл"])
+    писатель.записать_журнал("запись-ключа", {"ключ": ключ, "было": было,
+                                              "стало": значение,
+                                              "файл": строка["файл"]}, LOG_DIR)
     print(f"[запись-ключа] {ключ}: {было} → {значение} "
           f"({строка['файл']}, применяется {строка['применяется']}); "
           f"копия: {копия}")

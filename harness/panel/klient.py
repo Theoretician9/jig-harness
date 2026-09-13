@@ -22,26 +22,45 @@ import sys
 import urllib.error
 import urllib.request
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import nastrojki                                      # noqa: E402
+
 АДРЕС = os.environ.get("PANEL_LOCAL", "http://127.0.0.1:8787")
 
 
-def внутренний_ключ() -> str:
-    """Общий секрет со службой: маршруты /vnutr/ доказываются им (F-sec-01)."""
-    каталог = (os.environ.get("PANEL_SECRETS_DIR")
-               or os.environ.get("SECRETS_DIR") or "/var/lib/harness/panel-state")
+def внутренний_ключ() -> tuple[str, str]:
+    """Общий секрет со службой: маршруты /vnutr/ доказываются им (F-sec-01).
+
+    Возвращает (ключ, причина). Каталог — боевая константа: прежняя цепочка
+    окружения (PANEL_SECRETS_DIR → SECRETS_DIR) уводила клиента к каталогу
+    паспорта, ключа там нет, и владелец получал в чат «нет такой страницы»
+    вместо причины (ревью безопасности 13.09.2026, F-sec-05).
+
+    «Файла нет» и «нет прав» — разные ответы: второй означает, что процесс не
+    в группе harness-panel, и это чинится, а не пересказывается 404-м.
+    """
+    файл_ключа = nastrojki.СОСТОЯНИЕ_ПАНЕЛИ / "панель-внутренний-ключ"
     try:
-        with open(os.path.join(каталог, "панель-внутренний-ключ"),
-                  encoding="utf-8") as файл:
-            return файл.read().strip()
-    except OSError:
-        return ""
+        return файл_ключа.read_text(encoding="utf-8").strip(), ""
+    except FileNotFoundError:
+        return "", f"ключ панели не заведён: {файл_ключа} — служба ещё не стартовала"
+    except PermissionError:
+        return "", (f"ключ панели не прочитан: {файл_ключа} — нет прав. "
+                    f"Процесс не в группе harness-panel: id -nG")
+    except OSError as беда:
+        return "", f"ключ панели не прочитан: {файл_ключа} — {беда}"
 
 
 def позвать(путь: str, данные: dict) -> tuple[int, dict]:
+    ключ, причина = внутренний_ключ()
+    if not ключ:
+        # В службу не идём вовсе: без ключа она ответит 404, и владелец
+        # прочитает «нет такой страницы» вместо настоящей причины.
+        return 0, {"беда": причина}
     запрос = urllib.request.Request(
         f"{АДРЕС}{путь}", data=json.dumps(данные).encode(),
         headers={"Content-Type": "application/json",
-                 "X-Panel-Key": внутренний_ключ()}, method="POST")
+                 "X-Panel-Key": ключ}, method="POST")
     try:
         with urllib.request.urlopen(запрос, timeout=10) as ответ:
             return ответ.status, json.loads(ответ.read().decode("utf-8"))

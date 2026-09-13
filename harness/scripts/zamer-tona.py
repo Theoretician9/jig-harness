@@ -23,6 +23,10 @@ import re
 import sys
 from pathlib import Path
 
+import sys as _sys
+_sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
+import konf as конф_модуль                             # noqa: E402
+
 # Служебные слова языка: в замере они шум, а не голос владельца.
 СЛУЖЕБНЫЕ = {
     "надо", "нужно", "чтобы", "этом", "тебе", "меня", "было", "если", "тоже",
@@ -122,15 +126,8 @@ def _selftest() -> int:
 def main() -> int:
     if "--selftest" in sys.argv:
         return _selftest()
-    конф = {}
-    try:
-        for строка in Path("/etc/harness/install.conf").read_text(encoding="utf-8").splitlines():
-            если = re.match(r'^\s*([A-Z_][A-Z0-9_]*)\s*=\s*"?([^"#]*)"?', строка)
-            if если:
-                конф[если.group(1)] = если.group(2).strip()
-    except OSError:
-        pass
-    архив = Path(конф.get("LOG_DIR") or "/var/log/harness") / "inbox" / "обработано"
+    архив = (Path(конф_модуль.конфиг().get("LOG_DIR") or "/var/log/harness")
+             / "inbox" / "обработано")
     все = тексты(архив)
     итог = замер(все)
     print(json.dumps(итог, ensure_ascii=False, indent=2))

@@ -142,7 +142,7 @@ User=$AGENT_USER
 Environment=HOME=/home/$AGENT_USER
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
 WorkingDirectory=$PROJECT_DIR
-ExecStart=$PROJECT_DIR/scripts/запустить-агента.sh
+ExecStart=$PROJECT_DIR/scripts/zapustit-agenta.sh
 ExecStop=/usr/bin/tmux kill-session -t agent
 Restart=always
 RestartSec=10
@@ -213,7 +213,7 @@ sudo systemctl daemon-reload && sudo systemctl enable --now harness-dispatcher
 и главная из них: `sudo -u "$AGENT_USER" tmux display-message -p -t agent
 '#{pane_current_command}'` → `claude` или `node`, НЕ `bash`.
 
-Юнит зовёт `запустить-агента.sh`, а не `tmux new-session` напрямую: голая
+Юнит зовёт `zapustit-agenta.sh`, а не `tmux new-session` напрямую: голая
 `tmux new-session -d -s agent` создаёт сессию с ОБОЛОЧКОЙ — systemd рапортует
 `active`, tmux жив, а агента в панели нет. Улика владельца 11.08.2026: «сессия
 перезагрузилась, но автозапуска не произошло». Команду запуска скрипт берёт из

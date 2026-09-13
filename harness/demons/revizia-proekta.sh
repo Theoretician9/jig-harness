@@ -121,7 +121,7 @@ zapusk_agenta() {  # $1 = область, $2 = вопрос, $3 = список, 
     # --allowedTools перекрывается настройками проекта (живая проба 11.09.2026).
     # --strict-mcp-config обязателен: без него рвётся канал с владельцем.
     # 9>&- — агент не наследует дескриптор лока карты.
-    timeout "$6" claude -p --model "$REVIZIA_MODEL" "$promt" \
+    timeout "$6" bash "$PROJECT_DIR/scripts/claude-demon.sh" revizia-proekta -p --model "$REVIZIA_MODEL" "$promt" \
         --permission-mode manual \
         --allowedTools "Read,Edit,Write,Grep,Glob" \
         --mcp-config '{"mcpServers":{}}' --strict-mcp-config \
@@ -407,15 +407,38 @@ DO=$(GIT_INDEX_FILE="$T/do" git -C "$PROJECT_DIR" write-tree)
 OBLASTEJ=0
 # Построчно, а не `for … in $(…)`: имя области — фраза («честность проверок»),
 # и разбиение по словам искало две несуществующие области молча (12.09.2026).
-while IFS= read -r OBLAST; do
+# Порядок областей СДВИГАЕТСЯ каждый круг: при фиксированном порядке голодали
+# всегда одни и те же последние — им не доставалось ни времени, ни курсора, и
+# следующий шанс приходил через месяц (ревизия эффективности 12.09.2026).
+# Сдвиг — по числу прошедших кругов, оно же лежит в курсоре.
+mapfile -t OBLASTI < <(python3 "$SCRIPTS/revizia-porcii.py" --области)
+VSEGO_OBLASTEJ=${#OBLASTI[@]}
+SDVIG=$(python3 "$SCRIPTS/revizia-porcii.py" --сдвиг 2>/dev/null || echo 0)
+[ "$VSEGO_OBLASTEJ" -gt 0 ] && SDVIG=$(( SDVIG % VSEGO_OBLASTEJ ))
+PORYADOK=()
+for ((i = 0; i < VSEGO_OBLASTEJ; i++)); do
+    PORYADOK+=("${OBLASTI[$(( (i + SDVIG) % VSEGO_OBLASTEJ ))]}")
+done
+say "круг ревизии: областей $VSEGO_OBLASTEJ, начинаем с «${PORYADOK[0]:-—}» (сдвиг $SDVIG)"
+
+OSTALOS_OBLASTEJ=$VSEGO_OBLASTEJ
+for OBLAST in "${PORYADOK[@]}"; do
     [ -n "$OBLAST" ] || continue
     SPISOK="$(python3 "$SCRIPTS/revizia-porcii.py" "$OBLAST")"
-    [ -n "$SPISOK" ] || { say "область $OBLAST: читать нечего"; continue; }
-    OSTALOS=$(( DEADLINE - $(date +%s) ))
-    if [ "$OSTALOS" -lt 60 ]; then
+    [ -n "$SPISOK" ] || { say "область $OBLAST: читать нечего"
+                          OSTALOS_OBLASTEJ=$(( OSTALOS_OBLASTEJ - 1 )); continue; }
+    # Доля времени, а не весь остаток: прежде первая область забирала все 90
+    # минут, а остальные получали «потолок времени: не читалась» — всегда одни
+    # и те же. Доля = остаток / число оставшихся областей, не меньше минуты.
+    OSTATOK=$(( DEADLINE - $(date +%s) ))
+    if [ "$OSTATOK" -lt 60 ]; then
         say "потолок времени: область $OBLAST не читалась"
         break
     fi
+    [ "$OSTALOS_OBLASTEJ" -gt 0 ] || OSTALOS_OBLASTEJ=1
+    OSTALOS=$(( OSTATOK / OSTALOS_OBLASTEJ ))
+    [ "$OSTALOS" -lt 60 ] && OSTALOS=60
+    OSTALOS_OBLASTEJ=$(( OSTALOS_OBLASTEJ - 1 ))
     # Путь конфига передаётся ДОВОДОМ, а не через окружение: PROJECT_DIR —
     # переменная оболочки, в окружение python она не уезжает, и первый живой
     # прогон 12.09.2026 упал на KeyError, оставив вопрос области пустым.
@@ -431,12 +454,18 @@ PY
     AGENT_RC=0
     zapusk_agenta "$OBLAST" "$VOPROS" "$SPISOK" "$DATA" "$DOK" "$OSTALOS" || AGENT_RC=$?
     if [ "$AGENT_RC" = 0 ]; then
-        python3 "$SCRIPTS/revizia-porcii.py" "$OBLAST" --продвинуть >/dev/null
+        # Курсор ставится по ПРОЧИТАННОЙ порции: её последний путь у нас на
+        # руках. Прежде прибор считал порцию заново — через полтора часа и по
+        # другому порядку файлов, из-за чего часть их выпадала из круга молча.
+        POSLEDNIJ="$(printf '%s\n' "$SPISOK" | tail -n 1)"
+        python3 "$SCRIPTS/revizia-porcii.py" "$OBLAST" --продвинуть "$POSLEDNIJ" >/dev/null
         OBLASTEJ=$(( OBLASTEJ + 1 ))
     else
         say "область $OBLAST: агент вернул $AGENT_RC — курсор не двигаю"
     fi
-done < <(python3 "$SCRIPTS/revizia-porcii.py" --области)
+done
+# Круг прошёл — сдвигаем начало, чтобы в следующий раз голодала другая область.
+python3 "$SCRIPTS/revizia-porcii.py" --сдвиг-дальше >/dev/null 2>&1 || true
 
 # ── что агент тронул сверх двух разрешённых путей ───────────────────────────
 GIT_INDEX_FILE="$T/posle" git -C "$PROJECT_DIR" add -A >/dev/null 2>&1

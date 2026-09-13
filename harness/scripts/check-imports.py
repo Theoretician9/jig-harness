@@ -35,9 +35,17 @@ from konf import product_dir          # noqa: E402  (после правки sys
 
 
 def файлы():
-    вывод = subprocess.run(
+    готово = subprocess.run(
         ["git", "-C", str(КОРЕНЬ), "-c", "core.quotepath=false", "ls-files", "*.py"],
-        capture_output=True, text=True, check=True).stdout
+        capture_output=True, text=True)
+    if готово.returncode != 0:
+        # На СВЕЖЕЙ установке git init ещё не сделан (это задание первой смены),
+        # и гейт валился трассировкой CalledProcessError — ворота новой машины
+        # краснели там, где проверять просто нечем (живой прогон 13.09.2026).
+        print("[импорты] нечем проверять: дерево ещё не git-репозиторий "
+              f"({(готово.stderr or '').strip()[:120]})")
+        sys.exit(77)
+    вывод = готово.stdout
     for путь in вывод.splitlines():
         if путь and not путь.startswith(ПРОПУСК):
             да = КОРЕНЬ / путь

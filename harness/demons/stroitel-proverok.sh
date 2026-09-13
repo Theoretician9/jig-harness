@@ -202,7 +202,7 @@ ZADACH_DO=$(grep -c '^\s*- id:' "$DEVMAP" || echo 0)
 
 AGENT_RC=0
 timeout "$STROITEL_TIMEOUT" \
-claude -p --model "$(model_dlya тесты)" \
+bash "$PROJECT_DIR/scripts/claude-demon.sh" stroitel-proverok -p --model "$(model_dlya тесты)" \
   "Ты строитель проверок для проекта ${PROJECT_NAME:-харнес} ($PROJECT_DIR).
 
 Задача харнеса — не заставлять владельца щупать руками то, что машина может
@@ -247,7 +247,9 @@ $FORMY
   --mcp-config '{"mcpServers":{}}' --strict-mcp-config \
   --output-format text 9>&- >> "$LOG_DIR/stroitel-proverok.log" 2>&1 || AGENT_RC=$?
 
-if [ "$AGENT_RC" != 0 ]; then
+if [ "$AGENT_RC" = 77 ]; then
+    say "строитель пропущен: лимит подписки (обёртка claude-demon.sh сказала владельцу)"
+elif [ "$AGENT_RC" != 0 ]; then
     say "агент строителя вернул $AGENT_RC — карту проверяю всё равно"
 fi
 

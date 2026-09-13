@@ -20,10 +20,12 @@ DOTALL. Жадная точка съела всё до последней кав
 from __future__ import annotations
 
 import collections
+import pathlib
 import re
 import subprocess
 import sys
 
+КОРЕНЬ = pathlib.Path(__file__).resolve().parent.parent
 КАРТА = "dev-map.yaml"
 АРХИВ = "docs/dev-map-archive.yaml"
 # Задача карты: «      - id: <имя>» на своём уровне отступа. Регулярное
@@ -32,9 +34,16 @@ import sys
 ЗАДАЧА = re.compile(r"^\s+- id:\s*(\S+)\s*$", re.MULTILINE)
 
 
-def _git(*аргументы: str) -> str:
-    из_git = subprocess.run(["git", *аргументы], capture_output=True)
-    return из_git.stdout.decode("utf-8", "replace") if из_git.returncode == 0 else ""
+def _git(*аргументы: str) -> str | None:
+    """Вывод git — или None, если git не ответил.
+
+    «Не прочитали» и «пусто» — разные ответы: до 14.09.2026 отказ отдавался
+    пустой строкой, прежняя карта выглядела отсутствующей, и гейт печатал
+    «сверять не с чем» с кодом 0 — то есть сторож И-1 зеленел на сбое.
+    """
+    из_git = subprocess.run(["git", "-C", str(КОРЕНЬ), *аргументы],
+                            capture_output=True)
+    return из_git.stdout.decode("utf-8", "replace") if из_git.returncode == 0 else None
 
 
 def перечень(текст: str) -> list[str]:
@@ -51,11 +60,20 @@ def дубли(текст: str) -> list[str]:
     return sorted(ид for ид, n in счёт.items() if n > 1)
 
 
+def _не_прочитано(что: str) -> int:
+    print(f"\n[карта] ✗ НЕ ПРОЧИТАНО: git не отдал {что}")
+    print("Сверять нечем, а «нечем судить» это не «нарушений нет»: сторож И-1")
+    print("молчал бы ровно там, где карта могла потерять задачи.")
+    return 1
+
+
 def проверить(изменённые: list[str]) -> int:
     if КАРТА not in изменённые:
         print("[карта] dev-map.yaml не в коммите — сверять нечего")
         return 0
     текст = _git("show", f":{КАРТА}")
+    if текст is None:
+        return _не_прочитано(f":{КАРТА}")
     повторы = дубли(текст)
     if повторы:
         print(f"\n[карта] ✗ ОДИН id ВСТРЕЧАЕТСЯ ДВАЖДЫ: {len(повторы)}")
@@ -67,7 +85,15 @@ def проверить(изменённые: list[str]) -> int:
         print("тремя закрытыми пунктами, второй — plan с пустым списком; пропажи")
         print("не было, и этот же гейт молчал, потому что считал id множеством.")
         return 1
-    было = задачи(_git("show", f"HEAD:{КАРТА}"))
+    прежняя = _git("show", f"HEAD:{КАРТА}")
+    if прежняя is None and _git("rev-parse", "--git-dir") is not None:
+        # git жив, а прежней карты нет: либо это первый коммит карты, либо
+        # коммитов нет вовсе (свежая установка). И то и другое законно —
+        # красным должен быть только сбой самого git.
+        прежняя = ""
+    if прежняя is None:
+        return _не_прочитано(f"HEAD:{КАРТА}")
+    было = задачи(прежняя)
     стало = задачи(текст)
     if not было:
         print("[карта] прежней версии нет (первый коммит карты) — сверять не с чем")
@@ -76,7 +102,8 @@ def проверить(изменённые: list[str]) -> int:
     if not пропали:
         print(f"[карта] задач {len(стало)}, ни одна не потерялась")
         return 0
-    в_архиве = задачи(_git("show", f":{АРХИВ}")) | задачи(_git("show", f"HEAD:{АРХИВ}"))
+    в_архиве = (задачи(_git("show", f":{АРХИВ}") or "")
+                | задачи(_git("show", f"HEAD:{АРХИВ}") or ""))
     бесследно = sorted(пропали - в_архиве)
     перенесены = sorted(пропали & в_архиве)
     if перенесены:
@@ -147,8 +174,49 @@ def _selftest() -> int:
     if плохо:
         print("САМОТЕСТ ПРОВАЛЕН")
         return 1
-    print("САМОТЕСТ ПРОЙДЕН: 6 путей, больной случай первым в каждой паре")
+    if _проба_отказа_git() != 0:
+        return 1
+    if _проба_свежей_установки() != 0:
+        return 1
+    print("САМОТЕСТ ПРОЙДЕН: 8 путей, больной случай первым в каждой паре")
     return 0
+
+
+def _проба_свежей_установки() -> int:
+    """На свежей установке гейт молчит: коммитов нет — это не сбой git.
+
+    Здоровый случай рядом с больным обязателен: отличать «git умер» от «в
+    HEAD ещё ничего нет» гейт обязан сам, иначе первый же коммит новой машины
+    встанет, а краснеющий без причины сторож отключают.
+    """
+    import subprocess as подпроцесс
+    import tempfile
+    with tempfile.TemporaryDirectory() as тмп:
+        дерево = pathlib.Path(тмп)
+        (дерево / "scripts").mkdir()
+        (дерево / "scripts" / pathlib.Path(__file__).name).write_bytes(
+            pathlib.Path(__file__).read_bytes())
+        (дерево / КАРТА).write_text(
+            "lines:\n  - id: harness\n    tasks:\n"
+            "      - id: hr.проба\n        status: plan\n", encoding="utf-8")
+        подпроцесс.run(["git", "init", "-q", "."], cwd=дерево, check=True)
+        подпроцесс.run(["git", "add", КАРТА], cwd=дерево, check=True)
+        итог = подпроцесс.run(
+            [sys.executable, str(дерево / "scripts" / pathlib.Path(__file__).name)],
+            input=f"{КАРТА}\n", capture_output=True, text=True, cwd=дерево)
+    if итог.returncode == 0 and "первый коммит карты" in итог.stdout:
+        print("  ок    свежая установка: коммитов ещё нет — гейт молчит")
+        return 0
+    print(f"  ПЛОХО свежая установка покраснела: код {итог.returncode}, "
+          f"вывод «{итог.stdout.strip()[:120]}»")
+    return 1
+
+
+def _проба_отказа_git() -> int:
+    """Гейт краснеет, когда git не отдал карту, и называет ПРИЧИНУ."""
+    sys.path.insert(0, str(КОРЕНЬ / "scripts" / "lib"))
+    from proba_git import гейт_краснеет_без_git
+    return гейт_краснеет_без_git(__file__, f"{КАРТА}\n", "НЕ ПРОЧИТАНО")
 
 
 def main() -> int:

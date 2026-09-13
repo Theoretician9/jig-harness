@@ -1,0 +1,70 @@
+# Рубеж панели харнеса. ШАБЛОН: рабочий файл собирает scripts/nginx-paneli.sh
+# по паспорту установки — @PANEL_HOST@ из PANEL_URL, @PANEL_PORT@ из
+# установленного юнита панели.
+#
+# Зачем файл вообще существует. Защита панели в четырёх местах кода опирается
+# на этот конфиг (server.py: свой origin :20-21, /vnutr/ :403-418, X-Real-IP
+# :284, cookie Secure :526), а самого конфига не было ни в репозитории, ни в
+# пакете: на чистой установке рубежа не возникало, и код считал данностью то,
+# чего нет (ревизия безопасности 12.09.2026).
+#
+# TLS-строк здесь нет намеренно: сертификат выдаётся на живой домен, и вшитый
+# путь к чужому fullchain.pem уронил бы nginx на старте. Сборщик отказывает,
+# если /etc/letsencrypt/live/@PANEL_HOST@ нет, и печатает команду certbot.
+
+# Ответ по умолчанию для НЕИЗВЕСТНЫХ имён — обрыв, а не чужая страница.
+# Улика 13.09.2026: `curl -sk -H 'Host: bogus.example' https://127.0.0.1/`
+# отдавал 200 и страницу панели. Явного default_server для 443 не было ни у
+# кого, и nginx отвечал ПЕРВЫМ блоком по алфавиту — им оказалась панель.
+# «Свой origin» при этом не выполнялся: панель жила под любым именем.
+server {
+    listen 443 ssl default_server;
+    listen [::]:443 ssl default_server;
+    server_name _;
+    ssl_certificate     /etc/letsencrypt/live/@PANEL_HOST@/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/@PANEL_HOST@/privkey.pem;
+    return 444;
+}
+
+# Сама панель — ТОЛЬКО по своему имени и только по TLS: cookie пропуска идёт
+# с флагом Secure, по http браузер его не сохранит и войти будет нельзя.
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    server_name @PANEL_HOST@;
+    ssl_certificate     /etc/letsencrypt/live/@PANEL_HOST@/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/@PANEL_HOST@/privkey.pem;
+
+    # Панель — не место для поисковых роботов и чужих фреймов.
+    add_header X-Robots-Tag "noindex, nofollow" always;
+    add_header X-Frame-Options "DENY" always;
+    add_header X-Content-Type-Options "nosniff" always;
+
+    # Внутренние маршруты панели (их зовёт диспетчер с самой машины) снаружи
+    # не существуют. Второй носитель к проверке в самой службе: правило,
+    # перекрытое одним путём из двух, — не правило.
+    location /vnutr/ { return 404; }
+
+    location / {
+        proxy_pass http://127.0.0.1:@PANEL_PORT@;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        # Панель берёт адрес гостя ТОЛЬКО из этого заголовка и слушает лишь
+        # 127.0.0.1 — значит подделать его снаружи нельзя.
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 60s;
+    }
+}
+
+# Порт 80 — только обновление сертификата и переход на https. Панели здесь
+# нет: открытая по http форма входа работает, а cookie браузер отбрасывает —
+# это хуже, чем отсутствие рубежа (находка ревью спеки S-05).
+server {
+    listen 80;
+    listen [::]:80;
+    server_name @PANEL_HOST@;
+    location /.well-known/acme-challenge/ { root /var/www/html; }
+    location / { return 301 https://$host$request_uri; }
+}
