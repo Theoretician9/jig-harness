@@ -124,6 +124,13 @@ echo "psql rc=$RC, время $((T1 - T0)) с, строк ERROR: ${ERRS:-?}, т�
 # лежит в стенде — команда без указания контейнера не сработала бы вовсе.
 echo "ПРОБНАЯ БАЗА: $DB (контейнер $CONT)"
 echo "  убрать: DB_ADMIN_EXEC='docker exec -i $CONT' bash scripts/ubrat-bazu.sh $DB"
+# Метка присмотра: без неё смерть этой пробы незаметна. Пишется ПОСЛЕ прогона
+# и независимо от исхода — метка отвечает на вопрос «проба ходила», а исход
+# говорит сама проба своим кодом возврата. Улика 13.09.2026: демон стоял в
+# кроне без срока в HEARTBEAT_PERIODS, и его молчание не заметил бы никто.
+mkdir -p "${HEARTBEAT_DIR:-/var/lib/harness/heartbeat}" 2>/dev/null || true
+: > "${HEARTBEAT_DIR:-/var/lib/harness/heartbeat}/proba-vosstanovleniya" 2>/dev/null || true
+
 if [ "$RC" = 0 ] && [ "${ERRS:-1}" = 0 ] && [ "${TABLES:-0}" -gt 0 ]; then
     echo "$(date '+%Y-%m-%d %H:%M:%S')  ПРОБА ЗАВЕРШЕНА: дамп восстанавливается (таблиц ${TABLES}, ошибок 0)"
     exit 0

@@ -107,10 +107,27 @@
   backup: 1440
   devmap-selfheal: 1440
   heartbeat-watch: 1440
+  check-srok-vhoda: 30
+  limit-watch: 5
+  priyomka-watch: 1440
+  proba-vosstanovleniya: 44640
+  stroitel-proverok: 1440
+  ton-watch: 1440
   obnovlenie-watch: 1440
   rasshirenija-watch: 1440
   memory-revision: 44640
   revizia-proekta: 44640
+
+# Метки, у которых НЕТ строки в расписании выше, — и почему это законно.
+# Сверяет scripts/check-zadanie-i-metka.py: без этой записи метка без задания
+# неотличима от забытой, а задание без метки — мёртвый демон, которого никто
+# не ждёт (ревизия архитектуры 12.09.2026).
+метки_без_задания:
+  sentinel: "поднимается таймером systemd harness-sentinel.timer, а не крон-строкой"
+  limit-watch: "своя крон-строка ставится шагом установки: ежеминутный обход не входит в общий список"
+  check-srok-vhoda: "ставится тем же шагом установки, что и limit-watch"
+  proba-vosstanovleniya: "запускается раз в месяц строкой крона владельца; период метки нужен сторожу, задание — нет"
+  session-warden.запуск: "вторая метка того же сторожа: её пишет подъём смены, а не отдельное задание"
 
 # Ключи harness.conf с умолчаниями: ustanovit-novoe.py ДОПИСЫВАЕТ недостающие и
 # никогда не меняет стоящие — значение владельца старше умолчания пакета.

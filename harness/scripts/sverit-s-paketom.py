@@ -27,6 +27,10 @@ import sys
 from datetime import date
 from pathlib import Path
 
+import sys as _sys
+_sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
+import konf as конф_модуль                             # noqa: E402
+
 # Журнал правок пакета живёт в ПРОЕКТЕ, а не в пакете: пакет — продукт для
 # пользователей, и история нашей работы над ним им не нужна (вопрос владельца
 # 11.09.2026: «зачем нам оставлять механизм читки изменений если это продукт
@@ -89,14 +93,7 @@ def _журнал_пробы(корень):
 
 def найти_пакет(конф: str = "/etc/harness/harness.conf") -> tuple[Path | None, str]:
     """(каталог пакета, причина отсутствия). STARTER_DIR → поиск по домам."""
-    значение = ""
-    try:
-        for line in Path(конф).read_text(encoding="utf-8").splitlines():
-            m = re.match(r'\s*STARTER_DIR\s*=\s*"?([^"#\s]*)"?', line)
-            if m:
-                значение = m.group(1)
-    except OSError:
-        pass
+    значение = конф_модуль.из_файла(конф).get("STARTER_DIR", "")
     if значение:
         p = Path(значение)
         if p.is_dir():
@@ -105,14 +102,7 @@ def найти_пакет(конф: str = "/etc/harness/harness.conf") -> tuple[
     # STARTER_DIR пуст — ищем по конвенции установки, у АГЕНТА.
     # Не перебором /home/*: чужие домашние каталоги закрыты на чтение, и обход
     # падал PermissionError на первом же соседе (поймано первым прогоном).
-    агент = ""
-    try:
-        for line in Path("/etc/harness/install.conf").read_text(encoding="utf-8").splitlines():
-            m = re.match(r'\s*AGENT_USER\s*=\s*"?([^"#\s]*)"?', line)
-            if m:
-                агент = m.group(1)
-    except OSError:
-        pass
+    агент = конф_модуль.из_файла("/etc/harness/install.conf").get("AGENT_USER", "")
     if агент:
         p = Path("/home") / агент / "starter" / "STARTER-PACKAGE"
         if p.is_dir():

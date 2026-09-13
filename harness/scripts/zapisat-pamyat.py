@@ -20,13 +20,13 @@
 Код возврата: 0 — записано; 2 — имя не годится; 3 — пустой текст;
 4 — копия не удалась; 5 — записать не вышло.
 """
-import datetime
-import json
 import os
 import re
-import subprocess
 import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
+import pisatel_paneli as писатель                      # noqa: E402
 
 КОРЕНЬ = Path(__file__).resolve().parent.parent
 ПАМЯТЬ = Path(os.environ.get("HARNESS_PAMYAT") or КОРЕНЬ / "память")
@@ -36,8 +36,7 @@ LOG_DIR = Path(os.environ.get("LOG_DIR", "/var/log/harness"))
 
 
 def отказ(код: int, причина: str) -> int:
-    print(f"[память] отказ: {причина}", file=sys.stderr)
-    return код
+    return писатель.отказ("память", код, причина)
 
 
 def годное_имя(имя: str) -> str | None:
@@ -49,38 +48,6 @@ def годное_имя(имя: str) -> str | None:
     if цель.parent != ПАМЯТЬ.resolve():
         return f"путь «{цель}» выводит за каталог памяти"
     return None
-
-
-def снять_копию(файл: Path) -> Path | None:
-    if not файл.exists():
-        return None
-    каталог = LOG_DIR / "панель-копии"
-    каталог.mkdir(parents=True, exist_ok=True)
-    метка = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-    копия = каталог / f"{файл.name}.{метка}"
-    копия.write_bytes(файл.read_bytes())
-    return копия
-
-
-def записать_журнал(имя: str, было_знаков: int, стало_знаков: int) -> None:
-    запись = {"ts": datetime.datetime.now().isoformat(timespec="seconds"),
-              "память": имя, "было знаков": было_знаков,
-              "стало знаков": стало_знаков,
-              "кто": os.environ.get("SUDO_USER") or os.environ.get("USER") or "?"}
-    try:
-        LOG_DIR.mkdir(parents=True, exist_ok=True)
-        with open(LOG_DIR / "панель.jsonl", "a", encoding="utf-8") as fh:
-            fh.write(json.dumps(запись, ensure_ascii=False) + "\n")
-    except OSError as беда:
-        print(f"[память] журнал не записан: {беда}", file=sys.stderr)
-
-
-def _вернуть_хозяина(новый_файл: Path, прежний) -> None:
-    """Оставить прежних владельца и группу: запись идёт через sudo."""
-    try:
-        os.chown(новый_файл, прежний.st_uid, прежний.st_gid)
-    except (PermissionError, OSError):
-        pass
 
 
 def main(argv: list[str]) -> int:
@@ -96,40 +63,25 @@ def main(argv: list[str]) -> int:
         return отказ(3, "пустой текст — это потеря записи, а не правка")
 
     файл = ПАМЯТЬ / имя
-    каталог_пишется = os.access(ПАМЯТЬ, os.W_OK)
-    файл_пишется = (not файл.exists()) or os.access(файл, os.W_OK)
-    if (not (каталог_пишется and файл_пишется)) and "--под-sudo" not in sys.argv:
-        готово = subprocess.run(
-            ["sudo", "-n", "/usr/bin/python3", str(Path(__file__).resolve()),
-             имя, "--под-sudo"], input=текст, capture_output=True, text=True,
-            timeout=60)
-        sys.stdout.write(готово.stdout)
-        sys.stderr.write(готово.stderr)
-        return готово.returncode
+    # Целей две: сам файл (если он есть) и каталог — новая запись создаётся
+    # в нём, и закрытый каталог не менее непроходим, чем закрытый файл.
+    цели = [ПАМЯТЬ] + ([файл] if файл.exists() else [])
+    if писатель.надо_поднять_права(цели) and "--под-sudo" not in sys.argv:
+        return писатель.поднять_права(Path(__file__).resolve(), [имя], вход=текст)
 
     try:
-        копия = снять_копию(файл)
+        копия = писатель.снять_копию(файл, LOG_DIR)
     except OSError as ошибка:
         return отказ(4, f"копия прежней записи не снята: {ошибка}")
 
     было = len(файл.read_text(encoding="utf-8")) if файл.exists() else 0
-    врем = файл.with_suffix(".md.tmp")
     try:
-        врем.write_text(текст, encoding="utf-8")
-        if файл.exists():
-            прежний = os.stat(файл)
-            os.chmod(врем, прежний.st_mode & 0o7777)
-            _вернуть_хозяина(врем, прежний)
-        else:
-            прежний = os.stat(ПАМЯТЬ)
-            os.chmod(врем, 0o664)
-            _вернуть_хозяина(врем, прежний)
-        os.replace(врем, файл)
+        писатель.записать_атомарно(файл, текст)
     except OSError as ошибка:
-        врем.unlink(missing_ok=True)
         return отказ(5, f"записать не вышло: {ошибка}")
 
-    записать_журнал(имя, было, len(текст))
+    писатель.записать_журнал("память", {"память": имя, "было знаков": было,
+                                        "стало знаков": len(текст)}, LOG_DIR)
     print(f"[память] {имя}: {было} → {len(текст)} знаков"
           + (f"; копия: {копия}" if копия else "; новая запись"))
     return 0

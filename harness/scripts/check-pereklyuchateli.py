@@ -26,10 +26,21 @@ import re
 import sys
 from pathlib import Path
 
+import sys as _sys
+_sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
+import konf as конф_модуль                             # noqa: E402
+
 import yaml
 
 КОРЕНЬ = Path(__file__).resolve().parent.parent
 РЕЕСТР = КОРЕНЬ / "harness" / "config" / "переключатели.yaml"
+# Образец конфига, который уезжает на новую машину. Судится тем же гейтом:
+# «ручка есть в бою» и «ручка приедет к новому владельцу» — разные факты.
+sys.path.insert(0, str(КОРЕНЬ / "scripts" / "lib"))
+from konf import katalog_paketa                              # noqa: E402
+
+ОБРАЗЕЦ_ПАКЕТА = katalog_paketa() / "harness" / "config" / "harness.conf"
+
 КОНФИГИ = {
     "install.conf": os.environ.get("HARNESS_INSTALL_CONF", "/etc/harness/install.conf"),
     "harness.conf": os.environ.get("HARNESS_CONF", "/etc/harness/harness.conf"),
@@ -52,14 +63,9 @@ import yaml
 
 
 def значение_в_конфиге(ключ: str, путь: str) -> str | None:
-    """Значение ключа в shell-конфиге. Конфиг не исполняется — разбирается."""
-    try:
-        текст = Path(путь).read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return None
-    найдено = re.search(rf'^\s*{re.escape(ключ)}=["\']?([^"\'\n#]*)',
-                        текст, re.MULTILINE)
-    return найдено.group(1).strip() if найдено else None
+    """Значение ключа в shell-конфиге. Конфиг не исполняется — разбирается
+    общим загрузчиком (своя регулярка была одной из десяти копий)."""
+    return конф_модуль.из_файла(путь).get(ключ)
 
 
 def читает_ключ(читатель: str, ключ: str) -> bool:
@@ -256,6 +262,15 @@ def main() -> int:
         print(f"[переключатели] реестр не разбирается: {беда}")
         return 1
     беды = проверить(реестр, КОНФИГИ)
+    # Тот же счёт по ОБРАЗЦУ конфига из пакета: он приезжает на новую машину,
+    # и ручка, которой там нет, рисуется панелью впустую. Живой прогон ворот
+    # внутри свежей установки 13.09.2026 нашёл так две — UPDATE_MODE и
+    # LANG_LEVEL. Боевой конфиг о них знал, образец — нет.
+    образец = ОБРАЗЕЦ_ПАКЕТА
+    if образец.exists():
+        беды += [f"ОБРАЗЕЦ ПАКЕТА: {б}"
+                 for б in проверить(реестр, dict(КОНФИГИ, **{"harness.conf": str(образец)}))
+                 if "такого ключа нет" in б]
     if беды:
         print(f"[переключатели] РАСХОЖДЕНИЙ: {len(беды)}")
         for строка in беды:

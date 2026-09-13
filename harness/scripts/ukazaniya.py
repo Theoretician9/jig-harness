@@ -40,6 +40,10 @@ import pathlib
 import re
 import sys
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent / "lib"))
+import konf as конф_модуль                             # noqa: E402
+import ochered_kanala as очередь                       # noqa: E402
+
 # Слова, которыми владелец задаёт правило, а не сообщает факт. Список узкий
 # нарочно: ложная тревога стоит одной команды `--разобрано`, а пропущенное
 # указание — повторённой ошибки и упрёка в канал.
@@ -54,43 +58,17 @@ import sys
 МАРКЕР = re.compile(r"<!--\s*inbox:([0-9.]+)\s*-->")
 
 
-def читать_конф(путь: str, куда: dict) -> None:
-    """KEY="value" из конфига харнеса. Конфиги не исполняются (И-3)."""
-    try:
-        текст = pathlib.Path(путь).read_text(encoding="utf-8")
-    except OSError:
-        return
-    for строка in текст.splitlines():
-        совпало = re.match(r'^\s*([A-Z_][A-Z0-9_]*)\s*=\s*"?([^"#]*)"?', строка)
-        if совпало:
-            куда[совпало.group(1)] = совпало.group(2).strip()
-
-
 def указательное(текст: str) -> bool:
     return any(м in текст.lower() for м in МАРКЕРЫ)
 
 
-def сообщения(обработано: pathlib.Path) -> list[tuple[float, str, pathlib.Path]]:
-    """Разобранные сообщения владельца: (когда, id, файл), от старых к новым."""
-    файлы = sorted(обработано.glob("*.txt"), key=lambda ф: ф.stat().st_mtime)
-    return [(ф.stat().st_mtime, ф.stem, ф) for ф in файлы]
-
-
-def водораздел(курсор: pathlib.Path, все: list, указания: str) -> float:
-    """С какого момента спрашивать. Первый запуск начинает с последнего id,
-    который уже занесён в УКАЗАНИЯ.md: прошлое разбирать поздно, а требовать
-    разбора 244 старых сообщений — гейт, который никто не сможет позеленить."""
-    try:
-        return float(курсор.read_text(encoding="utf-8").strip())
-    except (OSError, ValueError):
-        занесённые = [когда for когда, ид, _ in все if ид in указания]
-        return max(занесённые) if занесённые else 0.0
-
-
+# Механика очереди — общая с `zadachi-iz-kanala.py`: чтение каталога,
+# водораздел, курсор, спутник. Здесь остаётся только СМЫСЛ этого сторожа —
+# что считать указанием и куда оно заносится (ревизия лаконичности 12.09.2026:
+# пять мест было повторено дословно, и дефект чинился бы в одной копии).
 def неразобранные(все: list, с_какого: float, указания: str) -> list[tuple[str, pathlib.Path]]:
-    return [(ид, файл) for когда, ид, файл in все
-            if когда > с_какого and ид not in указания
-            and указательное(файл.read_text(encoding="utf-8", errors="replace"))]
+    return [(ид, файл) for ид, файл, _ in
+            очередь.без_исхода(все, с_какого, указания, указательное)]
 
 
 def перенести_маркеры(корень: pathlib.Path) -> int:
@@ -140,9 +118,9 @@ def проверить(корень: pathlib.Path, лог: pathlib.Path) -> int:
 
     убрано = перенести_маркеры(корень)
     указания = занесённые(корень)
-    все = сообщения(обработано)
+    все = очередь.сообщения(обработано)
     курсор = лог / "указания/cursor"
-    с_какого = водораздел(курсор, все, указания)
+    с_какого = очередь.водораздел(курсор, все, указания)
     долги = неразобранные(все, с_какого, указания)
 
     if долги:
@@ -155,11 +133,7 @@ def проверить(корень: pathlib.Path, лог: pathlib.Path) -> int:
               "а если указания в сообщении нет — `ukazaniya.py --разобрано <id>`.")
         return 1
 
-    # Автопочинка: разобрано всё — курсор едет вперёд сам. Иначе гейт требовал
-    # бы ещё и «не забыть подвинуть курсор», то есть чтобы кто-то помнил.
-    if все:
-        курсор.parent.mkdir(parents=True, exist_ok=True)
-        курсор.write_text(f"{все[-1][0]:.0f}\n", encoding="utf-8")
+    очередь.подвинуть_курсор(курсор, все)
     хвост = f", маркеров убрано в спутник: {убрано}" if убрано else ""
     print(f"указания: разобраны все сообщения владельца ({len(все)} в очереди){хвост}")
     return 0
@@ -174,9 +148,7 @@ def разобрано(корень: pathlib.Path, ид: str) -> int:
     if ид in занесённые(корень):
         print(f"{ид} уже занесён")
         return 0
-    спутник = корень / СПУТНИК
-    было = спутник.read_text(encoding="utf-8") if спутник.exists() else ""
-    спутник.write_text(f"{было}{ид}\n", encoding="utf-8")
+    очередь.пометить(корень / СПУТНИК, ид)
     print(f"{ид} занесён в спутник «указания нет»: {СПУТНИК}")
     return 0
 
@@ -245,11 +217,12 @@ def main() -> int:
     if "--selftest" in sys.argv:
         return selftest()
 
-    конф: dict = {}
-    читать_конф(os.environ.get("HARNESS_INSTALL_CONF", "/etc/harness/install.conf"), конф)
-    корень = pathlib.Path(os.environ.get("PROJECT_DIR") or конф.get("PROJECT_DIR")
+    # Конфиг читает ОДИН загрузчик (scripts/lib/konf.py): своя регулярка здесь
+    # была одной из десяти копий, и окружение старше файла он держит сам.
+    конф = конф_модуль.конфиг()
+    корень = pathlib.Path(конф.get("PROJECT_DIR")
                           or pathlib.Path(__file__).resolve().parents[1])
-    лог = pathlib.Path(os.environ.get("LOG_DIR") or конф.get("LOG_DIR") or "/var/log/harness")
+    лог = pathlib.Path(конф.get("LOG_DIR") or "/var/log/harness")
 
     if "--разобрано" in sys.argv:
         место = sys.argv.index("--разобрано") + 1

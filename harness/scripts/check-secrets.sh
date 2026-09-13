@@ -45,13 +45,19 @@ PATTERNS=(
     -e 'github_pat_[A-Za-z0-9_]{20,}'
     -e 'xox[baprs]-[0-9A-Za-z-]{10,}'
     -e '-----BEGIN [A-Z ]*PRIVATE KEY-----'
+    # Секрет БЕЗ говорящего имени: ключ подписи, внутренний ключ и пропуска
+    # панели порождает secrets.token_urlsafe(32) — ровно 43 знака. 13.09.2026
+    # ревью безопасности нашло живой пропуск панели в коде гейта под именем
+    # «ПРОПУСК»: кириллическое имя мимо шаблонов выше, и сторож молчал.
+    # Замер по всему репозиторию перед включением: находок 0.
+    -e '=[[:space:]]*["'"'"'][A-Za-z0-9_-]{43}["'"'"']'
 )
 MARKER='не-секрет'
 
 run_scan() {  # $1 = каталог репо, $2 = режим all|staged
     local repo="$1" mode="$2" fail=0 files hits f
     git -C "$repo" rev-parse --git-dir >/dev/null 2>&1 \
-        || { echo "check-secrets: $repo — не git-репозиторий, сканировать нечего"; return 2; }
+        || { echo "check-secrets: $repo — не git-репозиторий, сканировать нечего (жёлтый)"; return 77; }
     # core.quotepath=false: без него git экранирует кириллические имена
     # («память/» → \320...), и поиск по такому имени падает. Поймано
     # прогоном при сборке пакета 08.08.2026.
@@ -114,7 +120,7 @@ if [ "${1:-}" = "--selftest" ]; then
     if run_scan "$T" all >/dev/null; then
         echo "SELFTEST FAIL: токен test123 не пойман"; exit 1
     fi
-    echo "selftest 1/4: больной случай в кавычках пойман (красный) — OK"
+    echo "selftest 1/5: больной случай в кавычках пойман (красный) — OK"
     rm "$T/config.py"
     git -C "$T" rm -q --cached config.py
 
@@ -124,7 +130,7 @@ if [ "${1:-}" = "--selftest" ]; then
     if run_scan "$T" all >/dev/null; then
         echo "SELFTEST FAIL: безкавычечный секрет не пойман"; exit 1
     fi
-    echo "selftest 2/4: безкавычечный больной случай пойман (красный) — OK"
+    echo "selftest 2/5: безкавычечный больной случай пойман (красный) — OK"
     rm "$T/app.ini"
     git -C "$T" rm -q --cached app.ini
 
@@ -134,7 +140,7 @@ if [ "${1:-}" = "--selftest" ]; then
     if ! run_scan "$T" all >/dev/null; then
         echo "SELFTEST FAIL: чистый репо покраснел"; exit 1
     fi
-    echo "selftest 3/4: здоровый случай прошёл (зелёный) — OK"
+    echo "selftest 3/5: здоровый случай прошёл (зелёный) — OK"
 
     # Режим --staged: секрет лежит В ИНДЕКСЕ, рабочее дерево уже чистое —
     # коммитится индекс, краснеть обязан именно он.  # не-секрет
@@ -144,7 +150,19 @@ if [ "${1:-}" = "--selftest" ]; then
     if run_scan "$T" staged >/dev/null; then
         echo "SELFTEST FAIL: --staged не увидел секрет в индексе"; exit 1
     fi
-    echo "selftest 4/4: --staged ловит секрет из индекса (красный) — OK"
+    echo "selftest 4/5: --staged ловит секрет из индекса (красный) — OK"
+    rm "$T/staged.py"
+    git -C "$T" rm -q --cached staged.py
+
+    # БОЛЬНОЙ СЛУЧАЙ 13.09.2026: живой пропуск панели попал в код гейта под
+    # кириллическим именем «ПРОПУСК». Имя мимо латинских шаблонов — ловит
+    # только ФОРМА: 43 знака, как выдаёт secrets.token_urlsafe(32).
+    printf 'ПРОПУСК = "%s"\n' "9tzRodPCTLwgGY8Kv2_lDUsIPjDKW0_JMxb_LgI6XXX" > "$T/proba.py"
+    git -C "$T" add "proba.py"
+    if run_scan "$T" all >/dev/null; then
+        echo "SELFTEST FAIL: пропуск панели под кириллическим именем не пойман"; exit 1
+    fi
+    echo "selftest 5/5: секрет без говорящего имени пойман по форме (красный) — OK"
     exit 0
 fi
 

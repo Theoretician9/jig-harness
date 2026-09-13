@@ -84,6 +84,12 @@ STAMP_DIR=/var/lib/harness/install-steps
   case "$p" in
     *'$'*|*'`'*|*'"'*|*"'"*|*'|'*|*';'*|*'&'*)
       printf 'в пути есть символ оболочки ($ ` " '"'"' | ; &) — так путь не пишут: «%s»\n' "$p"; return 1 ;;
+    *,*)
+      # Запятая расщепляет запись Cmnd в sudoers на две: файл остаётся
+      # синтаксически верным (visudo -c зелёный), а право уходит не туда —
+      # панель молча теряет возможность переключать ключи (ревью спеки
+      # установки панели 13.09.2026, S-08).
+      printf 'в пути есть запятая — она расщепит правило sudoers панели: «%s»\n' "$p"; return 1 ;;
   esac
   return 0
 }
@@ -92,6 +98,38 @@ STAMP_DIR=/var/lib/harness/install-steps
   local p="$1"
   while [[ "$p" == */ && "$p" != "/" ]]; do p="${p%/}"; done
   printf '%s\n' "$p"
+}
+
+узнать_chat_id() { # $1 = токен бота → chat_id на stdout, пусто если не вышло
+  # Человек всё равно должен написать боту, чтобы канал заработал. Раз так —
+  # пусть пишет один раз, а число возьмёт код: переписанный руками chat_id
+  # это лишний вопрос и целый класс ошибок (указание владельца 13.09.2026).
+  local token="$1" тик id
+  скажи ""
+  скажи "  Напишите вашему боту в Telegram любое сообщение — я возьму ваш"
+  скажи "  chat_id из него сам. Жду до 120 секунд (Ctrl+C — ввести числом)."
+  for ((тик = 0; тик < 24; тик++)); do
+    id=$(curl -s --max-time 10 "https://api.telegram.org/bot${token}/getUpdates" 2>/dev/null \
+         | python3 -c '
+import json, sys
+try:
+    д = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+for о in reversed(д.get("result") or []):
+    ч = (о.get("message") or о.get("edited_message") or {}).get("chat") or {}
+    if ч.get("id"):
+        print(ч["id"]); break
+' 2>/dev/null)
+    if [[ "$id" =~ ^-?[0-9]+$ ]]; then
+      скажи "  chat_id получен из вашего сообщения: $id"
+      printf '%s\n' "$id"
+      return 0
+    fi
+    sleep 5
+  done
+  скажи "  сообщения не дождался — спрошу число"
+  return 1
 }
 
 спросить_путь() { # $1 = текст вопроса, $2 = значение по умолчанию; печатает путь
@@ -149,6 +187,10 @@ STAMP_DIR=/var/lib/harness/install-steps
 DONE_LIST=()      # что поставлено
 CHECKED_LIST=()   # что проверено
 FAILED_LIST=()    # что упало (не остановив установку)
+# Строки, которые ШАГИ добавляют в блок «ОСТАЛОСЬ РУКАМИ». Подсказка, сказанная
+# только в поток установки, теряется вместе с прокруткой: владелец её не
+# перечитывает (ревью спеки панели 13.09.2026, S-14).
+MANUAL_LIST=()
 
 заголовок() { printf '\n==================== %s ====================\n' "$*"; }
 скажи()     { printf '%s\n' "$*"; }
@@ -203,6 +245,25 @@ FAILED_LIST=()    # что упало (не остановив установк�
 # Классовая починка: crontab шага 9 сверяется НЕ с собственной копией таблицы,
 # а с таблицей §9 самой спеки — она лежит рядом с установщиком. Функции
 # самодостаточны (printf, не скажи): их гоняет изолированный тест.
+
+стройки_crontab() { # $1=реестр $2=PROJECT_DIR $3=LOG_DIR → строки crontab
+  # Таблица расписаний — ДАННЫЕ. Вшитая копия отстала молча: в heredoc шага 9
+  # было десять демонов против семнадцати в реестре, и на чистой машине семь
+  # демонов не приезжали вовсе — установка падала на собственной же сверке
+  # (сухой прогон 13.09.2026).
+  python3 -c '
+import sys, yaml
+реестр, проект, логи = sys.argv[1], sys.argv[2], sys.argv[3]
+д = yaml.safe_load(open(реестр, encoding="utf-8")) or {}
+for з in (д.get("задания") or []):
+    имя, когда = з.get("имя") or "", з.get("расписание") or ""
+    команда, журнал = з.get("команда") or "", з.get("журнал") or ""
+    if not (имя and когда and команда) or имя.endswith("-порог"):
+        continue
+    куда = f" >>{логи}/{журнал} 2>&1" if журнал else ""
+    print(f"{когда}  {проект}/{команда}{куда}")
+' "$1" "$2" "$3"
+}
 
 демоны_из_спеки() { # путь к системные-задания.yaml → имена демонов, по одному в строке
   # Состав системы — ДАННЫЕ, а не проза. Прежде список вынимался awk-ом из §9
@@ -351,41 +412,50 @@ fi
     скажи "  PROJECT_NAME=$PROJECT_NAME PROJECT_DIR=$PROJECT_DIR SECRETS_DIR=$SECRETS_DIR TG_CHAT_ID=$TG_CHAT_ID вариант канала=$TG_CHANNEL_VARIANT"
     return 0
   fi
+  # Ревизия вопросов (указание владельца 13.09.2026: «лишние вопросы… надо
+  # упростить»). Вопрос остаётся, только если ответ НЕЛЬЗЯ вывести:
+  #   • каталоги кода и секретов выводятся из имени проекта — их можно задать
+  #     заранее в install.conf или переменными окружения, но спрашивать незачем;
+  #   • chat_id владельца узнаёт САМ бот из первого сообщения — человек всё
+  #     равно должен ему написать, а переписывать число руками он не должен;
+  #   • вариант канала один поддерживаемый (Б); эксперимент включается
+  #     переменной TG_CHANNEL_VARIANT=A, а не вопросом каждому ставящему.
   while :; do
-    read -r -p "  1/7 имя проекта латиницей (напр. myproject): " PROJECT_NAME
+    read -r -p "  1/3 имя проекта латиницей (напр. myproject): " PROJECT_NAME
     [[ "$PROJECT_NAME" =~ ^[A-Za-z0-9_-]+$ ]] && break
     скажи "      только латиница/цифры/дефис/подчёркивание"
   done
-  PROJECT_DIR=$(спросить_путь "2/7 каталог кода" "/opt/$PROJECT_NAME")
-  SECRETS_DIR=$(спросить_путь "3/7 каталог секретов" "/etc/$PROJECT_NAME/secrets")
+  PROJECT_DIR="$(нормализовать_путь "${PROJECT_DIR:-/opt/$PROJECT_NAME}")"
+  SECRETS_DIR="$(нормализовать_путь "${SECRETS_DIR:-/etc/$PROJECT_NAME/secrets}")"
+  скажи "      каталог кода: $PROJECT_DIR · секреты: $SECRETS_DIR"
+  скажи "      (другие пути — переменными PROJECT_DIR и SECRETS_DIR перед запуском)"
   while :; do
-    read -r -p "  4/7 TG_CHAT_ID владельца (число; узнать: написать боту @userinfobot): " TG_CHAT_ID
-    [[ "$TG_CHAT_ID" =~ ^-?[0-9]+$ ]] && break
-    скажи "      chat_id — это число"
-  done
-  while :; do
-    read -r -s -p "  5/7 токен бота от BotFather (вставьте, ввод скрыт): " BOT_TOKEN; echo
+    read -r -s -p "  2/3 токен бота от BotFather (вставьте, ввод скрыт): " BOT_TOKEN; echo
     [[ -n "$BOT_TOKEN" ]] && break
     скажи "      токен пустой — без него канала не будет"
   done
-  read -r -p "  6/7 вариант канала: Б — свой диспетчер (поддерживается) / А — telegram-плагин (эксперимент, после приёмки) [Б]: " ans
-  case "${ans:-Б}" in
-    [AaАа])
-      TG_CHANNEL_VARIANT="A"
-      скажи "      ВНИМАНИЕ: вариант А — экспериментальный, механика подтверждений слабее;"
-      скажи "      пункт чек-листа про юнит harness-dispatcher будет КРАСНЫМ (спека: до приёмки А не включать);"
-      скажи "      поддерживаемый путь — Б, вариант А пробуйте только после приёмки."
-      ;;
-    *) TG_CHANNEL_VARIANT="B" ;;
-  esac
+  TG_CHANNEL_VARIANT="${TG_CHANNEL_VARIANT:-B}"
+  [[ "$TG_CHANNEL_VARIANT" = "A" ]] && скажи "      вариант канала А — эксперимент, механика подтверждений слабее"
+  # chat_id: спрашивать число у человека незачем — бот узнаёт его сам из
+  # первого сообщения. Не дождались — тогда спрашиваем, как раньше.
+  TG_CHAT_ID="$(узнать_chat_id "$BOT_TOKEN")" || TG_CHAT_ID=""
+  if [[ -z "$TG_CHAT_ID" ]]; then
+    while :; do
+      read -r -p "  chat_id владельца числом (узнать: написать боту @userinfobot): " TG_CHAT_ID
+      [[ "$TG_CHAT_ID" =~ ^-?[0-9]+$ ]] && break
+      скажи "      chat_id — это число"
+    done
+  fi
   # Пояс ВЛАДЕЛЬЦА, не датацентра: по нему считаются расписания демонов, иначе
   # «ночные» работы идут у него днём (улика 12.08.2026 — сервер в UTC, владелец
   # на +5: «утренняя» сводка приходила в 13:00, ночной бэкап — в 9 утра).
   # Подтянуть неоткуда: по адресу сервера определяется пояс датацентра, а пояс
   # собеседника мессенджер не отдаёт. Значит — спросить, как остальный паспорт.
   while :; do
-    read -r -p "  7/7 часовой пояс ВЛАДЕЛЬЦА (напр. Asia/Yekaterinburg; список: timedatectl list-timezones) [Etc/UTC]: " OWNER_TZ
-    OWNER_TZ="${OWNER_TZ:-Etc/UTC}"
+    local tz_default; tz_default="$(readlink -f /etc/localtime 2>/dev/null | sed 's|^/usr/share/zoneinfo/||')"
+    [[ -f "/usr/share/zoneinfo/${tz_default:-}" ]] || tz_default="Etc/UTC"
+    read -r -p "  3/3 часовой пояс ВЛАДЕЛЬЦА (напр. Asia/Yekaterinburg; список: timedatectl list-timezones) [$tz_default]: " OWNER_TZ
+    OWNER_TZ="${OWNER_TZ:-$tz_default}"
     [[ -f "/usr/share/zoneinfo/$OWNER_TZ" ]] && break
     скажи "      такого пояса нет в /usr/share/zoneinfo — проверьте написание"
   done
@@ -426,13 +496,24 @@ EOF
   # считаются по времени машины, и на сервере в UTC «утренняя» сводка приходит
   # владельцу из UTC+5 в 13:00 (улика 12.08.2026). cron читает пояс при старте —
   # без перезапуска расписания остались бы в прежнем.
+  # timedatectl есть не везде: в контейнере (и на части VPS) служба timedated
+  # недоступна, и установка падала на часовом поясе целиком — живой прогон
+  # 13.09.2026 в чистой машине. Запасной путь — тот же, каким пояс ставит сам
+  # timedatectl: символьная ссылка /etc/localtime и /etc/timezone.
+  # База поясов бывает не установлена (минимальный образ): без неё пояс
+  # «ставится» битой ссылкой, и это видно только по времени в журналах через
+  # сутки. Живой прогон 13.09.2026: /etc/localtime вёл в несуществующий файл.
+  делай "[ -f '/usr/share/zoneinfo/$OWNER_TZ' ] || { apt-get update -qq && apt-get install -y -qq tzdata; }"
   if [[ "$OWNER_TZ" != "$(timedatectl show -p Timezone --value 2>/dev/null)" ]]; then
-    делай "timedatectl set-timezone '$OWNER_TZ'"
+    делай "timedatectl set-timezone '$OWNER_TZ' 2>/dev/null || { ln -sf '/usr/share/zoneinfo/$OWNER_TZ' /etc/localtime && printf '%s\\n' '$OWNER_TZ' > /etc/timezone; }"
     делай "systemctl restart cron 2>/dev/null || systemctl restart crond 2>/dev/null || true"
   fi
+  # Судим по ФАКТУ — по ссылке /etc/localtime, которую и переставляет сам
+  # timedatectl. Его «show» отвечает из своего кэша и врал про UTC при уже
+  # верной ссылке (живой прогон 13.09.2026): служба — не факт.
   проверка "$step" "системное время идёт по поясу владельца" \
-    "[ \"\$(timedatectl show -p Timezone --value)\" = '$OWNER_TZ' ]" \
-    "timedatectl; grep -n OWNER_TZ $CONF"
+    "[ \"\$(readlink -f /etc/localtime)\" = \"/usr/share/zoneinfo/$OWNER_TZ\" ]" \
+    "readlink -f /etc/localtime; timedatectl 2>/dev/null; grep -n OWNER_TZ $CONF"
   DONE_LIST+=("install.conf: $CONF (644)")
   DONE_LIST+=("часовой пояс сервера: $OWNER_TZ (пояс владельца)")
   отметить шаг_0
@@ -529,7 +610,7 @@ Environment=CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING=1
 Environment=CLAUDE_CODE_AUTO_COMPACT_WINDOW=800000
 Environment=DISABLE_AUTOUPDATER=1
 WorkingDirectory=$PROJECT_DIR
-ExecStart=$PROJECT_DIR/scripts/запустить-агента.sh
+ExecStart=$PROJECT_DIR/scripts/zapustit-agenta.sh
 ExecStop=/usr/bin/tmux kill-session -t agent
 Restart=always
 RestartSec=10
@@ -543,13 +624,14 @@ EOF
   # StartLimitIntervalSec=0 — чтобы серия быстрых падений не заблокировала юнит
   # насовсем: заблокированный автоподъём хуже частого.
   проверить_юнит "$step" /etc/systemd/system/harness-agent.service
-  делай "systemctl daemon-reload && systemctl enable --now harness-agent"
-  проверка "$step" "harness-agent активен" \
-    "[ \"\$(systemctl is-active harness-agent)\" = active ]" \
-    "systemctl status harness-agent; journalctl -u harness-agent -n 30"
-  проверка "$step" "tmux-сессия agent существует" \
-    "sudo -u $AGENT_USER tmux ls | grep -q '^agent'" \
-    "sudo -u $AGENT_USER tmux ls"
+  # ЗДЕСЬ юнит только ставится и включается. Запускать его нечем: скрипт,
+  # который он зовёт, приезжает раскладкой на шаге 7 — на ЧИСТОЙ машине
+  # «enable --now» давал 203/EXEC и установка вставала (живой прогон
+  # 13.09.2026). На машине, где харнес уже лежит, это было незаметно.
+  делай "systemctl daemon-reload && systemctl enable harness-agent"
+  проверка "$step" "юнит harness-agent включён в автозапуск" \
+    "[ \"\$(systemctl is-enabled harness-agent)\" = enabled ]" \
+    "systemctl is-enabled harness-agent; systemctl cat harness-agent"
   # ── Сторож систем: второй носитель присмотра, независимый от cron ─────────
   # Улика 11.08.2026 (владелец): «tmux слетал полностью; надо, чтобы при любом
   # падении и после перезагрузки точно произошёл запуск и проверка всех систем».
@@ -607,9 +689,9 @@ EOF
   проверка "$step" "таймер сторожа систем взведён" \
     "systemctl is-active harness-sentinel.timer | grep -q active" \
     "systemctl status harness-sentinel.timer; systemctl list-timers harness-sentinel.timer"
-  проверка "$step" "решения сторожа систем доказаны больными случаями" \
-    "sudo -u $AGENT_USER bash $PROJECT_DIR/harness/demons/sentinel.sh --selftest | tail -1 | grep -q зелёный" \
-    "sudo -u $AGENT_USER bash $PROJECT_DIR/harness/demons/sentinel.sh --selftest"
+  # Самотест сторожа — ПОСЛЕ раскладки: здесь его файла ещё нет, и на чистой
+  # машине проверка валила установку (живой прогон 13.09.2026). Юниты можно
+  # ставить заранее, а судить о коде — только когда код приехал.
   скажи "  (тестовый reboot из §4 — обязателен при приёмке: после него harness-sentinel-boot присылает владельцу отчёт о проверке систем)"
   DONE_LIST+=("systemd-юнит harness-agent (tmux, автозапуск, Restart=always)")
   DONE_LIST+=("sentinel: таймер каждые 5 минут + проверка всех систем после загрузки")
@@ -721,7 +803,23 @@ EOF
     "grep -q 'vhod.sh' /etc/harness/harness.conf && grep -q 'vhod.sh' /home/$AGENT_USER/.profile && grep -q 'vhod.sh' /home/$AGENT_USER/.bashrc" \
     "grep -n vhod /etc/harness/harness.conf /home/$AGENT_USER/.profile /home/$AGENT_USER/.bashrc"
   скажи "  (после git init агент повторит раскладку — она подключит pre-commit симлинком; это его 03-ЗАДАНИЕ)"
+  # Теперь скрипт запуска на месте — можно поднимать агента. Юнит поставлен
+  # шагом 4 и ждал именно этого: на чистой машине он стартовал в пустоту
+  # (203/EXEC) и валил установку (живой прогон 13.09.2026).
+  # Самотест сторожа систем — здесь, где его файл уже разложен (шаг 4 ставит
+  # юниты, но судить о коде до раскладки нечем).
+  проверка "$step" "решения сторожа систем доказаны больными случаями" \
+    "sudo -u $AGENT_USER bash $PROJECT_DIR/harness/demons/sentinel.sh --selftest | tail -1 | grep -q зелёный" \
+    "sudo -u $AGENT_USER bash $PROJECT_DIR/harness/demons/sentinel.sh --selftest"
+  делай "systemctl start harness-agent || true"
+  проверка "$step" "harness-agent активен" \
+    "[ \"\$(systemctl is-active harness-agent)\" = active ]" \
+    "systemctl status harness-agent; journalctl -u harness-agent -n 30"
+  проверка "$step" "tmux-сессия agent существует" \
+    "sudo -u $AGENT_USER tmux ls | grep -q '^agent'" \
+    "sudo -u $AGENT_USER tmux ls"
   DONE_LIST+=("харнес разложен в $PROJECT_DIR (+UNIFIED, +harness.conf в /etc/harness)")
+  DONE_LIST+=("harness-agent поднят: tmux-сессия agent живёт")
   отметить шаг_7а
 }
 
@@ -835,24 +933,20 @@ EOF
     "[ -d '$D' ]" \
     "ls '$PROJECT_DIR/harness' 2>/dev/null || echo 'раскладка не выполнена (шаг 7-а)'"
   local cron_file="/tmp/harness-crontab.$$"
+  local spec_zadanij="$SCRIPT_DIR/harness/config/системные-задания.yaml"
+  local cron_body; cron_body=$(стройки_crontab "$spec_zadanij" "$PROJECT_DIR" "$LOG_DIR")
+  [ -n "$cron_body" ] || стоп "$step" "реестр системных заданий не дал ни строки: $spec_zadanij"
   записать_файл "$cron_file" 644 root:root <<EOF
-*/10 * * * *  $D/session-warden.sh        >>$LOG_DIR/session-warden.log 2>&1
-0 * * * *     $D/task-closer.sh           >>$LOG_DIR/task-closer.log 2>&1
-0 3 * * *     $D/disk-cleanup.sh          >>$LOG_DIR/disk-cleanup.log 2>&1
-30 3 * * *    $D/server-hygiene.sh        >>$LOG_DIR/server-hygiene.log 2>&1
-0 4 * * *     $D/backup.sh                >>$LOG_DIR/backup.log 2>&1
-15 4 * * *    $D/devmap-selfheal.sh       >>$LOG_DIR/devmap-selfheal.log 2>&1
-5 * * * *     $D/evo-collector.sh         >>$LOG_DIR/evo-collector.log 2>&1
-10 * * * *    $D/tokens-collector.sh      >>$LOG_DIR/tokens-collector.log 2>&1
-0 8 * * *     $D/heartbeat-watch.sh       >>$LOG_DIR/heartbeat-watch.log 2>&1
-0 9 1 * *     $D/memory-revision.sh       >>$LOG_DIR/memory-revision.log 2>&1
+$cron_body
 EOF
   делай "crontab -u $AGENT_USER - < '$cron_file'  # мы под root — ставим сразу, точно по таблице §9"
   проверка "$step" "crontab -l совпадает с таблицей §9" \
     "diff <(crontab -l -u $AGENT_USER) '$cron_file'" \
     "diff <(crontab -l -u $AGENT_USER) '$cron_file'; crontab -l -u $AGENT_USER"
   делай "rm -f '$cron_file'"
-  local demons=(session-warden task-closer disk-cleanup server-hygiene backup devmap-selfheal evo-collector tokens-collector heartbeat-watch memory-revision)
+  # Набор прогонов — из того же реестра, что и расписания: две копии
+  # одного списка разъезжаются молча, и разъехались (13.09.2026).
+  local demons=(); mapfile -t demons < <(демоны_из_спеки "$SCRIPT_DIR/harness/config/системные-задания.yaml")
   # П-1б (классовая починка): набор демонов сверяется с таблицей §9 САМОЙ
   # спеки, не с собственной копией — установщик лежит рядом со спекой.
   # В dry-run crontab не ставится — сверяется массив прогонов (тот же набор,
@@ -1006,6 +1100,15 @@ EOF
   скажи "   Последняя должна печатать claude или node. Печатает bash — агент выпал"
   скажи "   в оболочку: подключитесь и запустите «$start_cmd»,"
   скажи "   либо подождите — сторож поднимет сам и напишет вам."
+  # Подсказки, добавленные шагами (запасной код панели, вывод наружу), печатались
+  # в сводке — а файлом сохраняется только ЭТОТ блок, и подсказка оставалась в
+  # прокрутке терминала, которую владелец не перечитывает (ревью кода F-09).
+  if (( ${#MANUAL_LIST[@]} )); then
+    скажи ""
+    скажи "ОТ ШАГОВ УСТАНОВКИ:"
+    local stroka   # ИМЯ ЛАТИНИЦЕЙ: bash кириллические не берёт (улика тут же)
+    for stroka in "${MANUAL_LIST[@]}"; do скажи "   • $stroka"; done
+  fi
 }
 
 сводка() {
@@ -1032,6 +1135,147 @@ EOF
   скажи "   (в комплекте «мобильная-разработка»: ставится, когда в задаче появилось приложение)"
 }
 
+шаг_10() { # панель владельца: пользователь, права, служба, вход (01-SPEC §10)
+  local step="шаг 10 — панель владельца"; CURRENT_STEP="$step"
+  уже_сделан шаг_10 && { скажи "[$step] пропуск (--resume)"; return 0; }
+  заголовок "$step"
+  # Зачем шаг вообще есть. Замер 13.09.2026 на чистой установке: службы панели
+  # нет, пользователя нет, каталога состояния нет, sudoers нет — всё это на
+  # рабочей машине было заведено РУКАМИ, и у нового владельца панели не
+  # возникало вовсе. Панель — единственное окно владельца в харнес кроме
+  # канала, и «поставит потом» тут значит «не поставит никто».
+  local PANEL_STATE="/var/lib/harness/panel-state"
+  local SUDOERS_SHABLON="$PROJECT_DIR/harness/panel/sudoers-paneli.in"
+  local SUDOERS_FILE="/etc/sudoers.d/harness-panel"
+
+  # 1. Группа ОТДЕЛЬНО от пользователя: `useradd --system` заводит группу лишь
+  # при USERGROUPS_ENAB yes, а юнит вшито требует Group=harness-panel и падает
+  # с 216/GROUP (ревью спеки 13.09.2026, S-10).
+  делай "getent group harness-panel >/dev/null || groupadd --system harness-panel"
+  делай "getent passwd harness-panel >/dev/null || useradd --system -g harness-panel --no-create-home --shell /usr/sbin/nologin harness-panel"
+  проверка "$step" "пользователь и группа harness-panel заведены" \
+    "getent passwd harness-panel >/dev/null && getent group harness-panel >/dev/null && [ \"\$(id -gn harness-panel)\" = harness-panel ]" \
+    "getent passwd harness-panel; getent group harness-panel; id harness-panel"
+
+  # 2. АГЕНТ в группе панели. Без этого диспетчер не прочитает внутренний ключ
+  # (служба пишет его 0640 своей группой), /vnutr/token ответит 404, и команда
+  # «панель» МОЛЧА не выдаст ссылку — панель есть, войти нельзя (S-01).
+  делай "id -nG $AGENT_USER | grep -qw harness-panel || usermod -aG harness-panel $AGENT_USER"
+  проверка "$step" "$AGENT_USER состоит в группе harness-panel (иначе ссылка входа не выдаётся)" \
+    "id -nG $AGENT_USER | grep -qw harness-panel" \
+    "id -nG $AGENT_USER"
+  # Дополнительные группы процесс берёт при СТАРТЕ: диспетчер поднят шагом 7 и
+  # без перезапуска останется без группы панели — ссылка молча не выдастся
+  # (ревью кода 13.09.2026, F-08).
+  делай "systemctl try-restart harness-dispatcher.service harness-agent.service"
+
+  # 3. Общий каталог состояния: setgid, чтобы файлы двух писателей (служба и
+  # диспетчер) наследовали одну группу.
+  делай "install -d -o $AGENT_USER -g harness-panel -m 2770 '$PANEL_STATE'"
+  проверка "$step" "каталог состояния 2770 $AGENT_USER:harness-panel" \
+    "[ \"\$(stat -c '%a %U %G' '$PANEL_STATE')\" = '2770 $AGENT_USER harness-panel' ]" \
+    "stat -c '%a %U %G' '$PANEL_STATE'"
+
+  # 4. Права службы. visudo -c проверяет СИНТАКСИС; смысл проверяется отдельно
+  # (S-08), а права файла — обязательны: sudo молча игнорирует файл в
+  # sudoers.d, если он не 0440 root:root, и visudo этого не видит (S-09).
+  проверка "$step" "шаблон прав панели на месте" \
+    "[ -f '$SUDOERS_SHABLON' ]" "ls -la '$PROJECT_DIR/harness/panel'"
+  делай "sed -e 's|@PROJECT_DIR@|$PROJECT_DIR|g' -e 's|@AGENT_USER@|$AGENT_USER|g' '$SUDOERS_SHABLON' > /tmp/harness-panel.sudoers"
+  проверка "$step" "правила sudoers синтаксически верны (visudo -c)" \
+    "visudo -c -f /tmp/harness-panel.sudoers" \
+    "visudo -c -f /tmp/harness-panel.sudoers; cat /tmp/harness-panel.sudoers"
+  делай "install -o root -g root -m 0440 /tmp/harness-panel.sudoers '$SUDOERS_FILE'"
+  делай "rm -f /tmp/harness-panel.sudoers"
+  проверка "$step" "право выдано ПО СМЫСЛУ: три скрипта видны в sudo -l" \
+    "sudo -n -l -U harness-panel | grep -q '$PROJECT_DIR/scripts/zapisat-klyuch.py'" \
+    "sudo -n -l -U harness-panel"
+
+  # 4б. Root-скрипт вывода панели наружу — ВНЕ дерева агента. Право запускать
+  # от root файл из каталога, куда агент пишет, равно полным правам (ревью
+  # кода 13.09.2026, F-03), поэтому копия кладётся сюда, root:root.
+  делай "install -d -o root -g root -m 0755 /usr/local/lib/harness"
+  делай "install -o root -g root -m 0755 '$PROJECT_DIR/harness/panel/panel-naruzhu-root.sh' /usr/local/lib/harness/panel-naruzhu-root.sh"
+  делай "install -o root -g root -m 0644 '$PROJECT_DIR/harness/panel/nginx-panel.conf.in' /usr/local/lib/harness/nginx-panel.conf.in"
+  проверка "$step" "скрипт вывода наружу лежит вне дерева агента (root:root)" \
+    "[ \"\$(stat -c '%U %a' /usr/local/lib/harness/panel-naruzhu-root.sh)\" = 'root 755' ]" \
+    "ls -la /usr/local/lib/harness"
+
+  # 5. Порт свободен ДО запуска: чужой процесс на нём отвечает 200, а юнит с
+  # Restart=always крутится в отказе — проверка «панель отвечает» зеленела бы
+  # при мёртвой панели (S-03).
+  local PANEL_PORT
+  PANEL_PORT=$(grep -o -- '--порт [0-9]\+' "$PROJECT_DIR/harness/panel/harness-panel.service.in" | grep -o '[0-9]\+' | head -1)
+  PANEL_PORT="${PANEL_PORT:-8787}"
+  # Проверка питоном, а не `ss`: iproute2 на чистой машине нет (живая проба в
+  # контейнере 13.09.2026), а python3 ставится шагом 2 и есть всегда. Порт,
+  # занятый НАШЕЙ службой, — это норма повторного прогона.
+  проверка "$step" "порт $PANEL_PORT свободен или занят самой панелью" \
+    "systemctl is-active --quiet harness-panel || python3 -c \"import socket,sys; s=socket.socket(); sys.exit(1 if s.connect_ex(('127.0.0.1',$PANEL_PORT))==0 else 0)\"" \
+    "python3 '$PROJECT_DIR/scripts/kto-na-portu.py' $PANEL_PORT; systemctl status harness-panel --no-pager | head -5"
+
+  # 6. Юнит собирается из шаблона по паспорту; enable + restart, а не
+  # `enable --now`: активный юнит он не перезапускает, и работал бы старый
+  # процесс со старым путём (S-07).
+  # ПОД ROOT, а не от имени агента: сборщик внутри зовёт `sudo install` и
+  # `systemctl daemon-reload`, а у агента на чистой машине прав NOPASSWD на
+  # них нет — живая проба в контейнере 13.09.2026 встала именно здесь.
+  делай "bash '$PROJECT_DIR/scripts/unit-paneli.sh'"
+  делай "systemctl enable harness-panel"
+  делай "systemctl restart harness-panel"
+  проверка "$step" "служба harness-panel активна" \
+    "systemctl is-active --quiet harness-panel" \
+    "systemctl status harness-panel --no-pager -l | tail -20; journalctl -u harness-panel -n 30 --no-pager"
+
+  # 7. Запасной вход. Страница входа обещает словами «код, выданный при
+  # установке», а не выдавал его никто: без канала панель была бы недостижима
+  # навсегда (S-06). Код показывается ОДИН раз.
+  local ZAPASNOJ=""
+  if (( DRY )); then
+    скажи "  + sudo -u $AGENT_USER python3 $PROJECT_DIR/harness/panel/vhod.py --запасной-код"
+  else
+    # Повторный прогон шага (он идемпотентен и потому обычен) НЕ перевыпускает
+    # код: CLI отвечает отказом и кодом 4, а новый отменил бы тот, который
+    # владелец уже сохранил при первой установке (ревью кода 13.09.2026, F-21).
+    # `|| true` обязателен: под `set -Eeuo pipefail` код 4 из подстановки
+    # срабатывает как ошибка, trap ERR обрывает установку, и ветка «прежний
+    # действует» недостижима — шаг 10 не отмечается, и --resume падает там же
+    # (ревью безопасности 13.09.2026, F-sec-03).
+    ZAPASNOJ=$( { sudo -u "$AGENT_USER" python3 "$PROJECT_DIR/harness/panel/vhod.py" --запасной-код || true; } 2>/dev/null | head -1)
+    if [ -z "$ZAPASNOJ" ]; then
+      скажи "  запасной код уже был выдан прежним прогоном — прежний действует, новый не выпускаю"
+      MANUAL_LIST+=("Запасной код входа в панель выдан при первой установке — действует он, нового не было")
+    fi
+    if [ -n "$ZAPASNOJ" ]; then
+      # Код уходит В КАНАЛ, а не в файл установки: файл лежит в каталоге логов
+      # с правами 644, и запасной вход в панель стал бы читаемым для любой
+      # учётки машины. Владелец видит только канал — туда и шлём.
+      if sudo -u "$AGENT_USER" bash "$PROJECT_DIR/scripts/tg_send.sh" \
+           "Запасной код входа в панель (показывается один раз, храните его): $ZAPASNOJ" >/dev/null 2>&1; then
+        MANUAL_LIST+=("Запасной код входа в панель отправлен вам в Telegram — сохраните его")
+      else
+        # Канал ещё не живой: код нужен владельцу сейчас, и другого носителя
+        # нет. Говорим прямо, что он показан здесь один раз.
+        скажи ""
+        скажи "  ЗАПАСНОЙ КОД ВХОДА В ПАНЕЛЬ (канал не ответил, показан ОДИН раз): $ZAPASNOJ"
+        MANUAL_LIST+=("Запасной код входа в панель показан выше в выводе установки — канал его не принял")
+      fi
+    fi
+  fi
+
+  # 8. Живая проверка — ВХОДОМ, а не страницей. `curl /` отдаёт 200 гостю даже
+  # когда войти невозможно (S-02). Ответ панели доказывает разом: юнит жив,
+  # внутренний ключ читается диспетчером, chat_id совпал. «Не выведена
+  # наружу» — законный ответ на этом шаге: рубеж ставится командой владельца.
+  проверка "$step" "панель отвечает диспетчеру и узнаёт владельца" \
+    "timeout 20 bash -c 'until sudo -u $AGENT_USER python3 \"$PROJECT_DIR/harness/panel/klient.py\" --ссылка \"$TG_CHAT_ID\" 2>&1 | grep -qE \"/vhod\\?t=|не выведена наружу\"; do sleep 1; done'" \
+    "sudo -u $AGENT_USER python3 '$PROJECT_DIR/harness/panel/klient.py' --ссылка '$TG_CHAT_ID'; journalctl -u harness-panel -n 30 --no-pager"
+
+  DONE_LIST+=("панель владельца: служба harness-panel, каталог состояния, права, запасной код")
+  MANUAL_LIST+=("Вывести панель наружу: напишите боту «панель наружу» — имя, сертификат и nginx он сделает сам")
+  отметить шаг_10
+}
+
 # ----------------------------------------------------------------- прогон ----
 
 (( DRY )) && заголовок "РЕЖИМ --dry-run: команды печатаются, НИЧЕГО не исполняется"
@@ -1044,6 +1288,29 @@ if ! сверить_пути_конфига; then
     "путь из $CONF не годится (причина выше) — ни один шаг не начинался" \
     "grep -n 'PROJECT_DIR\|SECRETS_DIR\|LOG_DIR\|HEARTBEAT_DIR' $CONF"
 fi
+# Блок «ОСТАЛОСЬ РУКАМИ» — единственная в установке инструкция ЧЕЛОВЕКУ, и до
+# сих пор она жила только в прокрутке терминала: закрыл окно — искать негде.
+# tee кладёт её файлом; путь назван внутри самого блока (иначе владелец не
+# узнает, что файл есть). Отказ записи не валит установку, но и не молчит:
+# pipefail сделал бы упавший tee провалом всего прогона на последнем шаге.
+MANUAL_FILE="$LOG_DIR/ОСТАЛОСЬ-РУКАМИ.txt"
+финал() {
+  # Идёт и при СТОПЕ на шаге. Провал проверки звал `стоп` → exit, и владелец
+  # оставался без файла подсказок и без сводки — то есть без ответа на вопрос
+  # «что уже стоит, а что упало» ровно тогда, когда он нужнее всего (ревью
+  # кода 13.09.2026, F-10). Запасной код панели жил в этом же блоке.
+  (( FINAL_DONE )) && return 0
+  FINAL_DONE=1
+  if (( DRY )); then
+    осталось_руками
+  elif ! осталось_руками | tee "$MANUAL_FILE"; then
+    скажи "ВНИМАНИЕ: блок «ОСТАЛОСЬ РУКАМИ» не записан в $MANUAL_FILE — сохраните его из прокрутки терминала"
+  fi
+  сводка
+}
+FINAL_DONE=0
+trap 'финал' EXIT
+
 шаг_0
 шаг_1
 шаг_2
@@ -1055,16 +1322,5 @@ fi
 шаг_7
 шаг_8
 шаг_9
-# Блок «ОСТАЛОСЬ РУКАМИ» — единственная в установке инструкция ЧЕЛОВЕКУ, и до
-# сих пор она жила только в прокрутке терминала: закрыл окно — искать негде.
-# tee кладёт её файлом; путь назван внутри самого блока (иначе владелец не
-# узнает, что файл есть). Отказ записи не валит установку, но и не молчит:
-# pipefail сделал бы упавший tee провалом всего прогона на последнем шаге.
-MANUAL_FILE="$LOG_DIR/ОСТАЛОСЬ-РУКАМИ.txt"
-if (( DRY )); then
-  осталось_руками
-elif ! осталось_руками | tee "$MANUAL_FILE"; then
-  скажи "ВНИМАНИЕ: блок «ОСТАЛОСЬ РУКАМИ» не записан в $MANUAL_FILE — сохраните его из прокрутки терминала"
-fi
-сводка
+шаг_10
 exit 0

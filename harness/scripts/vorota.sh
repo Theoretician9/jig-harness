@@ -116,6 +116,22 @@ echo "=== ворота харнеса: $(date '+%d.%m %H:%M') ==="
 # и замена стёрла её (замер 12.09.2026).
 проверка "писатели карты" python3 scripts/check-pisateli-karty.py
 проверка "писатели-самотест" python3 scripts/check-pisateli-karty.py --selftest
+# Механика очереди канала — общая у обоих сторожей; её больные случаи
+# (курсор отстал, первый запуск, пометка второй раз) живут в самотесте
+# модуля, а не в каждом стороже по копии.
+проверка "чтение настроек" python3 scripts/lib/konf.py --selftest
+проверка "границы задачи" python3 scripts/lib/kartochki.py --selftest
+# Четыре пробы, которые не звал НИКТО: их нашёл гейт «кто зовёт» 14.09.2026 —
+# ровно тот случай, ради которого он написан (проверка есть, вызова нет).
+проверка "кто на порту"   python3 scripts/test_kto_na_portu.py
+проверка "права наружу"   bash scripts/test_panel_root.sh
+проверка "сборщик реестра" python3 scripts/test_sobrat_reestr_v2.py
+проверка "глубина автоматом" python3 scripts/test_glubina_avtomatom.py
+проверка "задание и метка" python3 scripts/check-zadanie-i-metka.py
+проверка "метка-самотест" python3 scripts/check-zadanie-i-metka.py --selftest
+проверка "кто зовёт"      python3 scripts/check-kto-zovyot.py
+проверка "кто-зовёт-сам"  python3 scripts/check-kto-zovyot.py --selftest
+проверка "очередь канала" python3 scripts/lib/ochered_kanala.py --selftest
 проверка "указания"       python3 scripts/ukazaniya.py
 # Задача, сказанная в канал, обязана дойти до карты: 941 сообщение в очереди,
 # 171 с признаком работы, и связи «сообщение → задача» не было ни одной.
@@ -179,8 +195,14 @@ done
 # Ручки панели: каждая что-то делает и делает, когда обещано. Улики ревью
 # спеки панели 11.09: ручка, которую никто не читает, и ручка, обещающая
 # «сразу» при чтении раз в десять минут, — обман владельца, невидимый глазами.
+проверка "прополка указаний" python3 scripts/propolka-ukazanij.py --selftest
+проверка "тон панели"     python3 scripts/check-ton-paneli.py
+проверка "тон-самотест"   python3 scripts/check-ton-paneli.py --selftest
 проверка "переключатели"  python3 scripts/check-pereklyuchateli.py
 проверка "переключатели-самотест" python3 scripts/check-pereklyuchateli.py --selftest
+# Механика записи с панели (копия, права, хозяин, подъём через sudo, атомарная
+# подмена) — общая у трёх писателей; её больные случаи живут здесь.
+проверка "писатель панели" python3 scripts/lib/pisatel_paneli.py --selftest
 # Единственный писатель настроек: узкий вход вместо прав root у панели.
 проверка "писатель настроек" python3 scripts/test_zapisat_klyuch.py
 # Служба панели: вход через канал и защита от чужих запросов.
@@ -202,6 +224,15 @@ done
 проверка "сверка находок" python3 scripts/test_revizia_nahodki.py
 проверка "устройство"     python3 scripts/check-ustrojstvo.py
 проверка "устройство-самотест" python3 scripts/test_ustrojstvo.py
+# Сверка сроков присмотра: реестр против живого конфига сторожа. Без строки
+# здесь механизм против молчаливого расхождения сам молчал бы — его не звал
+# никто (ревью кода 13.09.2026, К-2).
+# Зов модели без --strict-mcp-config отбирает канал у владельца. Сторож команд
+# судит вызовы оболочки агента, а демона запускает cron — мимо него; 13.09.2026
+# три демона ходили так ежедневно.
+проверка "зов модели"     python3 scripts/check-zov-modeli.py
+проверка "сроки присмотра" python3 scripts/sobrat-sroki.py --проверить
+проверка "сроки-самотест"  python3 scripts/test_sobrat_sroki.py
 # Вход по подписке имеет срок, и владелец о нём не знал (вопрос 11.09.2026).
 # Сторож предупреждает ЗАРАНЕЕ: решение, требующее «чтобы кто-то помнил», —
 # не решение. Значения токенов в вывод не попадают (проверено самотестом).
@@ -233,12 +264,49 @@ done
 # CLAUDE.md пакета собирается из данных: правка руками уедет при следующей
 # сборке, а до неё файл врёт о том, чем держится каждый инвариант.
 проверка "claude.md"      python3 scripts/sobrat-claude-md.py --проверить
+# Скил — копия куска главы, а генератор зовут КОМАНДОЙ: поправил главу, забыл
+# перегенерировать — агент работает по устаревшему правилу и уверен, что прав.
+# Вопрос владельца 12.09.2026 про генерацию скилов вскрыл, что сверки не было.
+проверка "скилы"          python3 harness/SBORKA-SKILOV.py --сверить
+проверка "скилы-самотест" python3 scripts/test_sborka_skilov.py
+# Уровень вызова помощников: владелец выбирает его ключом AGENT_LEVEL, а
+# опечатка в нём не должна выглядеть как обычный уровень (12.09.2026).
+проверка "уровень агентов" python3 scripts/test_uroven_agenta.py
+# Доска состояния: запись с истёкшим сроком не должна выдаваться за правду.
+проверка "доска"          python3 scripts/test_doska.py
+проверка "лимит-журнал"   python3 scripts/limit-v-zhurnale.py --selftest
+проверка "лимит-сторож"   bash scripts/test_limit_watch.sh
+# У факта один судья: кто о факте говорит — тот его и спрашивает. Гейт написан
+# под три ночных отказа 12.09.2026, у которых был один корень.
+проверка "признаки"       python3 scripts/check-priznaki.py
+проверка "признаки-сам"   python3 scripts/test_priznaki.py
+# Настройки панели: пути читаются при обращении, а не при запуске службы.
+проверка "настройки панели" python3 harness/panel/test_nastrojki.py
+# Кнопки в меню бота: меню живёт на стороне Telegram, его может затереть.
+проверка "команды бота"   python3 scripts/test_komandy_bota.py
 проверка "расширения-сам" python3 scripts/check-rasshirenija.py --selftest
 проверка "публикация"     bash scripts/publikaciya.sh --selftest
+проверка "витрина-статусы" python3 scripts/vitrina_status.py --selftest
 # Две проверки, написанные 12.09.2026, не звал НИКТО — ни ворота, ни pre-commit
 # (ревью кода, №8). Проверка, которую не запускают, не сторожит.
 проверка "данные сборки"  python3 scripts/test_publichnaya_sborka.py
 проверка "юнит панели"    bash scripts/unit-paneli.sh --selftest
+# Рубеж панели: код опирается на конфиг nginx в четырёх местах, а самого
+# конфига не было ни в репозитории, ни в пакете. Живая улика 13.09.2026 —
+# панель отвечала на ЛЮБОЙ Host, потому что default_server не объявлял никто.
+# Скрипты ПАКЕТА судятся отдельно: они лежат в другом дереве со своим git, и
+# pre-commit проекта их не видит. 13.09.2026 кириллическое имя переменной в
+# USTANOVIT.sh уронило живой прогон установки — гейт молчал, потому что смотрел
+# не туда.
+проверка "кириллица-пакет" python3 scripts/check-kirillica-v-imenah.py --пакет
+проверка "вызов модели" python3 scripts/check-demon-zovyot-model.py
+проверка "вызов-самотест" python3 scripts/check-demon-zovyot-model.py --selftest
+проверка "обёртка демона" bash scripts/test_claude_demon.sh
+проверка "установка панели" python3 scripts/test_ustanovka_paneli.py
+проверка "установка-самотест" python3 scripts/test_ustanovka_paneli.py --selftest
+проверка "рубеж панели"   python3 scripts/check-rubezh-paneli.py
+проверка "рубеж-самотест" python3 scripts/check-rubezh-paneli.py --selftest
+проверка "сборщик рубежа" bash scripts/nginx-paneli.sh --selftest
 # Панель работает под своим пользователем: файл, который она показывает, но не
 # может прочитать, даёт владельцу «нет данных» при живом и свежем файле.
 проверка "права панели"   python3 scripts/check-prava-paneli.py

@@ -19,13 +19,15 @@
 удалась; 5 — пульт не прочитан или после правки перестал разбираться.
 """
 import datetime
-import json
 import os
 import re
 import sys
 from pathlib import Path
 
 import yaml
+
+sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
+import pisatel_paneli as писатель                      # noqa: E402
 
 КОРЕНЬ = Path(__file__).resolve().parent.parent
 ПУЛЬТ = Path(os.environ.get("HARNESS_PAJPLAJN")
@@ -36,8 +38,7 @@ LOG_DIR = Path(os.environ.get("LOG_DIR", "/var/log/harness"))
 
 
 def отказ(код: int, причина: str) -> int:
-    print(f"[шаг-пайплайна] отказ: {причина}", file=sys.stderr)
-    return код
+    return писатель.отказ("шаг-пайплайна", код, причина)
 
 
 def строка_уровня(текст: str, уровень: str):
@@ -86,36 +87,6 @@ def с_датой_включения(текст: str, уровень: str, ша�
     "# (вопрос владельца 11.09.2026). Пишет scripts/zapisat-shag.py.\n")
 
 
-def снять_копию(файл: Path) -> Path:
-    каталог = LOG_DIR / "панель-копии"
-    каталог.mkdir(parents=True, exist_ok=True)
-    метка = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-    копия = каталог / f"{файл.name}.{метка}"
-    копия.write_bytes(файл.read_bytes())
-    return копия
-
-
-def записать_журнал(уровень: str, шаг: str, действие: str, стало: list) -> None:
-    запись = {"ts": datetime.datetime.now().isoformat(timespec="seconds"),
-              "уровень": уровень, "шаг": шаг, "действие": действие,
-              "стало": стало,
-              "кто": os.environ.get("SUDO_USER") or os.environ.get("USER") or "?"}
-    try:
-        LOG_DIR.mkdir(parents=True, exist_ok=True)
-        with open(LOG_DIR / "панель.jsonl", "a", encoding="utf-8") as fh:
-            fh.write(json.dumps(запись, ensure_ascii=False) + "\n")
-    except OSError as беда:
-        print(f"[шаг-пайплайна] журнал не записан: {беда}", file=sys.stderr)
-
-
-def _вернуть_хозяина(новый_файл: Path, прежний: os.stat_result) -> None:
-    """Оставить файлу прежних владельца и группу. Не наш файл — молчим."""
-    try:
-        os.chown(новый_файл, прежний.st_uid, прежний.st_gid)
-    except (PermissionError, OSError):
-        pass
-
-
 def main(argv: list[str]) -> int:
     argv = [а for а in argv if а != "--под-sudo"]
     if len(argv) != 3:
@@ -132,15 +103,9 @@ def main(argv: list[str]) -> int:
     # прав. Не можем писать сами — поднимаемся через свою строку sudoers;
     # признак «уже поднимались» едет доводом, потому что sudo сбрасывает
     # окружение (та же грабля, что у писателя ключей).
-    if not os.access(ПУЛЬТ, os.W_OK) and "--под-sudo" not in sys.argv:
-        import subprocess
-        готово = subprocess.run(
-            ["sudo", "-n", "/usr/bin/python3", str(Path(__file__).resolve()),
-             уровень, шаг, действие, "--под-sudo"],
-            capture_output=True, text=True, timeout=60)
-        sys.stdout.write(готово.stdout)
-        sys.stderr.write(готово.stderr)
-        return готово.returncode
+    if писатель.надо_поднять_права([ПУЛЬТ]) and "--под-sudo" not in sys.argv:
+        return писатель.поднять_права(Path(__file__).resolve(),
+                                      [уровень, шаг, действие])
 
     try:
         текст = ПУЛЬТ.read_text(encoding="utf-8")
@@ -160,7 +125,7 @@ def main(argv: list[str]) -> int:
     новая = f"{отступ}{уровень}: [{', '.join(шаги)}]"
 
     try:
-        копия = снять_копию(ПУЛЬТ)
+        копия = писатель.снять_копию(ПУЛЬТ, LOG_DIR)
     except OSError as беда:
         return отказ(4, f"копия пульта не снята: {беда}")
 
@@ -175,16 +140,13 @@ def main(argv: list[str]) -> int:
         return отказ(5, f"после правки пульт не сходится ({беда}); "
                         f"прежний целиком лежит в {копия}")
 
-    прежний = os.stat(ПУЛЬТ)
-    врем = ПУЛЬТ.with_suffix(".yaml.tmp")
-    врем.write_text(новый, encoding="utf-8")
-    os.chmod(врем, прежний.st_mode & 0o7777)
-    # Хозяин файла обязан остаться прежним: запись идёт через sudo, и без этой
-    # строки пульт становился root:root — после первого же переключения с
-    # панели его не мог править ни агент, ни раскладка пакета (улика 11.09).
-    _вернуть_хозяина(врем, прежний)
-    os.replace(врем, ПУЛЬТ)
-    записать_журнал(уровень, шаг, действие, шаги)
+    try:
+        писатель.записать_атомарно(ПУЛЬТ, новый)
+    except OSError as беда:
+        return отказ(5, f"записать не вышло ({беда}); прежний пульт — в {копия}")
+    писатель.записать_журнал("шаг-пайплайна", {"уровень": уровень, "шаг": шаг,
+                                               "действие": действие, "стало": шаги},
+                             LOG_DIR)
     print(f"[шаг-пайплайна] {уровень}: {действие} «{шаг}» → "
           f"[{', '.join(шаги)}]; копия: {копия}")
     return 0

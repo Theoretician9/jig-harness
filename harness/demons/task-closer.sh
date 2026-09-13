@@ -162,8 +162,16 @@ fi
 
 # ── правка карты: yaml читает, хирургия строк пишет (Д-1) ───────────────────
 # 9>&- : потомок не наследует дескриптор лока (см. выше).
-CLOSED=$(python3 - "$DEVMAP" "$TASK_STALL_HOURS" 9>&- <<'PY'
+LIB_DIR="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../../scripts/lib"
+[ -d "$LIB_DIR" ] || LIB_DIR="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../scripts/lib"
+CLOSED=$(python3 - "$DEVMAP" "$TASK_STALL_HOURS" "$LIB_DIR" 9>&- <<'PY'
 import sys, os, re, datetime, tempfile
+
+# Каталог библиотек приходит ТРЕТЬИМ доводом: его знает оболочка — по месту
+# самого демона, а не по месту карты. В самотесте карта лежит во временном
+# каталоге, где никаких scripts/lib нет и быть не должно.
+sys.path.insert(0, sys.argv[3])
+import kartochki
 
 try:
     import yaml
@@ -222,23 +230,25 @@ if not stale:
 lines = text.split("\n")
 
 def task_block(tid):
-    """(строка id, отступ ключей, конец блока) блочной записи задачи или None."""
-    pat = re.compile(r'^(\s*)(- )?id:\s*' + re.escape(tid) + r'\s*(#.*)?$')
-    for i, ln in enumerate(lines):
-        m = pat.match(ln)
-        if m is None:
-            continue
-        key_indent = len(m.group(1)) + (2 if m.group(2) else 0)
-        end = len(lines)
-        for j in range(i + 1, len(lines)):
-            s = lines[j].strip()
-            if not s or s.startswith("#"):
-                continue
-            if len(lines[j]) - len(lines[j].lstrip()) < key_indent:
-                end = j
-                break
-        return i, key_indent, end
-    return None
+    """(строка id, отступ ключей, конец блока) блочной записи задачи или None.
+
+    Границы считает ОБЩИЙ разбор (scripts/lib/kartochki.py): у каждого
+    писателя карты он был свой, и починка в одной копии оставляла беду в
+    остальных (ревизия архитектуры 12.09.2026; аварии 09.09 — 88 задач,
+    12.09 — 15 задач). Отступ ключей и построчные номера — уже дело этого
+    писателя: он правит текст построчно.
+    """
+    найдено = kartochki.блок(text, tid)
+    if найдено is None:
+        return None
+    тело, начало, _ = найдено
+    i = text[:начало].count("\n")
+    m = re.match(r'^(\s*)(- )?id:', lines[i])
+    if m is None:
+        return None
+    key_indent = len(m.group(1)) + (2 if m.group(2) else 0)
+    end = i + тело.rstrip("\n").count("\n") + 1
+    return i, key_indent, end
 
 def close_in_text(tid, reason):
     """status: wip → plan + closed_reason рядом; True, если правка легла."""
