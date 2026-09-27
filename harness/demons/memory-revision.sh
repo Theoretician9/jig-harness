@@ -25,14 +25,14 @@ set -euo pipefail
 # в C-локали крона ${#строка} и ${строка:0:N} считают байты и рвут кириллицу.
 export LC_ALL=C.UTF-8
 
-INSTALL_CONF="${HARNESS_INSTALL_CONF:-${INSTALL_CONF:-/etc/harness/install.conf}}"
-HARNESS_CONF="${HARNESS_CONF:-/etc/harness/harness.conf}"
+# shellcheck disable=SC1091
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../../scripts/lib/config.sh"
+INSTALL_CONF="${HARNESS_INSTALL_CONF:-${INSTALL_CONF:-$(konf_koren)/install.conf}}"
+HARNESS_CONF="${HARNESS_CONF:-$(konf_koren)/harness.conf}"
 [ -r "$INSTALL_CONF" ] || { echo "memory-revision: нет $INSTALL_CONF — установка не завершена (01-SPEC §0)"; exit 1; }
-[ -r "$HARNESS_CONF" ] || { echo "memory-revision: нет $HARNESS_CONF — скопируйте harness/config/harness.conf в /etc/harness/"; exit 1; }
+[ -r "$HARNESS_CONF" ] || { echo "memory-revision: нет $HARNESS_CONF — скопируйте harness/config/harness.conf в $(konf_koren)/"; exit 1; }
 # Окружение старше конфига: общий загрузчик вместо голого source (улика
 # 12.09.2026 — проба с TMUX_SESSION в окружении сменила модель в РАБОЧЕЙ панели).
-# shellcheck disable=SC1091
-source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../../scripts/lib/konf.sh"
 konf_zagruzit
 : "${PROJECT_DIR:?пуст PROJECT_DIR}" "${LOG_DIR:?пуст LOG_DIR}" "${HEARTBEAT_DIR:?пуст HEARTBEAT_DIR}"
 
@@ -192,7 +192,7 @@ say "$SUMMARY"
     # Предложения обязаны иметь НОСИТЕЛЬ, иначе демон — половина механизма:
     # 01.09.2026 ревизия прислала владельцу четыре части предложений, и через
     # девять дней не было выполнено ни одного (замечание владельца П-5).
-    # Открытые старше срока красят ворота (scripts/check-predlozheniya.py).
+    # Открытые старше срока красят ворота (scripts/check-proposals.py).
     #
     # Ключ дубля — текст БЕЗ ЧИСЕЛ: в находке стоит номер строки («CLAUDE.md:25»),
     # и любая правка выше по файлу возвращала бы уже разобранное предложение

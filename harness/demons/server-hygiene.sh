@@ -20,14 +20,14 @@
 #        heartbeat-watch назовёт демона по имени завтра утром).
 set -euo pipefail
 
-INSTALL_CONF="${HARNESS_INSTALL_CONF:-${INSTALL_CONF:-/etc/harness/install.conf}}"
-HARNESS_CONF="${HARNESS_CONF:-/etc/harness/harness.conf}"
+# shellcheck disable=SC1091
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../../scripts/lib/config.sh"
+INSTALL_CONF="${HARNESS_INSTALL_CONF:-${INSTALL_CONF:-$(konf_koren)/install.conf}}"
+HARNESS_CONF="${HARNESS_CONF:-$(konf_koren)/harness.conf}"
 [ -r "$INSTALL_CONF" ] || { echo "server-hygiene: нет $INSTALL_CONF — установка не завершена (01-SPEC §0)"; exit 1; }
-[ -r "$HARNESS_CONF" ] || { echo "server-hygiene: нет $HARNESS_CONF — скопируйте harness/config/harness.conf в /etc/harness/"; exit 1; }
+[ -r "$HARNESS_CONF" ] || { echo "server-hygiene: нет $HARNESS_CONF — скопируйте harness/config/harness.conf в $(konf_koren)/"; exit 1; }
 # Окружение старше конфига: общий загрузчик вместо голого source (улика
 # 12.09.2026 — проба с TMUX_SESSION в окружении сменила модель в РАБОЧЕЙ панели).
-# shellcheck disable=SC1091
-source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../../scripts/lib/konf.sh"
 konf_zagruzit
 : "${HEARTBEAT_DIR:?пуст HEARTBEAT_DIR}" "${LOG_DIR:?пуст LOG_DIR}"
 

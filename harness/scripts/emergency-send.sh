@@ -23,7 +23,12 @@ if [ $# -lt 1 ]; then
     exit 1
 fi
 
-CONF="${HARNESS_INSTALL_CONF:-/etc/harness/install.conf}"
+# Корень установки берём у общего загрузчика: он только СЧИТАЕТ путь и чужой
+# конфиг не исполняет — аварийному каналу это ничем не грозит, а зашитый путь
+# не пережил бы установку на другую машину.
+# shellcheck disable=SC1091
+. "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/lib/config.sh"
+CONF="${HARNESS_INSTALL_CONF:-$(konf_koren)/install.conf}"
 
 # НЕ source, а мини-парсер: битый install.conf (незакрытая кавычка, случайная
 # команда) при source убил бы и аварийный канал — последнее, что имеет право

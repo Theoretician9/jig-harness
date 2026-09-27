@@ -25,24 +25,23 @@
 #
 set -euo pipefail
 
-INSTALL_CONF="${HARNESS_INSTALL_CONF:-/etc/harness/install.conf}"
-HARNESS_CONF="${HARNESS_CONF:-/etc/harness/harness.conf}"
+# shellcheck disable=SC1091
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/lib/config.sh"
+INSTALL_CONF="${HARNESS_INSTALL_CONF:-$(konf_koren)/install.conf}"
+HARNESS_CONF="${HARNESS_CONF:-$(konf_koren)/harness.conf}"
 # Окружение старше конфига: общий загрузчик вместо голого source (улика
 # 12.09.2026 — проба с TMUX_SESSION в окружении сменила модель в РАБОЧЕЙ панели).
-# shellcheck disable=SC1091
-source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/lib/konf.sh"
 konf_zagruzit
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-LOG_DIR="${LOG_DIR:-/var/log/harness}"
 
 # Алиасы CLI: claude --model понимает и их, и полное имя. Список короткий
 # намеренно — это то, чем пользуется владелец; полное имя тоже разрешено, но
 # проверяется шаблоном, чтобы опечатка не превратилась в неподнимающуюся сессию.
 # shellcheck disable=SC1091
-[ -r "$(dirname "${BASH_SOURCE[0]}")/lib/modeli.sh" ] \
-    && source "$(dirname "${BASH_SOURCE[0]}")/lib/modeli.sh"
-# Список имён — ОДИН на оба скрипта (lib/modeli.sh). Локальная копия оставлена
+[ -r "$(dirname "${BASH_SOURCE[0]}")/lib/models.sh" ] \
+    && source "$(dirname "${BASH_SOURCE[0]}")/lib/models.sh"
+# Список имён — ОДИН на оба скрипта (lib/models.sh). Локальная копия оставлена
 # только как запасная на случай, когда библиотека не разложена.
 ALIASES="${MODEL_ALIASES:-fable opus sonnet haiku}"
 

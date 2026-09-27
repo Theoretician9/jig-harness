@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Пробы root-скрипта вывода панели (harness/panel/panel-naruzhu-root.sh).
+# Пробы root-скрипта вывода панели (harness/panel/panel-expose-root.sh).
 #
 # Это ЕДИНСТВЕННОЕ, что агент делает от root, поэтому больные случаи здесь —
 # про аргумент: имя проверяется скриптом, а не строкой sudoers (ревью кода
@@ -10,8 +10,8 @@
 set -uo pipefail
 
 ZDES="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SKRIPT="$ZDES/../harness/panel/panel-naruzhu-root.sh"
-[ -f "$SKRIPT" ] || SKRIPT="$ZDES/../panel/panel-naruzhu-root.sh"
+SKRIPT="$ZDES/../harness/panel/panel-expose-root.sh"
+[ -f "$SKRIPT" ] || SKRIPT="$ZDES/../panel/panel-expose-root.sh"
 IMYA_STENDA="panel.stend.example"
 
 ok=1

@@ -8,8 +8,8 @@ in `/etc/harness/install.conf`.
 @./память/MEMORY.md
 @./память/ТОН.md
 
-> This file is BUILT from data by `scripts/sobrat-claude-md.py`. Hand edits are
-> overwritten by the next build, and `sobrat-claude-md.py --проверить` (part of
+> This file is BUILT from data by `scripts/build-claude-md.py`. Hand edits are
+> overwritten by the next build, and `build-claude-md.py --проверить` (part of
 > the gate run) turns red meanwhile. Edit the template
 > (`harness/шаблоны-задач/CLAUDE-EN.md.in`) or the data it reads.
 
@@ -36,10 +36,10 @@ Each one is held by code, not by memory.
 <!-- AUTO:invariants -->
 | # | invariant | held by | how to check the guard |
 |---|---|---|---|
-| И-1 | Never lose data. Irreversible work on a DB or files only with a fresh backup; destructive commands on production only through the guard. | `harness/demons/backup.sh` · `scripts/hooks/guard_bash.py` · `scripts/proba-vosstanovleniya.sh` | `bash harness/demons/backup.sh --selftest` · `python3 scripts/hooks/test_guard_bash.py` · `bash scripts/proba-vosstanovleniya.sh` |
-| И-2 | Never deploy around the gates. Deployment is `deploy.sh` only (gates, tag, auto-rollback); a hand-typed sequence is forbidden. | `scripts/deploy_guard.py` | `python3 scripts/test_deploy_guard_soglasie.py` |
-| И-3 | Secrets stay out of the repo and the web root. Keys and tokens never reach git or a public directory. | `scripts/check-secrets.sh` · `scripts/check-sekret-v-logah.py` | `bash scripts/check-secrets.sh --selftest` · `python3 scripts/check-sekret-v-logah.py` |
-| И-4 | Honest reporting. "Done" only after a live check; a green test is not a working feature. | `scripts/pre-commit-hook.sh` | `bash scripts/pre-commit-hook.sh --selftest-devmap` |
+| И-1 | Never lose data. Irreversible work on a DB or files only with a fresh backup; destructive commands on production only through the guard. | `harness/demons/backup.sh` · `scripts/hooks/guard_bash.py` · `scripts/restore-probe.sh` | `bash harness/demons/backup.sh --selftest` · `python3 scripts/hooks/test_guard_bash.py` · `bash scripts/restore-probe.sh` |
+| И-2 | Never deploy around the gates. Deployment is `deploy.sh` only (gates, tag, auto-rollback); a hand-typed sequence is forbidden. | `scripts/deploy_guard.py` | `python3 scripts/test_deploy_guard_consent.py` |
+| И-3 | Secrets stay out of the repo and the web root. Keys and tokens never reach git or a public directory. | `scripts/check-secrets.sh` · `scripts/check-secret-in-logs.py` | `bash scripts/check-secrets.sh --selftest` · `python3 scripts/check-secret-in-logs.py` |
+| И-4 | Honest reporting. "Done" only after a live check; a green test is not a working feature. | `scripts/pre-commit-gate.sh` | `bash scripts/pre-commit-gate.sh --selftest-devmap` |
 <!-- /AUTO -->
 
 ## Channel rules (the owner cannot see your terminal)
@@ -51,7 +51,7 @@ Each one is held by code, not by memory.
 2. **A rule from the owner goes to memory, not into the turn.** Any message
    that sets a rule ("always", "never", "I told you", "I don't want") is
    copied VERBATIM into `память/УКАЗАНИЯ.md` — that file is loaded into every
-   session; the processed-inbox folder is read by nobody. Gate: `ukazaniya.py`.
+   session; the processed-inbox folder is read by nobody. Gate: `orders.py`.
 3. **Announced means continue.** "Let me look" is the middle of a turn, not
    its end: keep going with tools right away.
 4. **No interactive questions.** No `AskUserQuestion`, no plan mode, no shell
@@ -93,7 +93,7 @@ consent means no action.
   "done".
 - **Verify after changes**: rebuild → logs → health → only then report.
 - **Subagents get absolute paths**; check WHERE a subagent wrote its file.
-- **Model per kind of work, not by feel**: `bash scripts/model-dlya.sh <kind>`
+- **Model per kind of work, not by feel**: `bash scripts/model-for.sh <kind>`
   (spec and review — strong; routine and search — cheap). The table is data.
   A session is consumable: long work goes to a background run, not into the
   current shift.
@@ -118,7 +118,7 @@ consent means no action.
 ## Commands
 
 ```bash
-bash scripts/vorota.sh                   # ALL gates in one step
+bash scripts/gates.sh                   # ALL gates in one step
 bash scripts/hooks/session_state.sh      # one-step look around: inbox, work, spend, daemons
 ./scripts/deploy.sh                      # the ONLY way to deploy
 ```
@@ -169,7 +169,7 @@ Bans are enforced by `scripts/hooks/guard_bash.py`, not by your memory.
 ## What is watching (built from the registry)
 
 <!-- AUTO:mechanisms -->
-200 mechanisms are registered in `harness/config/устройство.yaml` (gates — 144, daemons — 26, skills — 19, hooks — 11). Each one names what it does, when it runs, what breaks without it and the command that proves it works. The registry is data: `python3 scripts/check-ustrojstvo.py` fails when the code and the registry disagree.
+209 mechanisms are registered in `harness/config/устройство.yaml` (gates — 151, daemons — 27, skills — 19, hooks — 12). Each one names what it does, when it runs, what breaks without it and the command that proves it works. The registry is data: `python3 scripts/check-registry.py` fails when the code and the registry disagree.
 <!-- /AUTO -->
 
 ---

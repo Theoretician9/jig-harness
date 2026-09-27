@@ -22,15 +22,20 @@ import subprocess
 import sys
 import time
 
-CONF_PATH = "/etc/harness/install.conf"
-HARNESS_CONF_PATH = "/etc/harness/harness.conf"
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "lib"))
+import config as конф                                     # noqa: E402
+
+CONF_PATH = конф.путь_install_conf()
+HARNESS_CONF_PATH = конф.путь_harness_conf()
 # Значения по умолчанию — сторож обязан работать и там, где конфига ещё нет
 # (свежая машина, тестовый прогон): всё, что зависит от конфига, при его
-# отсутствии молчит (fail-open), а не блокирует.
+# отсутствии молчит (fail-open), а не блокирует. Места берутся ОТ КОРНЯ
+# установки (общий загрузчик), а не зашитым «/var/log/harness»: сторож
+# ставится на любую машину вместе с остальным харнесом.
 CONF_DEFAULTS = {
     "AUTONOMY": "semi",
-    "HEARTBEAT_DIR": "/var/lib/harness/heartbeat",
-    "LOG_DIR": "/var/log/harness",
+    "HEARTBEAT_DIR": конф.heartbeat_dir(),
+    "LOG_DIR": конф.log_dir(),
 }
 
 
@@ -64,7 +69,7 @@ def log_fail_open(reason: str, detail: str) -> None:
     каталога) не ломает сам fail-open — блокировать работу из-за лога нельзя.
     """
     try:
-        log_dir = read_conf().get("LOG_DIR") or "/var/log/harness"
+        log_dir = read_conf()["LOG_DIR"]
         os.makedirs(log_dir, exist_ok=True)
         with open(os.path.join(log_dir, "guard_exceptions.log"), "a", encoding="utf-8") as fh:
             fh.write(json.dumps({"ts": time.time(), "reason": reason, "detail": detail},
@@ -352,7 +357,7 @@ def ротация_ведётся_сторожем(now: float | None = None) -> 
     session-warden (`ротация_в_ходу`): два прибора должны отвечать одинаково.
     """
     conf = read_conf()
-    путь = os.path.join(conf.get("LOG_DIR") or "/var/log/harness", "rotation.jsonl")
+    путь = os.path.join(conf["LOG_DIR"], "rotation.jsonl")
     порог = int(conf.get("ROTATE_FINISH_TIMEOUT_SEC") or 900)
     try:
         with open(путь, "rb") as fh:
@@ -687,7 +692,7 @@ def session_suicide(cmd: str) -> str | None:
 # шёл 40 минут внутри сессии, ротация оборвала его на 73 % («make: ***
 # [Makefile:226: smoke] Terminated») — счёт в мусор, красные неразобраны;
 # до того та же беда трижды уносила прогон вместе с логом
-# ([[фоновая-работа-умирает-с-сессией]]).
+# ([[background-work-dies-with-the-session]]).
 ФОНОМ = re.compile(_CMD_POS + _PRE + r"(?:setsid|systemd-run)\b", re.MULTILINE)
 # Сборка тестов (--collect-only) — две секунды и не прогон; она стоит первой
 # строкой самих прогонов, запрещать её значит запретить проверку перед ними.
@@ -741,7 +746,7 @@ def прогон_в_сессии(cmd: str) -> str | None:
         "прогон на середине. 23.08.2026 `make smoke` умер на 73 % — сорок минут\n"
         "счёта в мусор, а красные так и остались неразобранными.\n\n"
         "Запускать фоном, лог — вне сессии, ждать по ИТОГОВОЙ СТРОКЕ лога:\n"
-        "  setsid nohup <команда> > /var/log/harness/<имя>.log 2>&1 < /dev/null &\n\n"
+        f"  setsid nohup <команда> > {конф.log_dir()}/<имя>.log 2>&1 < /dev/null &\n\n"
         "Соло-прогон конкретного теста (до трёх файлов набора) не запрещён."
     )
 
@@ -902,7 +907,7 @@ def без_тайн(текст: str) -> str:
     """Пароль из DSN и значение PASS=/TOKEN= — под звёздочки.
 
     Журнал отмен живёт вне репозитория, но его читает девятый гейт
-    (`check-sekret-v-logah.py`), и он прав: пароль боевой базы уже уезжал в
+    (`check-secret-in-logs.py`), и он прав: пароль боевой базы уже уезжал в
     логи 257 раз через рецепты make. Пишем то, что нужно для счёта и разбора,
     а не всю командную строку.
     """
@@ -986,7 +991,7 @@ def log_deny(reason: str, cmd: str) -> None:
     if os.environ.get("HARNESS_GUARD_NOLOG") == "1":
         return
     try:
-        log_dir = read_conf().get("LOG_DIR") or "/var/log/harness"
+        log_dir = read_conf()["LOG_DIR"]
         os.makedirs(log_dir, exist_ok=True)
         with open(os.path.join(log_dir, "guard.jsonl"), "a", encoding="utf-8") as fh:
             fh.write(json.dumps({
@@ -1029,7 +1034,7 @@ def _след_файл() -> str:
     берёт «*», скрытые файлы в отчёт не попадают.
     """
     conf = read_conf()
-    каталог = conf.get("HEARTBEAT_DIR") or "/var/lib/harness/heartbeat"
+    каталог = conf["HEARTBEAT_DIR"]
     кто = re.sub(r"[^A-Za-z0-9_-]", "", СЕССИЯ)[:32] or str(os.getppid())
     return os.path.join(каталог, f".guard_last.{кто}")
 
@@ -1065,7 +1070,7 @@ def log_followup(cmd: str) -> None:
     исход = ("повторил почти то же" if общих > 0.6
              else "переиначил" if общих > 0.2 else "отступил")
     try:
-        log_dir = read_conf().get("LOG_DIR") or "/var/log/harness"
+        log_dir = read_conf()["LOG_DIR"]
         with open(os.path.join(log_dir, "guard.jsonl"), "a", encoding="utf-8") as fh:
             fh.write(json.dumps({
                 "ts": datetime.datetime.now().astimezone().isoformat(timespec="seconds"),

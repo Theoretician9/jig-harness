@@ -12,13 +12,13 @@
 # сессии из-за отказа одной проверки; недоступное просто пропускаем молча.
 set -uo pipefail
 
-conf_path="${HARNESS_INSTALL_CONF:-/etc/harness/install.conf}"
+# shellcheck disable=SC1091
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/config.sh"
+conf_path="${HARNESS_INSTALL_CONF:-$(konf_koren)/install.conf}"
 project_dir=""
 if [ -r "$conf_path" ]; then
   # Окружение старше конфига: общий загрузчик вместо голого source (улика
   # 12.09.2026 — проба с TMUX_SESSION в окружении сменила модель в РАБОЧЕЙ панели).
-  # shellcheck disable=SC1091
-  source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/konf.sh"
   konf_zagruzit
   project_dir="${PROJECT_DIR:-}"
 fi
@@ -55,7 +55,31 @@ fi
 # Ход при этом всё равно закончен, и сторож обязан это знать.
 [ -n "$project_dir" ] && cd "$project_dir" 2>/dev/null || { отметить_конец_хода; exit 0; }
 
+# ── Пауза владельца: не просить того, что запрещено ─────────────────────────
+# СЛУЧАЙ 26.09.2026. На паузе этот хук требовал обновить передачу, а сторож
+# паузы (pause_guard.py) отменяет Write и Edit — два механизма противоречили
+# друг другу, и смена выбирала вниманием, кто прав. Правило тут же, выше по
+# файлу, уже названо про push: «Сторож, который просит невозможного, учит себя
+# не слушать». На паузе хвостов не показываем: ход закончен, и это верно.
+if [ -n "$project_dir" ] \
+   && python3 "$project_dir/scripts/pause.py" --идёт-ли >/dev/null 2>&1; then
+  отметить_конец_хода
+  exit 0
+fi
+
 msgs=()
+
+# СЛЕДУЮЩАЯ РАБОТА. Владелец 26.09.2026: «если у тебя блокер, но при этом есть
+# любая другая работа, она должна исполняться, вплоть до следующего блокера».
+# Хук называет её ИМЕНЕМ на завершении хода: «свободной работы нет» перестаёт
+# быть выводом из головы — прибор отвечает раньше, чем смена успеет так решить.
+if [ -f "$project_dir/dev-map.yaml" ]; then
+  next_work=$(python3 "$project_dir/scripts/work-queue.py" \
+      "$project_dir/dev-map.yaml" --следующая 2>/dev/null | head -1)
+  case "$next_work" in
+    "СЛЕДУЮЩАЯ РАБОТА:"*) msgs+=("${next_work#СЛЕДУЮЩАЯ РАБОТА: } — бери её, если стоишь") ;;
+  esac
+fi
 
 # Неотправленные коммиты — напоминание, но ТОЛЬКО когда отправка вообще
 # возможна. В полуавтомате push ждёт свежего «да» владельца, и пока его нет,
@@ -64,10 +88,10 @@ msgs=()
 # который просит невозможного, учит себя не слушать.
 ahead=$(git rev-list --count '@{u}..HEAD' 2>/dev/null || echo 0)
 if [ "${ahead:-0}" -gt 0 ]; then
-    confirm_log="${LOG_DIR:-/var/log/harness}/confirmations.jsonl"
-    max_age_min=$(sed -n 's/^CONFIRM_MAX_AGE_MIN=\([0-9]*\).*/\1/p' \
-        /etc/harness/harness.conf 2>/dev/null | head -1)
-    max_age_min=${max_age_min:-60}
+    confirm_log="${LOG_DIR}/confirmations.jsonl"
+    # Порог берётся из УЖЕ загруженного конфига: свой sed по зашитому пути был
+    # второй правдой о конфиге и на чужой машине читал пустоту.
+    max_age_min=${CONFIRM_MAX_AGE_MIN:-60}
     fresh_yes=$(python3 - "$confirm_log" "$max_age_min" <<'PYEOF' 2>/dev/null || echo нет
 import datetime, json, sys
 журнал, порог = sys.argv[1], int(sys.argv[2])
@@ -150,7 +174,7 @@ try:
             # назови блокер». Требование невыполнимо: назвать блокер он не
             # проверял, и сигнал горел бы до конца задачи. Тот же класс, что
             # уже чинили здесь 11.08 сужением до wip, — сигнал без различения.
-            # Пустая строка блокировкой не считается: так же считает ochered-raboty.py.
+            # Пустая строка блокировкой не считается: так же считает work-queue.py.
             if str(x.get("status")) == "wip" and not str(x.get("blocked") or "").strip():
                 n += 1
             for v in x.values():
@@ -176,13 +200,13 @@ fi
 # Накопленные входящие: ОДИН сортированный список — здесь и есть тот рубеж, о
 # котором владелец 12.09.2026 сказал «по завершению текущей задачи модель
 # получает сортированный скриптом по важности список». Несрочное сообщение
-# больше не пинает сессию в момент прихода (решает scripts/srochnost.py по
+# больше не пинает сессию в момент прихода (решает scripts/urgency.py по
 # данным harness/config/очередь.yaml), и единственный носитель этого списка —
-# рубеж. Свод считает scripts/inbox-svodka.py: порядок он берёт у
-# ochered-raboty.py, второй сортировщик разошёлся бы с первым молча.
+# рубеж. Свод считает scripts/inbox-digest.py: порядок он берёт у
+# work-queue.py, второй сортировщик разошёлся бы с первым молча.
 svodka=""
-if [ -f "$project_dir/scripts/inbox-svodka.py" ]; then
-  svodka=$(python3 "$project_dir/scripts/inbox-svodka.py" 2>/dev/null || true)
+if [ -f "$project_dir/scripts/inbox-digest.py" ]; then
+  svodka=$(python3 "$project_dir/scripts/inbox-digest.py" 2>/dev/null || true)
 fi
 
 [ ${#msgs[@]} -eq 0 ] && [ -z "$svodka" ] && { отметить_конец_хода; exit 0; }

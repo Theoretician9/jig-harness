@@ -24,23 +24,21 @@
 # и выйти, модель не звать).
 set -euo pipefail
 
-INSTALL_CONF="${HARNESS_INSTALL_CONF:-/etc/harness/install.conf}"
-HARNESS_CONF="${HARNESS_CONF:-/etc/harness/harness.conf}"
+# shellcheck disable=SC1091
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../../scripts/lib/config.sh"
+INSTALL_CONF="${HARNESS_INSTALL_CONF:-$(konf_koren)/install.conf}"
+HARNESS_CONF="${HARNESS_CONF:-$(konf_koren)/harness.conf}"
 # Окружение старше конфига: общий загрузчик вместо голого source (улика
 # 12.09.2026 — проба с TMUX_SESSION в окружении сменила модель в РАБОЧЕЙ панели).
-# shellcheck disable=SC1091
-source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../../scripts/lib/konf.sh"
 konf_zagruzit
 
 
 PROJECT_DIR="${PROJECT_DIR:?пуст PROJECT_DIR — не прочитан паспорт установки}"
 
-# Выбор модели — общей функцией из scripts/lib/modeli.sh: четыре копии одной
+# Выбор модели — общей функцией из scripts/lib/models.sh: четыре копии одной
 # функции разъезжаются при первой же правке (находка ревью кода 12.09.2026).
 # shellcheck disable=SC1091
-[ -r "$PROJECT_DIR/scripts/lib/modeli.sh" ] && source "$PROJECT_DIR/scripts/lib/modeli.sh"
-LOG_DIR="${LOG_DIR:-/var/log/harness}"
-HEARTBEAT_DIR="${HEARTBEAT_DIR:-/var/lib/harness/heartbeat}"
+[ -r "$PROJECT_DIR/scripts/lib/models.sh" ] && source "$PROJECT_DIR/scripts/lib/models.sh"
 TON="$PROJECT_DIR/память/ТОН.md"
 SOSTOYANIE="$LOG_DIR/ton-watch.json"
 # Сколько прогонов С ДАННЫМИ идут ежедневно, прежде чем перейти на месяц.
@@ -126,7 +124,7 @@ BYLO=$(prochitat "последнее сообщение" 0)
 STALO=$(posledneye)
 
 if [ "${1:-}" = "--замер" ]; then
-    python3 "$PROJECT_DIR/scripts/zamer-tona.py" --для-агента
+    python3 "$PROJECT_DIR/scripts/tone-measurement.py" --для-агента
     say "прогонов с данными: $PROGONOV · последнее сообщение: $BYLO → $STALO"
     exit 0
 fi
@@ -148,7 +146,7 @@ if [ "$(rezhim_po_progonam "$PROGONOV")" = "раз-в-месяц" ] && [ -f "$TO
     fi
 fi
 
-ZAMER=$(python3 "$PROJECT_DIR/scripts/zamer-tona.py" --для-агента 2>&1 || true)
+ZAMER=$(python3 "$PROJECT_DIR/scripts/tone-measurement.py" --для-агента 2>&1 || true)
 if [ -z "$ZAMER" ]; then
     say "ОТКАЗ: замер речи пуст — агента не зову"
     exit 1

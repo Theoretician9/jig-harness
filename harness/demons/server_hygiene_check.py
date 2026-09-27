@@ -7,8 +7,9 @@
 создаваться». Правило, записанное словами, распространяется ровно до первого
 забывшего — поэтому здесь оно записано проверкой, которая падает.
 
-Откуда взят: UNIFIED/templates/server_hygiene_check.py (живой скрипт боевого
-сервера). Плейсхолдеры заменены на чтение /etc/harness/install.conf и
+Откуда взят: UNIFIED/templates/server_hygiene_check.py — СЕМЯ первой
+установки, а не живой код: оно отстало и не обновляется (замер 27.09.2026).
+Плейсхолдеры заменены на чтение /etc/harness/install.conf и
 /etc/harness/harness.conf (мини-парсер ниже — формат KEY="value" разбирается
 без библиотек). Компоуз разбирается через yaml: python3-yaml гарантирован
 установкой (01-SPEC §2) — самодельный отступный парсер молча слеп на файлах
@@ -61,8 +62,21 @@ from pathlib import Path
 # ── конфиги: install.conf + harness.conf, без внешних библиотек ─────────────
 import os
 
-INSTALL_CONF = Path(os.environ.get("INSTALL_CONF", "/etc/harness/install.conf"))
-HARNESS_CONF = Path(os.environ.get("HARNESS_CONF", "/etc/harness/harness.conf"))
+def _загрузчик():
+    """Общий загрузчик конфига: у него живёт корень установки. Ищется вверх по
+    дереву — демон лежит на два уровня ниже корня, а в пакете иначе."""
+    здесь = Path(__file__).resolve()
+    for каталог in здесь.parents:
+        if (каталог / "scripts" / "lib" / "config.py").is_file():
+            sys.path.insert(0, str(каталог / "scripts" / "lib"))
+            import config                                  # noqa: PLC0415
+            return config
+    raise RuntimeError("не найден scripts/lib/config.py — корень установки неизвестен")
+
+
+_конф = _загрузчик()
+INSTALL_CONF = Path(_конф.путь_install_conf())
+HARNESS_CONF = Path(_конф.путь_harness_conf())
 
 
 def _read_conf(path: Path, conf: dict) -> None:

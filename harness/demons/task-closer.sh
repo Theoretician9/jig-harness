@@ -107,14 +107,14 @@ EOF
 fi
 
 # ── конфиги ─────────────────────────────────────────────────────────────────
-INSTALL_CONF="${HARNESS_INSTALL_CONF:-${INSTALL_CONF:-/etc/harness/install.conf}}"
-HARNESS_CONF="${HARNESS_CONF:-/etc/harness/harness.conf}"
+# shellcheck disable=SC1091
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../../scripts/lib/config.sh"
+INSTALL_CONF="${HARNESS_INSTALL_CONF:-${INSTALL_CONF:-$(konf_koren)/install.conf}}"
+HARNESS_CONF="${HARNESS_CONF:-$(konf_koren)/harness.conf}"
 [ -r "$INSTALL_CONF" ] || { echo "task-closer: нет $INSTALL_CONF — установка не завершена (01-SPEC §0)"; exit 1; }
-[ -r "$HARNESS_CONF" ] || { echo "task-closer: нет $HARNESS_CONF — скопируйте harness/config/harness.conf в /etc/harness/"; exit 1; }
+[ -r "$HARNESS_CONF" ] || { echo "task-closer: нет $HARNESS_CONF — скопируйте harness/config/harness.conf в $(konf_koren)/"; exit 1; }
 # Окружение старше конфига: общий загрузчик вместо голого source (улика
 # 12.09.2026 — проба с TMUX_SESSION в окружении сменила модель в РАБОЧЕЙ панели).
-# shellcheck disable=SC1091
-source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../../scripts/lib/konf.sh"
 konf_zagruzit
 : "${PROJECT_DIR:?пуст PROJECT_DIR}" "${HEARTBEAT_DIR:?пуст HEARTBEAT_DIR}" "${TASK_STALL_HOURS:?пуст TASK_STALL_HOURS}"
 
@@ -129,8 +129,8 @@ mkdir -p "$HEARTBEAT_DIR"
 # ежемесячной ревизии, I-10).
 #
 # Дескриптор закрывается у КАЖДОГО потомка (9>&-): иначе долгий потомок
-# наследует его и держит лок после нашего выхода — [[лок-утёк-в-потомка]].
-LOK="${LOG_DIR:-/var/log/harness}/locks/${SERVICE_LOCKS_SUBDIR:-services}/dev-map.lock"
+# наследует его и держит лок после нашего выхода — [[lock-leaked-into-a-child]].
+LOK="${LOG_DIR}/locks/${SERVICE_LOCKS_SUBDIR:-services}/dev-map.lock"
 mkdir -p "$(dirname "$LOK")"
 exec 9>"$LOK"
 if ! flock -n 9; then
@@ -171,7 +171,7 @@ import sys, os, re, datetime, tempfile
 # самого демона, а не по месту карты. В самотесте карта лежит во временном
 # каталоге, где никаких scripts/lib нет и быть не должно.
 sys.path.insert(0, sys.argv[3])
-import kartochki
+import cards
 
 try:
     import yaml
@@ -232,13 +232,13 @@ lines = text.split("\n")
 def task_block(tid):
     """(строка id, отступ ключей, конец блока) блочной записи задачи или None.
 
-    Границы считает ОБЩИЙ разбор (scripts/lib/kartochki.py): у каждого
+    Границы считает ОБЩИЙ разбор (scripts/lib/cards.py): у каждого
     писателя карты он был свой, и починка в одной копии оставляла беду в
     остальных (ревизия архитектуры 12.09.2026; аварии 09.09 — 88 задач,
     12.09 — 15 задач). Отступ ключей и построчные номера — уже дело этого
     писателя: он правит текст построчно.
     """
-    найдено = kartochki.блок(text, tid)
+    найдено = cards.блок(text, tid)
     if найдено is None:
         return None
     тело, начало, _ = найдено

@@ -99,7 +99,31 @@ EOF
     if echo "$OUT" | grep -q 'токены за сутки: 1234'; then
         echo "САМОТЕСТ ПРОВАЛЕН: при наличии отчёта короткая строка обязана уступить место"; echo "$OUT"; exit 1
     fi
-    rm -f "$T/tokens-daily.report"
+    # БОЛЬНОЙ СЛУЧАЙ 24.09.2026: сводка в 08:00 несла НЕПОЛНЫЕ текущие сутки
+    # под заголовком «РАСХОД ЗА СУТКИ» — владелец прочитал «Шаги 1», а модель
+    # за те сутки звали четыре раза. Законченный день перевешивает текущий.
+    printf 'РАСХОД ЗА СУТКИ — вчерашний день\n  шагов                     4\n' \
+        > "$T/tokens-daily.report.вчера"
+    OUT=$(INSTALL_CONF="$T/install.conf" HARNESS_CONF="$T/harness.conf" \
+          HEARTBEAT_DRY_SEND=1 bash "$0") || { echo "САМОТЕСТ ПРОВАЛЕН: прогон с отчётом за вчера упал"; echo "$OUT"; exit 1; }
+    echo "$OUT" | grep -q 'шагов                     4' \
+        || { echo "САМОТЕСТ ПРОВАЛЕН: сводка взяла неполные текущие сутки вместо законченных"; echo "$OUT"; exit 1; }
+    if echo "$OUT" | grep -q 'медиана                   42'; then
+        echo "САМОТЕСТ ПРОВАЛЕН: текущий неполный отчёт перевесил законченный"; echo "$OUT"; exit 1
+    fi
+    # Ревью спеки пайплайна I-2: журнал обходов честной двери не читал НИКТО —
+    # ни панель, ни сводка. Дверь, которую видит только прошедший в неё, —
+    # тихий обход, а не видимое решение.
+    printf '{"ts": "%s", "гейт": "пайплайн", "задача": "hr.проба", "почему": "проба видимости"}\n' \
+        "$(date +%Y-%m-%d)" > "$T/пайплайн-обходы.jsonl"
+    OUT=$(INSTALL_CONF="$T/install.conf" HARNESS_CONF="$T/harness.conf" \
+          HEARTBEAT_DRY_SEND=1 bash "$0") || { echo "САМОТЕСТ ПРОВАЛЕН: прогон с журналом обходов упал"; echo "$OUT"; exit 1; }
+    echo "$OUT" | grep -q 'обходы гейта пайплайна за сутки: 1' \
+        || { echo "САМОТЕСТ ПРОВАЛЕН: обход честной двери не назван в сводке (I-2)"; echo "$OUT"; exit 1; }
+    echo "$OUT" | grep -q 'проба видимости' \
+        || { echo "САМОТЕСТ ПРОВАЛЕН: сводка назвала число обходов без ПРИЧИНЫ"; echo "$OUT"; exit 1; }
+    rm -f "$T/пайплайн-обходы.jsonl"
+    rm -f "$T/tokens-daily.report" "$T/tokens-daily.report.вчера"
     # Д-4-остаток: свежий каталог БЕЗ метки — «ещё не прогонялся», не МЁРТВ;
     # заодно П-15: при TG_CHANNEL_VARIANT="A" — «диспетчер выключен», не крик.
     mkdir -p "$T/hb2"
@@ -142,14 +166,14 @@ EOF
 fi
 
 # ── конфиги ─────────────────────────────────────────────────────────────────
-INSTALL_CONF="${HARNESS_INSTALL_CONF:-${INSTALL_CONF:-/etc/harness/install.conf}}"
-HARNESS_CONF="${HARNESS_CONF:-/etc/harness/harness.conf}"
+# shellcheck disable=SC1091
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../../scripts/lib/config.sh"
+INSTALL_CONF="${HARNESS_INSTALL_CONF:-${INSTALL_CONF:-$(konf_koren)/install.conf}}"
+HARNESS_CONF="${HARNESS_CONF:-$(konf_koren)/harness.conf}"
 [ -r "$INSTALL_CONF" ] || { echo "heartbeat-watch: нет $INSTALL_CONF — установка не завершена (01-SPEC §0)"; exit 1; }
-[ -r "$HARNESS_CONF" ] || { echo "heartbeat-watch: нет $HARNESS_CONF — скопируйте harness/config/harness.conf в /etc/harness/"; exit 1; }
+[ -r "$HARNESS_CONF" ] || { echo "heartbeat-watch: нет $HARNESS_CONF — скопируйте harness/config/harness.conf в $(konf_koren)/"; exit 1; }
 # Окружение старше конфига: общий загрузчик вместо голого source (улика
 # 12.09.2026 — проба с TMUX_SESSION в окружении сменила модель в РАБОЧЕЙ панели).
-# shellcheck disable=SC1091
-source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../../scripts/lib/konf.sh"
 konf_zagruzit
 : "${HEARTBEAT_DIR:?пуст HEARTBEAT_DIR}" "${HEARTBEAT_PERIODS:?пуст HEARTBEAT_PERIODS — таблица периодов живёт в harness.conf}"
 
@@ -207,7 +231,7 @@ fi
 # Сторож fail-open: упав, он пропускает команду и лишь пишет след в лог.
 # Без этой сверки след никто не читает — молчаливый fail-open неотличим от
 # здорового сторожа. Прирост НЕ делает прогон красным: демоны-то живы.
-GUARD_LOG="${LOG_DIR:-/var/log/harness}/guard_exceptions.log"
+GUARD_LOG="${LOG_DIR}/guard_exceptions.log"
 SIZE_FILE="$HEARTBEAT_DIR/.guard_exceptions.size"
 GUARD_NEWSIZE=""
 if [ -f "$GUARD_LOG" ]; then
@@ -258,8 +282,13 @@ fi
 # ── расход токенов (Д-4в): строку готовит демон-счётчик, мы только включаем ─
 # Подробный отчёт, если он есть, вытесняет короткую строку: в нём те же числа
 # плюс распределение контекста и сверка баланса (13.08.2026, запрос владельца).
-TOKENS_SUMMARY="${LOG_DIR:-/var/log/harness}/tokens-daily.summary"
-TOKENS_REPORT="${LOG_DIR:-/var/log/harness}/tokens-daily.report"
+TOKENS_SUMMARY="${LOG_DIR}/tokens-daily.summary"
+TOKENS_REPORT="${LOG_DIR}/tokens-daily.report"
+# Утренняя сводка несёт ЗАКОНЧЕННЫЕ сутки, а не восемь часов текущих. 24.09.2026
+# владелец прочитал в сводке «Шаги 1», хотя за те сутки модель звали четыре
+# раза: отчёт собирался ежечасно и к 08:00 знал только ночь, а заголовок обещал
+# «РАСХОД ЗА СУТКИ». Копию прошедшего дня кладёт сборщик (tokens-collector).
+[ -f "$TOKENS_REPORT.вчера" ] && TOKENS_REPORT="$TOKENS_REPORT.вчера"
 [ -f "$TOKENS_REPORT" ] && TOKENS_SUMMARY="$TOKENS_REPORT"
 if [ -f "$TOKENS_SUMMARY" ]; then
     # П-15: head -c 1000 резал БАЙТЫ и рвал многобайтную кириллицу посередине.
@@ -275,6 +304,42 @@ if [ -f "$TOKENS_SUMMARY" ]; then
     )
     SUMMARY="$SUMMARY
 $TOKENS_LINE"
+fi
+
+# ── Обходы гейта пайплайна: честная дверь обязана быть ВИДНА ────────────────
+# Ревью спеки 23.09 (I-2): спека утверждала «дверь видна на панели», а журнал
+# обходов не читал НИКТО — ни панель, ни сводка. Дверь, которую видит только
+# тот, кто в неё прошёл, — это не видимое решение, а тихий обход. Сводка
+# называет число за сутки и причины: смена отвечает за каждую.
+OBHODY="${LOG_DIR}/пайплайн-обходы.jsonl"
+if [ -f "$OBHODY" ]; then
+    OBHODY_TEKST=$(python3 - "$OBHODY" <<'PYEOF' 2>/dev/null || true
+import datetime, json, sys
+вчера = (datetime.date.today() - datetime.timedelta(days=1)).isoformat()
+сегодня = datetime.date.today().isoformat()
+причины = []
+try:
+    with open(sys.argv[1], encoding="utf-8") as fh:
+        for строка in fh:
+            строка = строка.strip()
+            if not строка:
+                continue
+            try:
+                з = json.loads(строка)
+            except ValueError:
+                continue
+            if str(з.get("ts", ""))[:10] in (вчера, сегодня):
+                причины.append(f"{з.get('задача', '-')}: {з.get('почему', '')}"[:120])
+except OSError:
+    sys.exit()
+if причины:
+    print(f"обходы гейта пайплайна за сутки: {len(причины)}")
+    for п in причины[:5]:
+        print(f"  • {п}")
+PYEOF
+)
+    [ -n "$OBHODY_TEKST" ] && SUMMARY="$SUMMARY
+$OBHODY_TEKST"
 fi
 
 say "$SUMMARY"

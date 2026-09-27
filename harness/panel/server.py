@@ -42,21 +42,21 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import yaml  # noqa: E402  (после sys.path — модуль лежит рядом)
 
-import podtverzhdenie  # noqa: E402
-import sostoyanie  # noqa: E402
+import confirmation  # noqa: E402
+import state  # noqa: E402
 import vid  # noqa: E402
-import nastrojki  # noqa: E402
-import vhod  # noqa: E402
+import settings  # noqa: E402
+import login  # noqa: E402
 
 КОРЕНЬ = Path(__file__).resolve().parent.parent.parent
 РЕЕСТР = Path(os.environ.get("HARNESS_PERECLUCHATELI")
               or КОРЕНЬ / "harness" / "config" / "переключатели.yaml")
-ПИСАТЕЛЬ = КОРЕНЬ / "scripts" / "zapisat-klyuch.py"
+ПИСАТЕЛЬ = КОРЕНЬ / "scripts" / "write-key.py"
 # Настройки — через общий модуль: разборов shell-конфига в панели было три, и
 # копия расходится с оригиналом молча (ревью 11.09.2026, фаза 2 спеки).
-_конфиги = nastrojki.пути
-состояние_дир = nastrojki.состояние_дир
-SECRETS_DIR = Path(os.environ.get("SECRETS_DIR", "/var/lib/harness/secrets"))
+_конфиги = settings.пути
+состояние_дир = settings.состояние_дир
+SECRETS_DIR = Path(settings.конф.secrets_dir())
 
 # Имя пропуска в cookie — ЛАТИНИЦЕЙ: заголовки HTTP кодируются latin-1, и
 # кириллическое имя роняет ответ исключением внутри обработчика (пойман
@@ -92,19 +92,19 @@ SECRETS_DIR = Path(os.environ.get("SECRETS_DIR", "/var/lib/harness/secrets"))
 ЗАПРОСОВ_В_МИНУТУ = 60
 
 
-_чит_конфиг = nastrojki.читать
+_чит_конфиг = settings.читать
 
 
 _ВХОД = None
 
 
-def вход() -> vhod.Вход:
+def вход() -> login.Вход:
     """Вход заводится при первом обращении, а не при импорте: пути берутся из
     окружения, и служба (как и проверка) вправе выставить их до первого запроса."""
     global _ВХОД
     if _ВХОД is None:
-        _ВХОД = vhod.Вход(
-            каталог=vhod.каталог_секретов(),
+        _ВХОД = login.Вход(
+            каталог=login.каталог_секретов(),
             chat_id=_чит_конфиг(_конфиги()["install.conf"]).get("TG_CHAT_ID", ""))
     return _ВХОД
 
@@ -129,7 +129,7 @@ def переключатели() -> list[dict]:
     готово = []
     for строка in реестр().get("переключатели") or []:
         файл = строка.get("файл", "")
-        значение, почему = nastrojki.значение(строка["ключ"], файл)
+        значение, почему = settings.значение(строка["ключ"], файл)
         if значение is not None:
             состояние = "значение"
         elif "не прочитан" in почему:
@@ -190,7 +190,7 @@ def очередь_дир() -> Path:
     """Где лежит недоставленное. Каталог ОБЩИЙ с демонами, а не свой у панели:
     досылает очередь sentinel, и в PANEL_STATE_DIR он не смотрит (живая
     проверка 11.09.2026 — первое сообщение осталось лежать)."""
-    return Path(os.environ.get("LOG_DIR", "/var/log/harness"))
+    return settings.журнал_дир()
 
 
 # Свод промахов входа: подбирающий код даёт сообщение НА КАЖДУЮ попытку, и
@@ -205,7 +205,7 @@ def _свод_промахов(адрес: str) -> str | None:
 
     Счёт живёт файлом: служба отвечает на каждый запрос заново, и переменная
     в памяти не пережила бы ни одной попытки (тот же приём, что у промахов
-    подтверждения в podtverzhdenie.py).
+    подтверждения в confirmation.py).
     """
     файл = очередь_дир() / "панель-промахи-входа.json"
     сейчас = time.time()
@@ -355,16 +355,35 @@ class Панель(BaseHTTPRequestHandler):
         if not ЧАСТОТА_ЧТЕНИЯ.можно(self.адрес, ЗАПРОСОВ_В_МИНУТУ):
             return self.ответить(429, {"беда": "слишком часто"})
         if путь == "/vhod":
-            # Токен НЕ тратится: страницу открывает и предпросмотр Telegram (C4).
             токен = self.path.partition("t=")[2].split("&")[0]
-            живой = вход().жив(токен)
-            return self.ответить(200, vid.вход_по_ссылке(токен, живой), "text/html")
+            # Предпросмотру — страница, человеку — сама панель. Владелец
+            # 27.09.2026: «я бы убрал кнопку "войти", она не нужна, по ссылке
+            # надо сразу попадать в панель». Токен по-прежнему не тратит тот,
+            # кто открывает ссылку за владельца (C4): Telegram ходит по ней
+            # сам, чтобы показать предпросмотр.
+            if not login.браузер_человека(self.headers.get("User-Agent")):
+                return self.ответить(200, vid.вход_по_ссылке(вход().жив(токен)),
+                                     "text/html")
+            пропуск = вход().обменять(токен, self.адрес)
+            if not пропуск:
+                записать_в_журнал({"событие": "негодная ссылка", "адрес": self.адрес})
+                return self.ответить(200, vid.вход_по_ссылке(False), "text/html")
+            записать_в_журнал({"событие": "вход", "адрес": self.адрес})
+            self.send_response(303)
+            self.send_header("Location", "/")
+            # Lax, а не Strict: переход приходит СО СТОРОНЫ — из клиента
+            # Telegram, — и строгая кука на нём не отправится. Тот же довод,
+            # что у запасного входа.
+            self._выдать_пропуск(пропуск, "Lax")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return None
         if путь == "/zapasnoj":
             return self.ответить(200, vid.запасной_вход(), "text/html")
         if путь == "/sostoyanie":
             if not вход().проверить(self.пропуск):
                 return self.ответить(401, {"беда": "нужен пропуск"})
-            return self.ответить(200, sostoyanie.снять())
+            return self.ответить(200, state.снять())
         if путь == "/pamyat":
             if not вход().проверить(self.пропуск):
                 return self.ответить(401, {"беда": "нужен пропуск"})
@@ -373,13 +392,13 @@ class Панель(BaseHTTPRequestHandler):
             искать = (запрос.get("искать") or [""])[0]
             if имя:
                 return self.ответить(200, vid.правка_записи(
-                    sostoyanie.запись(имя), знак(self.пропуск)), "text/html")
+                    state.запись(имя), знак(self.пропуск)), "text/html")
             return self.ответить(200, vid.память(
-                sostoyanie.память(искать), знак(self.пропуск), искать), "text/html")
+                state.память(искать), знак(self.пропуск), искать), "text/html")
         if путь == "/karta":
             if not вход().проверить(self.пропуск):
                 return self.ответить(401, {"беда": "нужен пропуск"})
-            return self.ответить(200, vid.карта_разработки(sostoyanie.karta()),
+            return self.ответить(200, vid.карта_разработки(state.karta()),
                                  "text/html")
         if путь == "/ustrojstvo":
             if not вход().проверить(self.пропуск):
@@ -387,7 +406,7 @@ class Панель(BaseHTTPRequestHandler):
             запрос = urllib.parse.parse_qs(self.path.partition("?")[2])
             искать = (запрос.get("искать") or [""])[0]
             return self.ответить(200, vid.устройство(
-                sostoyanie.устройство(искать), искать), "text/html")
+                state.устройство(искать), искать), "text/html")
         if путь == "/nastrojki":
             if not вход().проверить(self.пропуск):
                 return self.ответить(401, {"беда": "нужен пропуск"})
@@ -470,7 +489,7 @@ class Панель(BaseHTTPRequestHandler):
         доводы = [str(тело.get("уровень", "")), str(тело.get("шаг", "")),
                   str(тело.get("действие", ""))]
         готово = subprocess.run(
-            [sys.executable, str(КОРЕНЬ / "scripts" / "zapisat-shag.py"), *доводы],
+            [sys.executable, str(КОРЕНЬ / "scripts" / "write-step.py"), *доводы],
             capture_output=True, text=True, timeout=60)
         записать_в_журнал({"событие": "шаг пайплайна", "доводы": доводы,
                            "код": готово.returncode, "адрес": self.адрес})
@@ -486,7 +505,7 @@ class Панель(BaseHTTPRequestHandler):
     def _сохранить_память(self, тело: dict):
         имя, текст = str(тело.get("имя", "")), str(тело.get("текст", ""))
         готово = subprocess.run(
-            [sys.executable, str(КОРЕНЬ / "scripts" / "zapisat-pamyat.py"), имя],
+            [sys.executable, str(КОРЕНЬ / "scripts" / "write-memory.py"), имя],
             input=текст, capture_output=True, text=True, timeout=60)
         записать_в_журнал({"событие": "правка памяти", "имя": имя,
                            "код": готово.returncode, "адрес": self.адрес})
@@ -495,14 +514,14 @@ class Панель(BaseHTTPRequestHandler):
             return self.ответить(422, vid.правка_записи(
                 {"нет данных": f"Не вышло: {беда}"}, знак(self.пропуск)), "text/html")
         return self.ответить(200, vid.память(
-            sostoyanie.память(), знак(self.пропуск), "",
+            state.память(), знак(self.пропуск), "",
             f"Запись «{имя}» сохранена. В хранилище кода она уедет сама."),
             "text/html")
 
     def _набор(self, тело: dict):
         имя, действие = str(тело.get("имя", "")), str(тело.get("действие", ""))
         готово = subprocess.run(
-            [sys.executable, str(КОРЕНЬ / "scripts" / "pamyat-v-paket.py"),
+            [sys.executable, str(КОРЕНЬ / "scripts" / "memory-to-package.py"),
              имя, действие], capture_output=True, text=True, timeout=60)
         записать_в_журнал({"событие": "набор памяти", "имя": имя,
                            "действие": действие, "код": готово.returncode,
@@ -511,7 +530,7 @@ class Панель(BaseHTTPRequestHandler):
                      if готово.returncode else
                      f"«{имя}»: {действие} в набор новой установки.")
         return self.ответить(200 if not готово.returncode else 422,
-                             vid.память(sostoyanie.память(), знак(self.пропуск),
+                             vid.память(state.память(), знак(self.пропуск),
                                         "", сообщение), "text/html")
 
     def _выдать_пропуск(self, пропуск: str, соседство: str = "Strict"):
@@ -525,7 +544,7 @@ class Панель(BaseHTTPRequestHandler):
         self.send_header("Set-Cookie",
                          f"{ИМЯ_ПРОПУСКА}={пропуск}; HttpOnly; Secure; "
                          f"SameSite={соседство}; Path=/; "
-                         f"Max-Age={vhod.СЕССИЯ_ЖИВЁТ_СЕК}")
+                         f"Max-Age={login.СЕССИЯ_ЖИВЁТ_СЕК}")
 
     def _из_браузера(self) -> bool:
         """Запрос пришёл обычной формой, а не нашим вызовом из кода."""
@@ -561,7 +580,7 @@ class Панель(BaseHTTPRequestHandler):
             ЗНАКИ.clear()
             return self.ответить(200, {"готово": True})
         if путь == "/vnutr/otvet":
-            итог = podtverzhdenie.ответ(str(тело.get("текст", "")))
+            итог = confirmation.ответ(str(тело.get("текст", "")))
             return self.ответить(200, {"итог": {True: "применено", False: "отказ",
                                                 None: "не ответ панели"}[итог]})
         return self.ответить(404, {"беда": "нет такой страницы"})
@@ -657,7 +676,7 @@ class Панель(BaseHTTPRequestHandler):
     def _спросить_владельца(self, строка: dict, значение: str):
         """Второй рубеж (C3): опасное меняется только с ответом в канале.
         Украденный пропуск сам по себе поведение сервера не меняет."""
-        podtverzhdenie.завести(строка["ключ"], значение, строка.get("имя", ""))
+        confirmation.завести(строка["ключ"], значение, строка.get("имя", ""))
         записать_в_журнал({"событие": "спрошено подтверждение", "ключ": строка["ключ"],
                            "значение": значение, "адрес": self.адрес})
         if self._из_браузера():
@@ -685,7 +704,7 @@ class Панель(BaseHTTPRequestHandler):
 
     # ── страницы ────────────────────────────────────────────────────────────
     def _панель(self, сообщение: str = "") -> str:
-        return vid.панель(sostoyanie.снять(), переключатели(),
+        return vid.панель(state.снять(), переключатели(),
                           знак(self.пропуск), сообщение)
 
 

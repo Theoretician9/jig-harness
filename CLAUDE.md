@@ -1,181 +1,180 @@
-# CLAUDE.md — правила проекта
+# CLAUDE.md — how this project is run
 
-Имя проекта и каталог кода — данные конфига: `PROJECT_NAME` / `PROJECT_DIR`
-в `/etc/harness/install.conf` (заполняются при установке, 01-SPEC §0).
+Project name and code directory are config data: `PROJECT_NAME` / `PROJECT_DIR`
+in `/etc/harness/install.conf`.
 
 @STATE.md
 @./память/УКАЗАНИЯ.md
 @./память/MEMORY.md
 @./память/ТОН.md
 
-## Обзор
+> This file is BUILT from data by `scripts/build-claude-md.py`. Hand edits are
+> overwritten by the next build, and `build-claude-md.py --проверить` (part of
+> the gate run) turns red meanwhile. Edit the template
+> (`harness/шаблоны-задач/CLAUDE-EN.md.in`) or the data it reads.
 
-Фаза — **продукт с нуля**. Харнес развёрнут и работает: канал, сторожа, демоны,
-память, карта. Кода продукта ещё нет — **первая задача придёт от владельца в
-Telegram**. Разделов «Домен» и «Архитектура» здесь намеренно нет: они
-дополняются первой задачей продукта — это часть её закрытия (dev-map: `pr.first`).
+## Overview
 
-- **Сервер**: чистый Ubuntu VPS; всё об установке — `/etc/harness/install.conf`.
-- **Канал**: Telegram-бот; токен и chat_id — в секретах вне вебрута (`SECRETS_DIR`
-  из install.conf). Владелец видит ТОЛЬКО канал, терминал не видит никогда.
-- **Режим**: полуавтомат (`AUTONOMY="semi"` в install.conf — данные, не код).
-- **Подписка**: Claude Code по подписке Max, вход по аккаунту; API-ключа в окружении нет.
-- **Язык**: русский — общение, коммиты, документация, названия задач. Технические
-  термины и имена в коде — в оригинале.
-- **Имена файлов кода — латиницей** (`.py`, `.sh`, `.ts`, `.sql`…): имя файла
-  становится именем модуля и целью импорта, а нелатинский путь git отдаёт
-  экранированными байтами — проверки по путям слепнут. Текст ВНУТРИ файла, имена
-  документов, данных и каталогов задач — по-русски. Держат ДВА носителя:
-  хук `PreToolUse` на запись файла (отказ в момент создания) и гейт
-  `scripts/check-file-names.py` в pre-commit и воротах (список коммита).
-  Что считать кодом — ключ `CODE_NAME_EXTS` в harness.conf, данные.
+- **Owner sees the channel only.** They never see the terminal, never see
+  shell prompts, and cannot answer an interactive question.
+- **Language:** speak the owner's language — the one they write to you in.
+  Commits, docs and task titles follow it. Code identifiers stay English.
+- **Autonomy:** `AUTONOMY` in install.conf (`semi` = deploy and irreversible
+  work need the owner's word; everything else you do yourself).
+- **Code file names are Latin-only** (`.py`, `.sh`, `.ts`, `.sql`…): a file
+  name becomes a module name and an import target, and git prints a non-Latin
+  path as escaped bytes, so path-based checks go blind. Text INSIDE files and
+  names of documents and data may be in any language. Two carriers hold this:
+  a `PreToolUse` hook (refusal at creation) and `scripts/check-file-names.py`
+  in pre-commit and the gate run. What counts as code: `CODE_NAME_EXTS` in
+  harness.conf.
 
-## Инварианты (нарушать нельзя никогда)
+## Invariants (never break)
 
-Решения владельца от 08.08.2026 (razrabotka/00-ВВОДНЫЕ.md §1.3), дословно. Каждый сторожится кодом:
+Each one is held by code, not by memory.
 
-| # | инвариант | сторож | как проверить сторожа |
+<!-- AUTO:invariants -->
+| # | invariant | held by | how to check the guard |
 |---|---|---|---|
-| И-1 | **Не терять данные.** Необратимые операции над БД/файлами — только при свежем бэкапе; деструктивные команды по проду — только через сторожа | `scripts/hooks/guard_bash.py` (PreToolUse) + `harness/demons/backup.sh` | `python3 scripts/hooks/test_guard_bash.py`; возраст бэкапа — heartbeat + deadman-алерт |
-| И-2 | **Не выкатывать мимо ворот.** Выкат только `deploy.sh` (гейты, тег, авто-откат); ручная последовательность команд запрещена | `guard_bash.py`: запрет `docker cp` внутрь, `compose restart`; ворота `scripts/deploy_guard.py` перед `git push`/`deploy.sh` | тот же тест сторожа; живой больной случай на приёмке |
-| И-3 | **Секреты вне репо и вебрута.** Ключи и токены никогда не попадают в git и публичные каталоги | `scripts/check-secrets.sh` в pre-commit и внутри `deploy.sh` | `bash scripts/check-secrets.sh` |
-| И-4 | **Честность отчёта.** «Сделано» — только после живой проверки; «тест зелёный» ≠ «работает» | статусный гейт dev-map: `done` требует `tested_at` (или `owner_testable: false`) — валидатор в pre-commit + живой смоук в конце `deploy.sh` | `scripts/pre-commit-hook.sh --selftest-devmap` |
+| И-1 | Never lose data. Irreversible work on a DB or files only with a fresh backup; destructive commands on production only through the guard. | `harness/demons/backup.sh` · `scripts/hooks/guard_bash.py` · `scripts/restore-probe.sh` | `bash harness/demons/backup.sh --selftest` · `python3 scripts/hooks/test_guard_bash.py` · `bash scripts/restore-probe.sh` |
+| И-2 | Never deploy around the gates. Deployment is `deploy.sh` only (gates, tag, auto-rollback); a hand-typed sequence is forbidden. | `scripts/deploy_guard.py` | `python3 scripts/test_deploy_guard_consent.py` |
+| И-3 | Secrets stay out of the repo and the web root. Keys and tokens never reach git or a public directory. | `scripts/check-secrets.sh` · `scripts/check-secret-in-logs.py` | `bash scripts/check-secrets.sh --selftest` · `python3 scripts/check-secret-in-logs.py` |
+| И-4 | Honest reporting. "Done" only after a live check; a green test is not a working feature. | `scripts/pre-commit-gate.sh` | `bash scripts/pre-commit-gate.sh --selftest-devmap` |
+<!-- /AUTO -->
 
-## Правила канала (владелец не видит терминал)
+## Channel rules (the owner cannot see your terminal)
 
-1. **Ack ≤ 30 секунд** на входящее: «принял, делаю X» — и только потом работа.
-   Сторож: диспетчер канала (`tg-dispatcher`) — единственный потребитель getUpdates.
-   **Твоя очередь входящих — `$LOG_DIR/inbox/`**: диспетчер складывает туда каждое
-   сообщение владельца файлом; в начале хода и на каждом рубеже проверяй каталог
-   (`ls $LOG_DIR/inbox/`), прочитанное переноси в `$LOG_DIR/inbox/обработано/`.
-   Напоминает о непустом inbox session-warden пинком в сессию.
-   **Указание владельца — не в ход, а в память**: сообщение, задающее правило
-   («правило», «всегда», «никогда», «я говорил», «не хочу»), заносится дословно
-   в `память/УКАЗАНИЯ.md` — этот файл грузится в каждую сессию через `@`, а
-   `inbox/обработано/` не читает никто. Сторож — `scripts/ukazaniya.py` в воротах:
-   не занесённое сообщение красит гейт. Причина — [[указание-умерло-с-сессией]].
-2. **Анонсировал — продолжай.** «Сейчас посмотрю» — середина хода, не конец:
-   после анонса сразу продолжать инструментами. Напоминание — хук `scripts/hooks/stop_reminder.sh` (Stop).
-3. **Никаких интерактивных вопросов.** `AskUserQuestion`, режим плана, подтверждения
-   оболочки — не использовать: владелец их не видит. Вопросы — сообщением в канал
-   с пронумерованными опциями («ответь цифрой»). Держится: подтверждения выключены
-   в `.claude/settings.json` (из пакета: hooks/project-settings.json) + запись [[feedback-communication]].
-4. **Файлы вложением, не путём.** Всё, что владелец должен прочитать, — вложением
-   или снимком экрана; путь в тексте — только как справка «где лежит».
-5. **Честность отчёта** (И-4): упавшее — показать, пропущенное — назвать, заглушку —
-   назвать заглушкой; числа и команды вместо «стало лучше»; непроверенное — «ждёт
-   твоей проверки», не «готово». Держится статусным гейтом dev-map.
-5б. **Тон общения — документ, а не память** (владелец 11.09.2026): как
-   говорить с владельцем, написано в `память/ТОН.md`; его пишет агент по
-   замеру живой речи (демон `ton-watch.sh`). Не использовать его нельзя:
-   файл грузится в каждую сессию через `@`, а сторож канала берёт потолки
-   длины ИЗ НЕГО — нет документа, нет и разрешённых потолков.
-5а. **Ёмко и регулярно** (владелец 11.09.2026): в канал идёт ИТОГ и ЧИСЛА, а не
-   ход мысли. Разбор своих действий — «ошибся, поправил, наступил на» — в память
-   и журнал, владельцу его читать не надо. Отчёт на каждом рубеже: пульс важнее
-   объёма. Держат: `scripts/check-perepiska.py` внутри `tg_send.sh` (потолки
-   900/1800 знаков, отказ на самокомментарии) и ветка 6в `session-warden`
-   (работа идёт, а отчёта нет 30 мин — пинок за статусом).
-6. **Останавливаться и ждать** только там, где нужно РЕШЕНИЕ владельца; тогда честно
-   «жду ответа». Не предлагать закончить сессию — решает владелец.
+1. **Acknowledge within 30 seconds**: "got it, doing X" — then work. Incoming
+   messages arrive as files in `$LOG_DIR/inbox/`; check the directory at the
+   start of a turn and at every checkpoint, move what you read to
+   `$LOG_DIR/inbox/обработано/`.
+2. **A rule from the owner goes to memory, not into the turn.** Any message
+   that sets a rule ("always", "never", "I told you", "I don't want") is
+   copied VERBATIM into `память/УКАЗАНИЯ.md` — that file is loaded into every
+   session; the processed-inbox folder is read by nobody. Gate: `orders.py`.
+3. **Announced means continue.** "Let me look" is the middle of a turn, not
+   its end: keep going with tools right away.
+4. **No interactive questions.** No `AskUserQuestion`, no plan mode, no shell
+   confirmations — the owner sees none of them. Ask in the channel with
+   numbered options ("reply with a digit").
+5. **Files as attachments, not paths.** Anything the owner must read goes as
+   an attachment or a screenshot; a path in text is a reference only.
+6. **Honest reporting.** Show what failed, name what you skipped, call a stub
+   a stub. Numbers and commands instead of "it got better". Unverified work is
+   "waiting for your check", not "done".
+7. **Short and regular.** The channel gets the RESULT and NUMBERS, not your
+   train of thought. Self-analysis goes to the log and to memory. Report at
+   every checkpoint: a pulse matters more than volume.
+8. **How to talk** is a document, not a habit: `память/ТОН.md`, written by an
+   agent from a measurement of the owner's own speech. The channel guard reads
+   its length limits FROM that file.
+9. **Stop and wait only when a DECISION of the owner is required** — then say
+   plainly "waiting for your answer". Never propose ending the session.
 
-## Полуавтомат: развилки с подтверждением
+## Semi-auto: what needs the owner's word
 
-Анонс в канал и явное подтверждение владельца обязательны для: **выката в прод**
-и **необратимых операций** (удаление данных, смена секретов). **Ротация сессии
-в этот список НЕ входит** (решение владельца 11.08.2026): она ничего не теряет
-и ничего не выкатывает — это внутренняя механика, идёт сама, ключ
-`ROTATE_NEEDS_OWNER` в harness.conf.
-Всё остальное — самостоятельно. Ответы владельца диспетчер складывает в
-`$LOG_DIR/confirmations.jsonl`; нет записи с согласием — действия нет
-(подробности: [[feedback-semi-auto]]). Переключение режима — строка `AUTONOMY`
-в install.conf, меняет её только владелец.
+Announce in the channel and get an explicit confirmation before: **deploying
+to production** and **irreversible operations** (deleting data, rotating
+secrets). Session rotation is NOT on this list — it loses nothing and deploys
+nothing. Confirmations land in `$LOG_DIR/confirmations.jsonl`; no record of
+consent means no action.
 
-## Правила работы (короткая форма; полные — скилы `harness/skills/`)
+## Working rules (short form; full ones are the skills)
 
-- **Думать до кода**: допущения проговорить, неясное — спросить (в канал), простое
-  решение — предложить. Скил `приём-задачи`.
-- **Пайплайн по глубине задачи**: спека → ревью спеки → план → контракт → тесты до
-  кода → код → ворота → ревью → выкат → живой смоук → закрытие. Ключевые шаги
-  ведут скилы; вызов скила пишет ХУК `scripts/hooks/skill_log.sh` с признаком
-  `"источник":"хук"` — гейты считают только машинные записи, руками журнал не ведётся.
-- **Хирургические правки**: не улучшать соседнее, каждая строка прослеживается к запросу.
-- **Тесты обязательны**, покрытие не деградирует; «тест зелёный ≠ сделано» — [[feedback-test-not-done]].
-- **Проверять после изменений**: пересобрать → логи → health → и только потом отчёт.
-- **Суб-агентам — абсолютные пути**; проверять, куда суб-агент записал файл.
-- **Системная ошибка чинится системно**: гейт → автопочинка → видимость; решение,
-  требующее «чтобы кто-то помнил», — не решение. Гейт — под случившийся отказ, не воображаемый.
-- **Дисциплина рубежей**: на каждом рубеже шага пайплайна обновлять
-  `docs/handover/SESSION-HANDOFF-<дата>.md` — [[feedback-handover-discipline]].
-  Сторожа: `stop_reminder.sh`, `pre_compact.sh`, session-warden (возраст handover).
+- **Think before code**: state assumptions, ask what is unclear (in the
+  channel), propose the simple solution. Skill: `приём-задачи`.
+- **Pipeline by task depth**: spec → spec review → plan → contract → tests
+  before code → code → gates → review → deploy → live smoke → closing. Key
+  steps are led by skills; a skill call is logged by a HOOK, so gates count
+  machine records only.
+- **Surgical edits**: do not improve the neighbourhood; every line traces back
+  to the request.
+- **Tests are mandatory**, coverage must not degrade; a green test is not
+  "done".
+- **Verify after changes**: rebuild → logs → health → only then report.
+- **Subagents get absolute paths**; check WHERE a subagent wrote its file.
+- **Model per kind of work, not by feel**: `bash scripts/model-for.sh <kind>`
+  (spec and review — strong; routine and search — cheap). The table is data.
+  A session is consumable: long work goes to a background run, not into the
+  current shift.
+- **A systemic failure is fixed systemically**: gate → self-healing →
+  visibility. A solution that requires someone to remember is not a solution.
+  A gate is written for a failure that HAPPENED, not an imagined one.
+- **Checkpoint discipline**: update `docs/handover/SESSION-HANDOFF-<date>.md`
+  at every pipeline checkpoint.
 
-## Планка кода: Торвальдс + SOLID
+## Code bar: Torvalds + SOLID
 
-- Убирать частные случаи, а не добавлять к ним `if`. Много ветвлений = неверная структура данных.
-- Функция делает одно и умещается в голове. Три уровня вложенности — внутри спрятана вторая функция.
-- Имена говорят, что это. Комментарий объясняет ПОЧЕМУ, а не ЧТО.
-- Никакой защиты от воображаемых бед: обработка невозможной ошибки прячет возможную.
-- SOLID по духу: разделять ответственности, зависеть от контрактов. Абстракция под
-  один вызов — нарушение простоты, а не выполнение SOLID.
+- Remove special cases instead of adding an `if` to them. Many branches mean
+  the data structure is wrong.
+- A function does one thing and fits in your head. Three levels of nesting
+  hide a second function inside.
+- Names say what a thing is. A comment explains WHY, not WHAT.
+- No defence against imaginary trouble: handling an impossible error hides a
+  possible one.
+- SOLID in spirit: separate responsibilities, depend on contracts. An
+  abstraction with a single caller breaks simplicity, it does not serve SOLID.
 
-Проверка — скил `ревью-кода` на каждой задаче; запись [[feedback-code-bar]].
-
-## Команды
+## Commands
 
 ```bash
-bash scripts/vorota.sh                   # ВСЕ гейты одним шагом (--всё: + самотесты)
-bash scripts/hooks/session_state.sh      # осмотр одним шагом: входящие, работа, расход, демоны
-./scripts/deploy.sh                      # ЕДИНСТВЕННЫЙ способ выката (И-2)
+bash scripts/gates.sh                   # ALL gates in one step
+bash scripts/hooks/session_state.sh      # one-step look around: inbox, work, spend, daemons
+./scripts/deploy.sh                      # the ONLY way to deploy
 ```
 
-Первые две — не удобство, а экономия: цена шага агента равна всему накопленному
-контексту (замер 12.08.2026 — 158 535 токенов), поэтому пять гейтов, прогнанных
-по одному, стоят впятеро. Гейты по отдельности (`check-secrets.sh`,
-`check-context-hygiene.py`, `test_guard_bash.py`, `sverit-s-paketom.py`) звать
-врозь только при разборе конкретного падения.
+The first two are economy, not comfort: an agent step costs the whole
+accumulated context, so five gates run one by one cost five times as much.
 
-- **НИКОГДА** `docker compose restart` — не пересобирает образ (сторож guard_bash отменит).
-- **НИКОГДА** `claude mcp ...` и `claude -p` без `--strict-mcp-config` — обрывают
-  канал с владельцем (сторож guard_bash отменит; почему — [[feedback-command-bans]]).
-- Пересборка после изменения зависимостей — только с `--no-cache`.
-- **НИКОГДА прогон тестов внутри сессии** — только фоном:
-  `setsid nohup <команда> > /var/log/harness/<имя>.log 2>&1 < /dev/null &`,
-  ждать по итоговой строке лога. Сторож guard_bash отменит; указание владельца
-  23.08.2026, улика — полный смоук, оборванный ротацией на 73 %.
+- **NEVER** `docker compose restart` — it does not rebuild the image.
+- **NEVER** `claude mcp …` or `claude -p` without `--strict-mcp-config` — they
+  take the channel away from the owner's live session.
+- Rebuild after a dependency change only with `--no-cache`.
+- **NEVER run a test suite inside the session** — background only:
+  `setsid nohup <command> > /var/log/harness/<name>.log 2>&1 < /dev/null &`,
+  then wait for the final line of the log.
 
-## Карта разработки и состояние
+Bans are enforced by `scripts/hooks/guard_bash.py`, not by your memory.
 
-- Задача разработки обновляет `dev-map.yaml` в ТОМ ЖЕ коммите; трейлер
-  `Dev-Map: <task-id>` одним блоком с `Co-Authored-By`, сообщение через `git commit -F -`.
-  Пропуски чинит `harness/demons/devmap-selfheal.sh` (водораздел — `$LOG_DIR/devmap/audit.cursor`).
-- Статусы: `done` = проверено владельцем · `test` = ждёт живого теста (это статус
-  по умолчанию для завершённой мной работы) · `wip` · `plan`.
-- `STATE.md` — только «что верно прямо сейчас», перезаписывается, ≤10 000 символов
-  (держится `check-context-hygiene.py`). История — в `docs/handover/`, грабли — в
-  `память/`, статусы — в `dev-map.yaml`.
+## Dev map and state
 
-## Карта документации (что где лежит)
+- A development task updates `dev-map.yaml` in the SAME commit; the trailer
+  `Dev-Map: <task-id>` sits in one block with `Co-Authored-By`, and the message
+  is passed via `git commit -F -`.
+- Statuses: `done` = verified by the owner · `test` = waiting for a live check
+  (the default for work you finished) · `wip` · `plan`.
+- `STATE.md` holds only what is true right now, is rewritten rather than
+  appended, and is capped. History goes to `docs/handover/`, lessons to
+  `память/`, statuses to `dev-map.yaml`.
 
-| Место | Назначение |
+## Where things live
+
+| Place | Purpose |
 |---|---|
-| `CLAUDE.md` | правила и инварианты (этот файл) |
-| `STATE.md` | актуальное состояние, точка входа сессии (≤10k, перезаписывается) |
-| `память/УКАЗАНИЯ.md` | ДЕЙСТВУЮЩИЕ указания владельца его словами; грузится каждую сессию (≤8k) |
-| `память/` | `MEMORY.md` (индекс + таблица срабатываний, грузится каждую сессию) + записи-факты |
-| `docs/handover/SESSION-HANDOFF-<дата>.md` | передача контекста между сессиями; в контекст сам не грузится |
-| `dev-map.yaml` | карта разработки — реестр всех задач, источник истины дашборда |
-| `harness/config/устройство.yaml` | реестр механизмов: что делает каждый демон, хук, гейт, скил — ДАННЫЕ |
-| `docs/УСТРОЙСТВО-ХАРНЕСА.md` | «как всё устроено» — СОБИРАЕТСЯ из реестра (`scripts/sobrat-ustrojstvo.py`), руками не править |
-| `harness/skills/` | скилы шагов пайплайна; генерируются `harness/SBORKA-SKILOV.py` из глав UNIFIED — руками не править |
-| `.claude/skills/` | то, что видит оболочка: симлинки на `harness/skills/` + скилы самого продукта (`перенос-карты-в-граф`) — свои каталогом, генератором не перезаписываются |
-| `harness/шаблоны-задач/` | шаблоны спеки, плана, pretask-контракта |
-| `scripts/hooks/` | хуки оболочки (сторожа, состояние сессии); исходник в пакете — harness/hooks/ |
-| `harness/demons/` | демоны присмотра (ротация, бэкап, гигиена, ревизии) |
-| `/etc/harness/install.conf`, `harness.conf` | паспорт установки и пороги механики — данные, не код |
-| `UNIFIED/` | главы харнеса — источник скилов и полных правил |
+| `CLAUDE.md` | rules and invariants (this file, generated) |
+| `STATE.md` | what is true right now; session entry point |
+| `память/УКАЗАНИЯ.md` | the owner's standing instructions in their own words |
+| `память/MEMORY.md` | memory index + trigger table, loaded every session |
+| `память/ТОН.md` | how to talk to the owner, measured from their speech |
+| `docs/handover/` | context handover between sessions |
+| `dev-map.yaml` | the task registry, source of truth for the dashboard |
+| `harness/config/устройство.yaml` | registry of mechanisms — DATA |
+| `docs/УСТРОЙСТВО-ХАРНЕСА.md` | "how it all works" — BUILT from the registry |
+| `harness/skills/` | pipeline skills — generated, never hand-edited |
+| `.claude/skills/` | what the shell sees: links to `harness/skills/` plus the product's own skills |
+| `harness/demons/` | watch daemons (rotation, backup, hygiene, reviews) |
+| `/etc/harness/install.conf`, `harness.conf` | installation passport and thresholds — data, not code |
+| `sluzhebnoe/UNIFIED/` | source chapters the skills are built from |
+
+## What is watching (built from the registry)
+
+<!-- AUTO:mechanisms -->
+204 mechanisms are registered in `harness/config/устройство.yaml` (gates — 147, daemons — 27, skills — 19, hooks — 11). Each one names what it does, when it runs, what breaks without it and the command that proves it works. The registry is data: `python3 scripts/check-registry.py` fails when the code and the registry disagree.
+<!-- /AUTO -->
 
 ---
 
-**Эти правила работают, если:** сторож отменяет опасное (тест зелёный), в диффах
-нет лишних изменений, непроверенное носит статус `test`, а отчёт владельцу
-называет команду и число, которыми проверен.
+**These rules work when:** the guard cancels the dangerous command (and its
+test is green), diffs contain nothing extra, unverified work carries the
+status `test`, and the report to the owner names the command and the number
+that prove it.

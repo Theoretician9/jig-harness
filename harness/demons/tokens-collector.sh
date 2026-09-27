@@ -243,14 +243,14 @@ PROVERKA
 fi
 
 # ── конфиги ─────────────────────────────────────────────────────────────────
-INSTALL_CONF="${HARNESS_INSTALL_CONF:-${INSTALL_CONF:-/etc/harness/install.conf}}"
-HARNESS_CONF="${HARNESS_CONF:-/etc/harness/harness.conf}"
+# shellcheck disable=SC1091
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../../scripts/lib/config.sh"
+INSTALL_CONF="${HARNESS_INSTALL_CONF:-${INSTALL_CONF:-$(konf_koren)/install.conf}}"
+HARNESS_CONF="${HARNESS_CONF:-$(konf_koren)/harness.conf}"
 [ -r "$INSTALL_CONF" ] || { echo "tokens-collector: нет $INSTALL_CONF — установка не завершена (01-SPEC §0)"; exit 1; }
-[ -r "$HARNESS_CONF" ] || { echo "tokens-collector: нет $HARNESS_CONF — скопируйте harness/config/harness.conf в /etc/harness/"; exit 1; }
+[ -r "$HARNESS_CONF" ] || { echo "tokens-collector: нет $HARNESS_CONF — скопируйте harness/config/harness.conf в $(konf_koren)/"; exit 1; }
 # Окружение старше конфига: общий загрузчик вместо голого source (улика
 # 12.09.2026 — проба с TMUX_SESSION в окружении сменила модель в РАБОЧЕЙ панели).
-# shellcheck disable=SC1091
-source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../../scripts/lib/konf.sh"
 konf_zagruzit
 : "${AGENT_USER:?пуст AGENT_USER}" "${LOG_DIR:?пуст LOG_DIR}" "${HEARTBEAT_DIR:?пуст HEARTBEAT_DIR}"
 
@@ -284,7 +284,7 @@ def _сегодня():
     Без явной даты самотест зависел от часа запуска: набор строился по местной
     дате, а сутки сверялись в двух поясах, и с расхождением дат проба краснела
     каждую ночь (разбор кода 11.09.2026, пункт 13). Проверка, исход которой
-    зависит от времени суток, не проверка ([[проверка-создаёт-условие]]).
+    зависит от времени суток, не проверка ([[a-check-creates-its-own-condition]]).
     """
     задано = os.environ.get("TOKENS_TODAY")
     if задано:
@@ -642,6 +642,26 @@ except OSError:
     f"фактически прошло {кратко(контекст_всего)}.",
     f"Кэш покрыл {попаданий} этого объёма — остальное оплачено как свежий вход.",
 ]
+# ПОЛНЫЕ прошедшие сутки — отдельным файлом, до перезаписи текущих.
+# СЛУЧАЙ 24.09.2026. Утренняя сводка уходит в 08:00 и несёт отчёт, который к
+# этому часу накопил ВОСЕМЬ часов, а озаглавлен «РАСХОД ЗА СУТКИ». Владелец
+# прочитал «шагов 1», хотя за те сутки модель звали четыре раза, и спросил:
+# «Почему когда был простой показывает расход». Врал не счётчик — врало слово
+# «сутки» над неполным днём.
+#
+# Копия снимается ДО перезаписи и только когда день сменился: файл на диске
+# озаглавлен своей датой, и она же говорит, законченный он или текущий.
+прежний = ""
+try:
+    прежний = open(report_path, encoding="utf-8").readline()
+except OSError:
+    прежний = ""
+if прежний and today not in прежний:
+    try:
+        write_atomic(report_path + ".вчера",
+                     open(report_path, encoding="utf-8").read(), mode=0o644)
+    except OSError:
+        pass       # копия — удобство сводки, её отказ не вправе ронять сбор
 write_atomic(report_path, "\n".join(отчёт) + "\n", mode=0o644)
 
 # Те же числа МАШИНЕ. Панель читала их из текста выше, выискивая значения по

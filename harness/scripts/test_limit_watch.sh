@@ -36,8 +36,8 @@ trap 'rm -rf "$STAND"' EXIT
 STAND_PROJECT="$STAND/proekt"
 TR_DIR_NAME="${STAND_PROJECT//\//-}"
 mkdir -p "$STAND/proekt/scripts/lib" "$STAND/zhurnal" "$STAND/transkripty/$TR_DIR_NAME"
-cp "$HERE/limit-v-zhurnale.py" "$STAND/proekt/scripts/"
-cp "$HERE/lib/konf.sh" "$STAND/proekt/scripts/lib/"
+cp "$HERE/limit-in-log.py" "$HERE/stall-in-log.py" "$HERE/limit_mark.py" "$STAND/proekt/scripts/"
+cp "$HERE/lib/config.sh" "$HERE/lib/config.py" "$STAND/proekt/scripts/lib/"
 cat > "$STAND/proekt/scripts/tg_send.sh" <<'KANAL'
 #!/usr/bin/env bash
 printf '%s\n' "$1" >> "$LOG_DIR/kanal.txt"
@@ -56,19 +56,36 @@ progon() {  # запускает сторожа на стенде
 
 skazano() { grep -c . "$STAND/zhurnal/kanal.txt" 2>/dev/null || echo 0; }
 
-otkaz_nazad() {  # $1 = сколько секунд назад был отказ 429
-    python3 - "$TRANSCRIPT" "$1" <<'PY'
+# Жизнь смены задаётся ЗАПИСЬЮ УСПЕШНОГО ОТВЕТА, а не `touch` (ревью 27.09,
+# F-01). Прежний стенд оживлял смену прикосновением к файлу — и тем кодировал
+# в пробе тот самый дефект, который она должна ловить: сторож считал работой
+# любую дописанную строку, включая отказ 429 и пинок сторожа. Проба, задающая
+# условие тем же неверным способом, что и код, не проверяет ничего.
+zhurnal() {  # $1 = секунд назад успешный ответ (или «нет»), $2 = секунд назад отказ
+    python3 - "$TRANSCRIPT" "$1" "$2" <<'ZH'
 import datetime, json, sys, time
-момент = datetime.datetime.fromtimestamp(time.time() - int(sys.argv[2]), datetime.UTC)
-with open(sys.argv[1], "w", encoding="utf-8") as файл:
-    файл.write(json.dumps({"error": "rate_limit",
-                           "timestamp": момент.isoformat()}) + "\n")
-PY
+путь, ответ, отказ = sys.argv[1], sys.argv[2], sys.argv[3]
+
+
+def метка(сек):
+    момент = datetime.datetime.fromtimestamp(time.time() - int(сек), datetime.UTC)
+    return момент.isoformat()
+
+
+строки = []
+if ответ != "нет":
+    строки.append(json.dumps({"type": "assistant", "timestamp": метка(ответ)}))
+if отказ != "нет":
+    строки.append(json.dumps({"type": "assistant", "error": "rate_limit",
+                              "isApiErrorMessage": True, "apiErrorStatus": 429,
+                              "timestamp": метка(отказ)}))
+with open(путь, "w", encoding="utf-8") as файл:
+    файл.write("\n".join(строки) + ("\n" if строки else ""))
+ZH
 }
 
 echo "── БОЛЬНОЙ СЛУЧАЙ: свежий отказ 429, смена молчит ──"
-otkaz_nazad 60
-touch -d "4 minutes ago" "$TRANSCRIPT"
+zhurnal 240 60
 progon
 itog "1" "$(skazano)" "о лимите сказано с ПЕРВОГО обхода"
 itog "да" "$([ -f "$STAND/zhurnal/лимит-подписки.состояние" ] && echo да || echo нет)" \
@@ -83,8 +100,7 @@ echo "── БОЛЬНОЙ СЛУЧАЙ 13.09: журнал свеж, но от
 # эти сообщения пока она стоит… Зачем мне этот спам». Пока сессия стоит в
 # лимите, каждая её попытка дописывает в журнал запись об ОТКАЗЕ и обновляет
 # время файла — свежесть журнала сама по себе работой не является.
-otkaz_nazad 60
-touch "$TRANSCRIPT"
+zhurnal 1500 60
 progon
 itog "1" "$(skazano)" "о возобновлении молчим, пока отказ свежий"
 itog "да" "$([ -f "$STAND/zhurnal/лимит-подписки.состояние" ] && echo да || echo нет)" \
@@ -93,30 +109,48 @@ itog "да" "$([ -f "$STAND/zhurnal/лимит-подписки.состояни
 echo "── смена ожила: о возобновлении говорим СРАЗУ ──"
 # Работа пошла = свежих отказов в журнале больше нет. Старый отказ остаётся
 # историей, а не признаком остановки.
-otkaz_nazad 3600
-touch "$TRANSCRIPT"
+zhurnal 30 3600
 progon
 itog "2" "$(skazano)" "о возобновлении сказано на первом же обходе"
 itog "нет" "$([ -f "$STAND/zhurnal/лимит-подписки.состояние" ] && echo да || echo нет)" \
      "метка снята"
+# БОЛЬНОЙ СЛУЧАЙ 27.09.2026 (снимок владельца): прибор объявил «Упёрся в лимит
+# подписки», а через 12 минут — «Признака лимита не было». Повод терялся,
+# потому что этот демон писал в метку одно поле, а читали оба демона два.
+# Проба считала СООБЩЕНИЯ и текста не читала, поэтому дефект жил.
+itog "да" "$(grep -q 'Лимит обновился' "$STAND/zhurnal/kanal.txt" && echo да || echo нет)" \
+     "весть о возобновлении называет ЛИМИТ, а не «признака не было»"
+itog "нет" "$(grep -q 'Признака лимита не было' "$STAND/zhurnal/kanal.txt" && echo да || echo нет)" \
+     "и не опровергает сама себя"
 
 echo "── БОЛЬНОЙ СЛУЧАЙ: старый отказ при молчащей смене — тревоги нет ──"
-otkaz_nazad 3600
-touch -d "4 minutes ago" "$TRANSCRIPT"
+zhurnal 240 3600
 progon
 itog "2" "$(skazano)" "прошедший лимит владельца не будит"
 
 echo "── отказ свежий, но смена ПИШЕТ: помощник упал, работа идёт ──"
-otkaz_nazad 60
-touch "$TRANSCRIPT"
+zhurnal 30 60
 progon
 itog "2" "$(skazano)" "живая смена с упавшим помощником тревоги не даёт"
 
 echo "── отказов нет вовсе ──"
-printf '%s\n' '{"type":"assistant","timestamp":"2026-09-13T00:00:00Z"}' > "$TRANSCRIPT"
-touch -d "4 minutes ago" "$TRANSCRIPT"
+zhurnal 240 нет
 progon
 itog "2" "$(skazano)" "чистый журнал — молчание"
+
+echo "── БОЛЬНОЙ СЛУЧАЙ 26.09 (ревью 27.09, F-01): файл пишется, работа стоит ──"
+# Сторож сессий в 21:20 пишет «тишина 25 мин — пробую разбудить смену», и его
+# пинок дописывает строку в журнал. Прежний прибор смотрел на время ФАЙЛА и
+# в 21:21 объявлял владельцу «работа пошла снова, простой 0 мин». Таких
+# «простой 0 мин» в боевом журнале пять.
+zhurnal 1500 60          # успешного ответа нет 25 минут, отказ свежий
+progon
+itog "3" "$(skazano)" "о новом лимите сказано"
+zhurnal 1500 400         # отказ уже не свежий, строки в журнал дописаны
+progon
+itog "3" "$(skazano)" "дописанные строки возобновлением не считаются"
+itog "да" "$([ -f "$STAND/zhurnal/лимит-подписки.состояние" ] && echo да || echo нет)" \
+     "метка на месте: успешного ответа не было 25 минут"
 
 printf '\nЛИМИТ-СТОРОЖ: путей %d, неудач %d\n' "$paths" "$fails"
 [ "$fails" -eq 0 ]

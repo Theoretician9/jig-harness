@@ -1,5 +1,20 @@
 # Шаблоны
 
+> **ЭТО СЕМЕНА ПЕРВОЙ УСТАНОВКИ, А НЕ ЖИВОЙ КОД.** Замер 27.09.2026: все
+> двенадцать семян, у которых есть живой двойник, разошлись с ним на 113–754
+> строки и не обновлялись с самого начала; всего кодовых семян здесь 17. Установка берёт код НЕ отсюда: раскладка
+> (`harness/razlozhit-harnes.sh`) копирует `harness/scripts` и `harness/hooks`
+> пакета. Правка семени не проявится нигде.
+>
+> Каждое кодовое семя первыми строками называет свой живой файл; у `*.json`
+> метка лежит в файле-соседе `*.ЧИТАЙ-МЕНЯ.md`. Держит это гейт
+> `scripts/check-seed-templates.py` (13 путей самотеста) — чтобы новое семя не
+> легло сюда молча и не притворилось живым.
+>
+> Зачем семена вообще остались: главы писались по ним, и текст глав на них
+> ссылается. Сборщик скилов (`harness/BUILD-SKILLS.py`) переписывает эти ссылки
+> на живые пути, так что в скилах адреса верные.
+
 Файлы под копирование в новый проект. Собраны из двух рабочих харнесов; в описи
 источник помечен: **AIE** и **CF**. Часть файлов — рабочие, снятые с живых серверов:
 логика переносится как есть, а проектные места заменены плейсхолдерами вида
@@ -21,7 +36,7 @@
 | Файл | Что делает | Откуда | Перенос: что подгонять |
 |---|---|---|---|
 | `CLAUDE.md` | правила агента, шаблон с плейсхолдерами | AIE | обзор, стек, инварианты, команды, пути |
-| `pre-commit-hook.sh` | гейты коммита по тирам T1–T3, выбор по составу staged-файлов | AIE | команды тестов/типов/сборок, `<домен>` для health, состав сервисов T3 |
+| `pre-commit-gate.sh` | гейты коммита по тирам T1–T3, выбор по составу staged-файлов | AIE | команды тестов/типов/сборок, `<домен>` для health, состав сервисов T3 |
 | `deploy.sh` | деплой: сборка → миграции → health → снимок карты → самопочинки | AIE | имена сервисов, health-url (порт), команда миграций |
 | `deploy_guard.py` | **ворота ПЕРЕД выкатом**: идут ли долгие задачи, чужой деплой, выкат в пути | CF | ВЕСЬ блок `НАСТРОЙКИ` вверху: скрипт с заполнителями намеренно неработоспособен, пока не подставишь свои контейнеры, запрос и репозиторий |
 | `check-secrets.sh` | секреты не пустые и не дефолтные, перед деплоем | AIE | путь `/opt/<проект>/secrets/.env`, список обязательных секретов |
@@ -35,7 +50,7 @@
 | `hooks/stop_reminder.sh` | Stop: напоминание о непушнутом и работе без трейлера | AIE | `/opt/<проект>` |
 | `disk-cleanup.sh` | ночная уборка диска: логи → образы → кеш сборок → теги отката → кеши → сироты → отходы расширений | CF | всё окружением: `KEEP_ROLLBACK`, `BUILD_CACHE_KEEP_H`, `ORPHAN_MIN_AGE_SEC`, `ORPHAN_PATTERN` (имена своих помощников), `MEM_LOG_DIR`/`MEM_SESSION_DIR` + сроки, канал оповещения (`TELEGRAM_ENV_FILE`, `OWNER_CHAT_ID`) |
 | `server_hygiene_check.py` | сторож гигиены сервера: потолки памяти, restart-политики, порты на петле, актуальность границ по пикам, диск/своп | CF | `БЕЗ_ПОТОЛКА` (свои исключения — с причиной у каждого), `НАРУЖУ_МОЖНО`, `ПРОМЕТЕЙ`, `ПРЕФИКС_КОНТЕЙНЕРОВ`, пороги |
-| `rasshifrovat_golos.py` | голосовое владельца → текст (речевая модель); образец мультимодального прибора | CF | как есть; источник `OPENAI_API_KEY` + обязательная строка в памяти «пришло голосовое → расшифровать» |
+| `transcribe_voice.py` | голосовое владельца → текст (речевая модель); образец мультимодального прибора | CF | как есть; источник `OPENAI_API_KEY` + обязательная строка в памяти «пришло голосовое → расшифровать» |
 | `dev-map.yaml` | скелет манифеста карты разработки | AIE | направления, задачи |
 | `spec-template.md` | шаблон спеки | AIE | — |
 | `plan-template.md` | шаблон плана реализации | AIE | — |
@@ -72,16 +87,16 @@ cp CLAUDE.md <repo>/CLAUDE.md
 
 # гейты коммита
 mkdir -p <repo>/.tasks/_config
-cp pre-commit-hook.sh <repo>/.tasks/_config/
-chmod +x <repo>/.tasks/_config/pre-commit-hook.sh
-cd <repo> && ln -sf ../../.tasks/_config/pre-commit-hook.sh .git/hooks/pre-commit
+cp pre-commit-gate.sh <repo>/.tasks/_config/
+chmod +x <repo>/.tasks/_config/pre-commit-gate.sh
+cd <repo> && ln -sf ../../.tasks/_config/pre-commit-gate.sh .git/hooks/pre-commit
 echo ".tasks/*/" >> .gitignore        # артефакты задач не коммитим, _config — коммитим
 
 # скрипты (AIE + CF в один каталог)
 mkdir -p <repo>/scripts
 cp deploy.sh deploy_guard.py check-secrets.sh devmap-selfheal.sh \
    check-context-hygiene.py fix-claude-mem-project.py \
-   disk-cleanup.sh server_hygiene_check.py rasshifrovat_golos.py <repo>/scripts/
+   disk-cleanup.sh server_hygiene_check.py transcribe_voice.py <repo>/scripts/
 chmod +x <repo>/scripts/*.sh <repo>/scripts/*.py
 
 # хуки проекта (версионируются вместе с репозиторием)
@@ -115,7 +130,7 @@ scripts/server_hygiene_check.py --только-compose   # шаг CI перед 
 ниже его пика и убедись, что `server_hygiene_check.py` ругается; раздуй `STATE.md` за
 потолок и убедись, что коммит не проходит.
 
-Для `rasshifrovat_golos.py` обязательная часть — строка в таблице условий памяти
+Для `transcribe_voice.py` обязательная часть — строка в таблице условий памяти
 («пришло голосовое → расшифровать», см. [03-ПАМЯТЬ.md]): без неё после перезапуска
 сессии агент снова ответит «не умею».
 
@@ -132,5 +147,5 @@ scripts/server_hygiene_check.py --только-compose   # шаг CI перед 
   свойство при адаптации.
 - Скрипты ссылаются друг на друга по именам из этого каталога
   (`deploy.sh` → `devmap-selfheal.sh`, `fix-claude-mem-project.py`;
-  `pre-commit-hook.sh` и `hooks/session_state.sh` → `check-context-hygiene.py`;
+  `pre-commit-gate.sh` и `hooks/session_state.sh` → `check-context-hygiene.py`;
   `hooks/guard_bash.py` → `deploy.sh`). Переименовываешь — правь ссылки.

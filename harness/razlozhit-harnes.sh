@@ -69,14 +69,14 @@ EOF
 
   # генератор скилов на сервере работоспособен: источники PACKAGE: доставлены,
   # главы UNIFIED на месте. Проверяется прогоном, а не наличием файлов.
-  if python3 "$T/proj/harness/SBORKA-SKILOV.py" >/dev/null 2>"$T/скилы.err"; then :; else
+  if python3 "$T/proj/harness/BUILD-SKILLS.py" >/dev/null 2>"$T/скилы.err"; then :; else
     echo "SELFTEST: пересборка скилов на разложенном сервере упала: $(tr '\n' ' ' < "$T/скилы.err" | cut -c1-200)"; ok_flag=0
   fi
   # возможности доставлены целиком и исполняемы
-  for f in "$T/proj/harness/vozmozhnosti/mobilnaya-razrabotka/ustanovit.sh" \
+  for f in "$T/proj/harness/vozmozhnosti/mobilnaya-razrabotka/install.sh" \
            "$T/proj/harness/vozmozhnosti/mobilnaya-razrabotka/МАНИФЕСТ.conf" \
            "$T/proj/harness/vozmozhnosti/mobilnaya-razrabotka/bin/mobile-loop" \
-           "$T/proj/scripts/vozmozhnost.sh"; do
+           "$T/proj/scripts/capability.sh"; do
     [[ -f "$f" ]] || { echo "SELFTEST: нет $f"; ok_flag=0; }
   done
   # метка установки — живые данные: повторная доставка кода НЕ должна её снимать,
@@ -146,7 +146,7 @@ fi
 # берётся ИЗ ПАКЕТА: в проекте его ещё нет, раскладка сама его и кладёт.
 INSTALL_CONF="$CONF"
 # shellcheck disable=SC1091
-source "$HERE/scripts/lib/konf.sh"
+source "$HERE/scripts/lib/config.sh"
 konf_zagruzit
 [[ -n "${PROJECT_DIR:-}" ]] || { echo "PROJECT_DIR пуст в $CONF"; exit 1; }
 
@@ -291,12 +291,12 @@ if [[ -d "$HERE/vozmozhnosti" ]]; then
   # Имя файла кода — латиницей (задача hr.имена-файлов-латиницей): под старым
   # именем «установить.sh» chmod не находил ничего, и на чистой установке
   # ставильщик возможности приезжал без флага исполнения (12.09.2026).
-  chmod +x "$PROJECT_DIR"/harness/vozmozhnosti/*/ustanovit.sh 2>/dev/null || true
+  chmod +x "$PROJECT_DIR"/harness/vozmozhnosti/*/install.sh 2>/dev/null || true
   chmod +x "$PROJECT_DIR"/harness/vozmozhnosti/*/bin/* 2>/dev/null || true
   rm -rf "$MARKS"
   echo "возможности доставлены: $(cd "$PROJECT_DIR/harness/vozmozhnosti" && printf '%s ' */ 2>/dev/null)"
 fi
-cp -f "$HERE"/SBORKA-SKILOV.py "$HERE"/ОПИСЬ.md "$PROJECT_DIR/harness/"
+cp -f "$HERE"/BUILD-SKILLS.py "$HERE"/ОПИСЬ.md "$PROJECT_DIR/harness/"
 [[ -f "$HERE/README-ПЛАГИН.md" ]] && cp -f "$HERE/README-ПЛАГИН.md" "$PROJECT_DIR/harness/"
 [[ -d "$HERE/.claude-plugin" ]] && cp -rf "$HERE/.claude-plugin" "$PROJECT_DIR/harness/"
 # CLAUDE.md проекта — ЖИВОЙ файл: в нём правила этого проекта, дополненные
@@ -389,7 +389,7 @@ fi
 
 # pre-commit: симлинк, если репозиторий уже есть
 if [[ -d "$PROJECT_DIR/.git" ]]; then
-  ln -sf ../../scripts/pre-commit-hook.sh "$PROJECT_DIR/.git/hooks/pre-commit"
+  ln -sf ../../scripts/pre-commit-gate.sh "$PROJECT_DIR/.git/hooks/pre-commit"
   echo "pre-commit подключён симлинком"
 else
   echo "репозитория ещё нет — после git init повторить раскладку (подключит pre-commit)"
@@ -398,7 +398,7 @@ fi
 # Раскладка КОПИРУЕТ и никогда не убирает: файл, переименованный в проекте,
 # возвращается из пакета вторым экземпляром. 11.09.2026 так вернулись пять
 # кириллических имён кода наутро после выката задачи об их переводе — и рядом
-# с `гейты/proverka-petli.py` встал старый `гейты/проверка-петли.py`, который
+# с `гейты/loop-check.py` встал старый `гейты/проверка-петли.py`, который
 # pre-commit запускает тем же `гейты/*.py`. Раскладка обязана сказать об этом
 # сама: гейт имён судит список коммита и такой возврат не видит.
 vernuvshiesya=$(find "$PROJECT_DIR/harness" "$PROJECT_DIR/scripts" "$PROJECT_DIR/UNIFIED" \
@@ -417,11 +417,11 @@ fi
 # руками в первый день, — и на чистой установке агент оставался БЕЗ СКИЛОВ,
 # хотя каталог harness/skills выглядел полным (улика 12.09.2026). Связывает сам
 # генератор; здесь он же и пересобирает скилы под доставленные возможности.
-if ! python3 "$PROJECT_DIR/harness/SBORKA-SKILOV.py"; then
+if ! python3 "$PROJECT_DIR/harness/BUILD-SKILLS.py"; then
   echo
   echo "ОТКАЗ: скилы не пересобраны и НЕ СВЯЗАНЫ с оболочкой."
   echo "Агент их не увидит: оболочка читает $PROJECT_DIR/.claude/skills."
-  echo "Починка: python3 $PROJECT_DIR/harness/SBORKA-SKILOV.py — причина выше."
+  echo "Починка: python3 $PROJECT_DIR/harness/BUILD-SKILLS.py — причина выше."
   exit 1
 fi
 

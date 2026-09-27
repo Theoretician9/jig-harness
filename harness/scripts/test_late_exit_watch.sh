@@ -18,7 +18,7 @@ set -euo pipefail
 
 # Переехал из harness/demons/ 10.09.2026 (ревизия): тест в каталоге демонов не
 # запускал никто — ни cron, ни systemd, ни ворота. Теперь он рядом с другими
-# проверками и входит в «vorota.sh --всё».
+# проверками и входит в «gates.sh --всё».
 DAEMON="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/harness/demons/session-warden.sh"
 T=$(mktemp -d); ok=1
 PANE="warden-latewatch-$$"

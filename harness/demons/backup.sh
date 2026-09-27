@@ -28,14 +28,14 @@
 # Запуск: cron, ночью, от имени $AGENT_USER.
 set -euo pipefail
 
-INSTALL_CONF="${HARNESS_INSTALL_CONF:-${INSTALL_CONF:-/etc/harness/install.conf}}"
-HARNESS_CONF="${HARNESS_CONF:-/etc/harness/harness.conf}"
+# shellcheck disable=SC1091
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../../scripts/lib/config.sh"
+INSTALL_CONF="${HARNESS_INSTALL_CONF:-${INSTALL_CONF:-$(konf_koren)/install.conf}}"
+HARNESS_CONF="${HARNESS_CONF:-$(konf_koren)/harness.conf}"
 [ -r "$INSTALL_CONF" ] || { echo "backup: нет $INSTALL_CONF — установка не завершена (01-SPEC §0)"; exit 1; }
-[ -r "$HARNESS_CONF" ] || { echo "backup: нет $HARNESS_CONF — скопируйте harness/config/harness.conf в /etc/harness/"; exit 1; }
+[ -r "$HARNESS_CONF" ] || { echo "backup: нет $HARNESS_CONF — скопируйте harness/config/harness.conf в $(konf_koren)/"; exit 1; }
 # Окружение старше конфига: общий загрузчик вместо голого source (улика
 # 12.09.2026 — проба с TMUX_SESSION в окружении сменила модель в РАБОЧЕЙ панели).
-# shellcheck disable=SC1091
-source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../../scripts/lib/konf.sh"
 konf_zagruzit
 : "${PROJECT_DIR:?пуст PROJECT_DIR}" "${HEARTBEAT_DIR:?пуст HEARTBEAT_DIR}" "${LOG_DIR:?пуст LOG_DIR}"
 : "${BACKUP_DIR:?пуст BACKUP_DIR}" "${BACKUP_KEEP_DAYS:?пуст BACKUP_KEEP_DAYS}"
@@ -72,8 +72,63 @@ if [ "${1:-}" = "--selftest" ]; then
     проба да  "$tmp/полный.sql"     "дамп дочитан до маркера конца — бэкап"
     проба нет "$tmp/пустой.sql"     "пустой файл — не бэкап"
     проба нет "$tmp/нет-такого.sql" "файла нет вовсе — не бэкап"
+
+    # ── БОЛЬНОЙ СЛУЧАЙ 21.09.2026: продукт выключен намеренно ────────────────
+    # Владелец велел погасить продукт совсем. Его база тогда не работает,
+    # команда дампа падает — и ночной бэкап считал бы это неудачей КАЖДУЮ
+    # ночь. Сторож, который кричит всегда, перестаёт быть сторожем.
+    # Проба СТРОИТ условие: свой проект, своя команда дампа, которая падает.
+    stend="$tmp/стенд"
+    mkdir -p "$stend/proekt" "$stend/backup" "$stend/log/locks" "$stend/hb"
+    ( cd "$stend/proekt" && git init -q . && echo x > a.txt && git add -A \
+      && git -c user.name=t -c user.email=t@t commit -qm проба ) >/dev/null 2>&1
+    cat > "$stend/install.conf" <<CONF
+PROJECT_DIR="$stend/proekt"
+LOG_DIR="$stend/log"
+HEARTBEAT_DIR="$stend/hb"
+CONF
+    cat > "$stend/harness.conf" <<CONF
+BACKUP_DIR="$stend/backup"
+BACKUP_KEEP_DAYS=14
+BACKUP_DBS="проба=false"
+CONF
+    # `|| true` у вызывающих обязателен: под `set -e` ненулевой код демона
+    # (а он ненулевой ровно в проверяемом случае) убил бы сам самотест.
+    progon_backup() {  # $1 — путь к состоянию выключения (может не существовать)
+        HARNESS_INSTALL_CONF="$stend/install.conf" HARNESS_CONF="$stend/harness.conf" \
+        PRODUCT_POWER_STATE="$1" bash "$0" 2>&1
+    }
+
+    # Здоровая жизнь: продукт работает, команда дампа упала — это НЕУДАЧА.
+    vyvod=$(progon_backup "$stend/нет.json" || true)
+    if printf '%s' "$vyvod" | grep -q "НЕ бэкап"; then
+        echo "  ок    продукт работает, дамп упал — это неудача, как и было"
+    else
+        echo "  ПЛОХО упавший дамп перестал быть неудачей"; ok=0
+    fi
+
+    # Продукт выключен владельцем: не неудача, но и НЕ молчание.
+    printf '{"когда":"2026-09-21T09:00:00","контейнеры":["a"],"сайт":1,"cron":1}' \
+        > "$stend/выключен.json"
+    vyvod=$(progon_backup "$stend/выключен.json" || true)
+    if printf '%s' "$vyvod" | grep -q "ВЫКЛЮЧЕН владельцем"; then
+        echo "  ок    БОЛЬНОЙ СЛУЧАЙ 21.09: выключенный продукт назван словами, а не молча пропущен"
+    else
+        echo "  ПЛОХО про выключенный продукт в журнале ни слова"; ok=0
+    fi
+    if ! printf '%s' "$vyvod" | grep -q "НЕ бэкап"; then
+        echo "  ок    выключенный продукт не считается неудачей бэкапа"
+    else
+        echo "  ПЛОХО выключенный продукт всё ещё красит бэкап каждую ночь"; ok=0
+    fi
+    if printf '%s' "$vyvod" | grep -q "ВЫКЛЮЧЕН владельцем (2026-09-21T09:00:00)"; then
+        echo "  ок    в журнале названа ДАТА выключения — состояние не безымянно"
+    else
+        echo "  ПЛОХО дата выключения в журнал не попала"; ok=0
+    fi
+
     rm -rf "$tmp"
-    (( ok )) && { echo "SELFTEST: зелёный (4 пути проверки дампа, первым — больной случай «оборван на середине»)"; exit 0; }
+    (( ok )) && { echo "SELFTEST: зелёный (8 путей: 4 на проверку дампа, 4 на выключенный продукт)"; exit 0; }
     echo "SELFTEST: КРАСНЫЙ"; exit 1
 fi
 
@@ -135,12 +190,16 @@ else
     FAILURES=$((FAILURES + 1))
 fi
 
-# ── 4. /etc/harness ─────────────────────────────────────────────────────────
-if tar -czf "$DEST/etc-harness.tar.gz" -C / etc/harness 2>/dev/null \
+# ── 4. корень установки (конфиги) ──────────────────────────────────────────
+# Путь берётся от КОРНЯ: зашитое «/etc/harness» на чужой машине сохраняло бы
+# пустоту и отчитывалось «сохранено» (владелец 21.09: «ставить на любую машину»).
+KOREN_UST="$(konf_koren)"
+if tar -czf "$DEST/etc-harness.tar.gz" -C "$(dirname "$KOREN_UST")" \
+        "$(basename "$KOREN_UST")" 2>/dev/null \
    && tar -tzf "$DEST/etc-harness.tar.gz" >/dev/null 2>&1; then
-    say "4. /etc/harness сохранён (tar -tzf — OK)"
+    say "4. $KOREN_UST сохранён (tar -tzf — OK)"
 else
-    say "4. /etc/harness НЕ сохранён или архив не листается"
+    say "4. $KOREN_UST НЕ сохранён или архив не листается"
     rm -f "$DEST/etc-harness.tar.gz"
     FAILURES=$((FAILURES + 1))
 fi
@@ -151,7 +210,31 @@ fi
 # внутри команды дампа законны и «;», и «|», резать по ним нельзя).
 # Команда пишет дамп в stdout, мы кладём его в файл. Появится продукт
 # с базой — добавьте строку в harness.conf, код не трогается.
-if [ -n "${BACKUP_DBS:-}" ]; then
+# Продукт может быть ВЫКЛЮЧЕН НАМЕРЕННО (scripts/product-power.sh): тогда его
+# контейнер с базой не работает, команда дампа падает, и ночной бэкап считал бы
+# это неудачей КАЖДУЮ ночь. Сторож, который кричит всегда, перестаёт быть
+# сторожем — его отключают, и вместе с ним исчезает настоящий сигнал.
+#
+# Молча пропускать тоже нельзя ([[disable-a-dangerous-mechanism-by-data]]: спящий
+# механизм выглядит живым). Поэтому строка в журнале называет и состояние, и
+# дату выключения, и где лежит последний дамп — тот, что снял сам выключатель
+# перед остановкой.
+PRODUCT_POWER_STATE="${PRODUCT_POWER_STATE:-$PANEL_STATE_DIR/product-power.json}"
+if [ -s "$PRODUCT_POWER_STATE" ]; then
+    KOGDA=$(python3 -c "
+import json, sys
+try:
+    print(json.load(open(sys.argv[1], encoding='utf-8')).get('когда', 'дата неизвестна'))
+except Exception:
+    print('дата нечитаема')
+" "$PRODUCT_POWER_STATE" 2>/dev/null || echo "дата нечитаема")
+    # `|| true` обязателен: под set -e + pipefail отсутствие файлов роняет
+    # весь демон, и бэкап не доходит до ротации ([[failure-under-set-e-is-silent]]).
+    POSLEDNIJ=$(ls -1t "$BACKUP_DIR"/produkt-pered-vykluchenim-*.dump 2>/dev/null | head -1 || true)
+    say "5. базы продукта не копируем: продукт ВЫКЛЮЧЕН владельцем ($KOGDA)."
+    say "   Последний дамп: ${POSLEDNIJ:-не найден — это повод разобраться}"
+    say "   Включить обратно: bash scripts/product-power.sh on"
+elif [ -n "${BACKUP_DBS:-}" ]; then
     while IFS= read -r entry; do
         entry=$(printf '%s' "$entry" | sed 's/^ *//;s/ *$//')
         [ -n "$entry" ] || continue

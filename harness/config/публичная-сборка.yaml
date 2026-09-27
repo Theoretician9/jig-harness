@@ -1,4 +1,4 @@
-# ДАННЫЕ публичной сборки. Читает harness/scripts/sobrat-publichnoe.py.
+# ДАННЫЕ публичной сборки. Читает harness/scripts/build-public.py.
 #
 # Ни одного литерала конкретной установки: этот файл САМ едет в сборку вместе
 # со сборщиком, и вписанный сюда путь или номер чата сделал бы гейт чистоты
@@ -20,12 +20,12 @@
 # в README объяснение каждого верхнего каталога.
 #
 # Кто ищет UNIFIED после переноса: раскладчик (razlozhit-harnes.sh) и генератор
-# скилов (SBORKA-SKILOV.py) — оба знают обе раскладки, старую и новую.
+# скилов (BUILD-SKILLS.py) — оба знают обе раскладки, старую и новую.
 перенести:
   UNIFIED: sluzhebnoe/UNIFIED
 
 # Файл едет, но своей заготовкой. Замер речи владельца — его личные данные;
-# заготовка несёт машинную строку потолков, которую читает check-perepiska.py.
+# заготовка несёт машинную строку потолков, которую читает check-channel-messages.py.
 заменить_шаблоном:
   harness/память/ТОН.md: harness/шаблоны-задач/ТОН-заготовка.md
 
@@ -51,7 +51,7 @@
   - harness/память/MEMORY.md
   - harness/память/ТОН.md
   - harness/dev-map.yaml
-  - harness/scripts/publikaciya.sh
+  - harness/scripts/publish.sh
   - harness/config/публичная-сборка.yaml
   - USTANOVIT.sh
   - README.md
