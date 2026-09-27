@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Ворота деплоя: не выкатывать, пока идёт долгая работа или чужой выкат.
 
-Откуда взят: UNIFIED/templates/deploy_guard.py (живой скрипт боевого сервера).
+Откуда взят: UNIFIED/templates/deploy_guard.py — СЕМЯ первой установки, а не
+живой код: оно отстало и не обновляется (замер 27.09.2026).
 Что изменено: источники занятости переведены на то, что есть на чистом сервере
 без базы задач и без CI — lock-файлы в $LOG_DIR/locks/ и живые долгие процессы
 claude/тестов. Проверки «спросить базу задач» и «спросить CI про автодеплой»
@@ -51,8 +52,11 @@ import sys
 import time
 
 # ── конфиг: KEY="value", без исполнения файла ───────────────────────────────
-CONF_PATH = os.environ.get("HARNESS_INSTALL_CONF", "/etc/harness/install.conf")
-HARNESS_CONF_PATH = os.environ.get("HARNESS_CONF", "/etc/harness/harness.conf")
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent / "lib"))
+import config as конф                                     # noqa: E402
+
+CONF_PATH = конф.путь_install_conf()
+HARNESS_CONF_PATH = конф.путь_harness_conf()
 
 
 def read_conf(path: str = CONF_PATH) -> dict:
@@ -79,7 +83,7 @@ def read_conf(path: str = CONF_PATH) -> dict:
 # и без этой двери они спрашивали бы БОЕВОЙ журнал согласий (поймано 11.09.2026
 # самотестом двери удаления базы сразу после перевода её на общее правило).
 LOG_DIR = pathlib.Path(os.environ.get("HARNESS_LOG_DIR")
-                       or КОНФИГ.get("LOG_DIR") or "/var/log/harness")
+                       or КОНФИГ.get("LOG_DIR") or конф.log_dir())
 LOCKS = LOG_DIR / "locks"
 # Б-1: сервисные локи (диспетчер и прочие долгоживущие) лежат в подкаталоге —
 # ворота смотрят ТОЛЬКО операционные локи верхнего уровня, иначе вечный лок
@@ -303,7 +307,7 @@ def _секунды_ts(ts) -> float | None:
 # знали только выкат, и push встал при данном разрешении. Правило то же, что
 # у выката, и живёт рядом с ним, чтобы не разошлось.
 ПРЕДМЕТ_ОТПРАВКИ = re.compile(r"гит|git|пуш|push|отправ")
-# Удаление базы — третье действие наружу (дверь scripts/ubrat-bazu.sh). До
+# Удаление базы — третье действие наружу (дверь scripts/drop-database.sh). До
 # 11.09.2026 у неё было СВОЁ правило согласия без предмета: любое «да» за час
 # открывало снос базы. Предмет назван здесь, рядом с двумя другими, чтобы не
 # разошлось снова.

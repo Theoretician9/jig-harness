@@ -1,4 +1,5 @@
 #!/bin/bash
+# СЕМЯ ПЕРВОЙ УСТАНОВКИ, НЕ ЖИВОЙ КОД. Живой файл: scripts/check-secrets.sh — правки туда и в пакет.
 set -e
 ENV_FILE="${1:-/opt/<проект>/secrets/.env}"
 

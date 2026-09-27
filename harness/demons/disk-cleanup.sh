@@ -7,8 +7,9 @@
 # улетел до 201 — и всё это накопилось незаметно, потому что никто ничего
 # не убирал, а мониторинг хост не видел вовсе.
 #
-# Откуда взят: UNIFIED/templates/disk-cleanup.sh (живой скрипт боевого
-# сервера), плейсхолдеры заменены на чтение /etc/harness/{install,harness}.conf.
+# Откуда взят: UNIFIED/templates/disk-cleanup.sh — СЕМЯ первой установки, а не
+# живой код: оно отстало и не обновляется (замер 27.09.2026), плейсхолдеры
+# заменены на чтение /etc/harness/{install,harness}.conf.
 # Чем доказывается: прогоном --dry-run на приёмке (01-SPEC §9) и первым
 # ночным прогоном; порог «диск всё ещё занят» — сообщением в канал.
 #
@@ -37,14 +38,14 @@
 set -euo pipefail
 
 # ── конфиги ─────────────────────────────────────────────────────────────────
-INSTALL_CONF="${HARNESS_INSTALL_CONF:-${INSTALL_CONF:-/etc/harness/install.conf}}"
-HARNESS_CONF="${HARNESS_CONF:-/etc/harness/harness.conf}"
+# shellcheck disable=SC1091
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../../scripts/lib/config.sh"
+INSTALL_CONF="${HARNESS_INSTALL_CONF:-${INSTALL_CONF:-$(konf_koren)/install.conf}}"
+HARNESS_CONF="${HARNESS_CONF:-$(konf_koren)/harness.conf}"
 [ -r "$INSTALL_CONF" ] || { echo "disk-cleanup: нет $INSTALL_CONF — установка не завершена (01-SPEC §0)"; exit 1; }
-[ -r "$HARNESS_CONF" ] || { echo "disk-cleanup: нет $HARNESS_CONF — скопируйте harness/config/harness.conf в /etc/harness/"; exit 1; }
+[ -r "$HARNESS_CONF" ] || { echo "disk-cleanup: нет $HARNESS_CONF — скопируйте harness/config/harness.conf в $(konf_koren)/"; exit 1; }
 # Окружение старше конфига: общий загрузчик вместо голого source (улика
 # 12.09.2026 — проба с TMUX_SESSION в окружении сменила модель в РАБОЧЕЙ панели).
-# shellcheck disable=SC1091
-source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../../scripts/lib/konf.sh"
 konf_zagruzit
 : "${HEARTBEAT_DIR:?пуст HEARTBEAT_DIR}" "${LOG_DIR:?пуст LOG_DIR}"
 

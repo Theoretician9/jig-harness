@@ -154,7 +154,7 @@ def самотест():
     # БОЛЬНОЙ СЛУЧАЙ 14.09.2026: git молчит, индекс выглядит пустым, и гейт
     # печатает «новых модулей без теста нет». Судится боевой путь целиком.
     sys.path.insert(0, str(КОРЕНЬ / "scripts" / "lib"))
-    from proba_git import гейт_краснеет_без_git
+    from git_probe import гейт_краснеет_без_git
     if гейт_краснеет_без_git(__file__, "", "индекс не прочитан") != 0:
         ok = False
     print("САМОТЕСТ %s: %d путей, первым — больной случай"
@@ -167,7 +167,7 @@ def _строгость_из_состояния(находок, строгост
     try:
         import importlib.util
         спец = importlib.util.spec_from_file_location(
-            "пайплайн", КОРЕНЬ / "scripts" / "pajplajn.py")
+            "пайплайн", КОРЕНЬ / "scripts" / "pipeline.py")
         модуль = importlib.util.module_from_spec(спец)
         спец.loader.exec_module(модуль)
         строгость, сменилась = модуль.отметить_прогон("тесты_до_кода", находок)

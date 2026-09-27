@@ -1,4 +1,4 @@
-# ДАННЫЕ расширений Claude Code. Читает scripts/rasshirenija.py.
+# ДАННЫЕ расширений Claude Code. Читает scripts/extensions.py.
 #
 # Здесь НЕТ команд: команда одна и живёт в коде (`claude plugin install`).
 # Прежняя таблица жила текстом скила СЛЭШ-формами (`/plugin install …`) — их

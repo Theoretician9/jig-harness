@@ -2,7 +2,8 @@
 #
 # deploy.sh — выкатка одной командой в гарантированном порядке.
 #
-# Откуда взят: UNIFIED/templates/deploy.sh (живой скрипт боевого сервера).
+# Откуда взят: UNIFIED/templates/deploy.sh — СЕМЯ первой установки, а не живой
+# код: оно отстало и не обновляется (замер 27.09.2026).
 # Что изменено: имена контейнеров и команды стека вынесены в /etc/harness/harness.conf
 # (секция STACK_* — данные, не код); добавлены ворота deploy_guard.py, тег выката,
 # снимок образов :previous и авто-откат на него при мёртвом health, пересборка
@@ -30,8 +31,9 @@
 set -euo pipefail
 
 # ── конфиги ─────────────────────────────────────────────────────────────────
-INSTALL_CONF="${HARNESS_INSTALL_CONF:-/etc/harness/install.conf}"
-HARNESS_CONF="${HARNESS_CONF:-/etc/harness/harness.conf}"
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/lib/config.sh"
+INSTALL_CONF="${HARNESS_INSTALL_CONF:-$(konf_koren)/install.conf}"
+HARNESS_CONF="${HARNESS_CONF:-$(konf_koren)/harness.conf}"
 [ -r "$INSTALL_CONF" ] || { echo "deploy: нет $INSTALL_CONF — установка не завершена (01-SPEC §0)"; exit 1; }
 # shellcheck disable=SC1090
 # Конфиги грузятся так, чтобы ОКРУЖЕНИЕ было старше файла: иначе проба с
@@ -40,7 +42,6 @@ HARNESS_CONF="${HARNESS_CONF:-/etc/harness/harness.conf}"
 # Путь берётся по РЕАЛЬНОМУ файлу (readlink -f): pre-commit подключён в
 # .git/hooks симлинком, и dirname дал бы .git/hooks, где библиотеки нет.
 # Поймано первым же коммитом после правки, 12.09.2026.
-source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/lib/konf.sh"
 konf_zagruzit PROJECT_DIR LOG_DIR TMUX_SESSION SECRETS_DIR AGENT_START_CMD
 # harness.conf несёт секцию STACK_*; без него продукт заведомо не задан.
 : "${PROJECT_DIR:?в install.conf пуст PROJECT_DIR}" "${LOG_DIR:?пуст LOG_DIR}"

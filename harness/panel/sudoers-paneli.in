@@ -9,9 +9,9 @@
 # Ставится только через `visudo -c -f`: битый файл в /etc/sudoers.d ломает
 # sudo на машине целиком, и чинить его будет некому — владелец терминала не
 # видит.
-harness-panel ALL=(root) NOPASSWD: /usr/bin/python3 @PROJECT_DIR@/scripts/zapisat-klyuch.py *
-harness-panel ALL=(root) NOPASSWD: /usr/bin/python3 @PROJECT_DIR@/scripts/zapisat-shag.py *
-harness-panel ALL=(root) NOPASSWD: /usr/bin/python3 @PROJECT_DIR@/scripts/zapisat-pamyat.py *
+harness-panel ALL=(root) NOPASSWD: /usr/bin/python3 @PROJECT_DIR@/scripts/write-key.py *
+harness-panel ALL=(root) NOPASSWD: /usr/bin/python3 @PROJECT_DIR@/scripts/write-step.py *
+harness-panel ALL=(root) NOPASSWD: /usr/bin/python3 @PROJECT_DIR@/scripts/write-memory.py *
 
 # Право АГЕНТА (под ним работает диспетчер) ровно одно: запустить скрипт
 # вывода панели наружу. Ревью кода 13.09.2026 показало, почему список из
@@ -21,4 +21,4 @@ harness-panel ALL=(root) NOPASSWD: /usr/bin/python3 @PROJECT_DIR@/scripts/zapisa
 # запускать от root файл из каталога, куда агент пишет, равно NOPASSWD: ALL.
 # Поэтому скрипт лежит в /usr/local/lib/harness (root:root, агент туда не
 # пишет), а единственный аргумент — имя хоста — проверяет он сам.
-@AGENT_USER@ ALL=(root) NOPASSWD: /usr/local/lib/harness/panel-naruzhu-root.sh *
+@AGENT_USER@ ALL=(root) NOPASSWD: /usr/local/lib/harness/panel-expose-root.sh *

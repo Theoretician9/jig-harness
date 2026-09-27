@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# СЕМЯ ПЕРВОЙ УСТАНОВКИ, НЕ ЖИВОЙ КОД. Живой файл: scripts/deploy.sh — правки туда и в пакет.
 # Деплой backend с гарантированным порядком: build -> migrate -> health -> dev-map снимок.
 set -euo pipefail
 cd "$(dirname "$0")/.."

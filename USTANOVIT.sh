@@ -268,7 +268,7 @@ for з in (д.get("задания") or []):
 демоны_из_спеки() { # путь к системные-задания.yaml → имена демонов, по одному в строке
   # Состав системы — ДАННЫЕ, а не проза. Прежде список вынимался awk-ом из §9
   # спеки установки, и спека отстала молча: 10 имён против 13 в данных
-  # (замер 11.09.2026 — не было obnovlenie-watch, pamyat-kommit и
+  # (замер 11.09.2026 — не было update-watch, memory-commit и
   # memory-revision-порог). Сверка с отставшим списком — это сверка ни с чем.
   python3 -c '
 import sys, yaml
@@ -373,7 +373,14 @@ done
 
 PROJECT_NAME=""; PROJECT_DIR=""; SECRETS_DIR=""; TG_CHAT_ID=""; BOT_TOKEN=""
 AGENT_USER="agent"; AUTONOMY="semi"; OWNER_TZ=""
-HEARTBEAT_DIR="/var/lib/harness/heartbeat"; LOG_DIR="/var/log/harness"
+# Места — ОТ КОРНЯ установки, а не зашитыми путями: корень задаётся
+# HARNESS_HOME, и на машине без права писать в /etc он лежит в доме
+# пользователя. Зашитые «/var/log/harness» ставили харнес ровно на одну машину
+# (владелец 21.09: «чтобы люди могли его ставить на любую машину»).
+HARNESS_ROOT="$(dirname "$CONF")"
+STATE_DIR="${STATE_DIR:-$([ "$HARNESS_ROOT" = /etc/harness ] && echo /var/lib/harness || echo "$HARNESS_ROOT/state")}"
+LOG_DIR="${LOG_DIR:-$([ "$HARNESS_ROOT" = /etc/harness ] && echo /var/log/harness || echo "$HARNESS_ROOT/log")}"
+HEARTBEAT_DIR="${HEARTBEAT_DIR:-$STATE_DIR/heartbeat}"
 # Канал: Б (свой диспетчер) — дефолт и единственный поддерживаемый;
 # А (telegram-плагин) — эксперимент, включать только после приёмки (решение владельца).
 TG_TOKEN_FILE=""; CC_VERSION=""; TG_CHANNEL_VARIANT="B"
@@ -483,6 +490,7 @@ TG_TOKEN_FILE="$TG_TOKEN_FILE"     # файл с токеном бота
 TG_CHAT_ID="$TG_CHAT_ID"           # chat_id владельца
 AUTONOMY="$AUTONOMY"               # semi | full — режим из 00-ВВОДНЫЕ §1.2; данные, не код
 OWNER_TZ="$OWNER_TZ"               # часовой пояс ВЛАДЕЛЬЦА: по нему живёт сервер и расписания демонов
+STATE_DIR="$STATE_DIR"             # корень состояния: под ним heartbeat, panel-state, secrets
 HEARTBEAT_DIR="$HEARTBEAT_DIR"
 LOG_DIR="$LOG_DIR"
 TG_CHANNEL_VARIANT="$TG_CHANNEL_VARIANT"  # A — telegram-плагин | B — свой диспетчер (01-SPEC §7)
@@ -610,7 +618,7 @@ Environment=CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING=1
 Environment=CLAUDE_CODE_AUTO_COMPACT_WINDOW=800000
 Environment=DISABLE_AUTOUPDATER=1
 WorkingDirectory=$PROJECT_DIR
-ExecStart=$PROJECT_DIR/scripts/zapustit-agenta.sh
+ExecStart=$PROJECT_DIR/scripts/start-agent.sh
 ExecStop=/usr/bin/tmux kill-session -t agent
 Restart=always
 RestartSec=10
@@ -905,7 +913,7 @@ EOF
   # <…> у нас должен быть сразу набор установленный» и «Команды установки/
   # удаления плагинов и скилов не для человека, а для демонов и хуков».
   # Поэтому набор не печатается советом, а ставится: список — данные
-  # (harness/config/расширения.yaml), установка — scripts/rasshirenija.py.
+  # (harness/config/расширения.yaml), установка — scripts/extensions.py.
   скажи "  набор берётся из данных: $PROJECT_DIR/harness/config/расширения.yaml"
   # П-13: совет про --channels уместен ТОЛЬКО при варианте А — в финале
   # варианта Б такой команды нет, печатать её значит путать владельца.
@@ -913,10 +921,10 @@ EOF
     скажи "  telegram-плагин (вариант А) активируется флагом --channels при запуске агента — команда в «ОСТАЛОСЬ РУКАМИ»;"
   fi
   # Ставится ОТ ИМЕНИ АГЕНТА: плагины живут в его ~/.claude, а шаг идёт под root.
-  делай "sudo -u $AGENT_USER python3 '$PROJECT_DIR/scripts/rasshirenija.py' поставить-базовый"
+  делай "sudo -u $AGENT_USER python3 '$PROJECT_DIR/scripts/extensions.py' поставить-базовый"
   проверка "$step" "базовый набор расширений на месте" \
-    "sudo -u $AGENT_USER python3 '$PROJECT_DIR/scripts/rasshirenija.py' состояние" \
-    "sudo -u $AGENT_USER python3 '$PROJECT_DIR/scripts/rasshirenija.py' состояние"
+    "sudo -u $AGENT_USER python3 '$PROJECT_DIR/scripts/extensions.py' состояние" \
+    "sudo -u $AGENT_USER python3 '$PROJECT_DIR/scripts/extensions.py' состояние"
   проверка "$step" "скилы и шаблоны разложены (дисциплина пайплайна)" \
     "[ -d '$PROJECT_DIR/harness/skills' ] && [ -d '$PROJECT_DIR/harness/шаблоны-задач' ]" \
     "ls '$PROJECT_DIR/harness'"
@@ -1131,7 +1139,7 @@ EOF
   скажи "Дальше: блок «ОСТАЛОСЬ РУКАМИ» выше, затем razrabotka/ЧЕК-ЛИСТ-ПРИЁМКИ.md (раздел А) и razrabotka/03-ЗАДАНИЕ-НОВОМУ-АГЕНТУ.md."
   скажи ""
   скажи "Крупные наборы (возможности) НЕ ставятся при установке — только по условию:"
-  скажи "   sudo -u $AGENT_USER bash $PROJECT_DIR/scripts/vozmozhnost.sh список"
+  скажи "   sudo -u $AGENT_USER bash $PROJECT_DIR/scripts/capability.sh список"
   скажи "   (в комплекте «мобильная-разработка»: ставится, когда в задаче появилось приложение)"
 }
 
@@ -1188,17 +1196,17 @@ EOF
   делай "install -o root -g root -m 0440 /tmp/harness-panel.sudoers '$SUDOERS_FILE'"
   делай "rm -f /tmp/harness-panel.sudoers"
   проверка "$step" "право выдано ПО СМЫСЛУ: три скрипта видны в sudo -l" \
-    "sudo -n -l -U harness-panel | grep -q '$PROJECT_DIR/scripts/zapisat-klyuch.py'" \
+    "sudo -n -l -U harness-panel | grep -q '$PROJECT_DIR/scripts/write-key.py'" \
     "sudo -n -l -U harness-panel"
 
   # 4б. Root-скрипт вывода панели наружу — ВНЕ дерева агента. Право запускать
   # от root файл из каталога, куда агент пишет, равно полным правам (ревью
   # кода 13.09.2026, F-03), поэтому копия кладётся сюда, root:root.
   делай "install -d -o root -g root -m 0755 /usr/local/lib/harness"
-  делай "install -o root -g root -m 0755 '$PROJECT_DIR/harness/panel/panel-naruzhu-root.sh' /usr/local/lib/harness/panel-naruzhu-root.sh"
+  делай "install -o root -g root -m 0755 '$PROJECT_DIR/harness/panel/panel-expose-root.sh' /usr/local/lib/harness/panel-expose-root.sh"
   делай "install -o root -g root -m 0644 '$PROJECT_DIR/harness/panel/nginx-panel.conf.in' /usr/local/lib/harness/nginx-panel.conf.in"
   проверка "$step" "скрипт вывода наружу лежит вне дерева агента (root:root)" \
-    "[ \"\$(stat -c '%U %a' /usr/local/lib/harness/panel-naruzhu-root.sh)\" = 'root 755' ]" \
+    "[ \"\$(stat -c '%U %a' /usr/local/lib/harness/panel-expose-root.sh)\" = 'root 755' ]" \
     "ls -la /usr/local/lib/harness"
 
   # 5. Порт свободен ДО запуска: чужой процесс на нём отвечает 200, а юнит с
@@ -1212,7 +1220,7 @@ EOF
   # занятый НАШЕЙ службой, — это норма повторного прогона.
   проверка "$step" "порт $PANEL_PORT свободен или занят самой панелью" \
     "systemctl is-active --quiet harness-panel || python3 -c \"import socket,sys; s=socket.socket(); sys.exit(1 if s.connect_ex(('127.0.0.1',$PANEL_PORT))==0 else 0)\"" \
-    "python3 '$PROJECT_DIR/scripts/kto-na-portu.py' $PANEL_PORT; systemctl status harness-panel --no-pager | head -5"
+    "python3 '$PROJECT_DIR/scripts/who-is-on-port.py' $PANEL_PORT; systemctl status harness-panel --no-pager | head -5"
 
   # 6. Юнит собирается из шаблона по паспорту; enable + restart, а не
   # `enable --now`: активный юнит он не перезапускает, и работал бы старый
@@ -1220,7 +1228,7 @@ EOF
   # ПОД ROOT, а не от имени агента: сборщик внутри зовёт `sudo install` и
   # `systemctl daemon-reload`, а у агента на чистой машине прав NOPASSWD на
   # них нет — живая проба в контейнере 13.09.2026 встала именно здесь.
-  делай "bash '$PROJECT_DIR/scripts/unit-paneli.sh'"
+  делай "bash '$PROJECT_DIR/scripts/panel-unit.sh'"
   делай "systemctl enable harness-panel"
   делай "systemctl restart harness-panel"
   проверка "$step" "служба harness-panel активна" \
@@ -1232,7 +1240,7 @@ EOF
   # навсегда (S-06). Код показывается ОДИН раз.
   local ZAPASNOJ=""
   if (( DRY )); then
-    скажи "  + sudo -u $AGENT_USER python3 $PROJECT_DIR/harness/panel/vhod.py --запасной-код"
+    скажи "  + sudo -u $AGENT_USER python3 $PROJECT_DIR/harness/panel/login.py --запасной-код"
   else
     # Повторный прогон шага (он идемпотентен и потому обычен) НЕ перевыпускает
     # код: CLI отвечает отказом и кодом 4, а новый отменил бы тот, который
@@ -1241,7 +1249,7 @@ EOF
     # срабатывает как ошибка, trap ERR обрывает установку, и ветка «прежний
     # действует» недостижима — шаг 10 не отмечается, и --resume падает там же
     # (ревью безопасности 13.09.2026, F-sec-03).
-    ZAPASNOJ=$( { sudo -u "$AGENT_USER" python3 "$PROJECT_DIR/harness/panel/vhod.py" --запасной-код || true; } 2>/dev/null | head -1)
+    ZAPASNOJ=$( { sudo -u "$AGENT_USER" python3 "$PROJECT_DIR/harness/panel/login.py" --запасной-код || true; } 2>/dev/null | head -1)
     if [ -z "$ZAPASNOJ" ]; then
       скажи "  запасной код уже был выдан прежним прогоном — прежний действует, новый не выпускаю"
       MANUAL_LIST+=("Запасной код входа в панель выдан при первой установке — действует он, нового не было")
@@ -1268,8 +1276,8 @@ EOF
   # внутренний ключ читается диспетчером, chat_id совпал. «Не выведена
   # наружу» — законный ответ на этом шаге: рубеж ставится командой владельца.
   проверка "$step" "панель отвечает диспетчеру и узнаёт владельца" \
-    "timeout 20 bash -c 'until sudo -u $AGENT_USER python3 \"$PROJECT_DIR/harness/panel/klient.py\" --ссылка \"$TG_CHAT_ID\" 2>&1 | grep -qE \"/vhod\\?t=|не выведена наружу\"; do sleep 1; done'" \
-    "sudo -u $AGENT_USER python3 '$PROJECT_DIR/harness/panel/klient.py' --ссылка '$TG_CHAT_ID'; journalctl -u harness-panel -n 30 --no-pager"
+    "timeout 20 bash -c 'until sudo -u $AGENT_USER python3 \"$PROJECT_DIR/harness/panel/client.py\" --ссылка \"$TG_CHAT_ID\" 2>&1 | grep -qE \"/vhod\\?t=|не выведена наружу\"; do sleep 1; done'" \
+    "sudo -u $AGENT_USER python3 '$PROJECT_DIR/harness/panel/client.py' --ссылка '$TG_CHAT_ID'; journalctl -u harness-panel -n 30 --no-pager"
 
   DONE_LIST+=("панель владельца: служба harness-panel, каталог состояния, права, запасной код")
   MANUAL_LIST+=("Вывести панель наружу: напишите боту «панель наружу» — имя, сертификат и nginx он сделает сам")

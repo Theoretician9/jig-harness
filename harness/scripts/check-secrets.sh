@@ -56,8 +56,18 @@ MARKER='не-секрет'
 
 run_scan() {  # $1 = каталог репо, $2 = режим all|staged
     local repo="$1" mode="$2" fail=0 files hits f
-    git -C "$repo" rev-parse --git-dir >/dev/null 2>&1 \
-        || { echo "check-secrets: $repo — не git-репозиторий, сканировать нечего (жёлтый)"; return 77; }
+    # «Нечем судить» и «судить есть чем, а git сломался» — РАЗНЫЕ ответы, и
+    # второй жёлтым быть не вправе: И-3 держится этим гейтом, а жёлтый пускает
+    # коммит (находка ревью пайплайна M-2, тот же класс, что дыра 21.09).
+    # Каталог .git есть — репозиторий существует, и молчание git это поломка.
+    if ! git -C "$repo" rev-parse --git-dir >/dev/null 2>&1; then
+        if [ -e "$repo/.git" ]; then
+            echo "check-secrets: $repo — git не ответил, а репозиторий на месте: секреты НЕ проверены"
+            return 1
+        fi
+        echo "check-secrets: $repo — не git-репозиторий, сканировать нечего (жёлтый)"
+        return 77
+    fi
     # core.quotepath=false: без него git экранирует кириллические имена
     # («память/» → \320...), и поиск по такому имени падает. Поймано
     # прогоном при сборке пакета 08.08.2026.
@@ -120,7 +130,7 @@ if [ "${1:-}" = "--selftest" ]; then
     if run_scan "$T" all >/dev/null; then
         echo "SELFTEST FAIL: токен test123 не пойман"; exit 1
     fi
-    echo "selftest 1/5: больной случай в кавычках пойман (красный) — OK"
+    echo "selftest 1/7: больной случай в кавычках пойман (красный) — OK"
     rm "$T/config.py"
     git -C "$T" rm -q --cached config.py
 
@@ -130,7 +140,7 @@ if [ "${1:-}" = "--selftest" ]; then
     if run_scan "$T" all >/dev/null; then
         echo "SELFTEST FAIL: безкавычечный секрет не пойман"; exit 1
     fi
-    echo "selftest 2/5: безкавычечный больной случай пойман (красный) — OK"
+    echo "selftest 2/7: безкавычечный больной случай пойман (красный) — OK"
     rm "$T/app.ini"
     git -C "$T" rm -q --cached app.ini
 
@@ -140,7 +150,7 @@ if [ "${1:-}" = "--selftest" ]; then
     if ! run_scan "$T" all >/dev/null; then
         echo "SELFTEST FAIL: чистый репо покраснел"; exit 1
     fi
-    echo "selftest 3/5: здоровый случай прошёл (зелёный) — OK"
+    echo "selftest 3/7: здоровый случай прошёл (зелёный) — OK"
 
     # Режим --staged: секрет лежит В ИНДЕКСЕ, рабочее дерево уже чистое —
     # коммитится индекс, краснеть обязан именно он.  # не-секрет
@@ -150,7 +160,7 @@ if [ "${1:-}" = "--selftest" ]; then
     if run_scan "$T" staged >/dev/null; then
         echo "SELFTEST FAIL: --staged не увидел секрет в индексе"; exit 1
     fi
-    echo "selftest 4/5: --staged ловит секрет из индекса (красный) — OK"
+    echo "selftest 4/7: --staged ловит секрет из индекса (красный) — OK"
     rm "$T/staged.py"
     git -C "$T" rm -q --cached staged.py
 
@@ -162,7 +172,25 @@ if [ "${1:-}" = "--selftest" ]; then
     if run_scan "$T" all >/dev/null; then
         echo "SELFTEST FAIL: пропуск панели под кириллическим именем не пойман"; exit 1
     fi
-    echo "selftest 5/5: секрет без говорящего имени пойман по форме (красный) — OK"
+    echo "selftest 5/7: секрет без говорящего имени пойман по форме (красный) — OK"
+
+    # БОЛЬНОЙ СЛУЧАЙ (ревью пайплайна M-2): «git сломался» отдавалось жёлтым,
+    # то есть коммит шёл, а И-3 не проверялся вовсе. Различает наличие .git.
+    BROKEN=$(mktemp -d); mkdir -p "$BROKEN/.git"
+    KOD=0; run_scan "$BROKEN" all >/dev/null 2>&1 || KOD=$?
+    rm -rf "$BROKEN"
+    if [ "$KOD" != 1 ]; then
+        echo "SELFTEST FAIL: битый репозиторий дал код $KOD, а не красный 1"; exit 1
+    fi
+    echo "selftest 6/7: git молчит при живом .git — КРАСНЫЙ, не жёлтый — OK"
+
+    NOGIT=$(mktemp -d)
+    KOD=0; run_scan "$NOGIT" all >/dev/null 2>&1 || KOD=$?
+    rm -rf "$NOGIT"
+    if [ "$KOD" != 77 ]; then
+        echo "SELFTEST FAIL: свежая машина без git дала код $KOD, а не жёлтый 77"; exit 1
+    fi
+    echo "selftest 7/7: свежая машина без git — жёлтый, ворота не краснеют — OK"
     exit 0
 fi
 
@@ -179,7 +207,7 @@ if [ -z "$REPO" ]; then
     # PROJECT_DIR увела бы проверку секретов на чужое дерево, и она молча
     # отчиталась бы «чисто» (ревью кода 12.09.2026, F1-gen-03).
     # shellcheck disable=SC1091
-    source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/lib/konf.sh"
+    source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/lib/config.sh"
     REPO="$(konf_iz_fajla PROJECT_DIR)"
     REPO="${REPO:-$PWD}"
     # Подмена обязана быть ВИДНА, а не молчать.

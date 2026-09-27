@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# vorota.sh — все гейты харнеса одним вызовом.
+# gates.sh — все гейты харнеса одним вызовом.
 #
 # Зачем. Цена шага агента — весь накопленный контекст: замер 12.08.2026 дал
 # 158 535 токенов в среднем на шаг. Пять гейтов, прогнанные по одному, стоят
@@ -14,9 +14,9 @@
 # Прогон, вываливающий двести строк успеха, съедает ровно то, что экономит.
 #
 # Запуск:
-#   vorota.sh            # гейты: секреты, гигиена, сторож команд, пакет, карта
-#   vorota.sh --всё      # то же + самотесты демонов и скриптов (долго)
-#   vorota.sh --selftest # проверка самих ворот на больном случае
+#   gates.sh            # гейты: секреты, гигиена, сторож команд, пакет, карта
+#   gates.sh --всё      # то же + самотесты демонов и скриптов (долго)
+#   gates.sh --selftest # проверка самих ворот на больном случае
 #
 # Код выхода = число красных проверок (0 = чисто).
 set -uo pipefail
@@ -109,33 +109,33 @@ echo "=== ворота харнеса: $(date '+%d.%m %H:%M') ==="
 # Карта едет в контекст КАЖДОЙ сессии: подробности карточки нужны при разборе
 # задачи, а не всегда. Замер 12.09.2026 — 31 карточка держала 29 397 лишних
 # знаков, карта была на 92 % потолка.
-проверка "прополка карты" python3 scripts/propolka-karty.py --проверить
-проверка "прополка-самотест" python3 scripts/propolka-karty.py --selftest
+проверка "прополка карты" python3 scripts/weed-the-map.py --проверить
+проверка "прополка-самотест" python3 scripts/weed-the-map.py --selftest
 # Карту пишут пятеро, и общий лок брали двое: атомарная запись спасает от
 # полуфайла, но не от гонки — пока демон читал карту, агент дописал карточку,
 # и замена стёрла её (замер 12.09.2026).
-проверка "писатели карты" python3 scripts/check-pisateli-karty.py
-проверка "писатели-самотест" python3 scripts/check-pisateli-karty.py --selftest
-проверка "указания"       python3 scripts/ukazaniya.py
+проверка "писатели карты" python3 scripts/check-map-writers.py
+проверка "писатели-самотест" python3 scripts/check-map-writers.py --selftest
+проверка "указания"       python3 scripts/orders.py
 # Задача, сказанная в канал, обязана дойти до карты: 941 сообщение в очереди,
 # 171 с признаком работы, и связи «сообщение → задача» не было ни одной.
-проверка "задачи из канала" python3 scripts/zadachi-iz-kanala.py
+проверка "задачи из канала" python3 scripts/tasks-from-channel.py
 # Сама приёмка проверок не делает ворота красными — она про содержание работы,
 # а не про здоровье машины. В воротах стоит её САМОТЕСТ: механизм, судящий о
 # доказанности, обязан быть доказан сам.
-проверка "приёмка-самотест" python3 scripts/priyomka.py --selftest
+проверка "приёмка-самотест" python3 scripts/acceptance.py --selftest
 # Оболочка ночному агенту закрыта не списком инструментов, а режимом прав:
 # живая проба 11.09.2026 показала, что --allowedTools настройки проекта
 # перекрывают. Гейт следит, чтобы флаг стоял в КАЖДОМ вызове агента.
-проверка "замок агента"   python3 scripts/proverka-zamka-agenta.py
-проверка "замок-самотест" python3 scripts/proverka-zamka-agenta.py --selftest
+проверка "замок агента"   python3 scripts/agent-lock-check.py
+проверка "замок-самотест" python3 scripts/agent-lock-check.py --selftest
 проверка "сторож команд"  python3 scripts/hooks/test_guard_bash.py
 # Список файлов сверке подаётся ЯВНО. БОЛЬНОЙ СЛУЧАЙ 12.08.2026: без него
 # скрипт читал stdin ворот, а тот в сессии агента открыт и молчит — ворота
 # висели одиннадцать минут и были сняты вручную, ни одной проверки не показав.
 # Пустой индекс — законный ответ «сверять нечего»: настоящую сверку делает
 # pre-commit, у которого список staged-файлов есть всегда.
-проверка "сверка пакета"  bash -c 'git diff --cached --name-only | python3 scripts/sverit-s-paketom.py'
+проверка "сверка пакета"  bash -c 'git diff --cached --name-only | python3 scripts/compare-with-package.py'
 # Что обходить не надо — из конфига (GATES_SKIP_PATHS): каталог продукта,
 # вшитый в ворота харнеса, на чужом проекте не исключил бы ничего, зато
 # гейт полез бы в чужие зависимости (разбор кода 11.09.2026).
@@ -143,15 +143,15 @@ SKIP_ARGS=""
 for SKIP_PATH in ${GATES_SKIP_PATHS:-./.git/*}; do
     SKIP_ARGS="$SKIP_ARGS -not -path $SKIP_PATH"
 done
-проверка "кириллица"      bash -c 'find . -name "*.sh" '"$SKIP_ARGS"' -print0 | xargs -0 python3 scripts/check-kirillica-v-imenah.py'
-проверка "секрет в логах" python3 scripts/check-sekret-v-logah.py
+проверка "кириллица"      bash -c 'find . -name "*.sh" '"$SKIP_ARGS"' -print0 | xargs -0 python3 scripts/check-cyrillic-in-names.py'
+проверка "секрет в логах" python3 scripts/check-secret-in-logs.py
 # Имена НОВЫХ файлов кода — латиницей (задача владельца 11.09). Существующие
 # 601 переводятся отдельной задачей: их переименование трогает прод.
 проверка "имена файлов"   bash -c 'git -c core.quotepath=false diff --cached --name-only --diff-filter=AR | python3 scripts/check-file-names.py'
 # Присваивание из конвейера с grep под set -e: пустой grep роняет ВЕСЬ
 # скрипт молча. Так умирал сторож сессий, когда fuser не показывал
 # держателя лока — ни одной строки в лог, ротации нет (улика 11.09.2026).
-проверка "падение под set -e" python3 scripts/check-padenie-pod-set-e.py
+проверка "падение под set -e" python3 scripts/check-failure-under-set-e.py
 # Середина пайплайна: спека и её ревью у крупной задачи (первый пункт владельца
 # 11.09). Уровень задачи — из замера индекса, а не из заявленного объёма.
 проверка "пайплайн-гейт"  python3 scripts/check-pipeline.py
@@ -164,79 +164,79 @@ done
 # Конфиг читают общим загрузчиком: голый source делает файл старше окружения,
 # и любая проба играет на боевом (улика 12.09.2026 — смена модели в рабочей
 # панели). Гейт судит всё дерево, самотест — девять путей.
-проверка "загрузка конфига" python3 scripts/check-konf-zagruzka.py
-проверка "загрузка-самотест" python3 scripts/check-konf-zagruzka.py --selftest
-проверка "загрузчик конфига" bash scripts/lib/konf.sh --selftest
+проверка "загрузка конфига" python3 scripts/check-config-loading.py
+проверка "загрузка-самотест" python3 scripts/check-config-loading.py --selftest
+проверка "загрузчик конфига" bash scripts/lib/config.sh --selftest
 # Функция оболочки, званная выше своего определения, печатает одну строку в
 # stderr и возвращает ПУСТО: отказ выглядит как «данных нет». Так в стартовом
 # отчёте месяц было пустым поле «последний коммит» (улика 12.09.2026).
-проверка "функция до определения" python3 scripts/check-funkciya-do-opredeleniya.py
-проверка "функция-самотест" python3 scripts/check-funkciya-do-opredeleniya.py --selftest
+проверка "функция до определения" python3 scripts/check-function-before-definition.py
+проверка "функция-самотест" python3 scripts/check-function-before-definition.py --selftest
 # Расписания и юниты зовут файлы проекта, а живут в /etc — репозиторные гейты
 # их не видят. 11.09 переименование scripts/fonovaya-cel.sh оставило пять
 # ночных целей продукта в cron звать исчезнувшее имя.
-проверка "внешние вызовы" python3 scripts/check-vneshnie-vyzovy.py
+проверка "внешние вызовы" python3 scripts/check-external-callers.py
 # Ручки панели: каждая что-то делает и делает, когда обещано. Улики ревью
 # спеки панели 11.09: ручка, которую никто не читает, и ручка, обещающая
 # «сразу» при чтении раз в десять минут, — обман владельца, невидимый глазами.
-проверка "переключатели"  python3 scripts/check-pereklyuchateli.py
-проверка "переключатели-самотест" python3 scripts/check-pereklyuchateli.py --selftest
+проверка "переключатели"  python3 scripts/check-switches.py
+проверка "переключатели-самотест" python3 scripts/check-switches.py --selftest
 # Единственный писатель настроек: узкий вход вместо прав root у панели.
-проверка "писатель настроек" python3 scripts/test_zapisat_klyuch.py
+проверка "писатель настроек" python3 scripts/test_write_key.py
 # Служба панели: вход через канал и защита от чужих запросов.
-проверка "вход панели"    python3 harness/panel/test_vhod.py
+проверка "вход панели"    python3 harness/panel/test_login.py
 проверка "служба панели"  python3 harness/panel/test_server.py
-проверка "подтверждение панели" python3 harness/panel/test_podtverzhdenie.py
-проверка "витрина панели"  python3 harness/panel/test_sostoyanie.py
-проверка "шаги пайплайна" python3 scripts/test_zapisat_shag.py
-проверка "правка памяти" python3 scripts/test_zapisat_pamyat.py
+проверка "подтверждение панели" python3 harness/panel/test_confirmation.py
+проверка "витрина панели"  python3 harness/panel/test_state.py
+проверка "шаги пайплайна" python3 scripts/test_write_step.py
+проверка "правка памяти" python3 scripts/test_write_memory.py
 # Описание устройства стареет быстрее всего: механизмы заводятся каждую смену.
 # Сверка двусторонняя — механизм без описания и описание без механизма красные.
-проверка "обновление"     python3 scripts/test_obnovlenie.py
-проверка "доустановка"    python3 scripts/test_ustanovit_novoe.py
+проверка "обновление"     python3 scripts/test_update.py
+проверка "доустановка"    python3 scripts/test_install_new.py
 # Ежемесячная ревизия: данные (области и пороги) и порции с курсором.
 # Область с маской, под которую не попадает ни один файл, читала бы пустоту и
 # отчитывалась «находок нет»; без курсора каждый месяц читались бы те же 15 %.
-проверка "конфиг ревизии"  python3 scripts/test_revizia_konfig.py
-проверка "порции ревизии"  python3 scripts/test_revizia_porcii.py
-проверка "сверка находок" python3 scripts/test_revizia_nahodki.py
-проверка "устройство"     python3 scripts/check-ustrojstvo.py
-проверка "устройство-самотест" python3 scripts/test_ustrojstvo.py
+проверка "конфиг ревизии"  python3 scripts/test_revision_config.py
+проверка "порции ревизии"  python3 scripts/test_revision_batches.py
+проверка "сверка находок" python3 scripts/test_revision_findings.py
+проверка "устройство"     python3 scripts/check-registry.py
+проверка "устройство-самотест" python3 scripts/test_registry.py
 # Вход по подписке имеет срок, и владелец о нём не знал (вопрос 11.09.2026).
 # Сторож предупреждает ЗАРАНЕЕ: решение, требующее «чтобы кто-то помнил», —
 # не решение. Значения токенов в вывод не попадают (проверено самотестом).
-проверка "срок входа"      python3 scripts/check-srok-vhoda.py
+проверка "срок входа"      python3 scripts/check-login-expiry.py
 # Харнес отдают другим людям: имя чужого продукта в его коде — и утечка, и
 # поломка у того, чей продукт зовётся иначе (замер 12.09.2026 — 124 вхождения
 # в 20 файлах; гейт импортов и гейт гигиены искали по вшитому имени).
-проверка "харнес чист"     python3 scripts/check-harnes-chist.py
+проверка "харнес чист"     python3 scripts/check-harness-clean.py
 # Таблица моделей обязана покрывать КАЖДЫЙ шаг пайплайна: шаг без своей модели
 # молча уезжает в самое дешёвое. Проверка идёт на БОЕВЫХ файлах — самотест
 # гонял её на синтетических, и дыру в живой таблице никто не увидел бы
 # (находка ревью кода 12.09.2026).
-проверка "модели под шаги"  python3 scripts/shagi-modeli.py
-проверка "пайплайн"        python3 scripts/pajplajn.py --selftest
+проверка "модели под шаги"  python3 scripts/model-steps.py
+проверка "пайплайн"        python3 scripts/pipeline.py --selftest
 # Правила переписки (владелец 11.09.2026) держит сторож внутри tg_send.sh;
 # здесь — его самотест, иначе сторож канала стоит без проверки.
-проверка "переписка"       python3 scripts/check-perepiska.py --selftest
-проверка "карта"          bash scripts/pre-commit-hook.sh --selftest-devmap
-проверка "потеря задач"   python3 scripts/check-karta-ne-teryaet-zadachi.py --selftest
+проверка "переписка"       python3 scripts/check-channel-messages.py --selftest
+проверка "карта"          bash scripts/pre-commit-gate.sh --selftest-devmap
+проверка "потеря задач"   python3 scripts/check-map-keeps-tasks.py --selftest
 # Замки публикации: их самотест не звал никто, и он молча падал — проба
 # задавала настройки окружением, а скрипт перечитывал их из harness.conf.
 # Поймано первой живой попыткой публикации 11.09.2026.
-проверка "сборка-публичного" python3 scripts/sobrat-publichnoe.py --selftest
-проверка "публикация"     bash scripts/publikaciya.sh --selftest
+проверка "сборка-публичного" python3 scripts/build-public.py --selftest
+проверка "публикация"     bash scripts/publish.sh --selftest
 # Признак согласия владельца — сторож И-2 и полуавтомата: «делай деплой, да»
 # не должно разрешать отправку, «выкат после 3 этапа» — не согласие вовсе.
 # Проверка была написана 03.09 и до ревизии 10.09 её не запускал НИКТО: ни
 # ворота, ни pre-commit, ни демон. Проверка, которую не запускают, не сторожит.
-проверка "согласие"       python3 scripts/test_deploy_guard_soglasie.py
+проверка "согласие"       python3 scripts/test_deploy_guard_consent.py
 # У пишущего пути обязан быть хозяин и потолок: «мусор» — один дефект, а не
 # семь разных уборок (замечание владельца П-3).
-проверка "удержание"      python3 scripts/check-uderzhanie.py
+проверка "удержание"      python3 scripts/check-retention.py
 # Предложения ревизии памяти обязаны разбираться, а не копиться: демон без
 # принуждения — половина механизма (замечание владельца П-5).
-проверка "предложения"    python3 scripts/check-predlozheniya.py
+проверка "предложения"    python3 scripts/check-proposals.py
 
 # Самотесты живут врозь от гейтов: они долгие, и на каждом коммите не нужны.
 # Список явный — искать «кто понимает --selftest» грепом значило бы решать
@@ -247,39 +247,39 @@ if [ "${1:-}" = "--всё" ]; then
                 harness/demons/backup.sh \
                 harness/demons/heartbeat-watch.sh harness/demons/task-closer.sh \
                 harness/demons/memory-revision.sh \
-                harness/demons/obnovlenie-watch.sh \
+                harness/demons/update-watch.sh \
                 harness/demons/tokens-collector.sh scripts/tg-dispatcher.sh \
-                scripts/zapustit-agenta.sh scripts/vozmozhnost.sh \
+                scripts/start-agent.sh scripts/capability.sh \
                 scripts/handover-check.sh scripts/check-secrets.sh \
-                scripts/model-dlya.sh; do
+                scripts/model-for.sh; do
         проверка "$(basename "$f" .sh)" bash "$f" --selftest
     done
     # Проверка самих проверок: «самотест зелёный» значит лишь, что код согласован
     # со своим тестом. Мутационная проба портит механизм и требует красного.
-    проверка "мутации"        bash scripts/mutacionnaya-proba.sh
+    проверка "мутации"        bash scripts/mutation-probe.sh
     # Обратный ход ревизии: у каждого правила — механизм, прибор и свежий след.
     # Строка без механизма важнее любой находки осмотра (замечание М-1).
-    проверка "покрытие"       python3 scripts/pokrytie-invariantov.py
+    проверка "покрытие"       python3 scripts/invariant-coverage.py
     # Живая проверка дозора позднего выхода: поднимает свою tmux-сессию,
     # убивает её и смотрит, поднял ли дозор преемника. Лежала среди демонов и
     # не запускалась никем (ревизия 10.09.2026).
     проверка "дозор выхода"   bash scripts/test_late_exit_watch.sh
     # Третье состояние гейта (жёлтый, код 77) — механизм обкатки: без него
     # новый гейт обязан молчать, а краснящий зря — отключают.
-    проверка "жёлтый в pre-commit" bash scripts/pre-commit-hook.sh --selftest-yellow
-    проверка "жёлтый в воротах"    bash scripts/vorota.sh --selftest
-    for f in scripts/ochered-raboty.py scripts/sverit-s-paketom.py \
-                scripts/skachat_vlozhenie.py scripts/ukazaniya.py \
-                scripts/check-kirillica-v-imenah.py \
-                scripts/check-padenie-pod-set-e.py \
-                scripts/check-srok-vhoda.py \
-                scripts/check-perepiska.py \
-                scripts/pajplajn.py \
+    проверка "жёлтый в pre-commit" bash scripts/pre-commit-gate.sh --selftest-yellow
+    проверка "жёлтый в воротах"    bash scripts/gates.sh --selftest
+    for f in scripts/work-queue.py scripts/compare-with-package.py \
+                scripts/download_attachment.py scripts/orders.py \
+                scripts/check-cyrillic-in-names.py \
+                scripts/check-failure-under-set-e.py \
+                scripts/check-login-expiry.py \
+                scripts/check-channel-messages.py \
+                scripts/pipeline.py \
                 scripts/check-file-names.py \
                 scripts/check-pipeline.py \
                 scripts/check-tests-first.py \
-                scripts/slovo-vnimaniya.py scripts/check-harnes-chist.py \
-                scripts/priyomka.py; do
+                scripts/attention-word.py scripts/check-harness-clean.py \
+                scripts/acceptance.py; do
         проверка "$(basename "$f" .py)" python3 "$f" --selftest
     done
 fi

@@ -1,4 +1,28 @@
 механизмы:
+- файл: harness/demons/nightly-gates.sh
+  вид: демон
+  тема: проверки и ворота
+  имя: Ночной полный прогон ворот
+  роль: 'Раз в сутки гонит ПОЛНЫЙ прогон ворот (флаг «--всё»), который включает
+    самотесты демонов и мутационную пробу, и говорит владельцу только о красном.
+
+    '
+  когда: каждые сутки в 06:00 (расписание cron)
+  без_него: 'Часть проверок — те, что проверяют сами сторожа, — запускается
+    только по отдельному флагу, и вспоминать о нём приходится человеку.
+    21.09.2026 такая проверка была красной восемь суток подряд, и этого не
+    увидел никто.
+
+    '
+  проверяется: bash harness/demons/nightly-gates.sh --selftest
+  пишет: журнал прогона /var/log/harness/nightly-gates-<дата>.log, метку свежести,
+    сообщение владельцу при красном прогоне
+  повод:
+    метки:
+    - имя: nightly-gates
+      молчание_считать_поломкой: 1440
+    источник: крон
+    расписание: 0 6 * * *
 - файл: harness/demons/backup.sh
   вид: демон
   тема: данные и сервер
@@ -61,7 +85,7 @@
       молчание_считать_поломкой: 1440
     источник: крон
     расписание: 0 3 * * *
-- файл: harness/demons/evo-collector.sh
+- файл: harness/demons/evolution-collector.sh
   вид: демон
   тема: память и смены
   имя: Сбор сигналов развития
@@ -74,7 +98,7 @@
     сменами не живёт.
 
     '
-  проверяется: bash harness/demons/evo-collector.sh --selftest
+  проверяется: bash harness/demons/evolution-collector.sh --selftest
   пишет: $LOG_DIR/evolution/*.jsonl
   повод:
     метки:
@@ -125,7 +149,7 @@
       молчание_считать_поломкой: 44640
     источник: крон
     расписание: 0 9 1 * *; 30 9 * * *
-- файл: harness/demons/revizia-proekta.sh
+- файл: harness/demons/project-revision.sh
   вид: демон
   тема: карта работы
   имя: Ежемесячная проверка проекта
@@ -140,7 +164,7 @@
     ли о нём агент; найденное не попадает в список дел и теряется.
 
     '
-  проверяется: bash harness/demons/revizia-proekta.sh --selftest
+  проверяется: bash harness/demons/project-revision.sh --selftest
   пишет: карточки в список дел, разбор в docs/ревизии/<дата>.md, одно сообщение владельцу
   повод:
     метки:
@@ -148,7 +172,7 @@
       молчание_считать_поломкой: 44640
     источник: крон
     расписание: 0 9 1 * *
-- файл: harness/demons/pamyat-kommit.sh
+- файл: harness/demons/memory-commit.sh
   вид: демон
   тема: память и смены
   имя: Сохранение правок памяти
@@ -161,8 +185,8 @@
     текст, и владелец не поймёт, куда делось написанное.
 
     '
-  проверяется: bash harness/demons/pamyat-kommit.sh --selftest
-  пишет: отдельные записи в хранилище кода, $LOG_DIR/pamyat-kommit.log
+  проверяется: bash harness/demons/memory-commit.sh --selftest
+  пишет: отдельные записи в хранилище кода, $LOG_DIR/memory-commit.log
   повод:
     метки:
     - имя: pamyat-kommit
@@ -279,7 +303,7 @@
       молчание_считать_поломкой: 5
     источник: крон
     расписание: '* * * * *'
-- файл: scripts/limit-v-zhurnale.py
+- файл: scripts/limit-in-log.py
   вид: гейт
   тема: память и смены
   имя: Отказ 429 в журнале сессии
@@ -292,7 +316,24 @@
     — а разошедшаяся половина молчит ровно тогда, когда нужна.
 
     '
-  проверяется: python3 scripts/limit-v-zhurnale.py --selftest
+  проверяется: python3 scripts/limit-in-log.py --selftest
+  пишет: 'ничего: только печатает минуты'
+- файл: scripts/stall-in-log.py
+  вид: гейт
+  тема: память и смены
+  имя: Немота смены по журналу сессии
+  роль: 'Отвечает на один вопрос: сколько минут назад смена в последний раз ОТВЕТИЛА
+    успешно. Ответы об ошибке работой не считаются. Единственный источник этого факта
+    для обоих сторожей.
+
+    '
+  когда: при вызове
+  без_него: 'Каждый сторож мерил бы работу сам: 27.09.2026 десятиминутный читал журнал,
+    а ежеминутный смотрел на время файла — и пинок сторожа выглядел работой. Владелец
+    получал «работа пошла снова, простой 0 мин», пока работа стояла.
+
+    '
+  проверяется: python3 scripts/stall-in-log.py --selftest
   пишет: 'ничего: только печатает минуты'
 - файл: scripts/test_limit_watch.sh
   вид: гейт
@@ -354,7 +395,7 @@
       молчание_считать_поломкой: 60
     источник: крон
     расписание: 10 * * * *
-- файл: harness/panel/nastrojki.py
+- файл: harness/panel/settings.py
   вид: гейт
   тема: связь с владельцем
   имя: 'Настройки панели: один разбор на всех'
@@ -369,9 +410,9 @@
     только глазами владельца.
 
     '
-  проверяется: python3 harness/panel/test_nastrojki.py (12 путей)
+  проверяется: python3 harness/panel/test_settings.py (12 путей)
   пишет: ничего не пишет — только читает
-- файл: harness/panel/test_nastrojki.py
+- файл: harness/panel/test_settings.py
   вид: гейт
   тема: связь с владельцем
   имя: Проверка настроек панели
@@ -384,7 +425,7 @@
   без_него: 'Проверки панели молча ушли бы работать с боевыми файлами сервера.
 
     '
-  проверяется: python3 harness/panel/test_nastrojki.py (12 путей)
+  проверяется: python3 harness/panel/test_settings.py (12 путей)
   пишет: число прошедших и упавших путей
 - файл: harness/panel/server.py
   вид: демон
@@ -405,7 +446,7 @@
     источник: служба
     расписание: harness-panel.service
     метки: []
-- файл: harness/demons/obnovlenie-watch.sh
+- файл: harness/demons/update-watch.sh
   вид: демон
   тема: выкат и версии
   имя: Проверка новых версий харнеса
@@ -418,8 +459,8 @@
     месте до других машин не доходит вовсе.
 
     '
-  проверяется: bash harness/demons/obnovlenie-watch.sh --selftest (5 путей)
-  пишет: $LOG_DIR/obnovlenie-watch.log, метку свежести, сообщение владельцу при новой
+  проверяется: bash harness/demons/update-watch.sh --selftest (5 путей)
+  пишет: $LOG_DIR/update-watch.log, метку свежести, сообщение владельцу при новой
     версии
   повод:
     метки:
@@ -427,7 +468,7 @@
       молчание_считать_поломкой: 1440
     источник: крон
     расписание: 45 4 * * *
-- файл: scripts/obnovlenie.py
+- файл: scripts/update.py
   вид: демон
   тема: выкат и версии
   имя: Установщик новой версии
@@ -440,13 +481,13 @@
     без возврата к прежнему состоянию.
 
     '
-  проверяется: python3 scripts/test_obnovlenie.py (27 путей, среди них откат)
+  проверяется: python3 scripts/test_update.py (27 путей, среди них откат)
   пишет: копию в /var/backups/harness, версию в /var/lib/harness, сообщение владельцу
   повод:
     источник: вручную
-    расписание: вызовом из obnovlenie-watch.sh
+    расписание: вызовом из update-watch.sh
     метки: []
-- файл: scripts/arhiv-karty.py
+- файл: scripts/archive-map.py
   вид: гейт
   тема: карта работы
   имя: Архив карты
@@ -459,9 +500,9 @@
     закрытые задачи, а чистило её только внимание модели.
 
     '
-  проверяется: python3 scripts/arhiv-karty.py --selftest
+  проверяется: python3 scripts/archive-map.py --selftest
   пишет: dev-map.yaml и docs/dev-map-archive.yaml — только вместе (И-1)
-- файл: scripts/proverka-zamka-agenta.py
+- файл: scripts/agent-lock-check.py
   вид: гейт
   тема: модель и помощники
   имя: Замок ночного агента
@@ -474,10 +515,10 @@
     доступ к серверу, хотя в коде было написано обратное.
 
     '
-  проверяется: python3 scripts/proverka-zamka-agenta.py --selftest (5 путей); живьём —
+  проверяется: python3 scripts/agent-lock-check.py --selftest (5 путей); живьём —
     --проба
   пишет: ничего — только судит
-- файл: harness/demons/stroitel-proverok.sh
+- файл: harness/demons/check-builder.sh
   вид: демон
   тема: карта работы
   имя: Строитель проверок
@@ -491,7 +532,7 @@
     вся приёмка целиком.
 
     '
-  проверяется: bash harness/demons/stroitel-proverok.sh --selftest (4 пути, первым больной)
+  проверяется: bash harness/demons/check-builder.sh --selftest (4 пути, первым больной)
   пишет: поле проверки в карточки dev-map.yaml — и больше ничего
   повод:
     метки:
@@ -499,7 +540,7 @@
       молчание_считать_поломкой: 1440
     источник: крон
     расписание: 45 5 * * *
-- файл: harness/demons/priyomka-watch.sh
+- файл: harness/demons/acceptance-watch.sh
   вид: демон
   тема: карта работы
   имя: Проверщик задач
@@ -513,7 +554,7 @@
     руками даже то, что машина доказывает за секунду.
 
     '
-  проверяется: bash harness/demons/priyomka-watch.sh --selftest (4 пути, первым больной)
+  проверяется: bash harness/demons/acceptance-watch.sh --selftest (4 пути, первым больной)
   пишет: статусы задач в карте, отчёт в docs/приёмка/, сообщение владельцу
   повод:
     метки:
@@ -521,7 +562,7 @@
       молчание_считать_поломкой: 1440
     источник: крон
     расписание: 45 4 * * *
-- файл: scripts/test_publichnaya_sborka.py
+- файл: scripts/test_public_build.py
   вид: гейт
   тема: выкат и версии
   имя: Проверка данных публичной сборки
@@ -535,9 +576,9 @@
     а ключ, которого нет в паспорте, — молчаливая пустая замена.
 
     '
-  проверяется: python3 scripts/test_publichnaya_sborka.py (25 путей)
+  проверяется: python3 scripts/test_public_build.py (25 путей)
   пишет: список находок в вывод ворот
-- файл: scripts/kto-na-portu.py
+- файл: scripts/who-is-on-port.py
   вид: гейт
   тема: связь с владельцем
   имя: Кто занял порт
@@ -550,9 +591,9 @@
     а человека у терминала в контуре нет.
 
     '
-  проверяется: python3 scripts/test_kto_na_portu.py (7 путей, больной — занятый порт)
+  проверяется: python3 scripts/test_who_is_on_port.py (7 путей, больной — занятый порт)
   пишет: 'строку «порт N занят: PID … · пользователь · команда»'
-- файл: scripts/test_kto_na_portu.py
+- файл: scripts/test_who_is_on_port.py
   вид: гейт
   тема: связь с владельцем
   имя: Пробы прибора «кто на порту»
@@ -565,7 +606,7 @@
     снова говорит только «занят».
 
     '
-  проверяется: python3 scripts/test_kto_na_portu.py (7 путей, больной — занятый порт)
+  проверяется: python3 scripts/test_who_is_on_port.py (7 путей, больной — занятый порт)
   пишет: число прошедших и упавших путей
 - файл: scripts/claude-demon.sh
   вид: демон
@@ -600,7 +641,7 @@
     '
   проверяется: bash scripts/test_claude_demon.sh
   пишет: число прошедших и упавших путей
-- файл: scripts/check-demon-zovyot-model.py
+- файл: scripts/check-daemon-calls-model.py
   вид: гейт
   тема: память и смены
   имя: Демон не зовёт модель мимо обёртки
@@ -614,9 +655,9 @@
     по исчерпанной подписке снова становится невидимым.
 
     '
-  проверяется: python3 scripts/check-demon-zovyot-model.py --selftest (7 путей)
+  проверяется: python3 scripts/check-daemon-calls-model.py --selftest (7 путей)
   пишет: список файлов и строк с прямым вызовом
-- файл: scripts/lib/ochered_kanala.py
+- файл: scripts/lib/channel_queue.py
   вид: гейт
   тема: связь с владельцем
   имя: Общий обход очереди сообщений
@@ -631,9 +672,9 @@
     беду во второй, и расходятся они молча.
 
     '
-  проверяется: python3 scripts/lib/ochered_kanala.py --selftest (13 путей, среди них «отметка отстала»)
+  проверяется: python3 scripts/lib/channel_queue.py --selftest (13 путей, среди них «отметка отстала»)
   пишет: ничего сам не пишет — отдаёт списки сторожам
-- файл: scripts/lib/pisatel_paneli.py
+- файл: scripts/lib/panel_writer.py
   вид: гейт
   тема: связь с владельцем
   имя: Общая механика правки файлов со страницы
@@ -647,9 +688,9 @@
     трёх одинаковых правок, и забытая третья молчит.
 
     '
-  проверяется: python3 scripts/lib/pisatel_paneli.py --selftest (16 путей, больной — запись не удалась)
+  проверяется: python3 scripts/lib/panel_writer.py --selftest (16 путей, больной — запись не удалась)
   пишет: копии в $LOG_DIR/панель-копии и строки в $LOG_DIR/панель.jsonl
-- файл: scripts/lib/kartochki.py
+- файл: scripts/lib/cards.py
   вид: гейт
   тема: карта и задачи
   имя: Общие границы записи задачи
@@ -663,9 +704,9 @@
     беду в остальных: 09.09.2026 так потерялись 88 задач, 12.09 — ещё 15.
 
     '
-  проверяется: python3 scripts/lib/kartochki.py --selftest (9 путей, больной первый — пустая строка перед записью)
+  проверяется: python3 scripts/lib/cards.py --selftest (9 путей, больной первый — пустая строка перед записью)
   пишет: ничего не пишет — отдаёт границы и поля
-- файл: scripts/check-kto-zovyot.py
+- файл: scripts/check-who-calls.py
   вид: гейт
   тема: установка и описание
   имя: У каждого механизма есть тот, кто его зовёт
@@ -681,9 +722,9 @@
     четыре забытые проверки.
 
     '
-  проверяется: python3 scripts/check-kto-zovyot.py --selftest (6 путей, больной первый)
+  проверяется: python3 scripts/check-who-calls.py --selftest (6 путей, больной первый)
   пишет: список механизмов без вызывающего
-- файл: scripts/check-zadanie-i-metka.py
+- файл: scripts/check-job-and-mark.py
   вид: гейт
   тема: установка и описание
   имя: У задания по расписанию есть срок присмотра
@@ -697,9 +738,9 @@
     такой работы не будит никого — так три помощника молчали бы неделями.
 
     '
-  проверяется: python3 scripts/check-zadanie-i-metka.py --selftest (9 путей, больной первый)
+  проверяется: python3 scripts/check-job-and-mark.py --selftest (9 путей, больной первый)
   пишет: список расхождений между работами и сроками
-- файл: scripts/check-rubezh-paneli.py
+- файл: scripts/check-panel-boundary.py
   вид: гейт
   тема: связь с владельцем
   имя: Рубеж панели не разошёлся с кодом
@@ -713,9 +754,9 @@
     это и случилось 13.09.2026.
 
     '
-  проверяется: python3 scripts/check-rubezh-paneli.py --selftest (26 путей, первым — живой случай)
+  проверяется: python3 scripts/check-panel-boundary.py --selftest (26 путей, первым — живой случай)
   пишет: список расхождений с именами файлов
-- файл: scripts/nginx-paneli.sh
+- файл: scripts/nginx-panel.sh
   вид: гейт
   тема: связь с владельцем
   имя: Сборщик защиты панели
@@ -731,9 +772,9 @@
     вслепую отняла бы у владельца вход.
 
     '
-  проверяется: bash scripts/nginx-paneli.sh --selftest (25 путей, три больных)
+  проверяется: bash scripts/nginx-panel.sh --selftest (25 путей, три больных)
   пишет: правила вывода панели и список расхождений
-- файл: scripts/test_rubezh_paneli.py
+- файл: scripts/test_panel_boundary.py
   вид: гейт
   тема: связь с владельцем
   имя: Пробы защиты панели
@@ -746,9 +787,9 @@
     и обезвредить его можно было бы молча.
 
     '
-  проверяется: python3 scripts/test_rubezh_paneli.py (26 путей)
+  проверяется: python3 scripts/test_panel_boundary.py (26 путей)
   пишет: список пройденных и упавших путей
-- файл: scripts/test_nginx_paneli.sh
+- файл: scripts/test_nginx_panel.sh
   вид: гейт
   тема: связь с владельцем
   имя: Пробы сборщика защиты панели
@@ -761,9 +802,9 @@
     было бы только на живой машине.
 
     '
-  проверяется: bash scripts/test_nginx_paneli.sh (25 путей, три больных)
+  проверяется: bash scripts/test_nginx_panel.sh (25 путей, три больных)
   пишет: список пройденных и упавших путей
-- файл: scripts/panel-naruzhu.sh
+- файл: scripts/panel-expose.sh
   вид: гейт
   тема: связь с владельцем
   имя: Вывод панели наружу одной командой
@@ -776,9 +817,9 @@
     нет: панель осталась бы доступной лишь с самой машины.
 
     '
-  проверяется: bash scripts/panel-naruzhu.sh --selftest (19 путей, три больных)
+  проверяется: bash scripts/panel-expose.sh --selftest (19 путей, три больных)
   пишет: адрес в настройках, правила веб-сервера, сообщение владельцу
-- файл: scripts/test_panel_naruzhu.sh
+- файл: scripts/test_panel_expose.sh
   вид: гейт
   тема: связь с владельцем
   имя: Пробы вывода панели наружу
@@ -791,9 +832,9 @@
     машины.
 
     '
-  проверяется: bash scripts/test_panel_naruzhu.sh (19 путей)
+  проверяется: bash scripts/test_panel_expose.sh (19 путей)
   пишет: список пройденных и упавших путей
-- файл: harness/panel/panel-naruzhu-root.sh
+- файл: harness/panel/panel-expose-root.sh
   вид: гейт
   тема: связь с владельцем
   имя: Вывод панели наружу от имени системы
@@ -824,7 +865,7 @@
     '
   проверяется: bash scripts/test_panel_root.sh (34 пути)
   пишет: список пройденных и упавших путей
-- файл: scripts/test_ustanovka_paneli.py
+- файл: scripts/test_panel_install.py
   вид: гейт
   тема: связь с владельцем
   имя: Установка поднимает панель
@@ -837,9 +878,9 @@
     окна в харнес кроме переписки.
 
     '
-  проверяется: python3 scripts/test_ustanovka_paneli.py --selftest (17 путей)
+  проверяется: python3 scripts/test_panel_install.py --selftest (17 путей)
   пишет: список невыполненных требований к шагу установки
-- файл: scripts/unit-paneli.sh
+- файл: scripts/panel-unit.sh
   вид: гейт
   тема: связь с владельцем
   имя: Сборщик юнита панели
@@ -852,9 +893,9 @@
     владельца не поднимается.
 
     '
-  проверяется: bash scripts/unit-paneli.sh --selftest (5 путей, три больных)
+  проверяется: bash scripts/panel-unit.sh --selftest (5 путей, три больных)
   пишет: файл юнита панели
-- файл: scripts/check-prava-paneli.py
+- файл: scripts/check-panel-permissions.py
   вид: гейт
   тема: связь с владельцем
   имя: Панель читает то, что показывает
@@ -868,10 +909,10 @@
     молчит: у службы свой пользователь, а файл создан для агента.
 
     '
-  проверяется: python3 scripts/check-prava-paneli.py --selftest (3 пути, среди них ложное
+  проверяется: python3 scripts/check-panel-permissions.py --selftest (3 пути, среди них ложное
     срабатывание); живой больной случай — права 600 на отчёте расхода
   пишет: список разделов с отказом прав в вывод ворот
-- файл: scripts/check-komandy-v-dokumentah.py
+- файл: scripts/check-commands-in-docs.py
   вид: гейт
   тема: установка и описание
   имя: Команда из документа ведёт к существующему файлу
@@ -885,11 +926,11 @@
     больше нет, и упирается в «нет такого файла» без объяснения.
 
     '
-  проверяется: python3 scripts/check-komandy-v-dokumentah.py --selftest (3 пути, среди
+  проверяется: python3 scripts/check-commands-in-docs.py --selftest (3 пути, среди
     них ложное срабатывание на архиве); живой прогон установки в чистом контейнере нашёл
     7 таких команд
   пишет: список находок в вывод ворот
-- файл: scripts/sprosit-model.py
+- файл: scripts/ask-the-model.py
   вид: гейт
   тема: модель и помощники
   имя: Вопрос к модели из кода
@@ -904,10 +945,10 @@
     никто не замечает, а сколько это стоило — не видно нигде.
 
     '
-  проверяется: 'python3 scripts/sprosit-model.py --selftest (9 путей, среди них запрет
+  проверяется: 'python3 scripts/ask-the-model.py --selftest (9 путей, среди них запрет
     спрашивать выводы); живой вызов 12.09.2026: данные по схеме за 7 с, 1 ход, 0,03 $'
   пишет: журнал вызовов $LOG_DIR/модель-вызовы.jsonl
-- файл: scripts/check-rasshirenija.py
+- файл: scripts/check-extensions.py
   вид: гейт
   тема: модель и помощники
   имя: Сторож живого способа ставить расширения
@@ -922,10 +963,10 @@
     за прошлый месяц не поставилось ни одного расширения.
 
     '
-  проверяется: python3 scripts/check-rasshirenija.py --selftest (4 пути, среди них ложное
+  проверяется: python3 scripts/check-extensions.py --selftest (4 пути, среди них ложное
     срабатывание на объяснении)
   пишет: список находок в вывод ворот
-- файл: harness/SBORKA-SKILOV.py
+- файл: harness/BUILD-SKILLS.py
   вид: гейт
   тема: установка и описание
   имя: Сборщик правил работы
@@ -940,9 +981,9 @@
     и никто этого не видит.
 
     '
-  проверяется: python3 harness/SBORKA-SKILOV.py --сверить (говорит «совпадают с главами»)
+  проверяется: python3 harness/BUILD-SKILLS.py --сверить (говорит «совпадают с главами»)
   пишет: инструкции в harness/skills и ссылки на них в .claude/skills
-- файл: scripts/test_sborka_skilov.py
+- файл: scripts/test_skills_build.py
   вид: гейт
   тема: установка и описание
   имя: Проверка сверки правил
@@ -955,9 +996,9 @@
     её отсутствие: зелёная проверка убеждает, что всё в порядке.
 
     '
-  проверяется: python3 scripts/test_sborka_skilov.py (5 путей, три больных)
+  проверяется: python3 scripts/test_skills_build.py (5 путей, три больных)
   пишет: число прошедших и упавших путей
-- файл: scripts/sobrat-claude-md.py
+- файл: scripts/build-claude-md.py
   вид: гейт
   тема: установка и описание
   имя: Сборщик правил для нового проекта
@@ -971,10 +1012,10 @@
     сторожей, которых уже нет.
 
     '
-  проверяется: python3 scripts/sobrat-claude-md.py --проверить (красный на правке руками
+  проверяется: python3 scripts/build-claude-md.py --проверить (красный на правке руками
     — проверено)
   пишет: harness/CLAUDE.md
-- файл: scripts/rasshirenija.py
+- файл: scripts/extensions.py
   вид: гейт
   тема: модель и помощники
   имя: Установщик расширений
@@ -989,10 +1030,10 @@
     установки за месяц 0.
 
     '
-  проверяется: python3 scripts/rasshirenija.py --selftest (9 проб, из них больной случай
+  проверяется: python3 scripts/extensions.py --selftest (9 проб, из них больной случай
     снятия несуществующего)
   пишет: плагины в ~/.claude/plugins
-- файл: harness/demons/rasshirenija-watch.sh
+- файл: harness/demons/extensions-watch.sh
   вид: демон
   тема: модель и помощники
   имя: Сторож набора расширений
@@ -1006,9 +1047,9 @@
     то есть ни на чём.
 
     '
-  проверяется: bash harness/demons/rasshirenija-watch.sh --selftest (механизм зелёный,
+  проверяется: bash harness/demons/extensions-watch.sh --selftest (механизм зелёный,
     отказ без claude назван словом)
-  пишет: метку присмотра rasshirenija-watch, доклад в канал при изменении
+  пишет: метку присмотра extensions-watch, доклад в канал при изменении
   повод:
     метки:
     - имя: rasshirenija-watch
@@ -1037,7 +1078,7 @@
       молчание_считать_поломкой: 1440
     источник: крон
     расписание: 15 5 * * *
-- файл: scripts/zamer-tona.py
+- файл: scripts/tone-measurement.py
   вид: гейт
   тема: связь с владельцем
   имя: Замер речи владельца
@@ -1050,9 +1091,9 @@
     выдумки вместо замера.
 
     '
-  проверяется: python3 scripts/zamer-tona.py --selftest (5 путей, первым больной)
+  проверяется: python3 scripts/tone-measurement.py --selftest (5 путей, первым больной)
   пишет: ничего — только печатает замер
-- файл: scripts/priyomka.py
+- файл: scripts/acceptance.py
   вид: гейт
   тема: карта работы
   имя: Приёмка задач
@@ -1066,9 +1107,9 @@
     им одна — статус перестал что-либо значить.
 
     '
-  проверяется: python3 scripts/priyomka.py --selftest (31 путь, первым больной)
+  проверяется: python3 scripts/acceptance.py --selftest (31 путь, первым больной)
   пишет: исходы проверки в карточки задач и отчёт приёмки
-- файл: scripts/zadachi-iz-kanala.py
+- файл: scripts/tasks-from-channel.py
   вид: гейт
   тема: связь с владельцем
   имя: Задачи из канала
@@ -1082,10 +1123,10 @@
     терялась вместе с ней — владельцу приходилось бы повторять.
 
     '
-  проверяется: python3 scripts/zadachi-iz-kanala.py --selftest (5 путей, первым больной)
+  проверяется: python3 scripts/tasks-from-channel.py --selftest (5 путей, первым больной)
     в воротах
   пишет: память/.задачи-разобрано и метку разбора в журнале
-- файл: scripts/versiya.py
+- файл: scripts/version.py
   вид: гейт
   тема: выкат и версии
   имя: Номер версии релиза
@@ -1101,9 +1142,9 @@
     не знает, стоит ли обновляться и на что откатиться.
 
     '
-  проверяется: python3 scripts/versiya.py --selftest (14 путей)
+  проверяется: python3 scripts/version.py --selftest (14 путей)
   пишет: VERSION и CHANGELOG.md в дереве публичной сборки
-- файл: scripts/test_versiya.py
+- файл: scripts/test_version.py
   вид: гейт
   тема: выкат и версии
   имя: Проверка счёта версии
@@ -1117,9 +1158,9 @@
     возможностью, а подделанный файл версии сбивал бы счёт.
 
     '
-  проверяется: python3 scripts/test_versiya.py (14 путей)
+  проверяется: python3 scripts/test_version.py (14 путей)
   пишет: число прошедших и упавших путей
-- файл: scripts/publikaciya.sh
+- файл: scripts/publish.sh
   вид: гейт
   тема: выкат и версии
   имя: Замки публикации
@@ -1135,9 +1176,9 @@
     обновлялись бы из него.
 
     '
-  проверяется: bash scripts/publikaciya.sh --selftest (14 путей, восемь больных) в воротах
+  проверяется: bash scripts/publish.sh --selftest (14 путей, восемь больных) в воротах
   пишет: дерево сборки в PUBLIC_BUILD_DIR и публичную ветку удалённого PUBLIC_REMOTE
-- файл: scripts/sobrat-publichnoe.py
+- файл: scripts/build-public.py
   вид: гейт
   тема: выкат и версии
   имя: Сборка публичного харнеса
@@ -1148,15 +1189,15 @@
     дерево не трогает.
 
     '
-  когда: внутри публикации (publikaciya.sh); самотест — в воротах
+  когда: внутри публикации (publish.sh); самотест — в воротах
   без_него: 'Наружу уезжала бы наша мастерская целиком — путь установки, имя продукта,
     разбор речи владельца — вместо инструмента.
 
     '
-  проверяется: python3 scripts/sobrat-publichnoe.py --selftest (16 путей, первым — больной
+  проверяется: python3 scripts/build-public.py --selftest (16 путей, первым — больной
     случай) в воротах
   пишет: дерево в каталоге PUBLIC_BUILD_DIR, строку чисел о сборке
-- файл: scripts/check-publichnoe-chisto.py
+- файл: scripts/check-public-clean.py
   вид: гейт
   тема: выкат и версии
   имя: Чистота публичной сборки
@@ -1171,9 +1212,9 @@
     туда уже попал номер чата владельца.
 
     '
-  проверяется: python3 scripts/check-publichnoe-chisto.py --selftest (10 путей, семь больных)
+  проверяется: python3 scripts/check-public-clean.py --selftest (10 путей, семь больных)
   пишет: строки находок с именем образца, без самого значения
-- файл: scripts/check-quotepath.py
+- файл: scripts/check-quotepath-flag.py
   вид: гейт
   тема: планка кода
   имя: Git не слепнет на русских именах
@@ -1187,7 +1228,7 @@
     видит их своими глазами — так и случилось 12.09.2026.
 
     '
-  проверяется: python3 scripts/check-quotepath.py --selftest (8 путей, из них три больных)
+  проверяется: python3 scripts/check-quotepath-flag.py --selftest (8 путей, из них три больных)
   пишет: 'строки находок: файл, строка, причина'
 - файл: scripts/hooks/guard_bash.py
   вид: хук
@@ -1233,7 +1274,7 @@
     '
   проверяется: bash scripts/hooks/stop_reminder.sh --selftest
   пишет: напоминание мне, $LOG_DIR/stop-reminder.log
-- файл: scripts/hooks/pre_compact.sh
+- файл: scripts/hooks/pre_compact_handover.sh
   вид: хук
   тема: память и смены
   имя: Запись перед сжатием памяти
@@ -1246,7 +1287,7 @@
     — преемник не узнает, на чём всё остановилось.
 
     '
-  проверяется: bash scripts/hooks/pre_compact.sh --selftest
+  проверяется: bash scripts/hooks/pre_compact_handover.sh --selftest
   пишет: $LOG_DIR/rotations.jsonl
 - файл: scripts/hooks/skill_log.sh
   вид: хук
@@ -1263,7 +1304,7 @@
     '
   проверяется: bash scripts/hooks/skill_log.sh --selftest
   пишет: '$LOG_DIR/skills.jsonl с признаком «источник: хук»'
-- файл: scripts/vorota.sh
+- файл: scripts/gates.sh
   вид: гейт
   тема: планка кода
   имя: 'Ворота: все проверки одним вызовом'
@@ -1276,9 +1317,9 @@
     означает, что сломанное уезжает дальше.
 
     '
-  проверяется: bash scripts/vorota.sh --selftest
+  проверяется: bash scripts/gates.sh --selftest
   пишет: итог каждой проверки в $LOG_DIR/ворота-итог.jsonl — его читает панель
-- файл: scripts/pre-commit-hook.sh
+- файл: scripts/pre-commit-gate.sh
   вид: гейт
   тема: планка кода
   имя: Проверки в момент записи
@@ -1291,7 +1332,7 @@
     бы в хранилище без единого следа.
 
     '
-  проверяется: bash scripts/pre-commit-hook.sh --selftest-devmap
+  проверяется: bash scripts/pre-commit-gate.sh --selftest-devmap
   пишет: причину отказа в вывод и $LOG_DIR/pre-commit.log
 - файл: scripts/check-secrets.sh
   вид: гейт
@@ -1308,7 +1349,7 @@
     '
   проверяется: bash scripts/check-secrets.sh
   пишет: список подозрительных строк в вывод
-- файл: scripts/check-sekret-v-logah.py
+- файл: scripts/check-secret-in-logs.py
   вид: гейт
   тема: данные и сервер
   имя: Секреты не лежат в записях работы
@@ -1322,7 +1363,7 @@
     этом можно только случайно.
 
     '
-  проверяется: python3 scripts/check-sekret-v-logah.py
+  проверяется: python3 scripts/check-secret-in-logs.py
   пишет: имена файлов и строк с находкой
 - файл: scripts/check-context-hygiene.py
   вид: гейт
@@ -1339,7 +1380,7 @@
     '
   проверяется: python3 scripts/check-context-hygiene.py
   пишет: размеры и перерасход в вывод
-- файл: scripts/ukazaniya.py
+- файл: scripts/orders.py
   вид: гейт
   тема: связь с владельцем
   имя: Слово владельца не теряется
@@ -1352,7 +1393,7 @@
     повторять его снова.
 
     '
-  проверяется: python3 scripts/ukazaniya.py
+  проверяется: python3 scripts/orders.py
   пишет: список незанесённых сообщений в вывод
 - файл: scripts/hooks/test_guard_bash.py
   вид: гейт
@@ -1369,7 +1410,7 @@
     '
   проверяется: python3 scripts/hooks/test_guard_bash.py
   пишет: число прошедших и упавших пар
-- файл: scripts/sverit-s-paketom.py
+- файл: scripts/compare-with-package.py
   вид: гейт
   тема: установка и описание
   имя: Правка живёт в установочном наборе
@@ -1382,9 +1423,9 @@
     и та же беда случится заново.
 
     '
-  проверяется: python3 scripts/sverit-s-paketom.py
+  проверяется: python3 scripts/compare-with-package.py
   пишет: список разошедшихся файлов
-- файл: scripts/check-kirillica-v-imenah.py
+- файл: scripts/check-cyrillic-in-names.py
   вид: гейт
   тема: планка кода
   имя: Русские имена переменных в скриптах
@@ -1397,7 +1438,7 @@
     у всех.
 
     '
-  проверяется: python3 scripts/check-kirillica-v-imenah.py
+  проверяется: python3 scripts/check-cyrillic-in-names.py
   пишет: файл и строку с русским именем
 - файл: scripts/check-file-names.py
   вид: гейт
@@ -1414,7 +1455,80 @@
     '
   проверяется: python3 scripts/check-file-names.py --selftest
   пишет: имя отвергнутого файла и причину
-- файл: scripts/lib/konf.sh
+- файл: scripts/check-seed-templates.py
+  вид: гейт
+  тема: планка кода
+  имя: Семя установки не притворяется живым кодом
+  роль: 'Каждый файл кода в каталоге семян первой установки обязан первой
+    строкой называть живой файл, который из него вырос. У форматов без
+    комментариев метка лежит в файле-соседе.
+
+    '
+  когда: в прогоне ворот и перед коммитом
+  без_него: 'Семена разошлись с живыми файлами на 113-754 строки и не менялись с
+    самого начала, а главы называют семя местом, где «живёт» механизм. Правку
+    понесут в семя, она не проявится нигде, и потерю заметят через месяц.
+
+    '
+  проверяется: python3 scripts/check-seed-templates.py --selftest (13 путей, больной первый)
+  пишет: список семян без указателя на живой файл
+- файл: scripts/limit_mark.py
+  вид: гейт
+  тема: канал с владельцем
+  имя: Судья метки «работа встала»
+  роль: 'Один формат метки и один текст вести о простое: ставит её с поводом
+    (лимит доказан отказом 429 либо просто немота), снимает и сам говорит
+    словами, что случилось. Неизвестный повод называется неизвестным, а не
+    «признака лимита не было».
+
+    '
+  когда: когда ежеминутный сторож лимита или сторож сессий объявляет остановку и возобновление
+  без_него: 'Знание о двух полях метки жило в двух сторожах сразу: сторож
+    сессий писал время и повод, а сторож лимита — только время. Повод терялся ровно там, где
+    лимит был доказан, и владелец получал «Упёрся в лимит подписки», а через 12
+    минут «Признака лимита не было — смена просто молчала» (его снимок экрана
+    27.09.2026).
+
+    '
+  проверяется: python3 scripts/limit_mark.py --selftest (18 путей, больной первый)
+  пишет: $LOG_DIR/лимит-подписки.состояние — время и повод остановки
+- файл: scripts/hooks/pause_guard.py
+  вид: хук
+  тема: канал с владельцем
+  имя: Пауза владельца останавливает смену
+  роль: 'Пока держится пауза, смена не работает: любая команда и любая правка
+    файла отменяются с причиной. Разрешены ровно три вещи — прочитать входящие,
+    ответить в канал и спросить саму паузу; свою собственную паузу смена вправе
+    ещё и снять, паузу владельца — нет.
+
+    '
+  когда: перед каждой командой и каждой правкой файла
+  без_него: 'Пауза останавливает только присмотр, а смена продолжает работать: 21.09.2026
+    владелец нажал кнопку и получил ещё полчаса чужой работы, после чего спросил,
+    какого хрена я продолжаю.
+
+    '
+  проверяется: python3 scripts/hooks/pause_guard.py --selftest (46 путей, больной первый)
+  пишет: причину отказа со словами владельца; при первом отказе на паузе владельца
+    сам пишет ему в канал «стою и жду», метка пауза-сказано в каталоге состояния
+- файл: scripts/check-install-root.py
+  вид: гейт
+  тема: планка кода
+  имя: Место установки не вписано в код
+  роль: 'Не даёт вписать в код путь к месту установки строкой: где лежат настройки,
+    журналы и состояние, решает один корень, а не каждый файл по-своему. Образцы
+    команд в пробах и объяснения в комментариях не трогает.
+
+    '
+  когда: в прогоне ворот и перед коммитом
+  без_него: 'Удобная строка «/var/log/harness» возвращается в первый же файл, корень
+    установки становится мёртвым, и харнес снова ставится ровно на одну машину:
+    21.09.2026 таких строк было 194 в 129 файлах.
+
+    '
+  проверяется: python3 scripts/check-install-root.py --selftest
+  пишет: файл, строку и вписанный путь
+- файл: scripts/lib/config.sh
   вид: гейт
   тема: планка кода
   имя: Общий читатель настроек
@@ -1429,9 +1543,9 @@
     12.09.2026 так проба сменила модель прямо в рабочей смене.
 
     '
-  проверяется: bash scripts/lib/konf.sh --selftest
+  проверяется: bash scripts/lib/config.sh --selftest
   пишет: 'ничего: молчит, пока его зовут правильно'
-- файл: scripts/check-funkciya-do-opredeleniya.py
+- файл: scripts/check-function-before-definition.py
   вид: гейт
   тема: планка кода
   имя: Кусок сценария описан раньше, чем нужен
@@ -1445,9 +1559,9 @@
     записи в хранилище.
 
     '
-  проверяется: python3 scripts/check-funkciya-do-opredeleniya.py --selftest
+  проверяется: python3 scripts/check-function-before-definition.py --selftest
   пишет: файл, строку вызова и строку, где кусок описан
-- файл: scripts/check-pisateli-karty.py
+- файл: scripts/check-map-writers.py
   вид: гейт
   тема: карта работы
   имя: Список дел правят по очереди
@@ -1460,9 +1574,9 @@
     нет. Замер 12.09.2026 — замок брали двое из пяти.
 
     '
-  проверяется: python3 scripts/check-pisateli-karty.py --selftest
+  проверяется: python3 scripts/check-map-writers.py --selftest
   пишет: файл и строку, где список дел меняют без замка
-- файл: scripts/propolka-karty.py
+- файл: scripts/weed-the-map.py
   вид: гейт
   тема: карта работы
   имя: Карта не раздувается подробностями
@@ -1476,9 +1590,9 @@
     карточка держала в нём 29 397 лишних знаков.
 
     '
-  проверяется: python3 scripts/propolka-karty.py --selftest
+  проверяется: python3 scripts/weed-the-map.py --selftest
   пишет: какие задачи и на сколько знаков вышли за потолок
-- файл: scripts/check-konf-zagruzka.py
+- файл: scripts/check-config-loading.py
   вид: гейт
   тема: планка кода
   имя: Настройки читаются одним способом
@@ -1492,9 +1606,9 @@
     модель прямо в рабочей смене, и заметил это владелец, а не проверка.
 
     '
-  проверяется: python3 scripts/check-konf-zagruzka.py --selftest
+  проверяется: python3 scripts/check-config-loading.py --selftest
   пишет: файл и строку, где настройки читаются в обход общего читателя
-- файл: scripts/check-padenie-pod-set-e.py
+- файл: scripts/check-failure-under-set-e.py
   вид: гейт
   тема: планка кода
   имя: Молчаливое падение сценария
@@ -1507,7 +1621,7 @@
     тоже.
 
     '
-  проверяется: python3 scripts/check-padenie-pod-set-e.py
+  проверяется: python3 scripts/check-failure-under-set-e.py
   пишет: файл и строку опасного места
 - файл: scripts/check-pipeline.py
   вид: гейт
@@ -1553,7 +1667,7 @@
     '
   проверяется: python3 scripts/check-imports.py
   пишет: список битых подключений
-- файл: scripts/check-vneshnie-vyzovy.py
+- файл: scripts/check-external-callers.py
   вид: гейт
   тема: установка и описание
   имя: Расписания зовут существующие файлы
@@ -1566,9 +1680,9 @@
     — ровно так сломались вызовы 11.09.
 
     '
-  проверяется: python3 scripts/check-vneshnie-vyzovy.py
+  проверяется: python3 scripts/check-external-callers.py
   пишет: список вызовов, ведущих в никуда
-- файл: scripts/check-karta-ne-teryaet-zadachi.py
+- файл: scripts/check-map-keeps-tasks.py
   вид: гейт
   тема: карта работы
   имя: Задача не исчезает из списка дел
@@ -1581,9 +1695,9 @@
     файл-то на месте.
 
     '
-  проверяется: python3 scripts/check-karta-ne-teryaet-zadachi.py --selftest
+  проверяется: python3 scripts/check-map-keeps-tasks.py --selftest
   пишет: число задач до и после, имена пропавших
-- файл: scripts/check-pereklyuchateli.py
+- файл: scripts/check-switches.py
   вид: гейт
   тема: связь с владельцем
   имя: Каждая ручка на панели что-то делает
@@ -1596,9 +1710,9 @@
     целиком.
 
     '
-  проверяется: python3 scripts/check-pereklyuchateli.py --selftest
+  проверяется: python3 scripts/check-switches.py --selftest
   пишет: список ручек без читателя и с ложным сроком применения
-- файл: scripts/check-perepiska.py
+- файл: scripts/check-channel-messages.py
   вид: гейт
   тема: связь с владельцем
   имя: Правила переписки с владельцем
@@ -1611,9 +1725,9 @@
     прямо.
 
     '
-  проверяется: python3 scripts/check-perepiska.py --selftest
+  проверяется: python3 scripts/check-channel-messages.py --selftest
   пишет: причину отказа отправки
-- файл: scripts/check-srok-vhoda.py
+- файл: scripts/check-login-expiry.py
   вид: гейт
   тема: связь с владельцем
   имя: Срок ключа входа
@@ -1626,7 +1740,7 @@
     об этом по молчанию канала.
 
     '
-  проверяется: python3 scripts/check-srok-vhoda.py
+  проверяется: python3 scripts/check-login-expiry.py
   пишет: остаток срока в вывод и предупреждение владельцу
   повод:
     метки:
@@ -1634,7 +1748,7 @@
       молчание_считать_поломкой: 30
     источник: крон
     расписание: '*/30 * * * *'
-- файл: scripts/check-harnes-chist.py
+- файл: scripts/check-harness-clean.py
   вид: гейт
   тема: планка кода
   имя: Харнес чист от продукта
@@ -1649,9 +1763,9 @@
     молчат — то есть выглядят зелёными, не проверяя.
 
     '
-  проверяется: python3 scripts/check-harnes-chist.py --selftest
+  проверяется: python3 scripts/check-harness-clean.py --selftest
   пишет: список файлов и строк с именем продукта
-- файл: scripts/slovo-vnimaniya.py
+- файл: scripts/attention-word.py
   вид: хук
   тема: связь с владельцем
   имя: Прямое слово владельца
@@ -1665,9 +1779,9 @@
     задача может уехать в конец, а может перебить всё, и объяснение каждый раз новое.
 
     '
-  проверяется: python3 scripts/slovo-vnimaniya.py --selftest
+  проверяется: python3 scripts/attention-word.py --selftest
   пишет: найденное слово; сам список слов лежит в настройках очереди
-- файл: scripts/check-priznaki.py
+- файл: scripts/check-signals.py
   вид: гейт
   тема: планка кода
   имя: У факта один судья
@@ -1683,9 +1797,9 @@
     в ту же минуту видела отказ по лимиту.
 
     '
-  проверяется: python3 scripts/check-priznaki.py (говорит «у каждого факта один судья»)
+  проверяется: python3 scripts/check-signals.py (говорит «у каждого факта один судья»)
   пишет: список судей без источника
-- файл: scripts/test_priznaki.py
+- файл: scripts/test_signals.py
   вид: гейт
   тема: планка кода
   имя: Проверка правила об одном судье
@@ -1699,9 +1813,9 @@
     потому что случаи уже починены, а «сегодня зелено» ничего не доказывает.
 
     '
-  проверяется: python3 scripts/test_priznaki.py (6 путей, три больных)
+  проверяется: python3 scripts/test_signals.py (6 путей, три больных)
   пишет: число прошедших и упавших путей
-- файл: scripts/doska.py
+- файл: scripts/board.py
   вид: хук
   тема: связь с владельцем
   имя: Доска состояния смены
@@ -1717,9 +1831,9 @@
     это не связано» при видимом лимите.
 
     '
-  проверяется: python3 scripts/doska.py --selftest (8 путей, два больных)
+  проверяется: python3 scripts/board.py --selftest (8 путей, два больных)
   пишет: одну запись на ключ в /var/log/harness/доска.json
-- файл: scripts/test_doska.py
+- файл: scripts/test_board.py
   вид: гейт
   тема: связь с владельцем
   имя: Проверка доски состояния
@@ -1732,9 +1846,9 @@
   без_него: 'Запись «жду ответа» могла бы висеть вечно и оправдывать любое молчание.
 
     '
-  проверяется: python3 scripts/test_doska.py (8 путей, два больных)
+  проверяется: python3 scripts/test_board.py (8 путей, два больных)
   пишет: число прошедших и упавших путей
-- файл: scripts/komandy-bota.py
+- файл: scripts/bot-commands.py
   вид: гейт
   тема: связь с владельцем
   имя: Кнопки в меню бота
@@ -1748,9 +1862,9 @@
     слово «панель» уходило в переписку как обычное сообщение.
 
     '
-  проверяется: python3 scripts/komandy-bota.py --проверить (сверяет меню с данными)
+  проверяется: python3 scripts/bot-commands.py --проверить (сверяет меню с данными)
   пишет: список команд на стороне Telegram
-- файл: scripts/test_komandy_bota.py
+- файл: scripts/test_bot_commands.py
   вид: гейт
   тема: связь с владельцем
   имя: Проверка кнопок бота
@@ -1763,9 +1877,9 @@
   без_него: 'Сверка могла бы молча перестать замечать пропажу кнопок.
 
     '
-  проверяется: python3 scripts/test_komandy_bota.py (10 путей, три больных)
+  проверяется: python3 scripts/test_bot_commands.py (10 путей, три больных)
   пишет: число прошедших и упавших путей
-- файл: scripts/srochnost.py
+- файл: scripts/urgency.py
   вид: хук
   тема: связь с владельцем
   имя: Срочное и несрочное
@@ -1780,10 +1894,10 @@
     назвали «накидывать задач в разных направлениях сбивает процесс».
 
     '
-  проверяется: python3 scripts/srochnost.py --selftest (14 путей, первым больной); живая
-    проба bash scripts/proba-vhod-bez-sboya.sh
+  проверяется: python3 scripts/urgency.py --selftest (14 путей, первым больной); живая
+    проба bash scripts/probe-login-without-failure.sh
   пишет: причину решения в журнал канала; замер по архиву даёт --замер
-- файл: scripts/inbox-svodka.py
+- файл: scripts/inbox-digest.py
   вид: хук
   тема: связь с владельцем
   имя: Свод входящих на рубеже
@@ -1797,9 +1911,9 @@
     в голове — то самое «записывать куда-то отдельно не столь эффективно».
 
     '
-  проверяется: python3 scripts/inbox-svodka.py --selftest (7 путей, первым больной)
+  проверяется: python3 scripts/inbox-digest.py --selftest (7 путей, первым больной)
   пишет: ничего не пишет — печатает свод на экран
-- файл: scripts/karta-iz-soobshcheniya.py
+- файл: scripts/map-from-message.py
   вид: хук
   тема: связь с владельцем
   имя: Задача из сообщения — кодом
@@ -1814,9 +1928,9 @@
     так 11.09.2026 потерялось ваше указание про автоматическую приёмку.
 
     '
-  проверяется: python3 scripts/karta-iz-soobshcheniya.py --selftest (17 путей, пять больных)
+  проверяется: python3 scripts/map-from-message.py --selftest (17 путей, пять больных)
   пишет: карточку в dev-map.yaml под общим замком карты и строку в свой журнал
-- файл: scripts/uroven-agenta.py
+- файл: scripts/agent-level.py
   вид: гейт
   тема: модель и помощники
   имя: Когда работу делает помощник
@@ -1831,10 +1945,10 @@
     ни узнать его заранее, ни поменять, не переписывая правила.
 
     '
-  проверяется: python3 scripts/uroven-agenta.py --показать (печатает уровень и что он
+  проверяется: python3 scripts/agent-level.py --показать (печатает уровень и что он
     разрешает)
   пишет: строку решения в /var/log/harness/вызовы-агентов.jsonl
-- файл: scripts/test_uroven_agenta.py
+- файл: scripts/test_agent_level.py
   вид: гейт
   тема: модель и помощники
   имя: Проверка уровня помощников
@@ -1847,9 +1961,9 @@
     как обычный уровень.
 
     '
-  проверяется: python3 scripts/test_uroven_agenta.py (8 путей, два больных)
+  проверяется: python3 scripts/test_agent_level.py (8 путей, два больных)
   пишет: число прошедших и упавших путей
-- файл: scripts/model-dlya.sh
+- файл: scripts/model-for.sh
   вид: хук
   тема: модель и помощники
   имя: Какой моделью делать эту работу
@@ -1864,9 +1978,9 @@
     дорого без пользы, где-то слабо там, где нужна сила.
 
     '
-  проверяется: bash scripts/model-dlya.sh --selftest
+  проверяется: bash scripts/model-for.sh --selftest
   пишет: имя модели; запасные ответы — в журнал model-dlya.log
-- файл: scripts/shagi-modeli.py
+- файл: scripts/model-steps.py
   вид: гейт
   тема: модель и помощники
   имя: У каждого шага работы есть своя модель
@@ -1879,9 +1993,9 @@
     модель, а проверка останется зелёной.
 
     '
-  проверяется: python3 scripts/shagi-modeli.py
+  проверяется: python3 scripts/model-steps.py
   пишет: список шагов без своей модели
-- файл: scripts/check-uderzhanie.py
+- файл: scripts/check-retention.py
   вид: гейт
   тема: память и смены
   имя: У каждого растущего файла есть хозяин
@@ -1894,9 +2008,9 @@
     появилась уборка.
 
     '
-  проверяется: python3 scripts/check-uderzhanie.py
+  проверяется: python3 scripts/check-retention.py
   пишет: список путей без хозяина или срока
-- файл: scripts/check-predlozheniya.py
+- файл: scripts/check-proposals.py
   вид: гейт
   тема: карта работы
   имя: Предложения ревизии не висят вечно
@@ -1908,9 +2022,9 @@
   без_него: 'Разбор превращается в свалку предложений, к которым никто не возвращается.
 
     '
-  проверяется: python3 scripts/check-predlozheniya.py
+  проверяется: python3 scripts/check-proposals.py
   пишет: список просроченных предложений
-- файл: scripts/pajplajn.py
+- файл: scripts/pipeline.py
   вид: гейт
   тема: карта работы
   имя: Цена ошибки и строгость шагов
@@ -1923,9 +2037,9 @@
     всех: строгость становится вкусовой.
 
     '
-  проверяется: python3 scripts/pajplajn.py --selftest
+  проверяется: python3 scripts/pipeline.py --selftest
   пишет: оценку задачи и обязательные шаги
-- файл: scripts/pokrytie-invariantov.py
+- файл: scripts/invariant-coverage.py
   вид: гейт
   тема: планка кода
   имя: У каждого правила есть механизм
@@ -1938,9 +2052,9 @@
     этого не проверял.
 
     '
-  проверяется: python3 scripts/pokrytie-invariantov.py
+  проверяется: python3 scripts/invariant-coverage.py
   пишет: таблицу «правило — механизм — след»
-- файл: scripts/mutacionnaya-proba.sh
+- файл: scripts/mutation-probe.sh
   вид: гейт
   тема: планка кода
   имя: Проверка самих проверок
@@ -1952,7 +2066,7 @@
   без_него: 'Зелёные проверки перестают что-либо значить: они зелёные и на сломанном коде.
 
     '
-  проверяется: bash scripts/mutacionnaya-proba.sh
+  проверяется: bash scripts/mutation-probe.sh
   пишет: список порч, которые никто не поймал
 - файл: scripts/test_late_exit_watch.sh
   вид: гейт
@@ -1969,7 +2083,7 @@
     '
   проверяется: bash scripts/test_late_exit_watch.sh
   пишет: итог живой пробы
-- файл: scripts/test_deploy_guard_soglasie.py
+- файл: scripts/test_deploy_guard_consent.py
   вид: гейт
   тема: выкат и версии
   имя: Согласие владельца на опасное
@@ -1982,9 +2096,9 @@
     владелец не разрешал.
 
     '
-  проверяется: python3 scripts/test_deploy_guard_soglasie.py (58 путей)
+  проверяется: python3 scripts/test_deploy_guard_consent.py (58 путей)
   пишет: 'разбор случая: было ли согласие и на что'
-- файл: scripts/test_zapisat_klyuch.py
+- файл: scripts/test_write_key.py
   вид: гейт
   тема: связь с владельцем
   имя: Проверка писателя настроек
@@ -1997,9 +2111,9 @@
     становится дырой вместо пульта.
 
     '
-  проверяется: python3 scripts/test_zapisat_klyuch.py (15 путей)
+  проверяется: python3 scripts/test_write_key.py (15 путей)
   пишет: итог проб записи и отказов
-- файл: scripts/test_zapisat_shag.py
+- файл: scripts/test_write_step.py
   вид: гейт
   тема: связь с владельцем
   имя: Проверка включателя шагов работы
@@ -2012,9 +2126,9 @@
     доказательства.
 
     '
-  проверяется: python3 scripts/test_zapisat_shag.py
+  проверяется: python3 scripts/test_write_step.py
   пишет: итог проб переключения
-- файл: scripts/test_zapisat_pamyat.py
+- файл: scripts/test_write_memory.py
   вид: гейт
   тема: связь с владельцем
   имя: Проверка правки памяти с панели
@@ -2026,9 +2140,9 @@
   без_него: 'Через поле ввода на странице можно было бы переписать любой файл на сервере.
 
     '
-  проверяется: python3 scripts/test_zapisat_pamyat.py
+  проверяется: python3 scripts/test_write_memory.py
   пишет: итог проб записи и отказов
-- файл: harness/panel/test_vhod.py
+- файл: harness/panel/test_login.py
   вид: гейт
   тема: связь с владельцем
   имя: Проверка входа в панель
@@ -2040,7 +2154,7 @@
   без_него: 'Дыра во входе означает, что переключателями харнеса управляет посторонний.
 
     '
-  проверяется: python3 harness/panel/test_vhod.py
+  проверяется: python3 harness/panel/test_login.py
   пишет: итог проб входа
 - файл: harness/panel/test_server.py
   вид: гейт
@@ -2057,7 +2171,7 @@
     '
   проверяется: python3 harness/panel/test_server.py
   пишет: итог проб по каждому адресу
-- файл: harness/panel/test_podtverzhdenie.py
+- файл: harness/panel/test_confirmation.py
   вид: гейт
   тема: связь с владельцем
   имя: Проверка второго рубежа
@@ -2070,9 +2184,9 @@
     существует именно для этого случая.
 
     '
-  проверяется: python3 harness/panel/test_podtverzhdenie.py (9 путей)
+  проверяется: python3 harness/panel/test_confirmation.py (9 путей)
   пишет: итог проб подтверждения
-- файл: harness/panel/test_sostoyanie.py
+- файл: harness/panel/test_state.py
   вид: гейт
   тема: связь с владельцем
   имя: Проверка витрины состояния
@@ -2084,9 +2198,9 @@
   без_него: 'Молчащий помощник выглядел бы на экране как работающий с нулевым результатом.
 
     '
-  проверяется: python3 harness/panel/test_sostoyanie.py
+  проверяется: python3 harness/panel/test_state.py
   пишет: итог проб показа состояния
-- файл: scripts/test_obnovlenie.py
+- файл: scripts/test_update.py
   вид: гейт
   тема: выкат и версии
   имя: Проверка обновления из хранилища
@@ -2099,9 +2213,9 @@
     откатиться назад на том, что мы сами же и написали.
 
     '
-  проверяется: python3 scripts/test_obnovlenie.py (10 путей)
+  проверяется: python3 scripts/test_update.py (10 путей)
   пишет: число прошедших и упавших путей
-- файл: scripts/test_revizia_konfig.py
+- файл: scripts/test_revision_config.py
   вид: гейт
   тема: карта работы
   имя: Настройки ежемесячной проверки осмысленны
@@ -2114,9 +2228,9 @@
     счёт прямо во время ночного прогона.
 
     '
-  проверяется: python3 scripts/test_revizia_konfig.py
+  проверяется: python3 scripts/test_revision_config.py
   пишет: какая область без папок и какой порог не число
-- файл: scripts/test_revizia_nahodki.py
+- файл: scripts/test_revision_findings.py
   вид: гейт
   тема: карта работы
   имя: Разбор того, что помощник сделал со списком дел
@@ -2129,9 +2243,9 @@
     исчезает без следа.
 
     '
-  проверяется: python3 scripts/test_revizia_nahodki.py
+  проверяется: python3 scripts/test_revision_findings.py
   пишет: какой путь разбора разошёлся с ожиданием
-- файл: scripts/revizia-nahodki.py
+- файл: scripts/revision-findings.py
   вид: гейт
   тема: карта работы
   имя: Сверка списка дел до и после проверки
@@ -2143,9 +2257,9 @@
   без_него: 'Всё, что помощник сделал со списком дел, принимается на веру.
 
     '
-  проверяется: python3 scripts/test_revizia_nahodki.py
+  проверяется: python3 scripts/test_revision_findings.py
   пишет: 'разбор одной строкой: сколько новых, что пропало, что вычеркнуто'
-- файл: scripts/test_revizia_porcii.py
+- файл: scripts/test_revision_batches.py
   вид: гейт
   тема: карта работы
   имя: Проверка читает новое, а не одно и то же
@@ -2158,9 +2272,9 @@
     не читается никогда.
 
     '
-  проверяется: python3 scripts/test_revizia_porcii.py
+  проверяется: python3 scripts/test_revision_batches.py
   пишет: какой путь выбора разошёлся с ожиданием
-- файл: scripts/revizia-porcii.py
+- файл: scripts/revision-batches.py
   вид: гейт
   тема: карта работы
   имя: Список файлов на один проход проверки
@@ -2173,9 +2287,9 @@
     же начало.
 
     '
-  проверяется: python3 scripts/test_revizia_porcii.py
+  проверяется: python3 scripts/test_revision_batches.py
   пишет: пути файлов по одному в строке
-- файл: scripts/test_ustanovit_novoe.py
+- файл: scripts/test_install_new.py
   вид: гейт
   тема: установка и описание
   имя: Проверка доустановки нового
@@ -2188,9 +2302,9 @@
     молчание никто не замечает.
 
     '
-  проверяется: python3 scripts/test_ustanovit_novoe.py (10 путей)
+  проверяется: python3 scripts/test_install_new.py (10 путей)
   пишет: число прошедших и упавших путей
-- файл: scripts/ustanovit-novoe.py
+- файл: scripts/install-new.py
   вид: демон
   тема: установка и описание
   имя: Доустановка нового
@@ -2203,13 +2317,13 @@
     сторож не ждёт того, о чём не знает.
 
     '
-  проверяется: python3 scripts/ustanovit-novoe.py --показать (печатает, чего не хватает)
+  проверяется: python3 scripts/install-new.py --показать (печатает, чего не хватает)
   пишет: строки в расписание и сроки присмотра в паспорт установки
   повод:
     источник: вручную
     расписание: вызовом при установке и обновлении
     метки: []
-- файл: scripts/check-ustrojstvo.py
+- файл: scripts/check-registry.py
   вид: гейт
   тема: установка и описание
   имя: Описание не отстаёт от устройства
@@ -2222,9 +2336,9 @@
     хуже, чем отсутствие описания вовсе.
 
     '
-  проверяется: python3 scripts/check-ustrojstvo.py
+  проверяется: python3 scripts/check-registry.py
   пишет: список расхождений между описанием и проектом
-- файл: scripts/test_ustrojstvo.py
+- файл: scripts/test_registry.py
   вид: гейт
   тема: установка и описание
   имя: Проверка сверки устройства
@@ -2236,7 +2350,7 @@
   без_него: 'Сверка может тихо перестать ловить расхождения и остаться зелёной навсегда.
 
     '
-  проверяется: python3 scripts/test_ustrojstvo.py (33 пути)
+  проверяется: python3 scripts/test_registry.py (33 пути)
   пишет: число прошедших и упавших путей
 - файл: harness/skills/приём-задачи/SKILL.md
   вид: скил
@@ -2518,7 +2632,7 @@
     '
   проверяется: отметка вызова в журнале; подставной телефон отвечает
   пишет: починенное окружение и запись о причине
-- файл: harness/panel/klient.py
+- файл: harness/panel/client.py
   вид: гейт
   тема: связь с владельцем
   имя: Мост бота к странице управления
@@ -2536,7 +2650,7 @@
     «выйти» её отзывает'
   пишет: ничего — спрашивает службу и печатает её ответ
   заведён: '2026-09-13'
-- файл: harness/panel/podtverzhdenie.py
+- файл: harness/panel/confirmation.py
   вид: гейт
   тема: связь с владельцем
   имя: Одноразовый код на опасное переключение
@@ -2550,10 +2664,10 @@
     запрет харнеса: второго ключа не осталось бы.
 
     '
-  проверяется: python3 harness/panel/test_podtverzhdenie.py
+  проверяется: python3 harness/panel/test_confirmation.py
   пишет: ожидания в файл панель-ожидания.json и строку в журнал страницы
   заведён: '2026-09-13'
-- файл: harness/panel/sostoyanie.py
+- файл: harness/panel/state.py
   вид: гейт
   тема: связь с владельцем
   имя: Снимок состояния харнеса
@@ -2567,10 +2681,10 @@
     бы на экране как работающий с нулём.
 
     '
-  проверяется: python3 harness/panel/test_sostoyanie.py
+  проверяется: python3 harness/panel/test_state.py
   пишет: ничего — только читает готовые замеры
   заведён: '2026-09-13'
-- файл: harness/panel/vhod.py
+- файл: harness/panel/login.py
   вид: гейт
   тема: связь с владельцем
   имя: Вход на страницу по одноразовой ссылке
@@ -2584,7 +2698,7 @@
     посторонний.
 
     '
-  проверяется: python3 harness/panel/test_vhod.py
+  проверяется: python3 harness/panel/test_login.py
   пишет: одноразовые ссылки и открытые входы файлами в каталоге секретов
   заведён: '2026-09-13'
 - файл: harness/panel/vid.py
@@ -2604,7 +2718,7 @@
   проверяется: python3 harness/panel/test_server.py
   пишет: ничего — возвращает готовую разметку службе
   заведён: '2026-09-13'
-- файл: harness/vozmozhnosti/mobilnaya-razrabotka/gates/proverka-petli.py
+- файл: harness/vozmozhnosti/mobilnaya-razrabotka/gates/loop-check.py
   вид: гейт
   тема: мобильное приложение
   имя: Замок на правку приложения без живого прогона
@@ -2618,11 +2732,11 @@
     то есть до первого раза, когда я о нём забыл.
 
     '
-  проверяется: python3 harness/vozmozhnosti/mobilnaya-razrabotka/gates/proverka-petli.py
+  проверяется: python3 harness/vozmozhnosti/mobilnaya-razrabotka/gates/loop-check.py
     --selftest
   пишет: ничего — читает след последнего прогона в $LOG_DIR/mobile/
   заведён: '2026-09-13'
-- файл: harness/vozmozhnosti/mobilnaya-razrabotka/sobrat-konfig.py
+- файл: harness/vozmozhnosti/mobilnaya-razrabotka/build-config.py
   вид: гейт
   тема: мобильное приложение
   имя: Сборка настроек мобильного прогона
@@ -2637,10 +2751,10 @@
     значение рвало установщик пополам.
 
     '
-  проверяется: bash harness/vozmozhnosti/mobilnaya-razrabotka/ustanovit.sh --selftest
+  проверяется: bash harness/vozmozhnosti/mobilnaya-razrabotka/install.sh --selftest
   пишет: ~/.config/harness-mobile.conf
   заведён: '2026-09-13'
-- файл: harness/vozmozhnosti/mobilnaya-razrabotka/ustanovit.sh
+- файл: harness/vozmozhnosti/mobilnaya-razrabotka/install.sh
   вид: гейт
   тема: мобильное приложение
   имя: Установка мобильной разработки
@@ -2655,7 +2769,7 @@
     держалась бы на внимании и умирала на первом пропущенном шаге.
 
     '
-  проверяется: bash harness/vozmozhnosti/mobilnaya-razrabotka/ustanovit.sh --selftest
+  проверяется: bash harness/vozmozhnosti/mobilnaya-razrabotka/install.sh --selftest
   пишет: системный шаг файлом, ~/.config/harness-mobile.conf, команды в ~/bin, строку
     в ~/.bashrc
   заведён: '2026-09-13'
@@ -2674,9 +2788,9 @@
     лежит, а вернуться некуда, потому что копия базы не снята.
 
     '
-  проверяется: прогон запрещён данными (список ЗАПРЕЩЕНО в scripts/proverit-mehanizmy.py);
+  проверяется: прогон запрещён данными (список ЗАПРЕЩЕНО в scripts/verify-mechanisms.py);
     доказывается живым выкатом с меткой версии и возвратом назад, ворота перед ним — python3
-    scripts/test_deploy_guard_soglasie.py
+    scripts/test_deploy_guard_consent.py
   пишет: метку версии в гит, копию базы и снимок образов :previous, строку в журнал выката
   заведён: '2026-09-13'
 - файл: scripts/fix-claude-mem-project.py
@@ -2697,7 +2811,7 @@
   проверяется: python3 scripts/fix-claude-mem-project.py --dry-run
   пишет: правки в базе записей памяти, её копию рядом перед правкой
   заведён: '2026-09-13'
-- файл: scripts/pamyat-v-paket.py
+- файл: scripts/memory-to-package.py
   вид: гейт
   тема: память и смены
   имя: Набор памяти для новой установки
@@ -2711,10 +2825,10 @@
     придётся собирать заново.
 
     '
-  проверяется: python3 scripts/pamyat-v-paket.py --список
+  проверяется: python3 scripts/memory-to-package.py --список
   пишет: harness/config/набор-памяти.txt и копии записей в стартовый набор
   заведён: '2026-09-13'
-- файл: scripts/zapisat-pamyat.py
+- файл: scripts/write-memory.py
   вид: гейт
   тема: память и смены
   имя: Правка памяти со страницы управления
@@ -2729,10 +2843,10 @@
     бы запись в любое место на сервере.
 
     '
-  проверяется: python3 scripts/test_zapisat_pamyat.py
+  проверяется: python3 scripts/test_write_memory.py
   пишет: файл в каталоге память/, его прежнюю копию и строку в журнал страницы
   заведён: '2026-09-13'
-- файл: scripts/ochered-raboty.py
+- файл: scripts/work-queue.py
   вид: гейт
   тема: карта работы
   имя: Счётчик работы, которую можно делать самому
@@ -2746,10 +2860,10 @@
     предупреждение, которое горит всегда, не несёт сведений.
 
     '
-  проверяется: python3 scripts/ochered-raboty.py --selftest
+  проверяется: python3 scripts/work-queue.py --selftest
   пишет: 'ничего — печатает две строки: сколько работы и что ждёт'
   заведён: '2026-09-13'
-- файл: scripts/zapisat-shag.py
+- файл: scripts/write-step.py
   вид: гейт
   тема: карта работы
   имя: Пульт обязательных шагов задачи
@@ -2763,10 +2877,10 @@
     это владелец мог бы только моими руками.
 
     '
-  проверяется: python3 scripts/test_zapisat_shag.py
+  проверяется: python3 scripts/test_write_step.py
   пишет: harness/config/пайплайн.yaml, его копию и строку в журнал страницы
   заведён: '2026-09-13'
-- файл: scripts/proba-vhod-bez-sboya.sh
+- файл: scripts/probe-login-without-failure.sh
   вид: гейт
   тема: связь с владельцем
   имя: Живой прогон доставки входящих
@@ -2781,10 +2895,10 @@
     сломанная доставка обнаружилась бы его молчанием.
 
     '
-  проверяется: bash scripts/proba-vhod-bez-sboya.sh
+  проверяется: bash scripts/probe-login-without-failure.sh
   пишет: ничего постоянного — свой временный двор со своими каталогами
   заведён: '2026-09-13'
-- файл: scripts/rasshifrovat_golos.py
+- файл: scripts/transcribe_voice.py
   вид: гейт
   тема: связь с владельцем
   имя: Расшифровка голосовых владельца
@@ -2798,10 +2912,10 @@
     заказ владельца от 11.09.2026 на разбор кода харнеса.
 
     '
-  проверяется: python3 scripts/rasshifrovat_golos.py --selftest
+  проверяется: python3 scripts/transcribe_voice.py --selftest
   пишет: ничего — печатает расшифровку
   заведён: '2026-09-13'
-- файл: scripts/skachat_vlozhenie.py
+- файл: scripts/download_attachment.py
   вид: гейт
   тема: связь с владельцем
   имя: Скачивание вложений владельца
@@ -2815,10 +2929,10 @@
     а обсуждать её нечем.
 
     '
-  проверяется: python3 scripts/skachat_vlozhenie.py --selftest
+  проверяется: python3 scripts/download_attachment.py --selftest
   пишет: скачанный файл в $LOG_DIR/inbox/файлы/
   заведён: '2026-09-13'
-- файл: scripts/uroven-yazyka.py
+- файл: scripts/language-level.py
   вид: гейт
   тема: связь с владельцем
   имя: Уровень языка в разговоре с владельцем
@@ -2833,10 +2947,29 @@
     а тому, кто сам строит системы, — объяснения на пальцах.
 
     '
-  проверяется: python3 scripts/uroven-yazyka.py --selftest
+  проверяется: python3 scripts/language-level.py --selftest
   пишет: $LOG_DIR/уровень-языка
   заведён: '2026-09-13'
-- файл: scripts/zapisat-klyuch.py
+- файл: scripts/spec_approval.py
+  вид: гейт
+  тема: связь с владельцем
+  имя: Уровень автоматизации и одобрение спеки
+  роль: 'Держит развилку владельца «полный или частичный уровень автоматизации». На частичном
+    крупная работа по спеке не начинается, пока спека не ушла ему файлом и он не ответил
+    согласием: след отправки пишется только по подтверждённому ответу Telegram, а одобрение
+    ищется в его собственных словах из очереди входящих. Голое «да» не засчитывается, если
+    после отправки спеки ворота выката спросили его о другом.
+
+    '
+  когда: на каждом коммите крупной задачи — из гейта пайплайна
+  без_него: 'Правило «спросить разрешение до работы по спеке» держалось бы вниманием смены:
+    21.09.2026 работа началась до ревью спеки, и владелец увидел это сам.
+
+    '
+  проверяется: python3 scripts/spec_approval.py --selftest
+  пишет: $LOG_DIR/спеки-владельцу.jsonl
+  заведён: '2026-09-26'
+- файл: scripts/write-key.py
   вид: гейт
   тема: связь с владельцем
   имя: Единственный писатель настроек харнеса
@@ -2850,7 +2983,7 @@
     чужая правка выглядела бы как «переключатель не сработал».
 
     '
-  проверяется: python3 scripts/test_zapisat_klyuch.py
+  проверяется: python3 scripts/test_write_key.py
   пишет: harness.conf, его копию и строку в журнал страницы
   заведён: '2026-09-13'
 - файл: scripts/model.sh
@@ -2871,7 +3004,7 @@
   проверяется: bash scripts/model.sh --selftest
   пишет: строку запуска в harness.conf; смену модели помощников — туда же
   заведён: '2026-09-13'
-- файл: scripts/lib/modeli.sh
+- файл: scripts/lib/models.sh
   вид: гейт
   тема: модель и помощники
   имя: Список имён моделей на всех
@@ -2888,7 +3021,7 @@
   проверяется: bash scripts/model.sh --selftest
   пишет: ничего — только объявляет список и две проверки
   заведён: '2026-09-13'
-- файл: scripts/lib/sosed.py
+- файл: scripts/lib/neighbor.py
   вид: гейт
   тема: планка кода
   имя: Загрузчик соседей с дефисом в имени
@@ -2903,10 +3036,10 @@
     ровно тогда, когда нужны.
 
     '
-  проверяется: python3 scripts/srochnost.py --selftest
+  проверяется: python3 scripts/urgency.py --selftest
   пишет: ничего
   заведён: '2026-09-13'
-- файл: scripts/propusk.py
+- файл: scripts/miss.py
   вид: гейт
   тема: планка кода
   имя: Журнал пропусков сторожей
@@ -2920,7 +3053,7 @@
     мимо сторожей второй и третий раз.
 
     '
-  проверяется: python3 scripts/propusk.py --selftest
+  проверяется: python3 scripts/miss.py --selftest
   пишет: $LOG_DIR/пропуски.jsonl
   заведён: '2026-09-13'
 - файл: scripts/rename-to-latin.py
@@ -2941,7 +3074,7 @@
   проверяется: python3 scripts/rename-to-latin.py --selftest
   пишет: новые имена файлов и правки ссылок в них; печатает число замен по типам
   заведён: '2026-09-13'
-- файл: scripts/translit.py
+- файл: scripts/transliterate.py
   вид: гейт
   тема: планка кода
   имя: Таблица перевода имён в латиницу
@@ -2955,10 +3088,10 @@
     вели бы в пустоту.
 
     '
-  проверяется: python3 scripts/translit.py --selftest
+  проверяется: python3 scripts/transliterate.py --selftest
   пишет: ничего — печатает переведённое имя
   заведён: '2026-09-13'
-- файл: scripts/lib/proba_git.py
+- файл: scripts/lib/git_probe.py
   вид: гейт
   тема: установка и описание
   имя: Отказ хранилища кода не проходит как «нарушений нет»
@@ -2974,7 +3107,7 @@
     сбое молча печатали «нарушений нет» и считались пройденными.
 
     '
-  проверяется: python3 scripts/check-karta-ne-teryaet-zadachi.py --selftest (8 путей, среди них отказ git и свежая установка)
+  проверяется: python3 scripts/check-map-keeps-tasks.py --selftest (8 путей, среди них отказ git и свежая установка)
   пишет: ничего не пишет — печатает строку пробы
   заведён: '2026-09-14'
 - файл: scripts/vitrina_status.py
@@ -2996,7 +3129,54 @@
   проверяется: python3 scripts/vitrina_status.py --selftest (5 путей, больной первый)
   пишет: ничего не пишет — печатает список задач, которые держат витрину
   заведён: '2026-09-14'
-- файл: scripts/lib/konf.py
+- файл: scripts/pause.py
+  вид: гейт
+  тема: канал и владелец
+  имя: Пауза работы по слову владельца
+  роль: 'Держит два признака: остановлена ли работа и КТО её остановил. Пока
+    признак стоит, присмотр не подгоняет смену — ни напоминаний ей, ни сообщений
+    владельцу о вставшей работе, — а сторож команд отменяет смене любое действие.
+    Кнопки «пауза» и «продолжай» в меню бота ставят и снимают его. Подпись автора
+    пишется по факту: умолчание — «смена», владельцем подписывает тот, кто передал
+    это явно; свою паузу смена вправе снять сама, чужую — нет.
+
+    '
+  когда: при каждом обходе присмотра и при каждой команде из бота
+  без_него: 'Остановка была только словом в переписке, и присмотр о ней не знал:
+    будил смену каждые десять минут и слал владельцу «работа встала», когда стоять
+    было его же решением (его слова 14.09.2026 — «больше лишней активности… не
+    было»).
+
+    '
+  проверяется: python3 scripts/pause.py --selftest (15 путей, больной первый)
+  пишет: /var/lib/harness/panel-state/пауза.json — общий каталог бота и панели
+  заведён: '2026-09-14'
+- файл: scripts/product-power.sh
+  вид: гейт
+  тема: продукт и сервер
+  имя: Выключатель продукта
+  роль: 'Гасит продукт целиком и поднимает обратно одной командой: останавливает
+    его контейнеры, снимает симлинк сайта nginx, убирает файл cron соседним
+    именем. Томов и образов не трогает НИКОГДА (И-1) — именно они и есть «только
+    место на диске занимал», и с ними подъём занимает секунды. Носители не
+    перечислены руками, а находятся по PRODUCT_DIR через метки docker compose:
+    список, записанный руками, разошёлся бы с живой машиной молча. Перед
+    остановкой снимает полную копию базы данных (дамп) — последнюю перед сном.
+
+    '
+  когда: по слову владельца — когда продукт убирают с сервера или возвращают
+  без_него: 'Гашение шло бы руками, и подъём тоже: что именно было остановлено,
+    помнил бы только человек. Живой случай 21.09.2026 показал цену: прогон
+    «только на стенде» снял общий с продуктом сайт nginx, и адрес перестал
+    отвечать на минуту — потому что сужение сужало лишь контейнеры.
+
+    '
+  проверяется: bash scripts/product-power.sh --selftest (10 путей, два — живые
+    больные случаи 21.09)
+  пишет: /var/lib/harness/panel-state/product-power.json — что именно было
+    остановлено; без этой записи подъём отказывает, а не поднимает «всё, что найдёт»
+  заведён: '2026-09-21'
+- файл: scripts/lib/config.py
   вид: гейт
   тема: установка и описание
   имя: Чтение настроек харнеса одним местом
@@ -3010,10 +3190,10 @@
     путь судил бы боевую установку.
 
     '
-  проверяется: python3 scripts/check-konf-zagruzka.py
+  проверяется: python3 scripts/check-config-loading.py
   пишет: ничего
   заведён: '2026-09-13'
-- файл: scripts/proverit-mehanizmy.py
+- файл: scripts/verify-mechanisms.py
   вид: гейт
   тема: установка и описание
   имя: Живой прогон всех механизмов харнеса
@@ -3028,10 +3208,10 @@
     было ни в одной проверке.
 
     '
-  проверяется: python3 scripts/proverit-mehanizmy.py --selftest
+  проверяется: python3 scripts/verify-mechanisms.py --selftest
   пишет: отчёт о прогоне файлом в $LOG_DIR и итог в stdout
   заведён: '2026-09-13'
-- файл: scripts/sobrat-reestr-v2.py
+- файл: scripts/build-registry-v2.py
   вид: гейт
   тема: установка и описание
   имя: Черновик нового реестра устройства
@@ -3045,10 +3225,10 @@
     127, и первая редакция плана этой потери не заметила.
 
     '
-  проверяется: python3 scripts/test_sobrat_reestr_v2.py
+  проверяется: python3 scripts/test_build_registry_v2.py
   пишет: черновик паспортов в рабочий каталог задачи; живой реестр только читает
   заведён: '2026-09-13'
-- файл: scripts/test_sobrat_reestr_v2.py
+- файл: scripts/test_build_registry_v2.py
   вид: гейт
   тема: установка и описание
   имя: Приёмка сборщика реестра числами
@@ -3062,10 +3242,10 @@
     записанное теряет шесть записей молча.
 
     '
-  проверяется: python3 scripts/test_sobrat_reestr_v2.py
+  проверяется: python3 scripts/test_build_registry_v2.py
   пишет: итог прогона строкой; свои временные каталоги убирает за собой
   заведён: '2026-09-13'
-- файл: scripts/sobrat-ustrojstvo.py
+- файл: scripts/build-registry-doc.py
   вид: гейт
   тема: установка и описание
   имя: Сборка документа «как устроен харнес»
@@ -3079,10 +3259,10 @@
     механизмы, которых уже нет.
 
     '
-  проверяется: python3 scripts/check-ustrojstvo.py
+  проверяется: python3 scripts/check-registry.py
   пишет: docs/УСТРОЙСТВО-ХАРНЕСА.md
   заведён: '2026-09-13'
-- файл: scripts/vozmozhnost.sh
+- файл: scripts/capability.sh
   вид: гейт
   тема: установка и описание
   имя: Установщик крупных возможностей
@@ -3096,10 +3276,10 @@
     из шести частей живёт до первого забывшего.
 
     '
-  проверяется: bash scripts/vozmozhnost.sh --selftest
+  проверяется: bash scripts/capability.sh --selftest
   пишет: отметку об установке в каталоге возможности и строку в реестр установок в $LOG_DIR
   заведён: '2026-09-13'
-- файл: scripts/ubrat-bazu.sh
+- файл: scripts/drop-database.sh
   вид: гейт
   тема: данные и сервер
   имя: Законная дверь для удаления пробной базы
@@ -3114,7 +3294,7 @@
     выходом остался бы обход сторожа — то есть дыра в правиле «не терять данные».
 
     '
-  проверяется: bash scripts/ubrat-bazu.sh --selftest
+  проверяется: bash scripts/drop-database.sh --selftest
   пишет: полную копию базы в каталог копий и строку в журнал
   заведён: '2026-09-13'
 - файл: scripts/deploy_guard.py
@@ -3126,7 +3306,7 @@
   когда: перед каждым выкатом и перед отправкой в хранилище кода
   без_него: Выкат оборвёт идущую работу на середине, а согласие владельца никто не спросит
     — обе беды тихие, видны только по последствиям.
-  проверяется: python3 scripts/test_deploy_guard_soglasie.py
+  проверяется: python3 scripts/test_deploy_guard_consent.py
   пишет: строку решения в журнал выката
   инвариант: И-2
   заведён: '2026-09-13'
@@ -3174,7 +3354,7 @@
   пишет: ничего
   инвариант: И-4
   заведён: '2026-09-13'
-- файл: scripts/proba-vosstanovleniya.sh
+- файл: scripts/restore-probe.sh
   вид: демон
   тема: данные и сервер
   имя: Восстановление из копии
@@ -3183,7 +3363,7 @@
   когда: раз в месяц по расписанию
   без_него: Копии будут считаться годными на веру — «файл не пустой» не значит «из него
     можно подняться».
-  проверяется: bash scripts/proba-vosstanovleniya.sh --selftest
+  проверяется: bash scripts/restore-probe.sh --selftest
   пишет: метку свежести и строку итога в журнал пробы
   инвариант: И-1
   заведён: '2026-09-13'
@@ -3205,7 +3385,7 @@
   проверяется: bash scripts/handover-check.sh --selftest
   пишет: ничего
   заведён: '2026-09-13'
-- файл: scripts/zapustit-agenta.sh
+- файл: scripts/start-agent.sh
   вид: гейт
   тема: память и смены
   имя: Подъём смены после перезагрузки
@@ -3214,10 +3394,10 @@
   когда: при запуске службы смены и после перезагрузки сервера
   без_него: После перезагрузки сервер живёт, панель открыта, а работы в ней нет — и это
     заметно только через четверть часа, по сторожу.
-  проверяется: bash scripts/zapustit-agenta.sh --selftest
+  проверяется: bash scripts/start-agent.sh --selftest
   пишет: ничего
   заведён: '2026-09-13'
-- файл: scripts/sobrat-sroki.py
+- файл: scripts/build-watch-periods.py
   вид: гейт
   тема: установка и описание
   имя: Сверка сроков присмотра
@@ -3226,10 +3406,10 @@
   когда: по вызову и в воротах
   без_него: Два списка сроков разойдутся молча, и постоянная работа останется без присмотра
     ровно так, как это уже случилось со сторожем срока входа.
-  проверяется: python3 scripts/sobrat-sroki.py --проверить
+  проверяется: python3 scripts/build-watch-periods.py --проверить
   пишет: ничего — только сличает
   заведён: '2026-09-13'
-- файл: scripts/test_sobrat_sroki.py
+- файл: scripts/test_build_watch_periods.py
   вид: гейт
   тема: установка и описание
   имя: Пробы сверки сроков
@@ -3237,10 +3417,10 @@
     механизмов и свой файл настроек, боевые не трогая.'
   когда: при правке сверки сроков
   без_него: Сверка могла бы молча перестать замечать расхождение, оставаясь зелёной.
-  проверяется: python3 scripts/test_sobrat_sroki.py
+  проверяется: python3 scripts/test_build_watch_periods.py
   пишет: ничего
   заведён: '2026-09-13'
-- файл: scripts/test_glubina_avtomatom.py
+- файл: scripts/test_depth_automatic.py
   вид: гейт
   тема: карта работы
   имя: Пробы заготовки глубины
@@ -3249,10 +3429,10 @@
   когда: при правке автомата карточек или правил глубины
   без_него: Правило снова стало бы держаться вниманием, и никто не заметил бы этого, пока
     задача не ушла бы в работу без назначенной глубины.
-  проверяется: python3 scripts/test_glubina_avtomatom.py
+  проверяется: python3 scripts/test_depth_automatic.py
   пишет: ничего
   заведён: '2026-09-13'
-- файл: scripts/check-zov-modeli.py
+- файл: scripts/check-model-call.py
   вид: гейт
   тема: модель и помощники
   имя: Сторож зова модели
@@ -3261,10 +3441,10 @@
   когда: в воротах и перед коммитом
   без_него: Ночная программа молча заберёт канал у живой смены, и владелец перестанет
     получать ответы, не понимая почему.
-  проверяется: python3 scripts/check-zov-modeli.py --selftest
+  проверяется: python3 scripts/check-model-call.py --selftest
   пишет: ничего
   заведён: '2026-09-13'
-- файл: scripts/check-ton-paneli.py
+- файл: scripts/check-panel-tone.py
   вид: гейт
   тема: канал и общение
   имя: Панель говорит его словами
@@ -3278,9 +3458,9 @@
     вместо «готово» — и каждое новое пояснение добавляет своего.
 
     '
-  проверяется: python3 scripts/check-ton-paneli.py --selftest
+  проверяется: python3 scripts/check-panel-tone.py --selftest
   пишет: список мест, где панель говорит не его словом
-- файл: scripts/propolka-ukazanij.py
+- файл: scripts/weed-the-orders.py
   вид: гейт
   тема: память и смены
   имя: Прополка указаний владельца
@@ -3289,10 +3469,10 @@
     и слов владельца не выдумывает: цитата переезжает, а не исчезает.
 
     '
-  когда: перед каждым коммитом памяти (демон pamyat-kommit, ежечасно)
+  когда: перед каждым коммитом памяти (демон memory-commit, ежечасно)
   без_него: 'Объём указаний держится ручной прополкой посреди другой работы: файл
     упирается в потолок, ворота краснеют, и правит их внимание смены.
 
     '
-  проверяется: python3 scripts/propolka-ukazanij.py --selftest
+  проверяется: python3 scripts/weed-the-orders.py --selftest
   пишет: правит память/УКАЗАНИЯ.md и записи, на которые указания ссылаются

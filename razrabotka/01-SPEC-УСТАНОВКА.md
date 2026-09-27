@@ -142,7 +142,7 @@ User=$AGENT_USER
 Environment=HOME=/home/$AGENT_USER
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
 WorkingDirectory=$PROJECT_DIR
-ExecStart=$PROJECT_DIR/scripts/zapustit-agenta.sh
+ExecStart=$PROJECT_DIR/scripts/start-agent.sh
 ExecStop=/usr/bin/tmux kill-session -t agent
 Restart=always
 RestartSec=10
@@ -213,7 +213,7 @@ sudo systemctl daemon-reload && sudo systemctl enable --now harness-dispatcher
 и главная из них: `sudo -u "$AGENT_USER" tmux display-message -p -t agent
 '#{pane_current_command}'` → `claude` или `node`, НЕ `bash`.
 
-Юнит зовёт `zapustit-agenta.sh`, а не `tmux new-session` напрямую: голая
+Юнит зовёт `start-agent.sh`, а не `tmux new-session` напрямую: голая
 `tmux new-session -d -s agent` создаёт сессию с ОБОЛОЧКОЙ — systemd рапортует
 `active`, tmux жив, а агента в панели нет. Улика владельца 11.08.2026: «сессия
 перезагрузилась, но автозапуска не произошло». Команду запуска скрипт берёт из
@@ -397,14 +397,14 @@ pre-commit симлинком.
 | `ЧЕЛОВЕКУ.md` | нет | что физически не может агент — уходит владельцу вложением |
 | `ЧЕК-ЛИСТ.md` | нет | приёмка набора, включая больные случаи |
 
-Единственная точка установки — `scripts/vozmozhnost.sh`:
+Единственная точка установки — `scripts/capability.sh`:
 
 ```bash
-bash scripts/vozmozhnost.sh список                    # что есть, при каком условии
-bash scripts/vozmozhnost.sh требования <id>           # замер ВЕЩЕЙ до установки
-bash scripts/vozmozhnost.sh поставить  <id> [--dry-run]
-bash scripts/vozmozhnost.sh состояние  [<id>]
-bash scripts/vozmozhnost.sh снять      <id>
+bash scripts/capability.sh список                    # что есть, при каком условии
+bash scripts/capability.sh требования <id>           # замер ВЕЩЕЙ до установки
+bash scripts/capability.sh поставить  <id> [--dry-run]
+bash scripts/capability.sh состояние  [<id>]
+bash scripts/capability.sh снять      <id>
 ```
 
 Метка `.установлено` в каталоге набора — водораздел механизма: до неё скилов
@@ -420,11 +420,11 @@ bash scripts/vozmozhnost.sh снять      <id>
 Android локально, iOS через EAS). Ставится не при установке харнеса, а когда в
 задаче продукта появилось приложение.
 
-**Проверка (без сервера):** `bash harness/scripts/vozmozhnost.sh --selftest`
-зелёный; `bash harness/vozmozhnosti/mobilnaya-razrabotka/ustanovit.sh --selftest`
+**Проверка (без сервера):** `bash harness/scripts/capability.sh --selftest`
+зелёный; `bash harness/vozmozhnosti/mobilnaya-razrabotka/install.sh --selftest`
 зелёный; `python3 harness/hooks/test_guard_bash.py` зелёный, включая путь
 «набор не установлен → его запреты молчат».
-**Проверка (на сервере):** `vozmozhnost.sh список` показывает набор как «не
+**Проверка (на сервере):** `capability.sh список` показывает набор как «не
 стоит»; `harness/skills/` не содержит `mobile-*` до установки.
 
 ## 9. Расписание демонов и heartbeat — после раскладки харнеса (этап 3)
@@ -446,7 +446,7 @@ sudo crontab -u "$AGENT_USER" - <<EOF
 30 3 * * *    $D/server-hygiene.sh        >>$LOG_DIR/server-hygiene.log 2>&1
 0 4 * * *     $D/backup.sh                >>$LOG_DIR/backup.log 2>&1
 15 4 * * *    $D/devmap-selfheal.sh       >>$LOG_DIR/devmap-selfheal.log 2>&1
-5 * * * *     $D/evo-collector.sh         >>$LOG_DIR/evo-collector.log 2>&1
+5 * * * *     $D/evolution-collector.sh         >>$LOG_DIR/evo-collector.log 2>&1
 10 * * * *    $D/tokens-collector.sh      >>$LOG_DIR/tokens-collector.log 2>&1
 0 8 * * *     $D/heartbeat-watch.sh       >>$LOG_DIR/heartbeat-watch.log 2>&1
 0 9 1 * *     $D/memory-revision.sh       >>$LOG_DIR/memory-revision.log 2>&1

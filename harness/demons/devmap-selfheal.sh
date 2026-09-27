@@ -8,8 +8,9 @@
 # Показывать пропуск владельцу — значит перекладывать на него забывчивость
 # агента; правило должно держаться механикой, а не вниманием.
 #
-# Откуда взят: UNIFIED/templates/devmap-selfheal.sh (живой скрипт боевого
-# сервера); подстановки путей заменены чтением install.conf, а внешний
+# Откуда взят: UNIFIED/templates/devmap-selfheal.sh — СЕМЯ первой установки, а
+# не живой код: оно отстало и не обновляется (замер 27.09.2026); подстановки
+# путей заменены чтением install.conf, а внешний
 # devmap_audit.py — встроенной сверкой по трейлерам `Dev-Map:` (на чистом
 # сервере продукта и его скриптов ещё нет, а правило трейлеров действует
 # с первого коммита).
@@ -91,23 +92,36 @@ MSG
     echo "SELFTEST: КРАСНЫЙ"; exit 1
 fi
 
-INSTALL_CONF="${HARNESS_INSTALL_CONF:-${INSTALL_CONF:-/etc/harness/install.conf}}"
-HARNESS_CONF="${HARNESS_CONF:-/etc/harness/harness.conf}"
+# shellcheck disable=SC1091
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../../scripts/lib/config.sh"
+INSTALL_CONF="${HARNESS_INSTALL_CONF:-${INSTALL_CONF:-$(konf_koren)/install.conf}}"
+HARNESS_CONF="${HARNESS_CONF:-$(konf_koren)/harness.conf}"
 [ -r "$INSTALL_CONF" ] || { echo "devmap-selfheal: нет $INSTALL_CONF — установка не завершена (01-SPEC §0)"; exit 1; }
-[ -r "$HARNESS_CONF" ] || { echo "devmap-selfheal: нет $HARNESS_CONF — скопируйте harness/config/harness.conf в /etc/harness/"; exit 1; }
+[ -r "$HARNESS_CONF" ] || { echo "devmap-selfheal: нет $HARNESS_CONF — скопируйте harness/config/harness.conf в $(konf_koren)/"; exit 1; }
 # Окружение старше конфига: общий загрузчик вместо голого source (улика
 # 12.09.2026 — проба с TMUX_SESSION в окружении сменила модель в РАБОЧЕЙ панели).
-# shellcheck disable=SC1091
-source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../../scripts/lib/konf.sh"
 konf_zagruzit
 
-# Выбор модели — общей функцией из scripts/lib/modeli.sh: четыре копии одной
+# Выбор модели — общей функцией из scripts/lib/models.sh: четыре копии одной
 # функции разъезжаются при первой же правке (находка ревью кода 12.09.2026).
 # shellcheck disable=SC1091
-[ -r "$PROJECT_DIR/scripts/lib/modeli.sh" ] && source "$PROJECT_DIR/scripts/lib/modeli.sh"
+[ -r "$PROJECT_DIR/scripts/lib/models.sh" ] && source "$PROJECT_DIR/scripts/lib/models.sh"
 : "${PROJECT_DIR:?пуст PROJECT_DIR}" "${LOG_DIR:?пуст LOG_DIR}" "${HEARTBEAT_DIR:?пуст HEARTBEAT_DIR}"
 
 say() { printf '%s  %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"; }
+
+# ── пауза владельца: демон заводит карточки и ПОДНИМАЕТ АГЕНТА ──────────────
+# Ревью спеки остановки 21.09.2026 (CRITICAL 4): на паузе владельца этот демон
+# продолжал будить агента и коммитить карту. Пауза обязана останавливать не
+# только смену, но и механику, которая работает чужой рукой.
+if python3 "$PROJECT_DIR/scripts/pause.py" --идёт-ли 2>/dev/null; then
+    say "владелец поставил паузу — агента не поднимаю, карту не трогаю"
+    # Метка — про ПРОГОН, а не про работу: демон проснулся и принял решение.
+    # 23–26.09.2026 владелец стоял на паузе, демон честно выходил здесь — и
+    # сводка четверо суток звала мёртвым живого ([[a-sign-true-while-work-stands-still]]).
+    mkdir -p "$HEARTBEAT_DIR" && touch "$HEARTBEAT_DIR/devmap-selfheal"
+    exit 0
+fi
 
 DAYS="${1:-${DEVMAP_AUDIT_DAYS:-14}}"
 DEVMAP="$PROJECT_DIR/dev-map.yaml"
@@ -242,7 +256,7 @@ $ITEMS
   --output-format text 9>&- > "$AGENT_LOG" 2>&1 || AGENT_RC=$?
 # 9>&- : агент живёт минутами и унёс бы дескриптор общего лока карты с собой —
 # следующий писатель видел бы «карту правит кто-то другой» вечно
-# ([[лок-утёк-в-потомка]], улика 12.09.2026: шестнадцать кругов впустую).
+# ([[lock-leaked-into-a-child]], улика 12.09.2026: шестнадцать кругов впустую).
 # ^ ночному headless-агенту — минимум инструментов, БЕЗ Bash (Д-6): чтение и
 #   правка файлов; оболочка дала бы ему весь сервер без сторожа PreToolUse.
 #   ВАЖНО: одного --allowedTools для этого МАЛО. Живая проба 11.09.2026:

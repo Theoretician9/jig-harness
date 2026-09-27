@@ -1,4 +1,4 @@
-# Покрытие инвариантов механизмами — ДАННЫЕ для scripts/pokrytie-invariantov.py.
+# Покрытие инвариантов механизмами — ДАННЫЕ для scripts/invariant-coverage.py.
 #
 # Заведено 10.09.2026 по замечанию владельца М-1 к ревизии харнеса: ревизия шла
 # снизу вверх (осматривала то, что есть), и непокрытый инвариант в такую ревизию
@@ -11,7 +11,7 @@
 # «прибора нет», строка попадает в отдельный список) · журнал и признак (след
 # срабатывания) · срок_дней (0 = след не обязателен: срабатывает редко).
 # Английские названия инвариантов для собираемого CLAUDE.md публичной сборки
-# (scripts/sobrat-claude-md.py). Лежат здесь, а не в генераторе: перевод рядом
+# (scripts/build-claude-md.py). Лежат здесь, а не в генераторе: перевод рядом
 # с оригиналом — одно место, иначе разъедется при первой правке формулировки.
 названия_en:
   И-1: "Never lose data. Irreversible work on a DB or files only with a fresh backup; destructive commands on production only through the guard."
@@ -44,20 +44,20 @@
   - id: И-1-проба-восстановления
     правило: "Бэкап, из которого не вставали, — не бэкап"
     механизм: "проба: дамп прода поднимается в отдельную базу стенда"
-    файл: scripts/proba-vosstanovleniya.sh
-    доказательство: "bash scripts/proba-vosstanovleniya.sh"
+    файл: scripts/restore-probe.sh
+    доказательство: "bash scripts/restore-probe.sh"
     тяжёлый: да        # поднимает базу на 278 МБ, идёт минутами
     журнал: проба-восстановления.log
     признак: "ПРОБА ЗАВЕРШЕНА"
     срок_дней: 30
     мутация: "s/^    grep -m3 -n -E \"\\^\\\\\\\\\\\\\\\\(connect|c)/    grep -m3 -n -E \"^zzz-нет-такого(/"
     мутация_случай: "признак чужой базы в дампе обезврежен"
-    мутация_доказательство: "bash scripts/proba-vosstanovleniya.sh --selftest"
+    мутация_доказательство: "bash scripts/restore-probe.sh --selftest"
   - id: И-2-выкат
     правило: "Выкат только deploy.sh: гейты, тег, авто-откат"
     механизм: "guard_bash запрещает ручные последовательности, deploy_guard — ворота"
     файл: scripts/deploy_guard.py
-    доказательство: "python3 scripts/test_deploy_guard_soglasie.py"
+    доказательство: "python3 scripts/test_deploy_guard_consent.py"
     журнал: deploy.log
     признак: "deploy ok"
     срок_дней: 14
@@ -70,7 +70,7 @@
     правило: "Выкат и необратимое — только по слову владельца (полуавтомат)"
     механизм: "deploy_guard читает confirmations.jsonl; согласие только словом"
     файл: scripts/deploy_guard.py
-    доказательство: "python3 scripts/test_deploy_guard_soglasie.py"
+    доказательство: "python3 scripts/test_deploy_guard_consent.py"
     журнал: confirmations.jsonl
     признак: '"text"'
     срок_дней: 14
@@ -95,8 +95,8 @@
   - id: И-3-секреты-в-логах
     правило: "Секрет продукта или харнеса не должен попадать в логи харнеса"
     механизм: "девятый гейт сверяет значения из .env, SECRETS_DIR и паспорта с логами"
-    файл: scripts/check-sekret-v-logah.py
-    доказательство: "python3 scripts/check-sekret-v-logah.py"
+    файл: scripts/check-secret-in-logs.py
+    доказательство: "python3 scripts/check-secret-in-logs.py"
     журнал: gates.jsonl
     # Своего следа у гейта нет: pre-commit пишет ОДНУ строку на коммит, общую
     # для всех гейтов внутри. Живость доказывает прибор (--приборы), а не журнал —
@@ -105,12 +105,12 @@
     срок_дней: 0
     мутация: "s/^МИН_ДЛИНА = 8$/МИН_ДЛИНА = 100000/"
     мутация_случай: "порог длины пароля поднят — в логах не ищется ничего"
-    мутация_доказательство: "python3 scripts/check-sekret-v-logah.py --selftest"
+    мутация_доказательство: "python3 scripts/check-secret-in-logs.py --selftest"
   - id: И-4-честность
     правило: "«Сделано» — только после живой проверки"
     механизм: "статусный гейт карты: done требует tested_at"
-    файл: scripts/pre-commit-hook.sh
-    доказательство: "bash scripts/pre-commit-hook.sh --selftest-devmap"
+    файл: scripts/pre-commit-gate.sh
+    доказательство: "bash scripts/pre-commit-gate.sh --selftest-devmap"
     журнал: gates.jsonl
     признак: '"verdict":'
     срок_дней: 3
@@ -139,8 +139,8 @@
   - id: указания-в-память
     правило: "Указание владельца заносится в память/УКАЗАНИЯ.md дословно"
     механизм: "гейт указаний ловит незанесённое сообщение с маркером"
-    файл: scripts/ukazaniya.py
-    доказательство: "python3 scripts/ukazaniya.py --selftest"
+    файл: scripts/orders.py
+    доказательство: "python3 scripts/orders.py --selftest"
     журнал: gates.jsonl
     # Своего следа у гейта нет: pre-commit пишет ОДНУ строку на коммит, общую
     # для всех гейтов внутри. Живость доказывает прибор (--приборы), а не журнал —
@@ -196,8 +196,8 @@
   - id: карта-не-теряет
     правило: "Задача не исчезает из карты молча"
     механизм: "гейт сверяет карту с архивом при каждом коммите"
-    файл: scripts/check-karta-ne-teryaet-zadachi.py
-    доказательство: "python3 scripts/check-karta-ne-teryaet-zadachi.py --selftest"
+    файл: scripts/check-map-keeps-tasks.py
+    доказательство: "python3 scripts/check-map-keeps-tasks.py --selftest"
     журнал: gates.jsonl
     # Своего следа у гейта нет: pre-commit пишет ОДНУ строку на коммит, общую
     # для всех гейтов внутри. Живость доказывает прибор (--приборы), а не журнал —
@@ -213,8 +213,8 @@
   - id: пакет-источник
     правило: "Правка файла харнеса идёт и в стартовый пакет"
     механизм: "гейт сверки с пакетом в pre-commit"
-    файл: scripts/sverit-s-paketom.py
-    доказательство: "python3 scripts/sverit-s-paketom.py --selftest"
+    файл: scripts/compare-with-package.py
+    доказательство: "python3 scripts/compare-with-package.py --selftest"
     журнал: gates.jsonl
     # Своего следа у гейта нет: pre-commit пишет ОДНУ строку на коммит, общую
     # для всех гейтов внутри. Живость доказывает прибор (--приборы), а не журнал —
@@ -237,14 +237,14 @@
   - id: проверки-ловят
     правило: "Самотест обязан краснеть на испорченном коде"
     механизм: "мутационная проба: порча копии механизма требует красного"
-    файл: scripts/mutacionnaya-proba.sh
-    доказательство: "bash scripts/mutacionnaya-proba.sh"
+    файл: scripts/mutation-probe.sh
+    доказательство: "bash scripts/mutation-probe.sh"
     журнал: мутации.log
     признак: "покраснели как надо"
     срок_дней: 14
     мутация: "s/BAD=$((BAD+1))/OK=$((OK+1))/g"
     мутация_случай: "дыра в чужом самотесте засчитывается пробой как успех"
-    мутация_доказательство: "bash scripts/mutacionnaya-proba.sh --selftest"
+    мутация_доказательство: "bash scripts/mutation-probe.sh --selftest"
   - id: передача-смены
     правило: "На каждом рубеже обновляется handover"
     механизм: "handover-check и пинок session-warden по возрасту передачи"

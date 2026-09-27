@@ -86,9 +86,52 @@ echo "── обычная неудача моделью: НЕ выдаётся
 printf 'что-то пошло не так\n' > "$STAND/беда.txt"
 export CLAUDE_SCENARIJ="$STAND/беда.txt" CLAUDE_KOD=1
 : > "$TG_VYHOD"
+rm -f "$LOG_DIR/отказ-демонов.состояние" "$LOG_DIR/отказ-демонов.сказано"
 VYVOD=$(bash "$OBERTKA" проба-демон -p "задание" 2>&1); KOD=$?
 itog "обычный отказ отдаёт код модели" 1 "$KOD"
-itog "об обычном отказе владельцу не пишем" 0 "$(grep -c . "$TG_VYHOD")"
+itog "о ПЕРВОМ обычном отказе владельцу не пишем" 0 "$(grep -c . "$TG_VYHOD")"
+
+# БОЛЬНОЙ СЛУЧАЙ 15–21.09.2026: отказ «organization has disabled Claude
+# subscription access» слова лимита не содержит, и шесть суток демоны молчали
+# о нём в свой лог. Признак — не словарь текстов, а ПОВТОР.
+echo "── БОЛЬНОЙ СЛУЧАЙ 15.09: отказ доступа повторяется ──"
+printf 'Your organization has disabled Claude subscription access for Claude Code\n' \
+    > "$STAND/доступ.txt"
+export CLAUDE_SCENARIJ="$STAND/доступ.txt" CLAUDE_KOD=1
+: > "$TG_VYHOD"
+rm -f "$LOG_DIR/отказ-демонов.состояние" "$LOG_DIR/отказ-демонов.сказано"
+bash "$OBERTKA" devmap-selfheal -p "z" >/dev/null 2>&1
+itog "первый отказ доступа: владельцу молчим" 0 "$(grep -c . "$TG_VYHOD")"
+bash "$OBERTKA" ton-watch -p "z" >/dev/null 2>&1
+itog "тот же отказ у СОСЕДНЕГО демона — владельцу сказано" 1 "$(grep -c . "$TG_VYHOD")"
+itog "в сообщении названа причина отказа" "да" \
+     "$(grep -q 'disabled Claude subscription access' "$TG_VYHOD" && echo да || echo нет)"
+itog "в сообщении назван демон" "да" "$(grep -q 'ton-watch' "$TG_VYHOD" && echo да || echo нет)"
+bash "$OBERTKA" stroitel-proverok -p "z" >/dev/null 2>&1
+itog "третий тот же отказ — второго сообщения нет" 1 "$(grep -c . "$TG_VYHOD")"
+
+echo "── другой отказ сбрасывает счёт: он не тот же самый ──"
+export CLAUDE_SCENARIJ="$STAND/беда.txt" CLAUDE_KOD=1
+bash "$OBERTKA" проба-демон -p "z" >/dev/null 2>&1
+itog "новый текст отказа — сообщения не добавил" 1 "$(grep -c . "$TG_VYHOD")"
+itog "подпись в состоянии сменилась" "да" \
+     "$(grep -q 'что-то пошло не так' "$LOG_DIR/отказ-демонов.состояние" && echo да || echo нет)"
+
+echo "── отказ прекратился: сказать об этом ОДИН раз ──"
+export CLAUDE_SCENARIJ="$STAND/доступ.txt" CLAUDE_KOD=1
+bash "$OBERTKA" проба-демон -p "z" >/dev/null 2>&1   # первый
+bash "$OBERTKA" проба-демон -p "z" >/dev/null 2>&1   # повтор — сказано
+SKAZANO_DO=$(grep -c . "$TG_VYHOD")
+export CLAUDE_SCENARIJ="$STAND/ответ.txt" CLAUDE_KOD=0
+bash "$OBERTKA" проба-демон -p "z" >/dev/null 2>&1
+itog "о прекращении сказано" "$((SKAZANO_DO + 1))" "$(grep -c . "$TG_VYHOD")"
+itog "сказано именно «прошло»" "да" "$(grep -q 'Прошло' "$TG_VYHOD" && echo да || echo нет)"
+bash "$OBERTKA" проба-демон -p "z" >/dev/null 2>&1
+itog "второй здоровый вызов молчит" "$((SKAZANO_DO + 1))" "$(grep -c . "$TG_VYHOD")"
+
+# Здоровый вызов после нашей возни обязан оставить стенд чистым для проб ниже.
+export CLAUDE_SCENARIJ="$STAND/ответ.txt" CLAUDE_KOD=0
+: > "$TG_VYHOD"
 
 echo "── запрет из CLAUDE.md держится обёрткой ──"
 export CLAUDE_SCENARIJ="$STAND/ответ.txt" CLAUDE_KOD=0
@@ -127,6 +170,42 @@ exec 7>&-
 echo "── второй демон в том же периоде молчит ──"
 itog "второй демон сообщения не добавил" 1 \
      "$(bash "$OBERTKA" второй-в-периоде -p "z" >/dev/null 2>&1; grep -c . "$TG_VYHOD")"
+
+# БОЛЬНОЙ СЛУЧАЙ 23–26.09.2026: владелец стоял на паузе трое суток, а в канал
+# ему шло «Лимит подписки…». Через эту обёртку модель зовут ВСЕ демоны, и слова
+# «пауза» в ней не было вовсе. Стенд паузы — СВОЙ каталог состояния: боевой
+# файл паузы проба трогать не смеет ([[the-probe-played-on-production]]).
+echo "── БОЛЬНОЙ СЛУЧАЙ 26.09: на паузе модель не зовём и владельцу не пишем ──"
+export HARNESS_PANEL_STATE="$STAND/panel-state"
+mkdir -p "$HARNESS_PANEL_STATE"
+export CLAUDE_SCENARIJ="$STAND/лимит.txt" CLAUDE_KOD=1
+rm -f "$LOG_DIR/лимит-демонов.состояние" "$LOG_DIR/отказ-демонов.состояние" \
+      "$LOG_DIR/отказ-демонов.сказано"
+: > "$TG_VYHOD"
+: > "$STAND/зов-модели.txt"
+# Подставная модель отмечает КАЖДЫЙ свой запуск: «не писал владельцу» ещё не
+# значит «не звал модель» — платим-то за зов.
+cat > "$STAND/bin/claude" <<'CLAUDE2'
+#!/usr/bin/env bash
+printf 'зван\n' >> "$STAND_ZOV"
+cat "$CLAUDE_SCENARIJ"
+exit "${CLAUDE_KOD:-0}"
+CLAUDE2
+chmod +x "$STAND/bin/claude"
+export STAND_ZOV="$STAND/зов-модели.txt"
+
+printf '{"когда": %s, "почему": "проба", "кто": "владелец"}\n' "$(date +%s)" \
+    > "$HARNESS_PANEL_STATE/пауза.json"
+bash "$OBERTKA" на-паузе -p "задание" >/dev/null 2>&1; KOD=$?
+itog "на паузе обёртка отдаёт свой код 78, а не код модели" 78 "$KOD"
+itog "на паузе владельцу НЕ написано" 0 "$(grep -c . "$TG_VYHOD")"
+itog "на паузе модель НЕ звана" 0 "$(grep -c . "$STAND_ZOV")"
+
+rm -f "$HARNESS_PANEL_STATE/пауза.json"
+bash "$OBERTKA" без-паузы -p "задание" >/dev/null 2>&1; KOD=$?
+itog "пауза снята — модель зовётся снова" 1 "$(grep -c . "$STAND_ZOV")"
+itog "пауза снята — лимит снова доходит до владельца" 1 "$(grep -c . "$TG_VYHOD")"
+itog "пауза снята — код лимита прежний" 77 "$KOD"
 
 printf '\nитого путей %s, неудач %s\n' "$PUTEJ" "$NEUDACH"
 [ "$NEUDACH" -eq 0 ]

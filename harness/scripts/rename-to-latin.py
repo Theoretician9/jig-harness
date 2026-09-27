@@ -9,11 +9,11 @@
 Три правила, каждое из разбора:
 
 * **Считать до и после.** Правка структурного файла регулярным выражением уже
-  съедала 88 задач молча (`[[жадный-regex-съел-полфайла]]`), поэтому скрипт
+  съедала 88 задач молча (`[[greedy-regex-ate-half-the-file]]`), поэтому скрипт
   печатает число замен по типам и отказывается, если в файле ничего не нашлось
   там, где ожидалось.
 * **Отказ при конфликте.** Два имени, дающих одно латинское, — это потеря
-  файла (`[[имя-модуля-уже-занято]]`). Отказ целиком, а не «перезапишем».
+  файла (`[[module-name-already-taken]]`). Отказ целиком, а не «перезапишем».
 * **Свидетельства не трогаем.** Журналы смен, архив задач и записи памяти
   описывают состояние на свою дату; переписанный журнал перестаёт быть
   свидетельством (§4 спеки).
@@ -31,7 +31,7 @@ from collections import Counter
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
-from konf import product_dir          # noqa: E402  (после правки sys.path)
+from config import product_dir          # noqa: E402  (после правки sys.path)
 
 КОРЕНЬ = Path(__file__).resolve().parent.parent
 # Каталог кода продукта — ДАННЫЕ (PRODUCT_DIR в harness.conf). Имя чужого
@@ -96,7 +96,7 @@ def карта_переименований(пути, существующие=N
     потеря файла при `git mv`, и самотест ловил именно этот случай.
     """
     import importlib.util
-    спец = importlib.util.spec_from_file_location("translit", КОРЕНЬ / "scripts" / "translit.py")
+    спец = importlib.util.spec_from_file_location("translit", КОРЕНЬ / "scripts" / "transliterate.py")
     translit = importlib.util.module_from_spec(спец)
     спец.loader.exec_module(translit)
 
@@ -111,7 +111,7 @@ def карта_переименований(пути, существующие=N
     for путь in (существующие if существующие is not None else пути):
         занято.setdefault(путь, путь)
     for старый in пути:
-        новый = translit.перевести_путь(старый)
+        новый = transliterate.перевести_путь(старый)
         if новый == старый:
             continue
         занято.pop(старый, None)      # сам себя не вытесняет
@@ -631,7 +631,7 @@ def самотест():
     объект, n_объекта = правки_в_тексте(
         "from .настройки import настройки\n"
         "ГДЕ = настройки.каталог\n",
-        {"app/api/app/настройки.py": "app/api/app/nastrojki.py"},
+        {"app/api/app/настройки.py": "app/api/app/settings.py"},
         файл="app/api/app/db.py")
     if объект == "from .nastrojki import настройки\nГДЕ = настройки.каталог\n":
         путь("  ок    БОЛЬНОЙ СЛУЧАЙ: имя в пути импорта не делает модуль импортированным")
@@ -643,7 +643,7 @@ def самотест():
     # и 171 импорт продукта указывал на исчезнувшее имя.
     относительный, n_отн = правки_в_тексте(
         "from .настройки import настройки\n",
-        {"app/api/app/настройки.py": "app/api/app/nastrojki.py"},
+        {"app/api/app/настройки.py": "app/api/app/settings.py"},
         файл="app/api/app/db.py")
     абсолютный, n_абс = правки_в_тексте(
         "from collectors.перенос_ремонтов import перенести\n",
@@ -652,7 +652,7 @@ def самотест():
     # Тот же модуль в ЧУЖОМ каталоге трогать нельзя: имя совпало, файл другой.
     чужой_каталог, n_чужой = правки_в_тексте(
         "from .настройки import настройки\n",
-        {"app/api/app/настройки.py": "app/api/app/nastrojki.py"},
+        {"app/api/app/настройки.py": "app/api/app/settings.py"},
         файл="app/collectors/svojstva_trub.py")
     if (относительный == "from .nastrojki import настройки\n" and n_отн == 1
             and абсолютный == "from collectors.perenos_remontov import перенести\n"

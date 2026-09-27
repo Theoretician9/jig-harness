@@ -3,7 +3,7 @@
 #
 # Список — то, что видит и правит панель (в пакет она заглянуть не может:
 # он в домашнем каталоге, а служба живёт с ProtectHome). Файлы в пакет
-# кладёт scripts/pamyat-v-paket.py от имени агента.
+# кладёт scripts/memory-to-package.py от имени агента.
 MEMORY.md
 feedback-code-bar.md
 feedback-command-bans.md

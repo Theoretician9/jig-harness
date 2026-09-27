@@ -5,7 +5,7 @@
 # (находка C7 разбора спеки обновления 11.09.2026). Раньше такие строки
 # добавлялись руками, то есть «кто-то должен помнить».
 #
-# Читает scripts/ustanovit-novoe.py: он ДОБАВЛЯЕТ недостающее и никогда ничего
+# Читает scripts/install-new.py: он ДОБАВЛЯЕТ недостающее и никогда ничего
 # не удаляет — чужие строки в расписании принадлежат машине, а не харнесу.
 #
 # Поля задания: имя (оно же ключ), расписание (пять полей cron), команда,
@@ -35,33 +35,37 @@
     расписание: "15 4 * * *"
     команда: "harness/demons/devmap-selfheal.sh"
     журнал: devmap-selfheal.log
-  - имя: stroitel-proverok
+  - имя: nightly-gates
+    расписание: "0 6 * * *"
+    команда: "harness/demons/nightly-gates.sh"
+    журнал: nightly-gates.log
+  - имя: check-builder
     расписание: "45 5 * * *"
-    команда: "harness/demons/stroitel-proverok.sh"
-    журнал: stroitel-proverok.log
+    команда: "harness/demons/check-builder.sh"
+    журнал: check-builder.log
 
-  - имя: priyomka-watch
+  - имя: acceptance-watch
     расписание: "45 4 * * *"
-    команда: "harness/demons/priyomka-watch.sh"
-    журнал: priyomka-watch.log
+    команда: "harness/demons/acceptance-watch.sh"
+    журнал: acceptance-watch.log
 
   - имя: ton-watch
     расписание: "15 5 * * *"
     команда: "harness/demons/ton-watch.sh"
     журнал: ton-watch.log
 
-  - имя: obnovlenie-watch
+  - имя: update-watch
     расписание: "45 4 * * *"
-    команда: "harness/demons/obnovlenie-watch.sh"
-    журнал: obnovlenie-watch.log
-  - имя: rasshirenija-watch
+    команда: "harness/demons/update-watch.sh"
+    журнал: update-watch.log
+  - имя: extensions-watch
     расписание: "35 5 * * *"
-    команда: "harness/demons/rasshirenija-watch.sh"
-    журнал: rasshirenija-watch.log
-  - имя: evo-collector
+    команда: "harness/demons/extensions-watch.sh"
+    журнал: extensions-watch.log
+  - имя: evolution-collector
     расписание: "5 * * * *"
-    команда: "harness/demons/evo-collector.sh"
-    журнал: evo-collector.log
+    команда: "harness/demons/evolution-collector.sh"
+    журнал: evolution-collector.log
   - имя: tokens-collector
     расписание: "10 * * * *"
     команда: "harness/demons/tokens-collector.sh"
@@ -77,30 +81,31 @@
   # Ревизия проекта идёт одновременно с ревизией памяти нарочно: та пишет
   # предложения и карту не трогает, столкновения нет. Утро первого числа —
   # после ночных демонов, до начала работы владельца.
-  - имя: revizia-proekta
+  - имя: project-revision
     расписание: "0 9 1 * *"
-    команда: "harness/demons/revizia-proekta.sh"
-    журнал: revizia-proekta.log
+    команда: "harness/demons/project-revision.sh"
+    журнал: project-revision.log
   - имя: memory-revision-порог
     расписание: "30 9 * * *"
     команда: "harness/demons/memory-revision.sh --по-порогу"
     журнал: memory-revision.log
-  - имя: pamyat-kommit
+  - имя: memory-commit
     расписание: "*/10 * * * *"
-    команда: "harness/demons/pamyat-kommit.sh"
-    журнал: pamyat-kommit.log
+    команда: "harness/demons/memory-commit.sh"
+    журнал: memory-commit.log
 
 # Период метки в минутах: через сколько молчание демона считается поломкой.
 # Имя = имя файла метки в HEARTBEAT_DIR. Сторож меток heartbeat-watch читает
-# их из HEARTBEAT_PERIODS в harness.conf — ustanovit-novoe.py дописывает туда
+# их из HEARTBEAT_PERIODS в harness.conf — install-new.py дописывает туда
 # недостающие, не трогая уже стоящие значения.
 метки:
+  nightly-gates: 1440
   sentinel: 5
   session-warden: 10
   session-warden.запуск: 10
-  pamyat-kommit: 10
+  memory-commit: 10
   task-closer: 60
-  evo-collector: 60
+  evolution-collector: 60
   tokens-collector: 60
   disk-cleanup: 1440
   server-hygiene: 1440
@@ -109,17 +114,17 @@
   heartbeat-watch: 1440
   check-srok-vhoda: 30
   limit-watch: 5
-  priyomka-watch: 1440
+  acceptance-watch: 1440
   proba-vosstanovleniya: 44640
-  stroitel-proverok: 1440
+  check-builder: 1440
   ton-watch: 1440
-  obnovlenie-watch: 1440
-  rasshirenija-watch: 1440
+  update-watch: 1440
+  extensions-watch: 1440
   memory-revision: 44640
-  revizia-proekta: 44640
+  project-revision: 44640
 
 # Метки, у которых НЕТ строки в расписании выше, — и почему это законно.
-# Сверяет scripts/check-zadanie-i-metka.py: без этой записи метка без задания
+# Сверяет scripts/check-job-and-mark.py: без этой записи метка без задания
 # неотличима от забытой, а задание без метки — мёртвый демон, которого никто
 # не ждёт (ревизия архитектуры 12.09.2026).
 метки_без_задания:
@@ -129,7 +134,7 @@
   proba-vosstanovleniya: "запускается раз в месяц строкой крона владельца; период метки нужен сторожу, задание — нет"
   session-warden.запуск: "вторая метка того же сторожа: её пишет подъём смены, а не отдельное задание"
 
-# Ключи harness.conf с умолчаниями: ustanovit-novoe.py ДОПИСЫВАЕТ недостающие и
+# Ключи harness.conf с умолчаниями: install-new.py ДОПИСЫВАЕТ недостающие и
 # никогда не меняет стоящие — значение владельца старше умолчания пакета.
 #
 # Зачем данными. Ручка панели требует, чтобы ключ СТОЯЛ в конфиге (гейт

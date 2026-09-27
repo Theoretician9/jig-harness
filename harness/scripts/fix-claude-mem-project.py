@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Свести записи автопамяти к одному имени проекта.
 
-Откуда взят: UNIFIED/templates/fix-claude-mem-project.py (живой скрипт боевого
-сервера). Что изменено: корень репозитория и каноническое имя читаются из
+Откуда взят: UNIFIED/templates/fix-claude-mem-project.py — СЕМЯ первой
+установки, а не живой код: оно отстало и не обновляется (замер 27.09.2026).
+Что изменено: корень репозитория и каноническое имя читаются из
 /etc/harness/install.conf (мини-парсер ниже, конфиг не исполняется; env
 HARNESS_INSTALL_CONF — для тестов); проектно-специфные списки KNOWN_STRAYS и
 OTHER_PROJECTS ужаты до общих случаев чистого сервера — «admin»/«html»/staging
@@ -55,7 +56,10 @@ def read_conf(path: str) -> dict:
     return conf
 
 
-CONF = read_conf(os.environ.get("HARNESS_INSTALL_CONF", "/etc/harness/install.conf"))
+sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
+from config import путь_install_conf  # noqa: E402
+
+CONF = read_conf(путь_install_conf())
 
 DB = Path.home() / ".claude-mem" / "claude-mem.db"
 REPO = Path(CONF.get("PROJECT_DIR") or ".")

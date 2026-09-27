@@ -14,7 +14,7 @@
 #
 # Форма полезной нагрузки СНЯТА с живого вызова (11.09, проба на keybindings-help),
 # а не выдумана — выдуманный образец чужого вывода уже делал проверку слепой
-# ([[маркер-меню-cli-не-больше-меньше]]):
+# ([[cli-menu-marker-is-not-a-caret]]):
 #   {"hook_event_name":"PostToolUse","tool_name":"Skill",
 #    "tool_input":{"skill":"keybindings-help"},
 #    "tool_response":{"success":true,"commandName":"keybindings-help",…},
@@ -35,12 +35,14 @@ set -uo pipefail
 # боевую установку (находка ревью кода 12.09.2026 — проба писала в боевой
 # журнал вместо своего).
 _HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Без загрузчика места харнеса неизвестны — хук молча уходит, а не пишет в
+# зашитый «/var/log/harness»: на чужой машине такого каталога нет.
+[ -r "$_HOOK_DIR/../lib/config.sh" ] || exit 0
 # shellcheck disable=SC1091
-[ -r "$_HOOK_DIR/../lib/konf.sh" ] && source "$_HOOK_DIR/../lib/konf.sh" \
-    && konf_zagruzit PROJECT_DIR LOG_DIR
+source "$_HOOK_DIR/../lib/config.sh"
+konf_zagruzit PROJECT_DIR LOG_DIR
 # shellcheck disable=SC1091
-[ -r "$_HOOK_DIR/../lib/modeli.sh" ] && source "$_HOOK_DIR/../lib/modeli.sh"
-LOG_DIR="${LOG_DIR:-/var/log/harness}"
+[ -r "$_HOOK_DIR/../lib/models.sh" ] && source "$_HOOK_DIR/../lib/models.sh"
 SKILLS_LOG_PATH="${SKILLS_LOG:-$LOG_DIR/${SKILLS_LOG_NAME:-skills.jsonl}}"
 FAIL_LOG="$LOG_DIR/hook_failures.log"
 
@@ -128,7 +130,7 @@ print(json.dumps({
 MODEL_SWITCH_PAUSE_SEC="${MODEL_SWITCH_PAUSE_SEC:-90}"
 # Каталог СКРИПТОВ — рядом с хуком (scripts/hooks → scripts). Не PROJECT_DIR:
 # он про проект, который судит передача смены, и подстановка его в пробе
-# отбирала у хука путь к model-dlya.sh (поймано красным самотестом 12.09.2026).
+# отбирала у хука путь к model-for.sh (поймано красным самотестом 12.09.2026).
 SCRIPTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MODEL_SWITCH_STAMP="${MODEL_SWITCH_STAMP:-$LOG_DIR/model-switch.последний}"
 
@@ -150,7 +152,7 @@ MODEL_SWITCH_STAMP="${MODEL_SWITCH_STAMP:-$LOG_DIR/model-switch.последни
     local skill="${1:-}" kind model current now last
     kind=$(вид_работы "$skill")
     [ -n "$kind" ] || return 0
-    model=$(bash "$SCRIPTS_DIR/model-dlya.sh" "$kind" 2>/dev/null) || model=""
+    model=$(bash "$SCRIPTS_DIR/model-for.sh" "$kind" 2>/dev/null) || model=""
     [ -n "$model" ] || return 0
     # Антидребезг: цепочка скилов ОДНОГО шага не должна дёргать панель. Порог в
     # секундах, а не в десяти минутах: соседние шаги пайплайна (план → контракт)

@@ -134,18 +134,16 @@ if [ "${1:-}" = "--selftest" ]; then
     echo "SELFTEST: КРАСНЫЙ"; exit 1
 fi
 
-INSTALL_CONF="${HARNESS_INSTALL_CONF:-/etc/harness/install.conf}"
-HARNESS_CONF="${HARNESS_CONF:-/etc/harness/harness.conf}"
+# shellcheck disable=SC1091
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../../scripts/lib/config.sh"
+INSTALL_CONF="${HARNESS_INSTALL_CONF:-$(konf_koren)/install.conf}"
+HARNESS_CONF="${HARNESS_CONF:-$(konf_koren)/harness.conf}"
 [ -r "$INSTALL_CONF" ] || { say "нет $INSTALL_CONF — установка не завершена, присматривать не за чем"; exit 1; }
 # Окружение старше конфига: общий загрузчик вместо голого source (улика
 # 12.09.2026 — проба с TMUX_SESSION в окружении сменила модель в РАБОЧЕЙ панели).
-# shellcheck disable=SC1091
-source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../../scripts/lib/konf.sh"
 konf_zagruzit
 
 TMUX_SESSION="${TMUX_SESSION:-agent}"
-LOG_DIR="${LOG_DIR:-/var/log/harness}"
-HEARTBEAT_DIR="${HEARTBEAT_DIR:-/var/lib/harness/heartbeat}"
 AGENT_START_CMD="${AGENT_START_CMD:-claude --dangerously-skip-permissions}"
 # Сторож сессий бежит раз в 10 минут; 25 — два периода с запасом на долгую ротацию.
 CRON_STALE_MIN="${CRON_STALE_MIN:-25}"
@@ -342,7 +340,7 @@ PANE=$(в_панели)
 case "$PANE" in
     claude|node) AGENT_LINE="агент поднялся за ${waited}с (в панели: $PANE)" ;;
     нет-сессии)  AGENT_LINE="СЕССИИ НЕТ за ${BOOT_WAIT_SEC}с — поднимаю сам"
-                 "$PROJECT_DIR/scripts/zapustit-agenta.sh" >> "$LOG_DIR/sentinel.log" 2>&1 \
+                 "$PROJECT_DIR/scripts/start-agent.sh" >> "$LOG_DIR/sentinel.log" 2>&1 \
                      && AGENT_LINE="сессии не было, поднял сам: $(в_панели)" || RC=1 ;;
     *)           AGENT_LINE="в панели '$PANE' — агента нет"; RC=1 ;;
 esac
@@ -388,7 +386,7 @@ cron: $(состояние_юнита cron)
 $(проверка "сторож команд" "cd '$PROJECT_DIR' && python3 scripts/hooks/test_guard_bash.py")
 $(проверка "секреты (И-3)" "cd '$PROJECT_DIR' && bash scripts/check-secrets.sh")
 $(проверка "сторож сессий" "cd '$PROJECT_DIR' && bash harness/demons/session-warden.sh --selftest")
-$(проверка "срок входа" "cd '$PROJECT_DIR' && python3 scripts/check-srok-vhoda.py")
+$(проверка "срок входа" "cd '$PROJECT_DIR' && python3 scripts/check-login-expiry.py")
 диск: $(df -h / | awk 'NR==2 {print $4" свободно из "$2}')
 память: $(free -h | awk 'NR==2 {print $7" доступно из "$2}')
 последний коммит: $(cd "$PROJECT_DIR" && git log --oneline -1 2>/dev/null)"

@@ -42,15 +42,15 @@ export HARNESS_CONF="$PKG/harness/config/harness.conf"
 
 echo "=== 1. Раскладка харнеса"
 HARNESS_SELFTEST=1 bash "$PKG/harness/razlozhit-harnes.sh" >/dev/null 2>&1
-chk "[ -f '$T/proj/scripts/vozmozhnost.sh' ]" "менеджер возможностей доставлен"
+chk "[ -f '$T/proj/scripts/capability.sh' ]" "менеджер возможностей доставлен"
 chk "[ -f '$T/proj/harness/vozmozhnosti/mobilnaya-razrabotka/МАНИФЕСТ.conf' ]" "набор доставлен"
 chk "! ls '$T/proj/harness/skills' | grep -q mobile" "скилов набора НЕТ до установки (контекст чист)"
 
 echo "=== 2. Список и требования до установки"
-out=$(bash "$T/proj/scripts/vozmozhnost.sh" список 2>&1)
+out=$(bash "$T/proj/scripts/capability.sh" список 2>&1)
 grep -q '\[ не стоит  \] мобильная-разработка' <<< "$out" && ok "список: набор виден как «не стоит»" || no "список: набор не показан"
 grep -q 'условие: в задаче продукта' <<< "$out" && ok "список: условие включения названо" || no "список: нет условия"
-out=$(HOME="$T/home" bash "$T/proj/scripts/vozmozhnost.sh" требования мобильная-разработка 2>&1)
+out=$(HOME="$T/home" bash "$T/proj/scripts/capability.sh" требования мобильная-разработка 2>&1)
 grep -qE '\[(ок |НЕТ| ~ )\] диск' <<< "$out" && ok "требования: диск замерен вещью (df)" || no "требования: диск не замерен"
 grep -q 'kvm' <<< "$out" && ok "требования: KVM проверен вещью, с адресом" || no "требования: KVM не проверен"
 
@@ -64,12 +64,12 @@ sed -i 's/^NEED_MEM_TOTAL_MB=.*/NEED_MEM_TOTAL_MB=0/' \
 
 echo "=== 3. Сухой прогон установки"
 HOME="$T/home" HARNESS_PACK_SELFTEST=1 SUDO_FORBIDDEN=1 \
-  bash "$T/proj/scripts/vozmozhnost.sh" поставить мобильная-разработка --dry-run >/dev/null 2>&1
+  bash "$T/proj/scripts/capability.sh" поставить мобильная-разработка --dry-run >/dev/null 2>&1
 chk "[ ! -f '$T/proj/harness/vozmozhnosti/mobilnaya-razrabotka/.установлено' ]" "--dry-run не поставил метку"
 
 echo "=== 4. Установка (сеть, sudo и Android заглушены — проверяется механизм)"
 HOME="$T/home" HARNESS_PACK_SELFTEST=1 SUDO_FORBIDDEN=1 \
-  bash "$T/proj/scripts/vozmozhnost.sh" поставить мобильная-разработка > "$T/установка.log" 2>&1
+  bash "$T/proj/scripts/capability.sh" поставить мобильная-разработка > "$T/установка.log" 2>&1
 rc=$?
 [ "$rc" = 0 ] && ok "установка завершилась нулём" || { no "установка вернула $rc"; tail -20 "$T/установка.log"; }
 chk "[ -f '$T/proj/harness/vozmozhnosti/mobilnaya-razrabotka/.установлено' ]" "метка .установлено поставлена"
@@ -114,15 +114,15 @@ p.write_text(t.replace('APP_DIR=""', 'APP_DIR="%s"' % sys.argv[2]), encoding="ut
 PY
 mkdir -p app && echo "export const Экран = () => null" > app/Экран.tsx
 git add app/Экран.tsx
-out=$(HOME="$T/home" PROJECT_DIR="$T/proj" bash "$T/proj/scripts/pre-commit-hook.sh" 2>&1)
+out=$(HOME="$T/home" PROJECT_DIR="$T/proj" bash "$T/proj/scripts/pre-commit-gate.sh" 2>&1)
 grep -q 'GATE FAIL' <<< "$out" && ok "БОЛЬНОЙ СЛУЧАЙ: правка экрана без петли → гейт красный" || no "гейт пропустил правку экрана без петли"
 grep -q 'mobile-loop' <<< "$out" && ok "гейт назвал адрес (mobile-loop)" || no "гейт не назвал адрес"
 mkdir -p "$T/log/mobile" && printf '{"итог": "ок"}\n' > "$T/log/mobile/последняя-петля.json"
-out=$(HOME="$T/home" PROJECT_DIR="$T/proj" bash "$T/proj/scripts/pre-commit-hook.sh" 2>&1)
+out=$(HOME="$T/home" PROJECT_DIR="$T/proj" bash "$T/proj/scripts/pre-commit-gate.sh" 2>&1)
 grep -q 'все гейты пройдены' <<< "$out" && ok "со свежим следом петли гейт зелёный" || { no "гейт красный при свежем следе"; tail -5 <<< "$out"; }
 
 echo "=== 9. Снятие набора"
-out=$(HOME="$T/home" bash "$T/proj/scripts/vozmozhnost.sh" снять мобильная-разработка 2>&1)
+out=$(HOME="$T/home" bash "$T/proj/scripts/capability.sh" снять мобильная-разработка 2>&1)
 chk "! ls '$T/proj/harness/skills' | grep -q mobile" "скилы набора исчезли после снятия"
 [ "$(guard '"emulator -avd dev"')" = 0 ] && ok "запреты набора замолчали после снятия" || no "запреты действуют после снятия"
 grep -q 'ОСТАЛОСЬ' <<< "$out" && ok "снятие честно называет, что осталось на диске" || no "снятие молчит про остатки"

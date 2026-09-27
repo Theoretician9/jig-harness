@@ -84,8 +84,9 @@ if [ "${1:-}" = "--selftest" ]; then
 fi
 
 # ── боевой запуск ───────────────────────────────────────────────────────────
-INSTALL_CONF="${HARNESS_INSTALL_CONF:-/etc/harness/install.conf}"
-HARNESS_CONF="${HARNESS_CONF:-/etc/harness/harness.conf}"
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/lib/config.sh"
+INSTALL_CONF="${HARNESS_INSTALL_CONF:-$(konf_koren)/install.conf}"
+HARNESS_CONF="${HARNESS_CONF:-$(konf_koren)/harness.conf}"
 [ -r "$INSTALL_CONF" ] || { echo "handover: нет $INSTALL_CONF — установка не завершена (01-SPEC §0)"; exit 2; }
 # Окружение старше конфига: без этого проба с подставным PROJECT_DIR судила бы
 # БОЕВОЙ каталог и отвечала «свежо» на чужой передаче (улика 12.09.2026).
@@ -93,7 +94,6 @@ HARNESS_CONF="${HARNESS_CONF:-/etc/harness/harness.conf}"
 # Путь берётся по РЕАЛЬНОМУ файлу (readlink -f): pre-commit подключён в
 # .git/hooks симлинком, и dirname дал бы .git/hooks, где библиотеки нет.
 # Поймано первым же коммитом после правки, 12.09.2026.
-source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/lib/konf.sh"
 konf_zagruzit PROJECT_DIR LOG_DIR HANDOVER_MAX_AGE_MIN
 : "${PROJECT_DIR:?в install.conf пуст PROJECT_DIR}"
 verdict "$PROJECT_DIR" "${HANDOVER_MAX_AGE_MIN:-240}"
