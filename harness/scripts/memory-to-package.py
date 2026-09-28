@@ -23,6 +23,7 @@ from pathlib import Path
 
 КОРЕНЬ_ЛИБ = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(КОРЕНЬ_ЛИБ / "scripts" / "lib"))
+import patterns as формы                          # noqa: E402
 from config import log_dir, из_файла, путь_install_conf  # noqa: E402 — один парсер паспорта на весь харнес
 
 
@@ -44,7 +45,7 @@ def _пакет_по_паспорту() -> str:
 ПАКЕТ = Path(os.environ.get("HARNESS_STARTER")
              or _пакет_по_паспорту()) / "harness" / "память"
 LOG_DIR = Path(log_dir())
-ИМЯ = re.compile(r"^[A-Za-zА-Яа-яЁё0-9][A-Za-zА-Яа-яЁё0-9-]{0,80}\.md$")
+ИМЯ = формы.ИМЯ_ЗАПИСИ_ПАМЯТИ      # один судья формы имени (ревизия §4.3)
 
 
 def отказ(код: int, причина: str) -> int:

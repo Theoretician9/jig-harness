@@ -30,11 +30,50 @@ def строки_расписаний():
     места = list(Path("/etc/cron.d").glob("*")) if Path("/etc/cron.d").is_dir() else []
     места += list(Path("/etc/systemd/system").glob("*.service"))
     места += list(Path("/etc/systemd/system").glob("*.timer"))
+    # Права sudo — тоже ВЫЗОВ по имени файла. Улика 28.09.2026: миграция транслита
+    # 21.09 переименовала писателей панели (zapisat-shag.py → write-step.py), а
+    # строки /etc/sudoers.d остались на старых именах — панель неделю не могла
+    # записать ни ключ, ни шаг, ни память, и владелец видел «sudo: a password is
+    # required». Гейт смотрел расписания и юниты, а этот вызывающий был вне поля.
+    if Path("/etc/sudoers.d").is_dir():
+        права = list(Path("/etc/sudoers.d").glob("*"))
+        if not права:
+            # Каталог прав закрыт от чтения списком (750 root:root): glob отдаёт
+            # ПУСТО, и это неотличимо от «файлов нет». Спрашиваем список законным
+            # путём — тем же sudo без пароля, каким читаем сами файлы.
+            перечень = subprocess.run(["sudo", "-n", "ls", "/etc/sudoers.d"],
+                                      capture_output=True, text=True)
+            if перечень.returncode == 0:
+                права = [Path("/etc/sudoers.d") / имя
+                         for имя in перечень.stdout.split()]
+            else:
+                print("[внешние вызовы] ВНИМАНИЕ: список /etc/sudoers.d не получен — "
+                      "права sudo не проверены")
+        места += права
+    непрочитанные = []
     for файл in места:
-        if not файл.is_file() or not os.access(файл, os.R_OK):
+        закрытый = str(файл).startswith("/etc/sudoers.d/")
+        if not закрытый and not файл.is_file():
+            continue
+        if not os.access(файл, os.R_OK):
+            # Файл прав читается только root. «Не прочли» ≠ «чисто», поэтому
+            # сначала пробуем законный путь — sudo без пароля, — и только если и
+            # он не дал, говорим вслух.
+            через_sudo = subprocess.run(["sudo", "-n", "cat", str(файл)],
+                                        capture_output=True, text=True)
+            if через_sudo.returncode == 0:
+                for строка in через_sudo.stdout.splitlines():
+                    yield str(файл), строка
+            else:
+                непрочитанные.append(str(файл))
             continue
         for строка in файл.read_text(encoding="utf-8", errors="replace").splitlines():
             yield str(файл), строка
+    for файл in непрочитанные:
+        # Видимость важнее тишины: гейт печатает, чего не смог прочесть, и это
+        # попадает в вывод ворот — иначе слепота выглядит чистотой.
+        print(f"[внешние вызовы] ВНИМАНИЕ: не прочитан {файл} — "
+              "нужен доступ root; строки этого файла не проверены")
 
 
 def пути_строки(строка: str, корень: Path):

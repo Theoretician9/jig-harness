@@ -36,11 +36,12 @@
 # в порядке круга, а сдвиг начала круга пересдаёт его следующему вопросу).
 области:
   - имя: архитектура
-    пути: ["harness/config/*.yaml", "harness/demons/*.sh"]
+    пути: ["harness/config/*.yaml", "harness/demons/*.sh", "harness/demons/*.py",
+            "harness/*.py", "harness/vozmozhnosti/**/*.py", "harness/vozmozhnosti/**/*.sh"]
     вопрос: "где механизмы делают одно и то же; где правило держится вниманием, а не кодом"
 
   - имя: безопасность
-    пути: ["scripts/hooks/*", "harness/panel/*.py"]
+    пути: ["scripts/hooks/*", "harness/panel/*.py", "harness/panel/*.sh"]
     вопрос: "где секрет может утечь; где опасное возможно без сторожа"
 
   - имя: лаконичность

@@ -26,6 +26,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
+import patterns as формы                          # noqa: E402
 import config as конф                                     # noqa: E402
 import panel_writer as писатель                      # noqa: E402
 
@@ -33,7 +34,7 @@ import panel_writer as писатель                      # noqa: E402
 ПАМЯТЬ = Path(os.environ.get("HARNESS_PAMYAT") or КОРЕНЬ / "память")
 LOG_DIR = Path(конф.log_dir())
 # Имя записи: русские и латинские буквы, цифры, дефис. Ни точек, ни путей.
-ИМЯ = re.compile(r"^[A-Za-zА-Яа-яЁё0-9][A-Za-zА-Яа-яЁё0-9-]{0,80}\.md$")
+ИМЯ = формы.ИМЯ_ЗАПИСИ_ПАМЯТИ      # один судья формы имени (ревизия §4.3)
 
 
 def отказ(код: int, причина: str) -> int:

@@ -380,7 +380,10 @@ def стенд_харнеса(tmp: str):
         "POSTGRES_PASSWORD=6d9parolBazyDlinnyj\n"
         "MAP_ONLY_SOURCES_LONG=yubileyny-rajon-karta\n"
         "TZ=Asia/Qostanay\n"
-        "PUBLIC_URL=https://193-180-212-180.sslip.io\n"
+        # Адрес из документационного диапазона RFC 5737, а не наш: живой
+        # адрес установки — её след, и он уехал бы в публичный гит
+        # (замер 28.09.2026 по сборке). Так же поступает test_panel_expose.sh.
+        "PUBLIC_URL=https://203-0-113-7.sslip.io\n"
         # Путь ЛАТИНИЦЕЙ: с кириллицей значение отсеивала форма, и признак
         # «абсолютный путь — не секрет» проба не проверяла вовсе (ревью 13.09).
         "DEMO_CREDS_FILE=/var/lib/harness/secrets/produkt-kredy-2026.txt\n"
@@ -440,7 +443,7 @@ def самотест_харнеса(проба) -> None:
     # 54, 18, 16, 9 и 1 файл. Каждое отдельной пробой: падение обязано назвать,
     # какое именно значение покраснело.
     for имя_случая, строка_лога in (
-            ("адрес показа (PUBLIC_URL)", "PUBLIC_URL=https://193-180-212-180.sslip.io"),
+            ("адрес показа (PUBLIC_URL)", "PUBLIC_URL=https://203-0-113-7.sslip.io"),
             ("абсолютный путь (DEMO_CREDS_FILE)",
              "creds=/var/lib/harness/secrets/produkt-kredy-2026.txt"),
             ("часовой пояс", "TZ=Asia/Qostanay"),

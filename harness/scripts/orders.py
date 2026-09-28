@@ -41,6 +41,7 @@ import re
 import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent / "lib"))
+import patterns as формы                          # noqa: E402
 import config as конф_модуль                             # noqa: E402
 import channel_queue as очередь                       # noqa: E402
 
@@ -55,7 +56,9 @@ import channel_queue as очередь                       # noqa: E402
 # Спутник указаний: машинная бухгалтерия «что уже занесено». Точка в начале
 # имени — знак того, что читать его человеку незачем.
 СПУТНИК = "память/.указания-разобрано"
-МАРКЕР = re.compile(r"<!--\s*inbox:([0-9.]+)\s*-->")
+# Метка источника — та же форма, что у карты и очереди работы: собираем из
+# общего судьи, а не переписываем (ревизия §4.3).
+МАРКЕР = re.compile(r"<!--\s*" + формы.ИСТОЧНИК_INBOX.pattern + r"\s*-->")
 
 
 def указательное(текст: str) -> bool:

@@ -60,9 +60,11 @@ from pathlib import Path
 # каталоги свои. Ключ MODEL_CONTEXT_PATHS в harness.conf.
 КОНТЕКСТ_ПО_УМОЛЧАНИЮ = ("память/", ".claude/", "harness/skills/",
                          "harness/config/")
-НЕ_ЛАТИНИЦА = re.compile(r"[^\x00-\x7F]")
 sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
+import patterns as формы                          # noqa: E402
 from config import путь_harness_conf  # noqa: E402
+
+НЕ_ЛАТИНИЦА = формы.НЕ_ЛАТИНИЦА    # тот же судья, что у переименования
 
 HARNESS_CONF = путь_harness_conf()
 

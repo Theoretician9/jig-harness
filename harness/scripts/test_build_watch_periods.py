@@ -91,7 +91,8 @@ from config import путь_harness_conf  # noqa: E402
 КОНФИГ_БОЕВОЙ = Path(путь_harness_conf())
 
 # Ручки окружения — часть контракта сборщика, имена продолжают уже живущие:
-# HARNESS_USTROJSTVO читает harness/panel/state.py и build-registry-v2.py,
+# HARNESS_USTROJSTVO читает harness/panel/state.py (сборщик реестра v2 был
+# разовым инструментом и удалён 28.09.2026 как мёртвый код, Ф2 ревизии),
 # HARNESS_CONF — harness/demons/heartbeat-watch.sh. Подставляются на КАЖДОМ
 # вызове ([[default-above-loader-kills-setting]]).
 РУЧКА_РЕЕСТР = "HARNESS_USTROJSTVO"

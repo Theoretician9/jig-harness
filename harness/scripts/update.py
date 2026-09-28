@@ -30,6 +30,7 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
+import patterns as формы                          # noqa: E402
 import config as конф_модуль                              # noqa: E402
 
 КОРЕНЬ = Path(__file__).resolve().parent.parent
@@ -116,8 +117,7 @@ def бытие_из_своего_пакета(каталог) -> bool:
     # которого встретилось это слово и семь hex-символов, признавался своей
     # сборкой — и извещение об обновлении гасло (ревью кода 12.09.2026, №13).
     заголовок = _гит("log", "-1", "--format=%s", "FETCH_HEAD", где=каталог).stdout.strip()
-    совпало = re.fullmatch(r"версия от \d{4}-\d{2}-\d{2}, пакет ([0-9a-f]{7,40})",
-                           заголовок)
+    совпало = формы.ЗАГОЛОВОК_РЕЛИЗА.fullmatch(заголовок)
     if not совпало:
         return False
     return _гит("merge-base", "--is-ancestor", совпало.group(1), "HEAD",

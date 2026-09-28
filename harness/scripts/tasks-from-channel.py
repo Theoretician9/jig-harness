@@ -32,6 +32,7 @@ import re
 import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent / "lib"))
+import patterns as формы                          # noqa: E402
 import config as конф_модуль                             # noqa: E402
 import channel_queue as очередь                       # noqa: E402
 
@@ -72,7 +73,7 @@ def маркеры(конфиг: pathlib.Path | str | None = None) -> tuple:
 
 СПУТНИК = "память/.задачи-разобрано"
 КАРТА = "dev-map.yaml"
-ИСТОЧНИК = re.compile(r"inbox:([0-9.]+)")
+ИСТОЧНИК = формы.ИСТОЧНИК_INBOX    # тот же судья, что у очереди работы
 
 
 def текст_сообщения(файл: pathlib.Path) -> str:

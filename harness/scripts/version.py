@@ -35,10 +35,13 @@ from pathlib import Path
 
 import yaml
 
+sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
+import patterns as формы                          # noqa: E402
+
 КОРЕНЬ = Path(__file__).resolve().parent.parent
 ДАННЫЕ_ПО_УМОЛЧАНИЮ = КОРЕНЬ / "harness" / "config" / "релиз.yaml"
 # Договор с publish.sh и update.py: первая строка релизного коммита.
-ЗАГОЛОВОК_РЕЛИЗА = re.compile(r"версия от \d{4}-\d{2}-\d{2}, пакет ([0-9a-f]{7,40})")
+ЗАГОЛОВОК_РЕЛИЗА = формы.ЗАГОЛОВОК_РЕЛИЗА   # тот же судья, что у обновления
 ТЕГ = re.compile(r"^v(\d+)\.(\d+)\.(\d+)$")
 
 
