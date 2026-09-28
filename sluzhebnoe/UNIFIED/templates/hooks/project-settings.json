@@ -23,6 +23,16 @@
             "timeout": 15
           }
         ]
+      },
+      {
+        "matcher": "Agent|Task",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 $CLAUDE_PROJECT_DIR/scripts/hooks/agent_skill_guard.py",
+            "timeout": 15
+          }
+        ]
       }
     ],
     "Stop": [

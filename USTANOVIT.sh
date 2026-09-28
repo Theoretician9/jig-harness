@@ -109,7 +109,7 @@ STAMP_DIR=/var/lib/harness/install-steps
   скажи "  Напишите вашему боту в Telegram любое сообщение — я возьму ваш"
   скажи "  chat_id из него сам. Жду до 120 секунд (Ctrl+C — ввести числом)."
   for ((тик = 0; тик < 24; тик++)); do
-    id=$(curl -s --max-time 10 "https://api.telegram.org/bot${token}/getUpdates" 2>/dev/null \
+    id=$(curl -s --max-time 10 "${TG_API_BASE:-https://api.telegram.org}/bot${token}/getUpdates" 2>/dev/null \
          | python3 -c '
 import json, sys
 try:
@@ -384,6 +384,11 @@ HEARTBEAT_DIR="${HEARTBEAT_DIR:-$STATE_DIR/heartbeat}"
 # Канал: Б (свой диспетчер) — дефолт и единственный поддерживаемый;
 # А (telegram-плагин) — эксперимент, включать только после приёмки (решение владельца).
 TG_TOKEN_FILE=""; CC_VERSION=""; TG_CHANNEL_VARIANT="B"
+# Адрес API канала — ОДНА форма и переменная, как у диспетчера (TG_API_BASE).
+# Зашитый адрес делал живую пробу установки невозможной: без настоящего бота шаг
+# канала останавливал установку, и шаги 8–9 (crontab демонов) не выполнялись
+# вовсе — проба 28.09.2026 в контейнере это и показала.
+TG_API="${TG_API_BASE:-https://api.telegram.org}"
 
 if [[ -r "$CONF" ]]; then
   # shellcheck source=/dev/null
@@ -884,18 +889,31 @@ EOF
       "systemctl status harness-dispatcher; journalctl -u harness-dispatcher -n 30"
     DONE_LIST+=("канал вариант Б: юнит harness-dispatcher (единственный getUpdates-поток)")
   fi
+  # Стенд без выхода в Telegram (живая проба установки в контейнере): живая
+  # отправка невозможна по построению — внешней службы там нет. Раньше установка
+  # на этом СТОПе кончалась, и шаги расписания демонов не выполнялись вовсе, то
+  # есть проба не могла проверить самое важное (замер 28.09.2026). Дверь узкая и
+  # ГРОМКАЯ: шаг не попадает в список проверенного, а требование проверить канал
+  # руками уходит в «ОСТАЛОСЬ РУКАМИ».
+  if [[ "${INSTALL_CHANNEL_CHECK:-1}" = "0" ]]; then
+    скажи "  ВНИМАНИЕ: живая отправка в канал ПРОПУЩЕНА (INSTALL_CHANNEL_CHECK=0)."
+    скажи "            Это режим стенда: на настоящей машине так ставить нельзя —"
+    скажи "            канал остаётся НЕ проверенным, и владелец не узнает о беде."
+    MANUAL_LIST+=("проверить канал живой отправкой: доставка НЕ подтверждена API (шаг пропущен режимом стенда)")
+    return 0
+  fi
   # общая для обоих вариантов проверка отправки: успех ТОЛЬКО при ok:true + message_id
   скажи "  + проба отправки: curl sendMessage (токен в команде скрыт), успех только при ok:true и message_id"
   if (( ! DRY )); then
     local token sent_id
     token="$(cat "$TG_TOKEN_FILE")"
     # URL с токеном уходит через stdin (curl -K -), а не в argv: argv виден в ps.
-    sent_id=$(printf 'url = "https://api.telegram.org/bot%s/sendMessage"\n' "$token" \
+    sent_id=$(printf 'url = "%s/bot%s/sendMessage"\n' "$TG_API" "$token" \
       | curl -s -K - \
         -d chat_id="$TG_CHAT_ID" -d text="Канал установлен. Ответьте РЕПЛАЕМ на это сообщение словом: дошло" \
       | jq -e '.result.message_id') \
       || стоп "$step" "отправка НЕ подтверждена API (нет ok:true/message_id)" \
-              "TOKEN=\$(sudo cat $TG_TOKEN_FILE); curl -s \"https://api.telegram.org/bot\$TOKEN/sendMessage\" -d chat_id=$TG_CHAT_ID -d text=проба | jq ."
+              "TOKEN=\$(sudo cat $TG_TOKEN_FILE); curl -s \"$TG_API/bot\$TOKEN/sendMessage\" -d chat_id=$TG_CHAT_ID -d text=проба | jq ."
     CHECKED_LIST+=("$step: доставка подтверждена API, message_id=$sent_id")
     скажи "  OK: message_id=$sent_id — сообщение владельцу ушло; вторая половина проверки (реплай «дошло») — в «ОСТАЛОСЬ РУКАМИ»"
     SENT_ID="$sent_id"
@@ -988,13 +1006,26 @@ EOF
   fi
   скажи ""
   скажи "  прогон каждого демона в чистом окружении (как его увидит cron), образец §9:"
-  local d rc
+  # Тяжёлым демонам при ПРОВЕРКЕ подставляется лёгкая работа: цель шага —
+  # «демон запускается в чистом окружении cron», а не «прогнать всё, что он
+  # делает по ночам». Замер 28.09.2026 (живая проба установки в контейнере):
+  # nightly-gates внутри установки гонял полный набор ворот и один съедал
+  # больше получаса — установка выглядела повисшей. Список — ДАННЫЕ этой
+  # функции: строка «демон=переменная=значение».
+  local -a LIGHT_RUN=("nightly-gates=NIGHTLY_GATES_CMD=true")
+  local d rc light pair
   for d in "${demons[@]}"; do
+    light=""
+    for pair in "${LIGHT_RUN[@]}"; do
+      [[ "${pair%%=*}" = "$d" ]] && light="${pair#*=}"
+    done
     скажи "  + sudo -u $AGENT_USER env -i HOME=/home/$AGENT_USER PATH=/usr/local/bin:/usr/bin:/bin /bin/sh -c '$D/$d.sh'; echo exit=\$?"
     if (( ! DRY )); then
       rc=0
       sudo -u "$AGENT_USER" env -i HOME="/home/$AGENT_USER" PATH=/usr/local/bin:/usr/bin:/bin \
+        ${light:+"$light"} \
         /bin/sh -c "$D/$d.sh" >>"$LOG_DIR/install-demon-probe.log" 2>&1 || rc=$?
+      [[ -n "$light" ]] && скажи "    (проверка запускаемости: $light — полный прогон этого демона идёт по расписанию)"
       if (( rc == 0 )); then
         скажи "    exit=0 — $d зелёный"
         CHECKED_LIST+=("$step: $d в env -i, exit=0")

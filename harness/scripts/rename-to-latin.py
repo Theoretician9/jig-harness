@@ -31,6 +31,7 @@ from collections import Counter
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
+import patterns as формы                          # noqa: E402
 from config import product_dir          # noqa: E402  (после правки sys.path)
 
 КОРЕНЬ = Path(__file__).resolve().parent.parent
@@ -83,7 +84,7 @@ def файлы_области(область, корень=None):
         путь = путь.strip()
         if not путь or not путь.endswith(РАСШИРЕНИЯ_КОДА):
             continue
-        if re.search(r"[^\x00-\x7F]", Path(путь).name):
+        if формы.НЕ_ЛАТИНИЦА.search(Path(путь).name):
             найдено.append(путь)
     return найдено
 
@@ -96,9 +97,14 @@ def карта_переименований(пути, существующие=N
     потеря файла при `git mv`, и самотест ловил именно этот случай.
     """
     import importlib.util
-    спец = importlib.util.spec_from_file_location("translit", КОРЕНЬ / "scripts" / "transliterate.py")
-    translit = importlib.util.module_from_spec(спец)
-    спец.loader.exec_module(translit)
+    # Имя переменной = имя, которым модуль зовут ниже. До 28.09.2026 здесь было
+    # `translit`, а ниже — `transliterate.перевести_путь`: NameError на боевом
+    # пути, и самотест инструмента был красным, пока его не гонял никто
+    # (находка Ф2 ревизии — инструмент смены без исполнителя тихо сгнил).
+    спец = importlib.util.spec_from_file_location(
+        "translit", КОРЕНЬ / "scripts" / "transliterate.py")
+    transliterate = importlib.util.module_from_spec(спец)
+    спец.loader.exec_module(transliterate)
 
     import builtins
     import keyword
@@ -633,7 +639,11 @@ def самотест():
         "ГДЕ = настройки.каталог\n",
         {"app/api/app/настройки.py": "app/api/app/settings.py"},
         файл="app/api/app/db.py")
-    if объект == "from .nastrojki import настройки\nГДЕ = настройки.каталог\n":
+    # Ожидание — АБСОЛЮТНОЕ и согласовано с картой пробы: карта переименовывает
+    # «настройки.py» в «settings.py», значит и в импорте обязано встать
+    # «settings». Прежняя строка ждала «nastrojki» (транслит из старой карты) и
+    # красила исправный инструмент: проверка отстала от кода, а не код от неё.
+    if объект == "from .settings import настройки\nГДЕ = настройки.каталог\n":
         путь("  ок    БОЛЬНОЙ СЛУЧАЙ: имя в пути импорта не делает модуль импортированным")
     else:
         ok = False
@@ -654,7 +664,7 @@ def самотест():
         "from .настройки import настройки\n",
         {"app/api/app/настройки.py": "app/api/app/settings.py"},
         файл="app/collectors/svojstva_trub.py")
-    if (относительный == "from .nastrojki import настройки\n" and n_отн == 1
+    if (относительный == "from .settings import настройки\n" and n_отн == 1
             and абсолютный == "from collectors.perenos_remontov import перенести\n"
             and n_абс == 1 and n_чужой == 0):
         путь("  ок    БОЛЬНОЙ СЛУЧАЙ: импорт по пути правится — относительный и абсолютный")

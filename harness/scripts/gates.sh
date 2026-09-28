@@ -29,6 +29,7 @@ export LC_ALL=C.UTF-8
 . "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/lib/config.sh"
 konf_zagruzit
 ITOG_LOG="$LOG_DIR/ворота-итог.jsonl"
+REZHIM="обычный"   # «всё» ставится ниже, у флага --всё
 
 GREEN=0
 RED=0
@@ -113,6 +114,9 @@ cd "$ROOT" || { echo "не нашёл корень проекта"; exit 1; }
 
 echo "=== ворота харнеса: $(date '+%d.%m %H:%M') ==="
 проверка "секреты"        bash scripts/check-secrets.sh
+# Права ВНУТРИ каталога секретов не проверял никто: два файла пролежали
+# читаемыми для всей машины с 10.09 по 27.09.2026 (замер ревизии харнеса).
+проверка "права секретов" python3 scripts/check-secrets-perms.py
 проверка "гигиена"        python3 scripts/check-context-hygiene.py
 # Карта едет в контекст КАЖДОЙ сессии: подробности карточки нужны при разборе
 # задачи, а не всегда. Замер 12.09.2026 — 31 карточка держала 29 397 лишних
@@ -133,11 +137,31 @@ echo "=== ворота харнеса: $(date '+%d.%m %H:%M') ==="
 # ровно тот случай, ради которого он написан (проверка есть, вызова нет).
 проверка "кто на порту"   python3 scripts/test_who_is_on_port.py
 проверка "права наружу"   bash scripts/test_panel_root.sh
-проверка "сборщик реестра" python3 scripts/test_build_registry_v2.py
 проверка "глубина автоматом" python3 scripts/test_depth_automatic.py
 проверка "задание и метка" python3 scripts/check-job-and-mark.py
 проверка "метка-самотест" python3 scripts/check-job-and-mark.py --selftest
 проверка "кто зовёт"      python3 scripts/check-who-calls.py
+# Мера Ф2 ревизии: население — ВСЕ .py/.sh харнеса (193), а не только
+# механизмы реестра. Печатает СПИСОК: инструменты смены, живых только через
+# свою пробу и ничьих. Ничей файл — красный.
+проверка "население кода" python3 scripts/check-who-calls.py --население
+# §4.3 ревизии: одна форма — один судья. Пять форм жили двумя копиями, а слова
+# отказа владельца — тремя (третья в tg-dispatcher.sh, точке приёма его
+# сообщений). Копия выглядит согласованной, пока кто-нибудь не поправит одну.
+проверка "один судья" python3 scripts/check-one-judge.py
+проверка "судья-самотест" python3 scripts/check-one-judge.py --selftest
+проверка "формы значений" python3 scripts/lib/patterns.py --selftest
+# Мера Ф3 ревизии: считаем УСПЕШНЫЕ машинные вызовы скилов, а не запуски —
+# прогон с отказом ставит запись и выглядит работой. Потолок молчащих —
+# ключ SKILL_SILENT_MAX в harness.conf, он уменьшается по мере выбора исходов.
+проверка "вызовы скилов" python3 scripts/check-skill-usage.py
+проверка "скилы-самотест" python3 scripts/check-skill-usage.py --selftest
+проверка "скил перед агентом" python3 scripts/hooks/agent_skill_guard.py --selftest
+# Ф4 ревизии, класс 1: проба, грепающая свой исходник, зеленеет от слова в
+# комментарии. Законные случаи (страж регресса, подсчёт своих путей, боевое
+# значение порога) объявлены с причиной в harness/config/own-text-reads.yaml.
+проверка "свой текст" python3 scripts/check-own-text-probes.py
+проверка "свой текст-самотест" python3 scripts/check-own-text-probes.py --selftest
 проверка "кто-зовёт-сам"  python3 scripts/check-who-calls.py --selftest
 проверка "очередь канала" python3 scripts/lib/channel_queue.py --selftest
 проверка "указания"       python3 scripts/orders.py
@@ -210,6 +234,12 @@ done
 # Расписания и юниты зовут файлы проекта, а живут в /etc — репозиторные гейты
 # их не видят. 11.09 переименование scripts/fonovaya-cel.sh оставило пять
 # ночных целей продукта в cron звать исчезнувшее имя.
+# Внешняя поверхность = слушатели ПЛЮС прокси: панель слушает 127.0.0.1:8787, и
+# мера «кто слушает 0.0.0.0» её не видела, хотя nginx отдаёт её в мир. Плюс
+# разбор Host: без default_server на порту отвечает первый блок по алфавиту.
+# Объявленное наружу задаётся ключом EXTERNAL_SURFACE_DECLARED — данными.
+проверка "внешняя поверхность" python3 scripts/check-external-surface.py
+проверка "поверхность-самотест" python3 scripts/check-external-surface.py --selftest
 проверка "внешние вызовы" python3 scripts/check-external-callers.py
 # Ручки панели: каждая что-то делает и делает, когда обещано. Улики ревью
 # спеки панели 11.09: ручка, которую никто не читает, и ручка, обещающая
@@ -247,6 +277,10 @@ done
 # запускает по расписанию.
 проверка "ревизия-самотест" bash harness/demons/project-revision.sh --selftest
 проверка "устройство"     python3 scripts/check-registry.py
+# Файл кода вне всех областей ревизии не читает ни один круг — молча. Замер
+# 28.09.2026: таких было 6 из 199, среди них сборщик скилов.
+проверка "области ревизии" python3 scripts/check-revision-coverage.py
+проверка "области-самотест" python3 scripts/check-revision-coverage.py --selftest
 проверка "устройство-самотест" python3 scripts/test_registry.py
 # Сверка сроков присмотра: реестр против живого конфига сторожа. Без строки
 # здесь механизм против молчаливого расхождения сам молчал бы — его не звал
@@ -300,6 +334,7 @@ done
 проверка "доска"          python3 scripts/test_board.py
 проверка "лимит-журнал"   python3 scripts/limit-in-log.py --selftest
 проверка "лимит-сторож"   bash scripts/test_limit_watch.sh
+проверка "память-в-гит"   bash scripts/test_memory_commit.sh
 # У факта один судья: кто о факте говорит — тот его и спрашивает. Гейт написан
 # под три ночных отказа 12.09.2026, у которых был один корень.
 проверка "признаки"       python3 scripts/check-signals.py
@@ -355,16 +390,28 @@ done
 # Самотесты живут врозь от гейтов: они долгие, и на каждом коммите не нужны.
 # Список явный — искать «кто понимает --selftest» грепом значило бы решать
 # грепом, что именно проверяется; такое решение не читается и молча худеет.
+#
+# Проба восстановления — с 28.09.2026: её 20 проб были записаны в карточке
+# задачи и в паспорте носителя, а гонять их не был обязан никто, то есть
+# доказательство И-1 снова держалось на внимании (находка F-09 ревью Оси В).
+#
+# Приёмка и строитель проверок стоят здесь с 27.09.2026: их 26 проб не гонял
+# НИКТО, а реестр при этом утверждал «проверяется: … путей» — утверждение без
+# исполнителя ([[a-mechanism-that-needs-a-human-is-dead]], находка G-10 ревью).
 if [ "${1:-}" = "--всё" ]; then
+    REZHIM="всё"
     echo "--- самотесты ---"
     for f in harness/demons/sentinel.sh harness/demons/session-warden.sh \
                 harness/demons/backup.sh \
+                harness/demons/acceptance-watch.sh \
+                harness/demons/check-builder.sh \
                 harness/demons/heartbeat-watch.sh harness/demons/task-closer.sh \
                 harness/demons/memory-revision.sh \
                 harness/demons/update-watch.sh \
                 harness/demons/tokens-collector.sh scripts/tg-dispatcher.sh \
                 scripts/start-agent.sh scripts/capability.sh \
                 scripts/handover-check.sh scripts/check-secrets.sh \
+                scripts/restore-probe.sh \
                 scripts/model-for.sh; do
         проверка "$(basename "$f" .sh)" bash "$f" --selftest
     done
@@ -374,6 +421,16 @@ if [ "${1:-}" = "--всё" ]; then
     # Обратный ход ревизии: у каждого правила — механизм, прибор и свежий след.
     # Строка без механизма важнее любой находки осмотра (замечание М-1).
     проверка "покрытие"       python3 scripts/invariant-coverage.py
+    # Ф4 ревизии, класс 2: исход проверки решает механизм, а не окружение
+    # хозяина. Гоняет каждую лёгкую проверку трижды — 9 минут на 126 проверок,
+    # поэтому только здесь, за флагом --всё. Законное — данные
+    # harness/config/host-independence.yaml.
+    проверка "хозяин машины"  python3 scripts/check-host-independence.py
+    проверка "хозяин-самотест" python3 scripts/check-host-independence.py --selftest
+    # Ф5 ревизии: установка с нуля доказывается прогоном, а не памятью. Около
+    # двух минут: поднимает свой контейнер, ставит харнес, судит по следам.
+    проверка "установка с нуля" bash scripts/install-probe.sh
+    проверка "установка-проба-самотест" bash scripts/install-probe.sh --selftest
     # Живая проверка дозора позднего выхода: поднимает свою tmux-сессию,
     # убивает её и смотрит, поднял ли дозор преемника. Лежала среди демонов и
     # не запускалась никем (ревизия 10.09.2026).
@@ -382,6 +439,10 @@ if [ "${1:-}" = "--всё" ]; then
     # новый гейт обязан молчать, а краснящий зря — отключают.
     проверка "жёлтый в pre-commit" bash scripts/pre-commit-gate.sh --selftest-yellow
     проверка "жёлтый в воротах"    bash scripts/gates.sh --selftest
+    # Слово владельца «да» тратится ПРОХОДОМ ворот, а выкат идёт дальше:
+    # упади он на секретах или смоуке — согласие сгорело на действии, которого
+    # не было. Проба поднимает свой стенд и судит состояние согласия.
+    проверка "возврат согласия" bash scripts/test_deploy_consent_return.sh
     for f in scripts/work-queue.py scripts/compare-with-package.py \
                 scripts/download_attachment.py scripts/orders.py \
                 scripts/check-cyrillic-in-names.py \
@@ -405,6 +466,11 @@ echo "=== итог: зелёных $GREEN, красных $RED$YELLOW_TAIL ==="
 # гонялись в последний раз и чем кончились. Без этой строки она честно говорит
 # «нет данных», но владелец так и не видит состояния проверок (находка I6
 # ревью спеки панели). Отказ записи не роняет ворота: журнал — наблюдение.
-printf '{"ts":"%s","зелёных":%s,"красных":%s}\n' "$(date -Is)" "$GREEN" "$RED" \
+# Режим — в записи, иначе полный прогон и обычный в журнале НЕОТЛИЧИМЫ:
+# 28.09.2026 приёмка не смогла судить карточку, требующую «--всё», по следу
+# ворот именно поэтому ([[freshness-by-mtime-is-false]] того же класса —
+# след есть, а сказать по нему нечего).
+printf '{"ts":"%s","режим":"%s","зелёных":%s,"красных":%s}\n' \
+    "$(date -Is)" "$REZHIM" "$GREEN" "$RED" \
     >> "$ITOG_LOG" 2>/dev/null || true
 exit "$RED"

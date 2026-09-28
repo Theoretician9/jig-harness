@@ -49,6 +49,16 @@
             "command": "python3 $CLAUDE_PROJECT_DIR/scripts/check-cyrillic-in-names.py --hook"
           }
         ]
+      },
+      {
+        "matcher": "Agent|Task",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 $CLAUDE_PROJECT_DIR/scripts/hooks/agent_skill_guard.py",
+            "timeout": 15
+          }
+        ]
       }
     ],
     "Stop": [
@@ -80,6 +90,16 @@
           {
             "type": "command",
             "command": "bash $CLAUDE_PROJECT_DIR/scripts/hooks/skill_log.sh"
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 $CLAUDE_PROJECT_DIR/scripts/check-cyrillic-in-names.py --после-команды",
+            "timeout": 10
           }
         ]
       }

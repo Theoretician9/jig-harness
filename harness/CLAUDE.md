@@ -36,10 +36,10 @@ Each one is held by code, not by memory.
 <!-- AUTO:invariants -->
 | # | invariant | held by | how to check the guard |
 |---|---|---|---|
-| И-1 | Never lose data. Irreversible work on a DB or files only with a fresh backup; destructive commands on production only through the guard. | `harness/demons/backup.sh` · `scripts/hooks/guard_bash.py` · `scripts/restore-probe.sh` | `bash harness/demons/backup.sh --selftest` · `python3 scripts/hooks/test_guard_bash.py` · `bash scripts/restore-probe.sh` |
-| И-2 | Never deploy around the gates. Deployment is `deploy.sh` only (gates, tag, auto-rollback); a hand-typed sequence is forbidden. | `scripts/deploy_guard.py` | `python3 scripts/test_deploy_guard_consent.py` |
-| И-3 | Secrets stay out of the repo and the web root. Keys and tokens never reach git or a public directory. | `scripts/check-secrets.sh` · `scripts/check-secret-in-logs.py` | `bash scripts/check-secrets.sh --selftest` · `python3 scripts/check-secret-in-logs.py` |
-| И-4 | Honest reporting. "Done" only after a live check; a green test is not a working feature. | `scripts/pre-commit-gate.sh` | `bash scripts/pre-commit-gate.sh --selftest-devmap` |
+| И-1 | Never lose data. Irreversible work on a DB or files only with a fresh backup; destructive commands on production only through the guard. | `harness/demons/backup.sh` · `scripts/hooks/guard_bash.py` · `scripts/restore-probe.sh` · `scripts/protected-delete.py` | `bash harness/demons/backup.sh --selftest` · `python3 scripts/hooks/test_guard_bash.py` · `bash scripts/restore-probe.sh` · `python3 scripts/protected-delete.py --selftest` |
+| И-2 | Never deploy around the gates. Deployment is `deploy.sh` only (gates, tag, auto-rollback); a hand-typed sequence is forbidden. | `scripts/deploy_guard.py` · `scripts/check-one-judge.py` · `scripts/lib/patterns.py` · `scripts/hooks/guard_bash.py` | `python3 scripts/test_deploy_guard_consent.py` · `python3 scripts/check-one-judge.py --selftest` · `python3 scripts/lib/patterns.py --selftest` · `python3 scripts/hooks/test_guard_bash.py` |
+| И-3 | Secrets stay out of the repo and the web root. Keys and tokens never reach git or a public directory. | `scripts/check-secrets.sh` · `scripts/check-secret-in-logs.py` · `scripts/check-external-surface.py` | `bash scripts/check-secrets.sh --selftest` · `python3 scripts/check-secret-in-logs.py` · `python3 scripts/check-external-surface.py --selftest` |
+| И-4 | Honest reporting. "Done" only after a live check; a green test is not a working feature. | `scripts/pre-commit-gate.sh` · `scripts/check-skill-usage.py` · `scripts/check-own-text-probes.py` · `scripts/hooks/agent_skill_guard.py` · `scripts/invariant-coverage.py` · `scripts/check-host-independence.py` · `scripts/install-probe.sh` | `bash scripts/pre-commit-gate.sh --selftest-devmap` · `python3 scripts/check-skill-usage.py --selftest` · `python3 scripts/check-own-text-probes.py --selftest` · `python3 scripts/hooks/agent_skill_guard.py --selftest` · `python3 scripts/invariant-coverage.py --selftest` · `python3 scripts/check-host-independence.py --selftest` · `bash scripts/install-probe.sh --selftest` |
 <!-- /AUTO -->
 
 ## Channel rules (the owner cannot see your terminal)
@@ -169,7 +169,7 @@ Bans are enforced by `scripts/hooks/guard_bash.py`, not by your memory.
 ## What is watching (built from the registry)
 
 <!-- AUTO:mechanisms -->
-209 mechanisms are registered in `harness/config/устройство.yaml` (gates — 151, daemons — 27, skills — 19, hooks — 12). Each one names what it does, when it runs, what breaks without it and the command that proves it works. The registry is data: `python3 scripts/check-registry.py` fails when the code and the registry disagree.
+219 mechanisms are registered in `harness/config/устройство.yaml` (gates — 161, daemons — 27, skills — 18, hooks — 13). Each one names what it does, when it runs, what breaks without it and the command that proves it works. The registry is data: `python3 scripts/check-registry.py` fails when the code and the registry disagree.
 <!-- /AUTO -->
 
 ---
