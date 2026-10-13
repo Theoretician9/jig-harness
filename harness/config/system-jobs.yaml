@@ -122,6 +122,10 @@
     расписание: "*/15 * * * *"
     команда: "scripts/check-login-expiry.py"
     журнал: check-login-expiry.log
+  - имя: build-board
+    расписание: "* * * * *"
+    команда: "scripts/build-board.py"
+    журнал: build-board.log
   - имя: restore-probe
     расписание: "0 5 * * 1"
     команда: "scripts/restore-probe.sh"
@@ -148,6 +152,7 @@
   devmap-selfheal: 1440
   heartbeat-watch: 1440
   check-login-expiry: 30
+  build-board: 5
   limit-watch: 5
   product-health: 5
   acceptance-watch: 1440

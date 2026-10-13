@@ -245,6 +245,11 @@ def main() -> int:
     now = datetime.now()
     board = build(judge.КОРЕНЬ / "dev-map.yaml", judge, now)
     write_atomic(Path(config.panel_state_dir()) / "board.json", board)
+    # Метка пульса: молчащий снимок — устаревшая доска, и сторож меток обязан
+    # назвать это владельцу, а не ждать, пока он сам заметит старое время.
+    marks = Path(config.heartbeat_dir())
+    marks.mkdir(parents=True, exist_ok=True)
+    (marks / "build-board").touch()
     print(f"доска: задач {len(board.get('задачи') or [])}, снято {now:%H:%M}"
           + (f" — беда: {board['беда']}" if board.get("беда") else ""))
     return 0
