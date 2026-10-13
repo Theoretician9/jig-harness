@@ -51,6 +51,19 @@ nuzhna_revizia() {   # $1=доля заполнения  $2=порог → 0 н�
     awk -v d="$1" -v t="$2" 'BEGIN { exit !(d >= t) }'
 }
 
+# Молчание скила — диагноз, только когда журнал вызовов прожил хотя бы период
+# ревизии: на свежей установке молчат все скилы, и «удалить» значило бы лишь
+# «журналу пять минут». Порог — данные (SKILL_SILENCE_MIN_DAYS).
+SKILL_SILENCE_MIN_DAYS="${SKILL_SILENCE_MIN_DAYS:-30}"
+
+skills_log_age_days() {  # $1=журнал  $2=«сейчас» в секундах → целых дней от первой записи, 0 если записей нет
+    local first stamp
+    first=$(head -1 "$1" 2>/dev/null | jq -r '.ts // empty' 2>/dev/null)
+    [ -n "$first" ] || { echo 0; return; }
+    stamp=$(date -d "$first" +%s 2>/dev/null) || { echo 0; return; }
+    echo $(( ($2 - stamp) / 86400 ))
+}
+
 max_dolya() {        # наибольшая доля заполнения постоянных файлов, или 0
     python3 "$HYGIENE" --доли 2>/dev/null | python3 -c "$MAX_SNIPPET" 2>/dev/null || echo 0
 }
@@ -71,7 +84,20 @@ if [ "${1:-}" = "--selftest" ]; then
     d=$(max_dolya)
     case "$d" in ''|*[!0-9.]*) echo "  ПЛОХО заполнение не число: «$d»"; ok=0;;
                  *) echo "  ок    заполнение читается числом ($d)";; esac
-    [ "$ok" = 1 ] && { echo "SELFTEST: зелёный (4 пути, среди них больной)"; exit 0; }
+    t=$(mktemp -d); now=$(date +%s)
+    a=$(skills_log_age_days "$t/нет.jsonl" "$now")
+    [ "$a" = 0 ] && echo "  ок    БОЛЬНОЙ СЛУЧАЙ: журнала скилов нет — возраст 0, молчание не судим" \
+        || { echo "  ПЛОХО нет журнала, а возраст «$a»"; ok=0; }
+    printf '{"ts":"%s","skill":"x"}\n' "$(date -u -d @$((now - 40*86400)) +%FT%TZ)" > "$t/старый.jsonl"
+    a=$(skills_log_age_days "$t/старый.jsonl" "$now")
+    [ "$a" = 40 ] && echo "  ок    журнал с первой записью 40 дн. назад — возраст 40, молчание судим" \
+        || { echo "  ПЛОХО 40 дней прочитаны как «$a»"; ok=0; }
+    echo '{"skill":"x"}' > "$t/без-даты.jsonl"
+    a=$(skills_log_age_days "$t/без-даты.jsonl" "$now")
+    [ "$a" = 0 ] && echo "  ок    запись без ts — возраст 0" \
+        || { echo "  ПЛОХО запись без ts дала «$a»"; ok=0; }
+    rm -rf "$t"
+    [ "$ok" = 1 ] && { echo "SELFTEST: зелёный (7 путей, среди них 2 больных)"; exit 0; }
     echo "SELFTEST: КРАСНЫЙ"; exit 1
 fi
 
@@ -169,7 +195,10 @@ fi
 # ── 3. Молчащие скилы ───────────────────────────────────────────────────────
 # «Ноль вызовов — диагноз» (UNIFIED/13): скил, не помянутый в журнале вызовов,
 # либо не нужен, либо не встроен в процесс. Оба случая — к владельцу.
-if [ -d "$SKILLS_DIR" ]; then
+SKILLS_LOG_AGE=$(skills_log_age_days "$SKILLS_LOG" "$(date +%s)")
+if [ -d "$SKILLS_DIR" ] && [ "$SKILLS_LOG_AGE" -lt "$SKILL_SILENCE_MIN_DAYS" ]; then
+    say "журналу вызовов скилов $SKILLS_LOG_AGE дн. при пороге $SKILL_SILENCE_MIN_DAYS — молчание скилов не сужу"
+elif [ -d "$SKILLS_DIR" ]; then
     while IFS= read -r sk; do
         sk_name=$(basename "$sk")
         # -F (Д-5): имя скила — литерал, не регэксп (та же грабля, что у памяти).
@@ -234,11 +263,17 @@ PYEOF
 
 
 tg_deliver() {
-    # Длинные ревизии — через tg_send.sh: он режет по СИМВОЛАМ и шлёт частями,
-    # ничего не теряя. Прямой curl ниже — только запасной путь.
+    # Через tg_send.sh: его сторож переписки держит потолок длины. Отказ по
+    # длине — не повод обойти сторожа: ревизия уходит вложением, как он велит.
+    # Прямой curl ниже — только когда tg_send.sh нет вовсе.
     if [ -x "$PROJECT_DIR/scripts/tg_send.sh" ]; then
-        if "$PROJECT_DIR/scripts/tg_send.sh" "$SUMMARY"; then return 0; fi
-        say "tg_send.sh отказал — пробую прямой curl"
+        "$PROJECT_DIR/scripts/tg_send.sh" "$SUMMARY" && return 0
+        local doc="$LOG_DIR/memory-revision-$(date +%F).txt"
+        printf '%s\n' "$SUMMARY" > "$doc"
+        say "текстом не прошло — шлю вложением $doc"
+        "$PROJECT_DIR/scripts/tg_send.sh" --file "$doc" \
+            --caption "Ежемесячная ревизия памяти и правил: находок $(grep -c '^•' "$doc")"
+        return
     fi
     if [ -z "${TG_CHAT_ID:-}" ] || [ ! -s "${TG_TOKEN_FILE:-/nonexistent}" ]; then
         say "КАНАЛ НЕ НАСТРОЕН: TG_CHAT_ID/TG_TOKEN_FILE — ревизии некуда идти"
