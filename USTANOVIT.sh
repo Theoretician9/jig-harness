@@ -548,7 +548,7 @@ EOF
   делай "mkdir -p '$PROJECT_DIR' '$LOG_DIR' '$HEARTBEAT_DIR' /var/backups/harness"
   делай "chown -R $AGENT_USER:$AGENT_USER '$PROJECT_DIR' '$LOG_DIR' '$HEARTBEAT_DIR' /var/backups/harness"
   записать_файл /etc/sudoers.d/50-agent 440 root:root <<EOF
-$AGENT_USER ALL=(root) NOPASSWD: /usr/bin/systemctl restart harness-agent, /usr/bin/systemctl status harness-agent
+$AGENT_USER ALL=(root) NOPASSWD: /usr/bin/systemctl restart harness-agent, /usr/bin/systemctl status harness-agent, /usr/bin/systemctl restart harness-dispatcher.service
 EOF
   проверка "$step" "sudoers корректен (visudo -cf)" \
     "visudo -cf /etc/sudoers.d/50-agent" \
