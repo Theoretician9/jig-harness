@@ -664,8 +664,8 @@ caps_gates=0
 if [ -d "$CAPS_DIR" ]; then
     for pack in "$CAPS_DIR"/*/; do
         [ -f "${pack}.установлено" ] || continue
-        [ -d "${pack}гейты" ] || continue
-        for gate in "${pack}гейты"/*.py; do
+        [ -d "${pack}gates" ] || continue
+        for gate in "${pack}gates"/*.py; do
             [ -f "$gate" ] || continue
             caps_gates=$((caps_gates + 1))
             echo "[pre-commit] гейт возможности $(basename "$pack"): $(basename "$gate")"
