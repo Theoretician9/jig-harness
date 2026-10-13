@@ -36,14 +36,10 @@ DISPATCHER="$KOREN/scripts/tg-dispatcher.sh"
 T=$(mktemp -d /tmp/proba-vhod-XXXXXX)
 SESSION="proba-vhod-$$"
 TOKEN="000:СТЕНДОВЫЙ"   # не-секрет: подставной Bot API стенда, боевого токена здесь нет
-ok=1
 API_PID=""
 DISP_PID=""
 
-itog() {  # ожидание, факт, имя случая
-    if [ "$2" = "$1" ]; then printf '  ок    %s\n' "$3"
-    else printf '  ПЛОХО %s: ждали «%s», получили «%s»\n' "$3" "$1" "$2"; ok=0; fi
-}
+source "$KOREN/scripts/lib/selftest_cases.sh"
 
 pribrat() {
     [ -n "$DISP_PID" ] && kill "$DISP_PID" 2>/dev/null
@@ -157,7 +153,7 @@ done
 sleep 4          # пинок доезжает до панели, карточка успевает лечь в карту
 
 LEZHIT=$(find "$T/log/inbox" -maxdepth 1 -name '*.txt' 2>/dev/null | wc -l | tr -d ' ')
-itog "2" "$LEZHIT" "оба сообщения легли в очередь канала файлами"
+case_check "оба сообщения легли в очередь канала файлами" "2" "$LEZHIT"
 
 tmux send-keys -t "$SESSION" C-d 2>/dev/null
 sleep 0.5
@@ -165,41 +161,41 @@ PANEL=$(cat "$T/панель" 2>/dev/null || true)
 
 # 1. БОЛЬНОЙ СЛУЧАЙ: несрочное не имеет права прерывать шаг.
 got=нет; printf '%s' "$PANEL" | grep -q 'экран памяти' && got=да
-itog "нет" "$got" "БОЛЬНОЙ СЛУЧАЙ: несрочное сообщение НЕ пинает панель агента"
+case_check "БОЛЬНОЙ СЛУЧАЙ: несрочное сообщение НЕ пинает панель агента" "нет" "$got"
 
 # 2. Срочное будит сразу — эту половину ломать нельзя.
 got=нет; printf '%s' "$PANEL" | grep -q 'останови выкат' && got=да
-itog "да" "$got" "срочное пинает панель в тот же миг"
+case_check "срочное пинает панель в тот же миг" "да" "$got"
 
 # 3. Решение записано в журнал канала словами — видимость, а не догадка.
 got=нет; grep -q 'несрочное — шаг агента не прерываю' "$T/log/tg-dispatcher.log" && got=да
-itog "да" "$got" "в журнале канала названа причина, почему пинка не было"
+case_check "в журнале канала названа причина, почему пинка не было" "да" "$got"
 
 # 4. Карточку завёл КОД: ссылка на сообщение стоит в карте стенда.
 METKA=$(grep -rl 'экран памяти' "$T/log/inbox"/*.txt 2>/dev/null | head -1 | xargs -r basename | sed 's/\.txt$//')
 got=нет
 [ -n "$METKA" ] && grep -q "inbox:$METKA" "$T/project/dev-map.yaml" && got=да
-itog "да" "$got" "карточка из несрочного сообщения заведена КОДОМ (источник inbox:$METKA)"
+case_check "карточка из несрочного сообщения заведена КОДОМ (источник inbox:$METKA)" "да" "$got"
 
 # Карта осталась целой: число задач выросло ровно на одну.
 BYLO=$(grep -c '^      - id: ' "$KOREN/dev-map.yaml")
 STALO=$(grep -c '^      - id: ' "$T/project/dev-map.yaml")
-itog "$((BYLO + 1))" "$STALO" "в карте стенда стало ровно на одну задачу больше"
+case_check "в карте стенда стало ровно на одну задачу больше" "$((BYLO + 1))" "$STALO"
 
 # 5. Свод рубежа: один сортированный список, срочное первым.
 SVOD=$(python3 "$KOREN/scripts/inbox-digest.py" --инбокс "$T/log/inbox" \
         --карта "$T/project/dev-map.yaml" 2>&1)
 got=нет
 printf '%s' "$SVOD" | grep -q 'экран памяти' && printf '%s' "$SVOD" | grep -q 'останови выкат' && got=да
-itog "да" "$got" "свод рубежа показывает оба накопленных сообщения"
+case_check "свод рубежа показывает оба накопленных сообщения" "да" "$got"
 got=нет; printf '%s' "$SVOD" | grep -q '1\. СРОЧНО' && got=да
-itog "да" "$got" "в своде срочное стоит первым"
+case_check "в своде срочное стоит первым" "да" "$got"
 
 printf '%s\n' "$SVOD" | sed 's/^/        /'
 
 # Красная проба обязана показать, ЧЕМ упал стенд: иначе разбор начинается с
 # гадания, а стенд к этому времени уже убран.
-if [ "$ok" != 1 ]; then
+if [ "$CASES_FAILED" != 0 ]; then
     echo "--- вывод диспетчера на стенде ---"
     tail -20 "$T/dispatcher.log" 2>/dev/null
     echo "--- журнал канала на стенде ---"
@@ -208,5 +204,5 @@ if [ "$ok" != 1 ]; then
     tail -10 "$T/log/map-from-message.log" 2>/dev/null
 fi
 
-[ "$ok" = 1 ] && { echo "ПРОБА ЗЕЛЁНАЯ: 8 путей, первым — больной случай (несрочное не пинает панель)"; exit 0; }
+[ "$CASES_FAILED" = 0 ] && { echo "ПРОБА ЗЕЛЁНАЯ: $CASES_PATHS путей, первым — больной случай (несрочное не пинает панель)"; exit 0; }
 echo "ПРОБА КРАСНАЯ"; exit 1

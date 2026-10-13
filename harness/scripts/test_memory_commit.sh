@@ -17,14 +17,7 @@ export LC_ALL=C.UTF-8
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEMON="$HERE/../harness/demons/memory-commit.sh"
-paths=0
-fails=0
-
-itog() {  # $1=ждём $2=вышло $3=имя
-    paths=$((paths + 1))
-    if [ "$1" = "$2" ]; then printf '  ок    %s\n' "$3"
-    else printf '  ПЛОХО %s: ждали «%s», вышло «%s»\n' "$3" "$1" "$2"; fails=$((fails + 1)); fi
-}
+source "$HERE/lib/selftest_cases.sh"
 
 STAND=$(mktemp -d)
 trap 'rm -rf "$STAND"' EXIT
@@ -111,38 +104,38 @@ echo "── БОЛЬНОЙ СЛУЧАЙ 27.09: первый отказ гово
 krasnyj_gejt
 printf 'правка с панели\n' > "$PROJECT/память/запись.md"
 progon
-itog "1" "$(skazano)" "владельцу сказано один раз"
-itog "нет" "$(grep -q 'разберусь' "$STAND/zhurnal/kanal.txt" && echo да || echo нет)" \
-     "слова «разберусь» в сообщении нет"
-itog "да" "$(grep -q 'повторю сам' "$STAND/zhurnal/kanal.txt" && echo да || echo нет)" \
-     "сказано, что демон повторит сам"
-itog "да" "$(grep -q 'проба_гейта' "$STAND/zhurnal/kanal.txt" && echo да || echo нет)" \
-     "красный гейт назван по имени"
+case_check "владельцу сказано один раз" "1" "$(skazano)"
+case_check "слова «разберусь» в сообщении нет" \
+    "нет" "$(grep -q 'разберусь' "$STAND/zhurnal/kanal.txt" && echo да || echo нет)"
+case_check "сказано, что демон повторит сам" \
+    "да" "$(grep -q 'повторю сам' "$STAND/zhurnal/kanal.txt" && echo да || echo нет)"
+case_check "красный гейт назван по имени" \
+    "да" "$(grep -q 'проба_гейта' "$STAND/zhurnal/kanal.txt" && echo да || echo нет)"
 
 echo "── тот же отказ на следующем обходе: владельцу не пишем ──"
 progon
-itog "1" "$(skazano)" "второго сообщения нет — обходы не спамят"
+case_check "второго сообщения нет — обходы не спамят" "1" "$(skazano)"
 
 echo "── отказ держится дольше порога: долг на доску и одно слово владельцу ──"
 progon
-itog "2" "$(skazano)" "о затянувшемся отказе сказано ОДИН раз"
-itog "да" "$(doska_est)" \
-     "долг записан на доску — смена увидит его в стартовом отчёте"
+case_check "о затянувшемся отказе сказано ОДИН раз" "2" "$(skazano)"
+case_check "долг записан на доску — смена увидит его в стартовом отчёте" \
+    "да" "$(doska_est)"
 progon
-itog "2" "$(skazano)" "и на следующем обходе второй раз не повторяем"
+case_check "и на следующем обходе второй раз не повторяем" "2" "$(skazano)"
 
 echo "── гейт починился: долг снят, счёт обнулён ──"
 zelenyj_gejt
 progon
-itog "2" "$(skazano)" "об успехе владельцу не пишем"
-itog "нет" "$(doska_est)" \
-     "запись о долге с доски снята"
-itog "нет" "$([ -f "$STAND/zhurnal/memory-commit.неудач" ] && echo да || echo нет)" \
-     "счёт неудач подряд обнулён"
+case_check "об успехе владельцу не пишем" "2" "$(skazano)"
+case_check "запись о долге с доски снята" \
+    "нет" "$(doska_est)"
+case_check "счёт неудач подряд обнулён" \
+    "нет" "$([ -f "$STAND/zhurnal/memory-commit.неудач" ] && echo да || echo нет)"
 # quotepath=false: без него git печатает кириллицу escape-байтами, и проба
 # искала бы слово, которого в выводе нет (память: quotepath).
-itog "да" "$(git -C "$PROJECT" -c core.quotepath=false log -1 --format=%s | grep -q 'Правка памяти' && echo да || echo нет)" \
-     "правка памяти в итоге закоммичена"
+case_check "правка памяти в итоге закоммичена" \
+    "да" "$(git -C "$PROJECT" -c core.quotepath=false log -1 --format=%s | grep -q 'Правка памяти' && echo да || echo нет)"
 
 echo "── решение «коммитить нечего» отличает исчезнувшую правку от красного гейта ──"
 # Находка ревью M-08: инвариант «нечего коммитить — владельцу не писать» был без
@@ -155,8 +148,8 @@ NECHEGO=$(bash -c ". '$STAND/reshenie.sh'
     nechego_kommitit 'nothing to commit, working tree clean' && echo да || echo нет")
 GEJT=$(bash -c ". '$STAND/reshenie.sh'
     nechego_kommitit '[pre-commit] GATE FAIL: проба_гейта' && echo да || echo нет")
-itog "да" "$NECHEGO" "вывод «nothing to commit» признан исчезнувшей правкой"
-itog "нет" "$GEJT" "БОЛЬНОЙ СЛУЧАЙ: красный гейт исчезнувшей правкой НЕ считается"
+case_check "вывод «nothing to commit» признан исчезнувшей правкой" "да" "$NECHEGO"
+case_check "БОЛЬНОЙ СЛУЧАЙ: красный гейт исчезнувшей правкой НЕ считается" "нет" "$GEJT"
 
 echo "── БОЛЬНОЙ СЛУЧАЙ 28.09: НОВАЯ запись памяти обязана попасть в коммит ──"
 # Коммит bf91834 назвал в сообщении MEMORY.md и вторую запись, а внёс один
@@ -167,21 +160,20 @@ printf 'вторая редакция\n' > "$PROJECT/память/запись.m
 printf 'новая запись\n' > "$PROJECT/память/проба-новой-записи.md"
 progon
 SOSTAV="$(git -C "$PROJECT" -c core.quotepath=false show --name-only --format= HEAD 2>/dev/null || true)"
-itog "да" "$(printf '%s\n' "$SOSTAV" | grep -q 'проба-новой-записи.md' && echo да || echo нет)" \
-     "новая (неотслеженная) запись попала в коммит"
-itog "да" "$(printf '%s\n' "$SOSTAV" | grep -q 'запись.md' && echo да || echo нет)" \
-     "правка старой записи тоже в коммите"
-itog "да" "$(git -C "$PROJECT" -c core.quotepath=false log -1 --format=%s \
-             | grep -q 'проба-новой-записи.md' && echo да || echo нет)" \
-     "сообщение коммита называет новую запись"
-itog "" "$(git -C "$PROJECT" status --porcelain -- память 2>/dev/null || true)" \
-     "после коммита в памяти не осталось неотслеженного"
+case_check "новая (неотслеженная) запись попала в коммит" \
+    "да" "$(printf '%s\n' "$SOSTAV" | grep -q 'проба-новой-записи.md' && echo да || echo нет)"
+case_check "правка старой записи тоже в коммите" \
+    "да" "$(printf '%s\n' "$SOSTAV" | grep -q 'запись.md' && echo да || echo нет)"
+case_check "сообщение коммита называет новую запись" \
+    "да" "$(git -C "$PROJECT" -c core.quotepath=false log -1 --format=%s | grep -q 'проба-новой-записи.md' && echo да || echo нет)"
+case_check "после коммита в памяти не осталось неотслеженного" \
+    "" "$(git -C "$PROJECT" status --porcelain -- память 2>/dev/null || true)"
 # Сверка состава судится по СВОЕМУ следу: демон пишет в этот файл имена,
 # которые назвал и не внёс. Первая редакция пробы искала в нём слово «БЕДА» —
 # а оно уходит в вывод демона, не в файл: под мутацией проба оставалась
 # зелёной и сверку не доказывала.
-itog "0" "$(grep -c . "$STAND/zhurnal/memory-commit.вывод.назвал-не-внёс" 2>/dev/null || true)" \
-     "сверка состава: названных и не внесённых файлов нет"
+case_check "сверка состава: названных и не внесённых файлов нет" \
+    "0" "$(grep -c . "$STAND/zhurnal/memory-commit.вывод.назвал-не-внёс" 2>/dev/null || true)"
 
-printf '\nПАМЯТЬ-В-ГИТ: путей %d, неудач %d\n' "$paths" "$fails"
-[ "$fails" -eq 0 ]
+printf '\nПАМЯТЬ-В-ГИТ: путей %d, неудач %d\n' "$CASES_PATHS" "$CASES_FAILED"
+[ "$CASES_FAILED" -eq 0 ]

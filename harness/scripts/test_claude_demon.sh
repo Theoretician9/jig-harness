@@ -19,18 +19,7 @@ export LC_ALL=C.UTF-8
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OBERTKA="$HERE/claude-demon.sh"
-PUTEJ=0
-NEUDACH=0
-
-itog() {  # itog "имя" "ждём" "вышло"
-    PUTEJ=$((PUTEJ + 1))
-    if [ "$2" = "$3" ]; then
-        printf 'ок  · %s\n' "$1"
-    else
-        NEUDACH=$((NEUDACH + 1))
-        printf 'ПЛОХО · %s: ждали «%s», вышло «%s»\n' "$1" "$2" "$3"
-    fi
-}
+source "$HERE/lib/selftest_cases.sh"
 
 STAND="$(mktemp -d)"
 trap 'rm -rf "$STAND"' EXIT
@@ -61,26 +50,26 @@ echo "── БОЛЬНОЙ СЛУЧАЙ: недельный лимит ──"
 printf "You've hit your weekly limit · resets Sep 16, 6pm (Asia/Qostanay)\n" > "$STAND/лимит.txt"
 export CLAUDE_SCENARIJ="$STAND/лимит.txt" CLAUDE_KOD=1
 VYVOD=$(bash "$OBERTKA" проба-демон -p "задание" 2>&1); KOD=$?
-itog "отказ по лимиту — свой код 77, а не общий 1" 77 "$KOD"
-itog "владельцу сказано один раз" 1 "$(grep -c . "$TG_VYHOD")"
-itog "в сообщении названа дата сброса" "да" "$(grep -q 'Sep 16' "$TG_VYHOD" && echo да || echo нет)"
+case_check "отказ по лимиту — свой код 77, а не общий 1" 77 "$KOD"
+case_check "владельцу сказано один раз" 1 "$(grep -c . "$TG_VYHOD")"
+case_check "в сообщении названа дата сброса" "да" "$(grep -q 'Sep 16' "$TG_VYHOD" && echo да || echo нет)"
 # Пояс — часть времени: без него «6pm» читается неверно. Живой прогон
 # 13.09.2026 показал обрезку по скобке: «resets Sep 16, 6pm (Asia/Qostanay».
-itog "пояс из скобок не потерян" "да" "$(grep -q 'Asia/Qostanay)' "$TG_VYHOD" && echo да || echo нет)"
-itog "в сообщении назван демон" "да" "$(grep -q 'проба-демон' "$TG_VYHOD" && echo да || echo нет)"
+case_check "пояс из скобок не потерян" "да" "$(grep -q 'Asia/Qostanay)' "$TG_VYHOD" && echo да || echo нет)"
+case_check "в сообщении назван демон" "да" "$(grep -q 'проба-демон' "$TG_VYHOD" && echo да || echo нет)"
 
 echo "── тот же лимит второй раз: владельцу НЕ повторяем ──"
 bash "$OBERTKA" проба-демон -p "задание" >/dev/null 2>&1
-itog "второе сообщение не ушло" 1 "$(grep -c . "$TG_VYHOD")"
-itog "второй демон тоже молчит" 1 "$(bash "$OBERTKA" другой-демон -p "z" >/dev/null 2>&1; grep -c . "$TG_VYHOD")"
+case_check "второе сообщение не ушло" 1 "$(grep -c . "$TG_VYHOD")"
+case_check "второй демон тоже молчит" 1 "$(bash "$OBERTKA" другой-демон -p "z" >/dev/null 2>&1; grep -c . "$TG_VYHOD")"
 
 echo "── здоровый вызов: вывод отдан как есть, кода 77 нет ──"
 printf 'ответ модели\n' > "$STAND/ответ.txt"
 export CLAUDE_SCENARIJ="$STAND/ответ.txt" CLAUDE_KOD=0
 VYVOD=$(bash "$OBERTKA" проба-демон -p "задание" 2>/dev/null); KOD=$?
-itog "здоровый вызов: код 0" 0 "$KOD"
-itog "здоровый вызов: вывод модели отдан вызывающему" "ответ модели" "$VYVOD"
-itog "о снятии лимита сказано" "да" "$(grep -q 'снят\|сброс\|работают' "$TG_VYHOD" && echo да || echo нет)"
+case_check "здоровый вызов: код 0" 0 "$KOD"
+case_check "здоровый вызов: вывод модели отдан вызывающему" "ответ модели" "$VYVOD"
+case_check "о снятии лимита сказано" "да" "$(grep -q 'снят\|сброс\|работают' "$TG_VYHOD" && echo да || echo нет)"
 
 echo "── обычная неудача моделью: НЕ выдаётся за лимит ──"
 printf 'что-то пошло не так\n' > "$STAND/беда.txt"
@@ -88,8 +77,8 @@ export CLAUDE_SCENARIJ="$STAND/беда.txt" CLAUDE_KOD=1
 : > "$TG_VYHOD"
 rm -f "$LOG_DIR/отказ-демонов.состояние" "$LOG_DIR/отказ-демонов.сказано"
 VYVOD=$(bash "$OBERTKA" проба-демон -p "задание" 2>&1); KOD=$?
-itog "обычный отказ отдаёт код модели" 1 "$KOD"
-itog "о ПЕРВОМ обычном отказе владельцу не пишем" 0 "$(grep -c . "$TG_VYHOD")"
+case_check "обычный отказ отдаёт код модели" 1 "$KOD"
+case_check "о ПЕРВОМ обычном отказе владельцу не пишем" 0 "$(grep -c . "$TG_VYHOD")"
 
 # БОЛЬНОЙ СЛУЧАЙ 15–21.09.2026: отказ «organization has disabled Claude
 # subscription access» слова лимита не содержит, и шесть суток демоны молчали
@@ -101,20 +90,20 @@ export CLAUDE_SCENARIJ="$STAND/доступ.txt" CLAUDE_KOD=1
 : > "$TG_VYHOD"
 rm -f "$LOG_DIR/отказ-демонов.состояние" "$LOG_DIR/отказ-демонов.сказано"
 bash "$OBERTKA" devmap-selfheal -p "z" >/dev/null 2>&1
-itog "первый отказ доступа: владельцу молчим" 0 "$(grep -c . "$TG_VYHOD")"
+case_check "первый отказ доступа: владельцу молчим" 0 "$(grep -c . "$TG_VYHOD")"
 bash "$OBERTKA" ton-watch -p "z" >/dev/null 2>&1
-itog "тот же отказ у СОСЕДНЕГО демона — владельцу сказано" 1 "$(grep -c . "$TG_VYHOD")"
-itog "в сообщении названа причина отказа" "да" \
+case_check "тот же отказ у СОСЕДНЕГО демона — владельцу сказано" 1 "$(grep -c . "$TG_VYHOD")"
+case_check "в сообщении названа причина отказа" "да" \
      "$(grep -q 'disabled Claude subscription access' "$TG_VYHOD" && echo да || echo нет)"
-itog "в сообщении назван демон" "да" "$(grep -q 'ton-watch' "$TG_VYHOD" && echo да || echo нет)"
+case_check "в сообщении назван демон" "да" "$(grep -q 'ton-watch' "$TG_VYHOD" && echo да || echo нет)"
 bash "$OBERTKA" check-builder -p "z" >/dev/null 2>&1
-itog "третий тот же отказ — второго сообщения нет" 1 "$(grep -c . "$TG_VYHOD")"
+case_check "третий тот же отказ — второго сообщения нет" 1 "$(grep -c . "$TG_VYHOD")"
 
 echo "── другой отказ сбрасывает счёт: он не тот же самый ──"
 export CLAUDE_SCENARIJ="$STAND/беда.txt" CLAUDE_KOD=1
 bash "$OBERTKA" проба-демон -p "z" >/dev/null 2>&1
-itog "новый текст отказа — сообщения не добавил" 1 "$(grep -c . "$TG_VYHOD")"
-itog "подпись в состоянии сменилась" "да" \
+case_check "новый текст отказа — сообщения не добавил" 1 "$(grep -c . "$TG_VYHOD")"
+case_check "подпись в состоянии сменилась" "да" \
      "$(grep -q 'что-то пошло не так' "$LOG_DIR/отказ-демонов.состояние" && echo да || echo нет)"
 
 echo "── отказ прекратился: сказать об этом ОДИН раз ──"
@@ -124,10 +113,10 @@ bash "$OBERTKA" проба-демон -p "z" >/dev/null 2>&1   # повтор �
 SKAZANO_DO=$(grep -c . "$TG_VYHOD")
 export CLAUDE_SCENARIJ="$STAND/ответ.txt" CLAUDE_KOD=0
 bash "$OBERTKA" проба-демон -p "z" >/dev/null 2>&1
-itog "о прекращении сказано" "$((SKAZANO_DO + 1))" "$(grep -c . "$TG_VYHOD")"
-itog "сказано именно «прошло»" "да" "$(grep -q 'Прошло' "$TG_VYHOD" && echo да || echo нет)"
+case_check "о прекращении сказано" "$((SKAZANO_DO + 1))" "$(grep -c . "$TG_VYHOD")"
+case_check "сказано именно «прошло»" "да" "$(grep -q 'Прошло' "$TG_VYHOD" && echo да || echo нет)"
 bash "$OBERTKA" проба-демон -p "z" >/dev/null 2>&1
-itog "второй здоровый вызов молчит" "$((SKAZANO_DO + 1))" "$(grep -c . "$TG_VYHOD")"
+case_check "второй здоровый вызов молчит" "$((SKAZANO_DO + 1))" "$(grep -c . "$TG_VYHOD")"
 
 # Здоровый вызов после нашей возни обязан оставить стенд чистым для проб ниже.
 export CLAUDE_SCENARIJ="$STAND/ответ.txt" CLAUDE_KOD=0
@@ -144,7 +133,7 @@ exit "${CLAUDE_KOD:-0}"
 CLAUDE2
 chmod +x "$STAND/bin/claude"
 SLED_ARG="$SLED" bash "$OBERTKA" проба-демон -p "задание" >/dev/null 2>&1
-itog "--strict-mcp-config добавлен всегда (иначе обрывается канал владельца)" \
+case_check "--strict-mcp-config добавлен всегда (иначе обрывается канал владельца)" \
      "да" "$(grep -q -- '--strict-mcp-config' "$SLED" && echo да || echo нет)"
 
 echo "── запись состояния идёт ПОД ЛОКОМ ──"
@@ -161,14 +150,14 @@ flock 7                                   # лок у пробы
 bash "$OBERTKA" под-локом -p "задание" >/dev/null 2>&1 &
 DEMON_PID=$!
 sleep 1
-itog "пока лок держит проба — демон не пишет владельцу" 0 "$(grep -c . "$TG_VYHOD")"
+case_check "пока лок держит проба — демон не пишет владельцу" 0 "$(grep -c . "$TG_VYHOD")"
 flock -u 7                                # отпускаем
 wait "$DEMON_PID" || true
-itog "лок отпущен — сообщение ушло" 1 "$(grep -c . "$TG_VYHOD")"
+case_check "лок отпущен — сообщение ушло" 1 "$(grep -c . "$TG_VYHOD")"
 exec 7>&-
 
 echo "── второй демон в том же периоде молчит ──"
-itog "второй демон сообщения не добавил" 1 \
+case_check "второй демон сообщения не добавил" 1 \
      "$(bash "$OBERTKA" второй-в-периоде -p "z" >/dev/null 2>&1; grep -c . "$TG_VYHOD")"
 
 # БОЛЬНОЙ СЛУЧАЙ 23–26.09.2026: владелец стоял на паузе трое суток, а в канал
@@ -197,15 +186,15 @@ export STAND_ZOV="$STAND/зов-модели.txt"
 printf '{"когда": %s, "почему": "проба", "кто": "владелец"}\n' "$(date +%s)" \
     > "$HARNESS_PANEL_STATE/пауза.json"
 bash "$OBERTKA" на-паузе -p "задание" >/dev/null 2>&1; KOD=$?
-itog "на паузе обёртка отдаёт свой код 78, а не код модели" 78 "$KOD"
-itog "на паузе владельцу НЕ написано" 0 "$(grep -c . "$TG_VYHOD")"
-itog "на паузе модель НЕ звана" 0 "$(grep -c . "$STAND_ZOV")"
+case_check "на паузе обёртка отдаёт свой код 78, а не код модели" 78 "$KOD"
+case_check "на паузе владельцу НЕ написано" 0 "$(grep -c . "$TG_VYHOD")"
+case_check "на паузе модель НЕ звана" 0 "$(grep -c . "$STAND_ZOV")"
 
 rm -f "$HARNESS_PANEL_STATE/пауза.json"
 bash "$OBERTKA" без-паузы -p "задание" >/dev/null 2>&1; KOD=$?
-itog "пауза снята — модель зовётся снова" 1 "$(grep -c . "$STAND_ZOV")"
-itog "пауза снята — лимит снова доходит до владельца" 1 "$(grep -c . "$TG_VYHOD")"
-itog "пауза снята — код лимита прежний" 77 "$KOD"
+case_check "пауза снята — модель зовётся снова" 1 "$(grep -c . "$STAND_ZOV")"
+case_check "пауза снята — лимит снова доходит до владельца" 1 "$(grep -c . "$TG_VYHOD")"
+case_check "пауза снята — код лимита прежний" 77 "$KOD"
 
-printf '\nитого путей %s, неудач %s\n' "$PUTEJ" "$NEUDACH"
-[ "$NEUDACH" -eq 0 ]
+printf '\nитого путей %s, неудач %s\n' "$CASES_PATHS" "$CASES_FAILED"
+[ "$CASES_FAILED" -eq 0 ]

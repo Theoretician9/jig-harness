@@ -136,16 +136,9 @@ def записать_атомарно(файл: Path, текст: str, прав�
 def _selftest() -> int:
     import tempfile
 
-    путей = неудач = 0
-
-    def проба(имя: str, ждём, факт):
-        nonlocal путей, неудач
-        путей += 1
-        if факт == ждём:
-            print(f"  ок    {имя}")
-        else:
-            неудач += 1
-            print(f"  ПЛОХО {имя}: ждали «{ждём}», вышло «{факт}»")
+    from selftest_cases import Cases
+    случаи = Cases()
+    проба = случаи.check
 
     with tempfile.TemporaryDirectory() as врем:
         дом = Path(врем)
@@ -241,9 +234,9 @@ def _selftest() -> int:
         os.environ.pop("PANEL_NO_SUDO", None)
         os.chmod(закрытый, 0o700)
 
-    print(f"SELFTEST: {'зелёный' if not неудач else 'КРАСНЫЙ'} ({путей} путей; "
+    print(f"SELFTEST: {'зелёный' if случаи.ok else 'КРАСНЫЙ'} ({случаи.paths} путей; "
           "среди них больной случай «запись не удалась — прежнее цело»)")
-    return 1 if неудач else 0
+    return 0 if случаи.ok else 1
 
 
 if __name__ == "__main__":
