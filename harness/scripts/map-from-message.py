@@ -67,7 +67,7 @@ def исход_есть(карта: Path, ид: str) -> bool:
     куски = []
     if карта.exists():
         куски.append(карта.read_text(encoding="utf-8"))
-    спутник = карта.parent / "память" / ".задачи-разобрано"
+    спутник = карта.parent / модуль("tasks-from-channel").СПУТНИК
     if спутник.exists():
         куски.append(спутник.read_text(encoding="utf-8"))
     return f"inbox:{ид}" in "\n".join(куски) or any(
