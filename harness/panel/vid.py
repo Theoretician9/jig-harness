@@ -12,6 +12,7 @@
 переключатели — обычные формы, кольца и полоски — CSS-градиенты.
 """
 import html
+import urllib.parse
 
 СТИЛЬ = """
 :root{
@@ -471,85 +472,210 @@ def _механизм(строка: dict) -> str:
             f'{html.escape(строка["файл"])}</div></div>')
 
 
-# Состояния задач словами владельца: «test» и «принято» ему ничего не говорят.
-ПОДПИСИ_СОСТОЯНИЙ = {
-    "wip": ("В работе прямо сейчас", "зелёная"),
-    "test": ("Ждёт проверки", "жёлтая"),
-    "plan": ("В планах", ""),
-    # Владелец 28.09.2026: «нужен какой-то беклог который ты вообще не будешь
-    # трогать пока я не скажу».
-    "беклог": ("Беклог — не трогаю без вашего слова", "серая"),
-    "принято": ("Проверено машиной", "зелёная"),
-    "done": ("Проверено вами", "зелёная"),
-}
+# ── доска (канбан) и страница задачи — спека hr.kanban §2, §5 ───────────────
+# Колонки идут вбок и прокручиваются пальцем: на телефоне 390 px десять колонок
+# в ряд не помещаются, а перенос строки смешал бы порядок шагов.
+BOARD_STYLE = """
+.board{display:flex;gap:12px;overflow-x:auto;padding-bottom:10px;
+  scroll-snap-type:x proximity;-webkit-overflow-scrolling:touch}
+.board-column{flex:0 0 250px;background:var(--карта);border:1px solid var(--рамка);
+  border-radius:18px;padding:12px;scroll-snap-align:start}
+.board-column h3{margin:0 0 10px;font-size:.92rem;color:var(--тихо);font-weight:600}
+.board-card{display:block;background:var(--карта2);border:1px solid var(--рамка);
+  border-radius:14px;padding:10px 12px;margin-bottom:8px;color:inherit;
+  text-decoration:none}
+.board-card .пилюля{margin-top:6px;white-space:normal}
+.problem{border-color:var(--красн);margin-bottom:14px}
+.stale{border-color:var(--оранж);margin-bottom:14px}
+pre{white-space:pre-wrap;word-break:break-word;font:13px/1.5 ui-monospace,Menlo,monospace}
+textarea{width:100%;font:inherit;padding:10px 14px;border-radius:14px;
+  border:1px solid var(--рамка);background:var(--карта2);color:var(--текст)}
+a{color:var(--оранж)}
+"""
+UNASSIGNED_COLUMN = "колонка не названа"
+STEP_MARKS = {True: "✓", False: "✗", None: "○"}
 
 
-def _задача_карты(строка: dict) -> str:
-    подпись, цвет = ПОДПИСИ_СОСТОЯНИЙ.get(строка["состояние"],
-                                          (строка["состояние"], ""))
-    доказано = (f'<div class="мелко">чем доказана: '
-                f'{html.escape(str(строка["чем доказана"])[:140])}</div>'
-                if строка["чем доказана"] else
-                '<div class="мелко">доказать пока нечем</div>')
-    блокер = (f'<div class="пилюля жёлтая" style="margin-top:8px">'
-              f'ждёт: {html.escape(str(строка["блокер"])[:90])}</div>'
-              if строка.get("блокер") else "")
-    # Глубина решает, какие шаги задаче положены. Её отсутствие видно ЗДЕСЬ:
-    # вопрос владельца 28.09.2026 — «где мне это увидеть?».
-    глубина = (f'<div class="мелко">глубина: '
-               f'{html.escape(str(строка.get("глубина")))}</div>'
-               if строка.get("глубина") else
-               '<div class="пилюля жёлтая" style="margin-top:8px">'
-               'глубины нет — шаги не назначены</div>')
-    return (f'<div class="карта"><div class="пилюля {цвет}">'
-            f'{html.escape(подпись)}</div>'
-            f'<div style="margin:8px 0 4px;font-weight:600">'
-            f'{html.escape(строка["название"] or строка["id"])}</div>'
-            f'{доказано}{глубина}{блокер}</div>')
+def _board_page(title: str, body: str) -> str:
+    return _страница(title, f"<style>{BOARD_STYLE}</style>{body}")
 
 
-def карта_разработки(данные: dict) -> str:
-    """Экран карты: чем занят харнес и что ждёт проверки.
+def _header(title: str, back: str, back_label: str) -> str:
+    return ('<div class="шапка"><div style="display:flex;align-items:center;gap:12px">'
+            f'<div class="значок">✳</div><h1>{html.escape(title)}</h1></div>'
+            f'<a href="{back}"><button>{back_label}</button></a></div>')
 
-    Владелец 11.09.2026: «Карта где используется? Где предполагается быть
-    использованной?» По ней принимают решения двадцать механизмов, а экрана у
-    неё не было ни одного.
-    """
-    шапка = ('<div class="шапка"><div style="display:flex;align-items:center;gap:12px">'
-             '<div class="значок">✳</div><h1>Карта работы</h1></div>'
-             '<a href="/"><button>На панель</button></a></div>')
-    if данные.get("нет данных"):
-        return _страница("Карта работы",
-                         шапка + f'<div class="карта">'
-                         f'{html.escape(данные["нет данных"])}</div>')
-    пилюли = "".join(
-        f'<div class="пилюля {ПОДПИСИ_СОСТОЯНИЙ.get(с, (с, ""))[1]}">'
-        f'{html.escape(ПОДПИСИ_СОСТОЯНИЙ.get(с, (с, ""))[0])}: {n}</div>'
-        for с, n in sorted(данные["по состояниям"].items(),
-                           key=lambda п: -п[1]))
-    сводка = (f'<div class="карта" style="margin-bottom:14px">'
-              f'<div class="число">{данные["всего"]}'
-              f'<span class="мелко"> задач в карте</span></div>'
-              f'<div class="кнопки" style="margin-top:10px">{пилюли}</div>'
-              f'<div class="подсказка">Работаем над: '
-              f'{html.escape(str(данные.get("рабочее направление", "все")))}. '
-              + (f'Отложено и не мешает: {данные["отложено задач"]} задач(и). '
-                 if данные.get("отложено задач") else "")
-              + (f'Без глубины: {данные["без глубины"]} — для них машина не '
-                 f'знает, какие шаги нужны. '
-                 if данные.get("без глубины") else "")
-              + f'Закрытые уезжают в архив сами, поэтому здесь только живое. '
-              f'«Проверено машиной» — доказано командой, она названа у '
-              f'задачи.</div></div>')
-    # Показываем не всё: карта живёт сотней задач, а экран читают с телефона.
-    видно = данные["задачи"][:40]
-    хвост = (f'<div class="подсказка" style="margin:14px 2px">И ещё '
-             f'{len(данные["задачи"]) - len(видно)} задач(и) ниже по списку.</div>'
-             if len(данные["задачи"]) > len(видно) else "")
-    return _страница("Карта работы",
-                     шапка + сводка + '<div class="сетка">'
-                     + "".join(_задача_карты(с) for с in видно)
-                     + '</div>' + хвост)
+
+def _pills(pills: list) -> str:
+    return "".join(f'<div class="пилюля">{html.escape(str(p))}</div>' for p in pills or [])
+
+
+def _clock(moment) -> str:
+    """ЧЧ:ММ из ISO-времени; непонятное время — как есть."""
+    text = str(moment or "")
+    return text[11:16] if len(text) >= 16 and text[10] == "T" else (text or "—")
+
+
+def _or_dash(value) -> str:
+    """Величины нет (снимок не прочитал её) — прочерк, а не «None» и не 0."""
+    return "—" if value is None else str(value)
+
+
+def task_href(task_id: str) -> str:
+    return "/karta/" + urllib.parse.quote(str(task_id), safe="")
+
+
+def board(snapshot: dict) -> str:
+    """Канбан: колонки из снимка в его порядке, все задачи без обрезки."""
+    header = _header("Карта работы", "/", "На панель")
+    if snapshot.get("нет данных"):
+        return _board_page("Карта работы", header + (
+            f'<div class="карта problem">Доска не показана: '
+            f'{html.escape(snapshot["нет данных"])}; задач в карте не видно, '
+            f'пока снимка нет.</div>'))
+    tasks = [t for t in snapshot["задачи"] if isinstance(t, dict)]
+    columns = list(snapshot.get("колонки") or [])
+    by_column = {column: [] for column in columns}
+    for task in tasks:
+        by_column.setdefault(task.get("колонка") if task.get("колонка") in by_column
+                             else UNASSIGNED_COLUMN, []).append(task)
+    stale = (f'<div class="карта stale">доска устарела: снимок '
+             f'{html.escape(_clock(snapshot.get("снято")))}, демон build-board молчит'
+             f'</div>' if snapshot.get("устарела") else "")
+    problem = (f'<div class="карта problem">{html.escape(str(snapshot["беда"]))}</div>'
+               if snapshot.get("беда") else "")
+    summary = (f'<div class="карта" style="margin-bottom:14px">'
+               f'<div class="число">{len(tasks)}<span class="мелко"> задач в карте</span></div>'
+               f'<div class="подсказка">направление '
+               f'{html.escape(str(snapshot.get("направление") or "все"))} · '
+               f'в архиве: {html.escape(_or_dash(snapshot.get("архив")))} · снято '
+               f'{html.escape(_clock(snapshot.get("снято")))}. Стадию ставит гейт '
+               f'пайплайна, а не рука: доска — его снимок.</div></div>')
+    rendered = []
+    for column, column_tasks in by_column.items():
+        cards = "".join(
+            f'<a class="board-card" href="{task_href(t.get("id", ""))}">'
+            f'<div style="font-weight:600">{html.escape(str(t.get("название") or t.get("id")))}</div>'
+            f'<div class="мелко">{html.escape(str(t.get("id", "")))}</div>'
+            f'{_pills(t.get("пилюли"))}</a>' for t in column_tasks)
+        rendered.append(f'<section class="board-column"><h3>{html.escape(column)} · '
+                        f'{len(column_tasks)}</h3>'
+                        f'{cards or "<div class=мелко>пусто</div>"}</section>')
+    return _board_page("Карта работы", header + stale + problem + summary
+                       + f'<div class="board">{"".join(rendered)}</div>')
+
+
+def _section(title: str, body: str) -> str:
+    return (f'<div class="карта" style="margin-bottom:14px"><h2>{html.escape(title)}</h2>'
+            f'{body}</div>')
+
+
+def _steps_block(task: dict) -> str:
+    rows = []
+    for number, step in enumerate(task.get("шаги") or []):
+        where = (f'<a href="{task_href(task["id"])}/fajl?n={number}">'
+                 f'{html.escape(str(step["путь"]))}</a>' if step.get("путь") else "")
+        why = html.escape(str(step.get("почему") or ""))
+        rows.append(f'<div class="строка"><span>{STEP_MARKS.get(step.get("есть"), "○")} '
+                    f'{html.escape(str(step.get("шаг", "")).replace("_", " "))}</span>'
+                    f'<span class="мелко" style="text-align:right">'
+                    f'{" · ".join(part for part in (where, why) if part)}</span></div>')
+    return "".join(rows) or '<div class="мелко">шагов в снимке нет</div>'
+
+
+def _sources_block(task: dict) -> str:
+    rows = []
+    for source in task.get("источники") or []:
+        line = html.escape(str(source.get("строка") or source.get("id") or ""))
+        text = (f'<pre>{html.escape(str(source["текст"]))}</pre>'
+                if source.get("текст") else "")
+        rows.append(f'<div class="мелко">{line}</div>{text}')
+    return "".join(rows) or '<div class="мелко">источник не назван</div>'
+
+
+def _commits_block(task: dict) -> str:
+    return "".join(
+        f'<div class="строка"><span><code>{html.escape(str(c.get("хеш", "")))}</code> '
+        f'{html.escape(str(c.get("тема", "")))}</span>'
+        f'<span class="мелко">{html.escape(str(c.get("дата", ""))[:16])}</span></div>'
+        for c in task.get("коммиты") or []) or '<div class="мелко">коммитов с меткой задачи нет</div>'
+
+
+def _skills_block(task: dict) -> str:
+    rows = []
+    for call in task.get("скилы") or []:
+        attributed = (" · приписано по истории"
+                      if call.get("откуда_задача") == "история" else "")
+        rows.append(f'<div class="строка"><span>{html.escape(str(call.get("скил", "")))}'
+                    f'<span class="мелко">{attributed}</span></span>'
+                    f'<span class="мелко">{html.escape(str(call.get("ts", ""))[:16])}</span></div>')
+    return "".join(rows) or '<div class="мелко">вызовов скилов нет</div>'
+
+
+def _delivery_word(row: dict | None) -> str:
+    if row is None:
+        return "ждёт доставки"
+    if row.get("исход") == "битая":
+        return html.escape(f"не доставлено: {row.get('причина') or 'заявка негодна'}")
+    return f'доставлено агенту {html.escape(_clock(row.get("доставлено")))}'
+
+
+def _comments_block(task: dict, comments: dict, csrf: str) -> str:
+    if comments.get("нет данных"):
+        rows = f'<div class="мелко">{html.escape(comments["нет данных"])}</div>'
+    else:
+        rows = "".join(
+            f'<div class="строка"><span style="white-space:pre-wrap">'
+            f'{html.escape(str(c.get("текст", "")))}</span><span class="мелко">'
+            + _delivery_word(c.get("доставка"))
+            + '</span></div>' for c in comments["строки"])
+    form = (f'<form method="post" action="/kommentarij" style="display:block;margin-top:12px">'
+            f'<input type="hidden" name="csrf" value="{html.escape(csrf)}">'
+            f'<input type="hidden" name="id" value="{html.escape(str(task["id"]))}">'
+            f'<textarea name="текст" rows="4" placeholder="комментарий к задаче"></textarea>'
+            f'<div class="кнопки" style="margin-top:8px">'
+            f'<button class="выбрано">Отправить агенту</button></div></form>')
+    return (rows or '<div class="мелко">комментариев нет</div>') + form
+
+
+def task_page(task: dict, comments: dict, csrf: str, message: str = "") -> str:
+    """Страница задачи: шапка, слова владельца, шаги, журнал, коммиты, скилы,
+    комментарии (спека §5)."""
+    notice = (f'<div class="карта stale">{html.escape(message)}</div>' if message else "")
+    head = (f'<div class="карта" style="margin-bottom:14px">'
+            f'<div class="число" style="font-size:1.15rem">'
+            f'{html.escape(str(task.get("название") or task["id"]))}</div>'
+            f'<div class="мелко">{html.escape(str(task["id"]))} · статус '
+            f'{html.escape(str(task.get("статус", "")))} · колонка '
+            f'{html.escape(str(task.get("колонка", "")))} · уровень объявлен '
+            f'{html.escape(str(task.get("уровень_объявлен") or "—"))}, по коммитам '
+            f'{html.escape(str(task.get("уровень_по_коммитам") or "—"))} · цена '
+            f'{html.escape(str(task.get("цена") if task.get("цена") is not None else "—"))}</div>'
+            f'<div class="кнопки" style="margin-top:8px">{_pills(task.get("пилюли"))}</div></div>')
+    journal = (f'<pre>{html.escape(str(task["журнал"]))}</pre>' if task.get("журнал")
+               else '<div class="мелко">журнала нет</div>')
+    return _board_page(str(task.get("название") or task["id"]),
+                       _header("Задача", "/karta", "К доске") + notice + head
+                       + _section("Слова владельца", _sources_block(task))
+                       + _section("Шаги пайплайна", _steps_block(task))
+                       + _section("Журнал", journal)
+                       + _section("Коммиты", _commits_block(task))
+                       + _section("Скилы", _skills_block(task))
+                       + _section("Комментарии", _comments_block(task, comments, csrf)))
+
+
+def paper(task: dict, number: str, code: int, text: str) -> str:
+    """Бумага задачи текстом; отказ — причиной словами."""
+    body = (f'<pre>{html.escape(text)}</pre>' if code == 200
+            else f'<div class="мелко">{html.escape(text)}</div>')
+    return _board_page(f"Бумага {task['id']}",
+                       _header(f"Бумага {number}", task_href(task["id"]), "К задаче")
+                       + f'<div class="карта">{body}</div>')
+
+
+def notice(title: str, message: str, back: str = "/karta") -> str:
+    return _board_page(title, _header(title, back, "Назад")
+                       + f'<div class="карта">{html.escape(message)}</div>')
 
 
 def устройство(данные: dict, искать: str = "") -> str:

@@ -85,6 +85,9 @@ SECRETS_DIR = Path(settings.конф.secrets_dir())
     "/shag": ("_шаг", "опасный"),
     "/pamyat": ("_сохранить_память", "опасный"),
     "/nabor": ("_набор", "опасный"),
+    # Опасный: запасным кодом входят при мёртвом канале, и доставить
+    # комментарий агенту некому (спека hr.kanban §4).
+    "/kommentarij": ("_comment", "опасный"),
 }
 
 # Лимиты частоты: вход — редкое действие, чтение состояния — частое.
@@ -160,6 +163,9 @@ class Частота:
 
 ЧАСТОТА_ВХОДА = Частота()
 ЧАСТОТА_ЧТЕНИЯ = Частота()
+# Каждый принятый комментарий — пинок агенту: панель не должна стать их насосом.
+COMMENTS_PER_MINUTE = 5
+COMMENT_RATE = Частота()
 # Знак записи на сессию: сам пропуск в тело запроса не кладём.
 ЗНАКИ: dict[str, str] = {}
 
@@ -395,11 +401,10 @@ class Панель(BaseHTTPRequestHandler):
                     state.запись(имя), знак(self.пропуск)), "text/html")
             return self.ответить(200, vid.память(
                 state.память(искать), знак(self.пропуск), искать), "text/html")
-        if путь == "/karta":
+        if путь == "/karta" or путь.startswith("/karta/"):
             if not вход().проверить(self.пропуск):
                 return self.ответить(401, {"беда": "нужен пропуск"})
-            return self.ответить(200, vid.карта_разработки(state.karta()),
-                                 "text/html")
+            return self._board_route(путь)
         if путь == "/ustrojstvo":
             if not вход().проверить(self.пропуск):
                 return self.ответить(401, {"беда": "нужен пропуск"})
@@ -418,6 +423,28 @@ class Панель(BaseHTTPRequestHandler):
                 return self.ответить(200, self._панель(), "text/html")
             return self.ответить(200, vid.гость(), "text/html")
         return self.ответить(404, {"беда": "нет такой страницы"})
+
+    def _board_route(self, path: str):
+        """/karta — доска; /karta/<id> — задача; /karta/<id>/fajl?n= — бумага.
+
+        id сверяется с МНОЖЕСТВОМ id снимка после unquote: префиксный разбор
+        пути отдал бы чужое под видом задачи (`..`, `%2F`)."""
+        snapshot = state.board()
+        parts = path.split("/")[2:]
+        if not parts:
+            return self.ответить(200, vid.board(snapshot), "text/html")
+        if snapshot.get("нет данных"):
+            return self.ответить(503, vid.board(snapshot), "text/html")
+        task = state.find_task(snapshot, urllib.parse.unquote(parts[0]))
+        if task is None or parts[1:] not in ([], ["fajl"]):
+            return self.ответить(404, vid.notice("Карта работы",
+                                                 "Такой задачи на доске нет."), "text/html")
+        if len(parts) == 1:
+            return self.ответить(200, vid.task_page(task, state.comments(task["id"]),
+                                                    знак(self.пропуск)), "text/html")
+        number = (urllib.parse.parse_qs(self.path.partition("?")[2]).get("n") or [""])[0]
+        code, text = state.read_paper(task, number)
+        return self.ответить(code, vid.paper(task, number, code, text), "text/html")
 
     def внутренний(self) -> bool:
         """Запрос пришёл с самой машины, минуя nginx.
@@ -532,6 +559,56 @@ class Панель(BaseHTTPRequestHandler):
         return self.ответить(200 if not готово.returncode else 422,
                              vid.память(state.память(), знак(self.пропуск),
                                         "", сообщение), "text/html")
+
+    def _comment(self, body: dict):
+        """Комментарий владельца к задаче доски: запись в каталог панели.
+
+        Во входящие харнеса он не попадает — это разговор о задаче, а не
+        команда (спека §4); агенту его доставляет диспетчер."""
+        task_id, text = str(body.get("id", "")), str(body.get("текст", ""))
+        snapshot = state.board()
+        if snapshot.get("нет данных"):
+            return self._comment_refusal(503, snapshot["нет данных"], None)
+        task = state.find_task(snapshot, task_id)
+        if task is None:
+            return self._comment_refusal(404, f"задачи «{task_id}» на доске нет", None)
+        limit = state.comment_limit()
+        if limit is None:
+            return self._comment_refusal(503, "потолок длины комментария не прочитан "
+                                              "из harness/config/pipeline.yaml", task)
+        if not text.strip():
+            return self._comment_refusal(422, "комментарий пустой", task)
+        if len(text) > limit:
+            return self._comment_refusal(422, f"комментарий длиннее {limit} знаков", task)
+        if not COMMENT_RATE.можно(self.адрес, COMMENTS_PER_MINUTE):
+            return self._comment_refusal(429, f"чаще {COMMENTS_PER_MINUTE} комментариев "
+                                              f"в минуту не принимаю", task)
+        try:
+            record = state.add_comment(task["id"], text)
+        except ValueError as error:
+            return self._comment_refusal(422, f"комментарий не принят: {error}", task)
+        except OSError as error:
+            return self._comment_refusal(500, f"комментарий не записан: {error}", task)
+        записать_в_журнал({"событие": "комментарий", "id": task["id"],
+                           "ts": record["ts"], "адрес": self.адрес})
+        if self._из_браузера():
+            self.send_response(303)
+            self.send_header("Location", vid.task_href(task["id"]))
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return None
+        return self.ответить(200, {"готово": True, "ts": record["ts"]})
+
+    def _comment_refusal(self, code: int, reason: str, task: dict | None):
+        """Браузеру — страница с причиной (форма шлётся без скриптов), коду — JSON."""
+        if not self._из_браузера():
+            return self.ответить(code, {"беда": reason})
+        if task is None:
+            return self.ответить(code, vid.notice("Комментарий", f"Не принят: {reason}"),
+                                 "text/html")
+        return self.ответить(code, vid.task_page(task, state.comments(task["id"]),
+                                                 знак(self.пропуск), f"Не принят: {reason}"),
+                             "text/html")
 
     def _выдать_пропуск(self, пропуск: str, соседство: str = "Strict"):
         """Единственное место, где собирается cookie пропуска.
