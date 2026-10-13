@@ -36,7 +36,7 @@ Each one is held by code, not by memory.
 <!-- AUTO:invariants -->
 | # | invariant | held by | how to check the guard |
 |---|---|---|---|
-| И-1 | Never lose data. Irreversible work on a DB or files only with a fresh backup; destructive commands on production only through the guard. | `harness/demons/backup.sh` · `scripts/hooks/guard_bash.py` · `scripts/restore-probe.sh` · `scripts/protected-delete.py` | `bash harness/demons/backup.sh --selftest` · `python3 scripts/hooks/test_guard_bash.py` · `bash scripts/restore-probe.sh` · `python3 scripts/protected-delete.py --selftest` |
+| И-1 | Never lose data. Irreversible work on a DB or files only with a fresh backup; destructive commands on production only through the guard. | `harness/demons/backup.sh` · `scripts/hooks/guard_bash.py` · `scripts/restore-probe.sh` · `scripts/protected-delete.py` · `scripts/lib/owner_word.py` | `bash harness/demons/backup.sh --selftest` · `python3 scripts/hooks/test_guard_bash.py` · `bash scripts/restore-probe.sh` · `python3 scripts/protected-delete.py --selftest` · `python3 scripts/lib/owner_word.py --selftest` |
 | И-2 | Never deploy around the gates. Deployment is `deploy.sh` only (gates, tag, auto-rollback); a hand-typed sequence is forbidden. | `scripts/deploy_guard.py` · `scripts/check-one-judge.py` · `scripts/lib/patterns.py` · `scripts/hooks/guard_bash.py` | `python3 scripts/test_deploy_guard_consent.py` · `python3 scripts/check-one-judge.py --selftest` · `python3 scripts/lib/patterns.py --selftest` · `python3 scripts/hooks/test_guard_bash.py` |
 | И-3 | Secrets stay out of the repo and the web root. Keys and tokens never reach git or a public directory. | `scripts/check-secrets.sh` · `scripts/check-secret-in-logs.py` · `scripts/check-external-surface.py` | `bash scripts/check-secrets.sh --selftest` · `python3 scripts/check-secret-in-logs.py` · `python3 scripts/check-external-surface.py --selftest` |
 | И-4 | Honest reporting. "Done" only after a live check; a green test is not a working feature. | `scripts/pre-commit-gate.sh` · `scripts/check-skill-usage.py` · `scripts/check-own-text-probes.py` · `scripts/hooks/agent_skill_guard.py` · `scripts/invariant-coverage.py` · `scripts/check-host-independence.py` · `scripts/install-probe.sh` | `bash scripts/pre-commit-gate.sh --selftest-devmap` · `python3 scripts/check-skill-usage.py --selftest` · `python3 scripts/check-own-text-probes.py --selftest` · `python3 scripts/hooks/agent_skill_guard.py --selftest` · `python3 scripts/invariant-coverage.py --selftest` · `python3 scripts/check-host-independence.py --selftest` · `bash scripts/install-probe.sh --selftest` |
@@ -109,7 +109,19 @@ consent means no action.
   the data structure is wrong.
 - A function does one thing and fits in your head. Three levels of nesting
   hide a second function inside.
-- Names say what a thing is. A comment explains WHY, not WHAT.
+- Names say what a thing is. A comment explains WHY, not WHAT — and why it is so
+  NOW. History ("was N, became M", "the shift of 30.09 found"), shift numbers and
+  the story of the fix go into the COMMIT MESSAGE: the commit is read by date, a
+  comment is read by whoever edits the line, and a file that keeps its own history
+  grows a third heavier in tokens for every reader (measured 30.09.2026:
+  comments are 30 % of lines, 13 267 of 44 020).
+- Nothing in code is written in Russian except comments (owner 30.09.2026):
+  identifiers are always English, transliteration is not English. A Cyrillic
+  object KEY that is DATA — a state value, a foreign system's field name — stays
+  Russian but in QUOTES: that is what says "data, not a name". Carriers: the name
+  gate in the product repo (`src/scripts/check-identifier-names.py`, judges
+  `.ts`, `.py`, `.sh` and files with a shebang) and `scripts/rename-identifiers.py`
+  for the translation itself.
 - No defence against imaginary trouble: handling an impossible error hides a
   possible one.
 - SOLID in spirit: separate responsibilities, depend on contracts. An
@@ -169,7 +181,7 @@ Bans are enforced by `scripts/hooks/guard_bash.py`, not by your memory.
 ## What is watching (built from the registry)
 
 <!-- AUTO:mechanisms -->
-219 mechanisms are registered in `harness/config/устройство.yaml` (gates — 161, daemons — 27, skills — 18, hooks — 13). Each one names what it does, when it runs, what breaks without it and the command that proves it works. The registry is data: `python3 scripts/check-registry.py` fails when the code and the registry disagree.
+227 mechanisms are registered in `harness/config/устройство.yaml` (gates — 168, daemons — 28, skills — 18, hooks — 13). Each one names what it does, when it runs, what breaks without it and the command that proves it works. The registry is data: `python3 scripts/check-registry.py` fails when the code and the registry disagree.
 <!-- /AUTO -->
 
 ---

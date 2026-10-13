@@ -53,6 +53,26 @@ konf_zagruzit PROJECT_DIR LOG_DIR TMUX_SESSION SECRETS_DIR AGENT_START_CMD
 }
 
 FAIL_LOG="$LOG_DIR/tg_failures.log"
+OUT_LOG="$LOG_DIR/tg_out.jsonl"
+
+# Журнал ИСХОДЯЩИХ. Заведён 29.09.2026 по слову владельца: «я поменял стиль
+# твоего текста в панели на самый простой, но не вижу, что чтото изменилось».
+# Разбор показал, что проверить это было НЕЧЕМ: входящие диспетчер пишет в
+# inbox.jsonl, а из исходящих хранились только ОТКАЗЫ. Совпадает ли язык смены
+# с уровнем владельца — вопрос к замеру, а замерять было не по чему.
+#
+# Пишется ПОСЛЕ доставки: строка в журнале означает, что текст ушёл, а не что
+# его собирались отправить. Уровень языка кладётся рядом с текстом — иначе
+# следующий замер не отличит «написано сложно при простом уровне» от
+# «написано сложно, когда простого ещё не просили».
+zapisat_ishodyashchee() {
+    mkdir -p "$LOG_DIR" 2>/dev/null || true
+    LANG_LEVEL_NOW=$(python3 "$PROJECT_DIR/scripts/language-level.py" 2>/dev/null || echo "")
+    jq -cn --arg ts "$(date -Is)" --arg text "$1" --arg uroven "$LANG_LEVEL_NOW" \
+           --arg iz_sessii "$([ -n "${CLAUDE_CODE_SESSION_ID:-}" ] && echo 1 || echo 0)" \
+           '{ts: $ts, uroven: $uroven, iz_sessii: ($iz_sessii == "1"), text: $text}' \
+        >> "$OUT_LOG" 2>/dev/null || true
+}
 
 # jq проверяется ДО работы: без него ответ API нечем разобрать, и отказ был бы
 # ложным «не доставлено» уже после ухода запроса. Строка в FAIL_LOG — руками
@@ -446,4 +466,5 @@ fi
 
 отправить_текст_частями "$TEXT"
 отметить_отчёт
+zapisat_ishodyashchee "$TEXT"
 echo "tg_send: доставлено (частей: $TOTAL_PARTS, message_id подтверждён)"
