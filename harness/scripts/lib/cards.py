@@ -74,16 +74,9 @@ def поле(блок_текста: str, имя: str) -> str | None:
 
 
 def _selftest() -> int:
-    путей = неудач = 0
-
-    def проба(имя: str, ждём, факт):
-        nonlocal путей, неудач
-        путей += 1
-        if факт == ждём:
-            print(f"  ок    {имя}")
-        else:
-            неудач += 1
-            print(f"  ПЛОХО {имя}: ждали «{ждём}», вышло «{факт}»")
+    from selftest_cases import Cases
+    случаи = Cases()
+    проба = случаи.check
 
     карта = (
         "tasks:\n"
@@ -117,9 +110,9 @@ def _selftest() -> int:
     проба("инлайн-карточка не мешает соседней", ["следом"],
           [и for и, _, _, _ in блоки(плоская)])
 
-    print(f"SELFTEST: {'зелёный' if not неудач else 'КРАСНЫЙ'} ({путей} путей; "
+    print(f"SELFTEST: {'зелёный' if случаи.ok else 'КРАСНЫЙ'} ({случаи.paths} путей; "
           "больной первый — пустая строка перед карточкой)")
-    return 1 if неудач else 0
+    return 0 if случаи.ok else 1
 
 
 def главная(argv: list[str]) -> int:

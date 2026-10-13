@@ -131,7 +131,10 @@ komanda_agenta() {  # $1 = AGENT_START_CMD; печатает её же, без �
 # Самотест: обе функции без него не проверял никто, а konf_iz_fajla — вход
 # сторожа инварианта И-3 (ревью кода 12.09.2026, F2-gen-03).
 konf_selftest() {
-    local T ok=1
+    # Помощник подключается ДО ловушки RETURN: она срабатывает и на конце
+    # source внутри функции и снесла бы стенд, едва его заведя.
+    source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/selftest_cases.sh"
+    local T
     T=$(mktemp -d)
     trap 'rm -rf "$T"' RETURN
     printf 'PROJECT_DIR="/из-install"\nCOMMON_KEY="из-install"\n' > "$T/i.conf"
@@ -139,93 +142,78 @@ konf_selftest() {
 
     # Имена переменных ЛАТИНИЦЕЙ: bash кириллические не берёт и печатает в
     # ошибку само значение (улика 12.08.2026 — так утёк токен бота).
-    proba() {  # $1 = что проверяем, $2 = получено, $3 = ждём
-        if [ "$2" = "$3" ]; then
-            printf '  ок    %s\n' "$1"
-        else
-            printf '  ПЛОХО %s: ждали «%s», получили «%s»\n' "$1" "$3" "$2"; ok=0
-        fi
-    }
 
     local lib="${BASH_SOURCE[0]}" out
     out=$(HARNESS_INSTALL_CONF="$T/i.conf" HARNESS_CONF="$T/h.conf" PROJECT_DIR=из-окружения \
           bash -c 'source "$1"; konf_zagruzit; printf "%s|%s|%s" "$PROJECT_DIR" "$COMMON_KEY" "$THRESHOLD"' _ "$lib")
-    proba "БОЛЬНОЙ СЛУЧАЙ: окружение старше файла (улика про смену модели)" \
-          "$(printf '%s' "$out" | cut -d'|' -f1)" "из-окружения"
-    proba "ключ в ОБОИХ файлах: harness.conf читается вторым и побеждает" \
-          "$(printf '%s' "$out" | cut -d'|' -f2)" "из-harness"
-    proba "ключ, которого в окружении нет, берётся из harness.conf" \
-          "$(printf '%s' "$out" | cut -d'|' -f3)" "42"
+    case_check "БОЛЬНОЙ СЛУЧАЙ: окружение старше файла (улика про смену модели)" "из-окружения" \
+          "$(printf '%s' "$out" | cut -d'|' -f1)"
+    case_check "ключ в ОБОИХ файлах: harness.conf читается вторым и побеждает" "из-harness" \
+          "$(printf '%s' "$out" | cut -d'|' -f2)"
+    case_check "ключ, которого в окружении нет, берётся из harness.conf" "42" \
+          "$(printf '%s' "$out" | cut -d'|' -f3)"
 
-    proba "konf_iz_fajla берёт значение мимо окружения (сторож И-3)" \
+    case_check "konf_iz_fajla берёт значение мимо окружения (сторож И-3)" "/из-install" \
           "$(HARNESS_INSTALL_CONF="$T/i.conf" HARNESS_CONF="$T/h.conf" PROJECT_DIR=из-окружения \
-             bash -c 'source "$1"; konf_iz_fajla PROJECT_DIR' _ "$lib")" "/из-install"
-    proba "отсутствующего ключа нет и в ответе — пусто, а не мусор" \
+             bash -c 'source "$1"; konf_iz_fajla PROJECT_DIR' _ "$lib")"
+    case_check "отсутствующего ключа нет и в ответе — пусто, а не мусор" "" \
           "$(HARNESS_INSTALL_CONF="$T/i.conf" HARNESS_CONF="$T/h.conf" \
-             bash -c 'source "$1"; konf_iz_fajla NO_SUCH_KEY' _ "$lib")" ""
-    proba "конфигов нет вовсе — загрузчик не роняет скрипт под set -e" \
+             bash -c 'source "$1"; konf_iz_fajla NO_SUCH_KEY' _ "$lib")"
+    case_check "конфигов нет вовсе — загрузчик не роняет скрипт под set -e" "цел" \
           "$(HARNESS_INSTALL_CONF=/нет/такого HARNESS_CONF=/нет/такого \
-             bash -c 'set -euo pipefail; source "$1"; konf_zagruzit && echo цел' _ "$lib")" "цел"
+             bash -c 'set -euo pipefail; source "$1"; konf_zagruzit && echo цел' _ "$lib")"
 
     # ── корень установки (владелец 21.09: «ставить на любую машину») ────────
     # БОЛЬНОЙ СЛУЧАЙ: на чужой машине нет /etc/harness и нет права его завести.
     # Пока умолчание было зашито в 71 файле, установка туда не доходила.
     mkdir -p "$T/дом"
     printf 'PROJECT_DIR="/из-чужого-дома"\n' > "$T/дом/install.conf"
-    proba "БОЛЬНОЙ СЛУЧАЙ: корень задан переменной — конфиг читается оттуда" \
-          "$(HARNESS_HOME="$T/дом" bash -c 'source "$1"; konf_zagruzit; printf "%s" "$PROJECT_DIR"' _ "$lib")" \
-          "/из-чужого-дома"
-    proba "корень по умолчанию — /etc/harness, пока он есть" \
-          "$(bash -c 'source "$1"; konf_koren' _ "$lib")" \
-          "$([ -d /etc/harness ] && echo /etc/harness || echo "${HOME:-/root}/.harness")"
-    proba "нет /etc/harness и нет переменной — корень в доме пользователя" \
-          "$(HOME="$T/чужой" bash -c 'source "$1"; if [ -d /etc/harness ]; then printf "%s" "$HOME/.harness"; else konf_koren; fi' _ "$lib")" \
-          "$T/чужой/.harness"
+    case_check "БОЛЬНОЙ СЛУЧАЙ: корень задан переменной — конфиг читается оттуда" "/из-чужого-дома" \
+          "$(HARNESS_HOME="$T/дом" bash -c 'source "$1"; konf_zagruzit; printf "%s" "$PROJECT_DIR"' _ "$lib")"
+    case_check "корень по умолчанию — /etc/harness, пока он есть" \
+          "$([ -d /etc/harness ] && echo /etc/harness || echo "${HOME:-/root}/.harness")" \
+          "$(bash -c 'source "$1"; konf_koren' _ "$lib")"
+    case_check "нет /etc/harness и нет переменной — корень в доме пользователя" "$T/чужой/.harness" \
+          "$(HOME="$T/чужой" bash -c 'source "$1"; if [ -d /etc/harness ]; then printf "%s" "$HOME/.harness"; else konf_koren; fi' _ "$lib")"
     # Явный путь конфига СТАРШЕ корня: иначе проба, подменившая один файл,
     # молча уехала бы на боевой (улика 12.09 — проба играла на боевом).
-    proba "HARNESS_INSTALL_CONF старше корня" \
+    case_check "HARNESS_INSTALL_CONF старше корня" "/из-install" \
           "$(HARNESS_HOME="$T/дом" HARNESS_INSTALL_CONF="$T/i.conf" HARNESS_CONF=/нет \
-             bash -c 'source "$1"; konf_zagruzit; printf "%s" "$PROJECT_DIR"' _ "$lib")" \
-          "/из-install"
+             bash -c 'source "$1"; konf_zagruzit; printf "%s" "$PROJECT_DIR"' _ "$lib")"
 
     # БОЛЬНОЙ СЛУЧАЙ: конфиг не назвал места — они обязаны лечь ПОД КОРЕНЬ, а не
     # в /var/log чужой машины.
-    proba "места от корня, когда конфиг молчит" \
-          "$(HARNESS_HOME="$T/дом" bash -c 'source "$1"; konf_zagruzit; printf "%s|%s|%s" "$LOG_DIR" "$HEARTBEAT_DIR" "$SECRETS_DIR"' _ "$lib")" \
-          "$T/дом/log|$T/дом/state/heartbeat|$T/дом/state/secrets"
+    case_check "места от корня, когда конфиг молчит" "$T/дом/log|$T/дом/state/heartbeat|$T/дом/state/secrets" \
+          "$(HARNESS_HOME="$T/дом" bash -c 'source "$1"; konf_zagruzit; printf "%s|%s|%s" "$LOG_DIR" "$HEARTBEAT_DIR" "$SECRETS_DIR"' _ "$lib")"
     # БОЛЬНОЙ СЛУЧАЙ: корень состояния назван в конфиге (наша машина — /var/lib),
     # а корень конфигов другой. Места обязаны ехать за STATE_DIR, иначе метки
     # панели легли бы в /etc/harness/state рядом с конфигами.
     printf 'STATE_DIR="/свой/двор"\n' >> "$T/дом/install.conf"
-    proba "heartbeat, panel-state и secrets едут за STATE_DIR" \
-          "$(HARNESS_HOME="$T/дом" bash -c 'source "$1"; konf_zagruzit; printf "%s|%s|%s" "$HEARTBEAT_DIR" "$PANEL_STATE_DIR" "$SECRETS_DIR"' _ "$lib")" \
-          "/свой/двор/heartbeat|/свой/двор/panel-state|/свой/двор/secrets"
+    case_check "heartbeat, panel-state и secrets едут за STATE_DIR" "/свой/двор/heartbeat|/свой/двор/panel-state|/свой/двор/secrets" \
+          "$(HARNESS_HOME="$T/дом" bash -c 'source "$1"; konf_zagruzit; printf "%s|%s|%s" "$HEARTBEAT_DIR" "$PANEL_STATE_DIR" "$SECRETS_DIR"' _ "$lib")"
     # И обратное: место, названное поимённо, старше вывода из STATE_DIR.
     printf 'HEARTBEAT_DIR="/поимённо"\n' >> "$T/дом/install.conf"
-    proba "поимённое место старше вывода из STATE_DIR" \
-          "$(HARNESS_HOME="$T/дом" bash -c 'source "$1"; konf_zagruzit; printf "%s" "$HEARTBEAT_DIR"' _ "$lib")" \
-          "/поимённо"
+    case_check "поимённое место старше вывода из STATE_DIR" "/поимённо" \
+          "$(HARNESS_HOME="$T/дом" bash -c 'source "$1"; konf_zagruzit; printf "%s" "$HEARTBEAT_DIR"' _ "$lib")"
     # И обратное: конфиг назвал место — умолчание его НЕ перебивает.
     printf 'LOG_DIR="/из-конфига"\n' >> "$T/дом/install.conf"
-    proba "место из конфига старше умолчания от корня" \
-          "$(HARNESS_HOME="$T/дом" bash -c 'source "$1"; konf_zagruzit; printf "%s" "$LOG_DIR"' _ "$lib")" \
-          "/из-конфига"
+    case_check "место из конфига старше умолчания от корня" "/из-конфига" \
+          "$(HARNESS_HOME="$T/дом" bash -c 'source "$1"; konf_zagruzit; printf "%s" "$LOG_DIR"' _ "$lib")"
 
     # ── чем входит агент (больной случай 10.10.2026) ────────────────────────
     # Судится ПОВЕДЕНИЕ, а не текст команды: проба ставит носитель в окружение
     # и спрашивает запущенную команду, видит ли она его.
-    proba "БОЛЬНОЙ СЛУЧАЙ 10.10: носитель в окружении — запущенная команда его НЕ видит" \
+    case_check "БОЛЬНОЙ СЛУЧАЙ 10.10: носитель в окружении — запущенная команда его НЕ видит" "пусто" \
           "$(CLAUDE_CODE_OAUTH_TOKEN=чужой-ключ bash -c \
              'source "$1"; eval "$(komanda_agenta "printenv CLAUDE_CODE_OAUTH_TOKEN")" || printf пусто' \
-             _ "$lib")" "пусто"
+             _ "$lib")"
     # Обратный случай: без срыва носитель виден. Иначе проба зелена сама по себе.
-    proba "без срыва носитель виден — проба мерит, а не совпадает" \
-          "$(CLAUDE_CODE_OAUTH_TOKEN=чужой-ключ printenv CLAUDE_CODE_OAUTH_TOKEN)" "чужой-ключ"
-    proba "команда запуска доезжает целиком, с ключами модели" \
-          "$(bash -c 'source "$1"; komanda_agenta "claude --model claude-opus-5 --dangerously-skip-permissions"' _ "$lib")" \
-          "env -u CLAUDE_CODE_OAUTH_TOKEN claude --model claude-opus-5 --dangerously-skip-permissions"
+    case_check "без срыва носитель виден — проба мерит, а не совпадает" "чужой-ключ" \
+          "$(CLAUDE_CODE_OAUTH_TOKEN=чужой-ключ printenv CLAUDE_CODE_OAUTH_TOKEN)"
+    case_check "команда запуска доезжает целиком, с ключами модели" "env -u CLAUDE_CODE_OAUTH_TOKEN claude --model claude-opus-5 --dangerously-skip-permissions" \
+          "$(bash -c 'source "$1"; komanda_agenta "claude --model claude-opus-5 --dangerously-skip-permissions"' _ "$lib")"
 
-    [ "$ok" = 1 ] && { echo "САМОТЕСТ ПРОЙДЕН: 17 путей, первым — больной случай"; return 0; }
+    [ "$CASES_FAILED" = 0 ] && { echo "САМОТЕСТ ПРОЙДЕН: $CASES_PATHS путей, первым — больной случай"; return 0; }
     echo "САМОТЕСТ ПРОВАЛЕН"; return 1
 }
 
