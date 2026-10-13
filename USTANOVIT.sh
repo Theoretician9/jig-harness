@@ -572,8 +572,12 @@ EOF
   делай "id -u $AGENT_USER >/dev/null 2>&1 || adduser --disabled-password --gecos '' $AGENT_USER"
   делай "mkdir -p '$PROJECT_DIR' '$LOG_DIR' '$HEARTBEAT_DIR' /var/backups/harness"
   делай "chown -R $AGENT_USER:$AGENT_USER '$PROJECT_DIR' '$LOG_DIR' '$HEARTBEAT_DIR' /var/backups/harness"
+  # Возврат файлов входа: `sudo claude` рядом делает их root-овыми, и агент
+  # теряет вход. Строка обязана совпадать с команда_возврата() в
+  # scripts/check-login-expiry.py буква в букву — иначе sudo откажет.
   записать_файл /etc/sudoers.d/50-agent 440 root:root <<EOF
 $AGENT_USER ALL=(root) NOPASSWD: /usr/bin/systemctl restart harness-agent, /usr/bin/systemctl status harness-agent, /usr/bin/systemctl restart harness-dispatcher.service
+$AGENT_USER ALL=(root) NOPASSWD: /usr/bin/chown -hR $AGENT_USER\:$AGENT_USER /home/$AGENT_USER/.claude /home/$AGENT_USER/.claude.json
 EOF
   проверка "$step" "sudoers корректен (visudo -cf)" \
     "visudo -cf /etc/sudoers.d/50-agent" \
@@ -584,7 +588,7 @@ EOF
   проверка "$step" "каталоги принадлежат агенту" \
     "[ \"\$(stat -c '%U' '$PROJECT_DIR' '$LOG_DIR' '$HEARTBEAT_DIR' /var/backups/harness | sort -u)\" = '$AGENT_USER' ]" \
     "stat -c '%U %n' '$PROJECT_DIR' '$LOG_DIR' '$HEARTBEAT_DIR' /var/backups/harness"
-  DONE_LIST+=("пользователь $AGENT_USER, каталоги, sudoers (только 2 systemctl), /var/backups/harness")
+  DONE_LIST+=("пользователь $AGENT_USER, каталоги, sudoers (2 systemctl и возврат своих файлов входа), /var/backups/harness")
   отметить шаг_1
 }
 
@@ -1170,6 +1174,8 @@ EOF
   скажи "   Команда запуска — ровно та, которой сторож поднимает агента после"
   скажи "   ротации (AGENT_START_CMD в harness.conf): без флага после первой"
   скажи "   ротации она сменилась бы у вас под руками."
+  скажи "   claude запускайте только от $AGENT_USER (sudo -u $AGENT_USER -H …): от root он"
+  скажи "   пишет в тот же каталог, и агент теряет вход."
   скажи ""
   скажи "   НЕ закрывайте Claude Code. Отключитесь: Ctrl+B, затем D."
   скажи ""
