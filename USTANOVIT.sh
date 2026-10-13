@@ -1102,7 +1102,10 @@ EOF
   # nightly-gates внутри установки гонял полный набор ворот и один съедал
   # больше получаса — установка выглядела повисшей. Список — ДАННЫЕ этой
   # функции: строка «демон=переменная=значение».
-  local -a LIGHT_RUN=("nightly-gates=NIGHTLY_GATES_CMD=true")
+  # Тяжёлые демоны — только на запускаемость: полный прогон ревизии проекта зовёт
+  # модель по всем областям харнеса и держит лок карты десятки минут (установка
+  # llama 13.10.2026 встала на нём). Полный прогон — по расписанию.
+  local -a LIGHT_RUN=("nightly-gates=NIGHTLY_GATES_CMD=true" "project-revision=REVIZIA_ENABLED=0")
   local d rc light pair
   for d in "${demons[@]}"; do
     light=""
