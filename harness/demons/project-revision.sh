@@ -331,6 +331,13 @@ CONF
     progon zdorovyj "--сейчас" "REVIZIA_MODEL=haiku"   # умолчание подставной таблицы
     proba "БОЛЬНОЙ: модель равна умолчанию — отказ до агента" "0" "$(grep -c ВЫЗОВ "$T/claude.calls")"
 
+    # 3а. Пустое направление (умолчание свежей установки): ревизия идёт в harness.
+    progon zdorovyj "--сейчас" "ACTIVE_LINE="
+    proba "БОЛЬНОЙ: пустой ACTIVE_LINE — агент всё равно позван" "1" \
+          "$(grep -c ВЫЗОВ "$T/claude.calls")"
+    proba "пустой ACTIVE_LINE — карточки в направление harness" "да" \
+          "$(grep -q 'направление «harness»' "$T/claude.calls" "$T"/*.prompt 2>/dev/null && echo да || echo нет)"
+
     # 4. Здоровый путь.
     progon zdorovyj "--сейчас"
     proba "здоровый: агент позван нужной моделью" "да" \
@@ -413,7 +420,7 @@ CONF4
     proba "прочитанная область отчитывается знаками и находками" "1" \
           "$(grep -cE 'проба: [0-9]+k знаков, находок [0-9]+' "$T/tg.log")"
 
-    [ "$ok_flag" = 1 ] && { echo "САМОТЕСТ ПРОЙДЕН: 14 путей, из них 12 больных (подставной claude)"; exit 0; }
+    [ "$ok_flag" = 1 ] && { echo "САМОТЕСТ ПРОЙДЕН: 16 путей, из них 13 больных (подставной claude)"; exit 0; }
     echo "САМОТЕСТ ПРОВАЛЕН"; exit 1
 fi
 
@@ -439,7 +446,10 @@ if [ "$REVIZIA_ENABLED" != "1" ]; then
     exit 0
 fi
 
-[ -n "$ACTIVE_LINE" ] || { say "ОТКАЗ: пуст ACTIVE_LINE — неизвестно, что смотреть"; exit 1; }
+# Пустой ACTIVE_LINE по конфигу значит «работаем над всеми направлениями», а
+# ревизия — аудит харнеса: её карточки (hr.ревизия-…) живут в его направлении.
+# Отказ здесь означал вечный exit 1 на свежей установке и мёртвую метку.
+[ -n "$ACTIVE_LINE" ] || ACTIVE_LINE="harness"
 
 UMOLCHANIE="$(model_umolchaniya)"
 if [ -z "$REVIZIA_MODEL" ] || [ "$REVIZIA_MODEL" = "$UMOLCHANIE" ]; then
