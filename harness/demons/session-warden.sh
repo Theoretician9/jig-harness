@@ -805,7 +805,11 @@ pane_cmd() {
 # Проверено пробой: `exec {FD}>>` НЕ спасает (bash не ставит close-on-exec —
 # потомок видит дескриптор), спасает только явное закрытие при вызове.
 start_agent() {
-    local cmd waited=0
+    local cmd waited=0 zapusk
+    # Чем войдёт поднятая смена. Носитель чужого ключа срывается ЗДЕСЬ, у
+    # самой отправки: поставленный на загрузке конфига, он обходится любым,
+    # кто задаёт AGENT_START_CMD позже, — и проба судила бы не тот путь.
+    zapusk="$(komanda_agenta "$AGENT_START_CMD")"
     # Подмена конфига живёт одной командой, а не в окружении tmux-сервера:
     # сервер — демон, он не умирает, и всё, что осело в его глобальном
     # окружении, наследует КАЖДАЯ будущая сессия агента. Улика 12.08.2026:
@@ -814,6 +818,13 @@ start_agent() {
     # ручной прогон сторожа объявил ротацию на 26% окна.
     tmux set-environment -gu HARNESS_CONF 2>/dev/null || true
     tmux set-environment -gu HARNESS_INSTALL_CONF 2>/dev/null || true
+    # Та же беда, но дороже: носитель чужого входа. Сервер tmux нёс его с
+    # 30.09 (поднят, когда переменная стояла в профиле), и каждая созданная
+    # им панель получала ЧУЖУЮ подписку — владелец 10.10: «при ротации
+    # подключается аккаунт, в котором у меня закончился лимит». У команды
+    # запуска носитель срывает komanda_agenta; здесь он снимается у сервера,
+    # чтобы его не унаследовала панель, открытая руками.
+    tmux set-environment -gu "$NOSITEL_CHUZHOGO_VHODA" 2>/dev/null || true
     if ! tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
         say "tmux-сессии '$TMUX_SESSION' нет — поднимаю её вместе с агентом"
         if [ -x "$PROJECT_DIR/scripts/start-agent.sh" ]; then
@@ -823,7 +834,7 @@ start_agent() {
             # вместе с агентом и выбрасывает приаттаченного владельца из tmux
             # (улика 13.08.2026 — та же, что в scripts/start-agent.sh).
             tmux new-session -d -s "$TMUX_SESSION" -c "$PROJECT_DIR" 8>&- || return 1
-            tmux send-keys -t "$TMUX_SESSION" "$AGENT_START_CMD" Enter 8>&- || return 1
+            tmux send-keys -t "$TMUX_SESSION" "$zapusk" Enter 8>&- || return 1
         fi
         while [ "$waited" -lt "$AGENT_START_TIMEOUT_SEC" ]; do
             sleep 5; waited=$((waited + 5))
@@ -838,7 +849,7 @@ start_agent() {
         # Мёртвой панели ввод не отдать: её оживляют respawn, а не send-keys.
         мертва)
             say "панель пережила выход агента (remain-on-exit) — оживляю её командой запуска"
-            tmux respawn-pane -t "$TMUX_SESSION" -c "$PROJECT_DIR" "$AGENT_START_CMD" 8>&- || return 1 ;;
+            tmux respawn-pane -t "$TMUX_SESSION" -c "$PROJECT_DIR" "$zapusk" 8>&- || return 1 ;;
         bash|sh|zsh|dash)
             say "запускаю агента: $AGENT_START_CMD"
             # Строка оболочки очищается ДО команды. В ней мог остаться висячий
@@ -849,7 +860,7 @@ start_agent() {
             # агент не поднялся за 120с, работа стояла 27 минут.
             tmux send-keys -t "$TMUX_SESSION" C-c 8>&- 2>/dev/null || true
             sleep "${PANE_ENTER_DELAY:-0.7}"
-            tmux send-keys -t "$TMUX_SESSION" "$AGENT_START_CMD" Enter 8>&- ;;
+            tmux send-keys -t "$TMUX_SESSION" "$zapusk" Enter 8>&- ;;
         *) say "в панели '$cmd' — не оболочка, команду запуска не шлю"; return 1 ;;
     esac
     while [ "$waited" -lt "$AGENT_START_TIMEOUT_SEC" ]; do
@@ -890,6 +901,14 @@ budit_smenu() {  # $1=число работ, $2=строка ждущих → 0 
 if [ "${1:-}" = "--selftest" ]; then
     ok_flag=1
     NOW=1000000
+    # Библиотека конфигов — ЗДЕСЬ: самотест идёт РАНЬШЕ загрузки паспорта, а
+    # start_agent берёт из неё komanda_agenta (срыв чужого носителя входа).
+    # Без неё проба умирала под set -e молча, не напечатав ни строки
+    # ([[a-bash-function-called-before-definition]]).
+    KONF_ST="$WARDEN_HOME/../../scripts/lib/config.sh"
+    [ -r "$KONF_ST" ] || KONF_ST="$WARDEN_HOME/../scripts/lib/config.sh"
+    # shellcheck disable=SC1090
+    source "$KONF_ST"
     проба() { # $1=ожидание $2..$4 аргументы решения $5=имя случая $6=простой панели, мин $7=владелец ждёт
         local want="$1" got
         got=$(AGENT_DEAD_MIN=15 AGENT_ATTACHED_IDLE_MIN=10 \
@@ -1070,6 +1089,44 @@ if [ "${1:-}" = "--selftest" ]; then
         fi
         tmux kill-session -t "$SES" 2>/dev/null || true
     fi
+    # ── чужой вход в памяти оболочки: улика 10.10.2026 ───────────────────────
+    # Владелец: «при ротации сессий подключается аккаунт, в котором у меня
+    # закончился лимит». Файловые носители убрали ещё утром того дня, а чужой
+    # ключ продолжал входить: его помнили СЕРВЕР tmux (поднят 30.09) и живая
+    # оболочка панели — ровно та, в которую ротация шлёт команду подъёма.
+    # Больной случай ПЕРВЫМ: сперва доказываем, что носитель в оболочке есть и
+    # доезжает до запущенной команды, иначе зелень второго случая ничего не стоит.
+    #
+    # Стенд СВОЙ, без висячего Escape: в стенде соседней пробы первая буква
+    # команды съедается, «export …» не исполняется, и носитель не появляется
+    # вовсе — первый прогон этой пробы так и показал (случай не воспроизвёлся,
+    # а второй был бы зелёным ни за что).
+    SES_N="warden-nositel-$$"
+    NOSITEL_OUT="$T/nositel-vhoda"
+    if tmux has-session -t "$SES_N" 2>/dev/null || \
+       ! tmux new-session -d -s "$SES_N" -c /tmp 2>/dev/null; then
+        printf '  ПЛОХО стенд оболочки для пробы носителя входа не поднялся\n'; ok_flag=0
+    else
+        sleep 0.5
+        tmux send-keys -t "$SES_N" "export CLAUDE_CODE_OAUTH_TOKEN=podstavnoj-klyuch" Enter; sleep 0.7
+        tmux send-keys -t "$SES_N" "printenv CLAUDE_CODE_OAUTH_TOKEN > '$NOSITEL_OUT'" Enter; sleep 1.5
+        if [ -s "$NOSITEL_OUT" ]; then
+            printf '  ок    БОЛЬНОЙ СЛУЧАЙ: носитель чужого входа живёт в оболочке панели и доезжает до команды\n'
+        else
+            printf '  ПЛОХО больной случай не воспроизвёлся: оболочка носитель не отдала\n'; ok_flag=0
+        fi
+        : > "$NOSITEL_OUT"
+        TMUX_SESSION="$SES_N" AGENT_START_CMD="printenv CLAUDE_CODE_OAUTH_TOKEN > '$NOSITEL_OUT'" \
+            AGENT_START_TIMEOUT_SEC=5 start_agent >/dev/null 2>&1 || true
+        sleep 1.5
+        if [ -s "$NOSITEL_OUT" ]; then
+            printf '  ПЛОХО start_agent поднял агента С чужим носителем входа — работа уйдёт на чужую подписку\n'; ok_flag=0
+        else
+            printf '  ок    start_agent срывает носитель: поднятая смена его не видит\n'
+        fi
+        tmux kill-session -t "$SES_N" 2>/dev/null || true
+    fi
+
     rm -rf "$T"
 
     # ── антиповтор ротации: 11.08 здесь потерялась сессия ────────────────────

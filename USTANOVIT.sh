@@ -270,13 +270,21 @@ for з in (д.get("задания") or []):
   # спеки установки, и спека отстала молча: 10 имён против 13 в данных
   # (замер 11.09.2026 — не было update-watch, memory-commit и
   # memory-revision-порог). Сверка с отставшим списком — это сверка ни с чем.
+  # СРАВНИВАЕМ РАВНОЕ С РАВНЫМ: из реестра берётся ИМЯ СКРИПТА (из поля
+  # «команда»), а не имя ЗАДАНИЯ. Одно задание может звать чужой скрипт с
+  # доводом — `disk-pressure` исполняется `disk-cleanup.sh --по-давлению`, — и
+  # сверка по имени задания искала в crontab скрипт, которого не существует:
+  # установка с нуля вставала с «в crontab НЕТ демонов: disk-pressure» (замер
+  # 13.10.2026), то есть на ровном месте, у каждого нового человека.
   python3 -c '
-import sys, yaml
+import re, sys, yaml
 д = yaml.safe_load(open(sys.argv[1], encoding="utf-8")) or {}
 for з in (д.get("задания") or []):
     имя = з.get("имя") or ""
-    if имя and not имя.endswith("-порог"):
-        print(имя)
+    if not имя or имя.endswith("-порог"):
+        continue
+    найдено = re.search(r"([A-Za-z0-9_-]+)\.sh", з.get("команда") or "")
+    print(найдено.group(1) if найдено else имя)
 ' "$1" 2>/dev/null | sort -u
 }
 
@@ -805,16 +813,38 @@ EOF
   проверка "$step" "/etc/harness/harness.conf существует и читается" \
     "[ -f /etc/harness/harness.conf ] && bash -n /etc/harness/harness.conf" \
     "ls -l /etc/harness/; bash -n /etc/harness/harness.conf"
-  # Вход агента: долгий токен доходит до ВСЕХ, кто зовёт claude. Файл ставится
-  # всегда (он безвреден, пока токена нет), а подключение в профиль оболочки —
-  # отдельной строкой: cron читает harness.conf, панель tmux — профиль.
-  # Улика 12.09.2026: носитель жил в домашнем каталоге и до cron не доходил,
-  # а работавшая сессия была старше него на девять часов.
-  делай "cp '$pkg_dst/harness/config/vhod.sh' /etc/harness/vhod.sh && chmod 644 /etc/harness/vhod.sh"
-  делай "for f in .profile .bashrc; do grep -q 'harness/vhod.sh' /home/$AGENT_USER/\$f 2>/dev/null || printf '\\n# Вход агента: долгий токен Claude Code\\n[ -r /etc/harness/vhod.sh ] && . /etc/harness/vhod.sh\\n' >> /home/$AGENT_USER/\$f; done; chown $AGENT_USER:$AGENT_USER /home/$AGENT_USER/.profile /home/$AGENT_USER/.bashrc"
-  проверка "$step" "долгий вход доходит до пути cron и до панели агента" \
-    "grep -q 'vhod.sh' /etc/harness/harness.conf && grep -q 'vhod.sh' /home/$AGENT_USER/.profile && grep -q 'vhod.sh' /home/$AGENT_USER/.bashrc" \
-    "grep -n vhod /etc/harness/harness.conf /home/$AGENT_USER/.profile /home/$AGENT_USER/.bashrc"
+  # Вход агента: носитель ОДИН — подписка владельца из `/login`. Переменная
+  # CLAUDE_CODE_OAUTH_TOKEN стоит в порядке выбора учётки ВЫШЕ подписки, и
+  # второй ключ, подставляемый ею всем оболочкам и демонам, 19 суток молча
+  # уводил работу на ЧУЖУЮ организацию (улика 10.10.2026, подробности — в
+  # scripts/check-login-expiry.py). Поэтому носителя переменной больше нет.
+  # Вместо него ставится ЭТАЛОН аккаунта — и ставится замером: организацию
+  # называет сам ответ api.anthropic.com, рука её не вписывает.
+  # ВХОДА НА ЧИСТОЙ МАШИНЕ ЕЩЁ НЕТ, И ЭТО ЗАКОННО. OAuth-вход — пункт «а» блока
+  # «ОСТАЛОСЬ РУКАМИ», то есть шаг ПОСЛЕ установки: спрашивать аккаунт здесь —
+  # значит требовать то, чего по порядку работ быть не может. Замер 13.10.2026:
+  # установщик умирал на этом шаге с кодом 2 («ключа подписки нет»), и ВСЁ
+  # дальнейшее — канал, расписание сторожей — не выполнялось вовсе; у нового
+  # человека установка умерла бы так же.
+  #
+  # Поэтому эталон аккаунта пишется, КОГДА ЕГО ЕСТЬ ЧЕМ ИЗМЕРИТЬ, а иначе шаг
+  # уходит в «осталось руками» — ровно той командой, которой его закрыть.
+  # Эталон ДОПИСЫВАЕТСЯ, а не затирается: у владельца аккаунтов два (его слово
+  # 12.10.2026), ключ держит СПИСОК, и `sed` по всей строке стёр бы второй —
+  # снятая ложная тревога вернулась бы на новом сервере (ревью кода 13.10.2026,
+  # критическое). Повтор установки список тоже не портит: уже названный аккаунт
+  # второй раз не дописывается.
+  делай "ORG=\$(sudo -u $AGENT_USER python3 '$PROJECT_DIR/scripts/check-login-expiry.py' --аккаунт-подписки 2>/dev/null || true); if [ -n \"\$ORG\" ]; then OLD=\$(sed -n 's|^LOGIN_EXPECTED_ORG=\\\"\\(.*\\)\\\"\$|\\1|p' /etc/harness/harness.conf | tail -1); case \" \$OLD \" in *\" \$ORG \"*) NEW=\"\$OLD\" ;; *) NEW=\$(printf '%s %s' \"\$OLD\" \"\$ORG\" | sed 's|^ *||') ;; esac; if grep -q '^LOGIN_EXPECTED_ORG=' /etc/harness/harness.conf; then sed -i \"s|^LOGIN_EXPECTED_ORG=.*|LOGIN_EXPECTED_ORG=\\\"\$NEW\\\"|\" /etc/harness/harness.conf; else printf 'LOGIN_EXPECTED_ORG=\"%s\"\\n' \"\$NEW\" >> /etc/harness/harness.conf; fi; echo \"эталон аккаунта записан замером: \$NEW\"; else echo 'входа в модель ещё нет — эталон аккаунта запишется после входа (строка в блоке ОСТАЛОСЬ РУКАМИ)'; fi"
+  # Проверка судит ДВА законных исхода, а не один: аккаунт записан ЗАМЕРОМ, либо
+  # входа нет вовсе. Третьего («записан рукой») она по-прежнему не принимает.
+  проверка "$step" "аккаунт владельца записан замером либо входа ещё нет" \
+    "grep -qE '^LOGIN_EXPECTED_ORG=\"[0-9a-f-]{36}\"' /etc/harness/harness.conf || ! sudo -u $AGENT_USER python3 '$PROJECT_DIR/scripts/check-login-expiry.py' --аккаунт-подписки >/dev/null 2>&1" \
+    "grep -n LOGIN_EXPECTED_ORG /etc/harness/harness.conf; sudo -u $AGENT_USER python3 '$PROJECT_DIR/scripts/check-login-expiry.py' --аккаунт-подписки"
+  if ! sudo -u "$AGENT_USER" python3 "$PROJECT_DIR/scripts/check-login-expiry.py" --аккаунт-подписки >/dev/null 2>&1; then
+    # Та же дисциплина, что и у шага выше: эталон ДОПИСЫВАЕТСЯ. Рука, затирающая
+    # список, стоит владельцу вернувшейся ложной тревоги на втором аккаунте.
+    MANUAL_LIST+=("после OAuth-входа записать эталон аккаунта (иначе сторож входа не с чем сверять): sudo bash -c 'ORG=\$(sudo -u $AGENT_USER python3 $PROJECT_DIR/scripts/check-login-expiry.py --аккаунт-подписки) && OLD=\$(sed -n \"s|^LOGIN_EXPECTED_ORG=\\\\\\\"\\\\(.*\\\\)\\\\\\\"\\$|\\\\1|p\" /etc/harness/harness.conf | tail -1) && case \" \$OLD \" in *\" \$ORG \"*) NEW=\"\$OLD\" ;; *) NEW=\$(printf \"%s %s\" \"\$OLD\" \"\$ORG\" | sed \"s|^ *||\") ;; esac && sed -i \"s|^LOGIN_EXPECTED_ORG=.*|LOGIN_EXPECTED_ORG=\\\"\$NEW\\\"|\" /etc/harness/harness.conf'")
+  fi
   скажи "  (после git init агент повторит раскладку — она подключит pre-commit симлинком; это его 03-ЗАДАНИЕ)"
   # Теперь скрипт запуска на месте — можно поднимать агента. Юнит поставлен
   # шагом 4 и ждал именно этого: на чистой машине он стартовал в пустоту

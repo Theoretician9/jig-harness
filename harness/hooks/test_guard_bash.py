@@ -34,6 +34,22 @@ DEPLOY_GUARD = next(
     None,
 )
 
+# Правила живого учёта — ДАННЫЕ установки (product-local.conf), и проба подаёт
+# СВОИ: иначе случаи ниже судили бы боевые адреса, а имя учётной системы
+# заказчика осталось бы в пакете, который уезжает в публичный гит (слово
+# владельца 13.10.2026). Литералы стенда нарочно выдуманные.
+_ЛИТЕРАЛЫ_УЧЁТА = ("api.erp-obrazec.test", "online.erp-obrazec.test", "erp-token")
+_ДВОР_УЧЁТА = tempfile.mkdtemp(prefix="проба-сторожа-учёт-")
+_КОНФ_УЧЁТА = os.path.join(_ДВОР_УЧЁТА, "product-local.conf")
+with open(_КОНФ_УЧЁТА, "w", encoding="utf-8") as _фх:
+    _фх.write('ERP_LIVE_HOSTS="api.erp-obrazec.test online.erp-obrazec.test"\n'
+              'ERP_KEY_NAME="erp-token"\n'
+              'ERP_STUB_HINT="adapters/erp/test/stub.ts"\n')
+os.environ["HARNESS_PRODUCT_CONF"] = _КОНФ_УЧЁТА
+# Признак стенда: без него сторож путь из окружения НЕ берёт (иначе переменная
+# в чужом профиле снимала бы правила учёта молча).
+os.environ["HARNESS_PRODUCT_CONF_STEND"] = "1"
+
 # Базовые случаи: не зависят от конфига, гоняются с окружением по умолчанию.
 CASES = [
     # (ожидаемый код, описание, команда)
@@ -159,6 +175,76 @@ CASES = [
     (2, "то же длинной формой", "docker image rm app-web:previous"),
     (2, "глобальный флаг перед подкомандой не спасает", "docker --debug image prune -a"),
     (0, "удаление :latest — не страховка выката", "docker rmi app-api:latest"),
+    # Живой учёт заказчика — только чтение (слово владельца 29.09.2026).
+    # Больной случай: запись по рабочему адресу стирает карточку, которую ведёт
+    # человек, и восстановить её нам нечем — чужая система и чужие копии.
+    (2, "PUT в живой учёт",
+     "curl -X PUT https://api.erp-obrazec.test/api/remap/1.2/entity/product/7a1 -d '{}'"),
+    (2, "DELETE в живой учёт",
+     "curl -X DELETE 'https://api.erp-obrazec.test/api/remap/1.2/entity/product/7a1'"),
+    (2, "POST длинным флагом",
+     "curl --request POST https://online.erp-obrazec.test/api/remap/1.2/entity/product"),
+    (2, "-d без метода — это тоже POST",
+     "curl -d '{\"name\":\"x\"}' https://api.erp-obrazec.test/api/remap/1.2/entity/product"),
+    (2, "метод в теле скрипта",
+     "node -e \"fetch('https://api.erp-obrazec.test/api/remap/1.2/entity/product',{method:'PUT'})\""),
+    # Слово владельца 29.09 (вечер): «может быть копии достаточно, чтобы
+    # обращений в реальную базу не делать». Чтение БЫЛО разрешено — теперь нет:
+    # работа идёт по снятой копии, а дверь открывает только его свежее слово.
+    (2, "чтение живого учёта тоже запрещено — работаем по копии",
+     "curl -s https://api.erp-obrazec.test/api/remap/1.2/entity/product?limit=1"),
+    (2, "причина без его слова дверь не открывает",
+     "HARNESS_ERP_READ_WHY='сверить поля' curl -s https://api.erp-obrazec.test/api/remap/1.2/entity/product"),
+    # ТЕСТОВЫЙ аккаунт учёта — слово владельца 30.09.2026: «делай с ним что
+    # хочешь, тестируй как угодно». Признак — имя файла ключа: адрес у обоих
+    # аккаунтов один, и хук видит только текст команды.
+    (0, "запись на ТЕСТОВЫЙ аккаунт разрешена — его слово 30.09",
+     "ERP_TEST_TOKEN_FILE=/var/lib/harness/secrets/erp-token-тестовый.txt "
+     "curl -X POST https://api.erp-obrazec.test/api/remap/1.2/entity/product -d '{}'"),
+    (0, "чтение тестового аккаунта не требует ни причины, ни его свежего слова",
+     "ERP_TEST_TOKEN_FILE=/var/lib/harness/secrets/erp-token-тестовый.txt "
+     "curl -s https://api.erp-obrazec.test/api/remap/1.2/entity/product?limit=1"),
+    # БОЛЬНОЙ СЛУЧАЙ «не перепутай»: команда называет ОБА ключа. Рабочий тут
+    # под рукой, значит это не тестовый аккаунт, и запись отменяется.
+    (2, "названы оба ключа — это НЕ тестовый аккаунт",
+     "ERP_TOKEN_FILE=/var/lib/harness/secrets/erp-token.txt "
+     "ERP_TEST_TOKEN_FILE=/var/lib/harness/secrets/erp-token-тестовый.txt "
+     "curl -X PUT https://api.erp-obrazec.test/api/remap/1.2/entity/product/7a1 -d '{}'"),
+    # БОЛЬНОЙ СЛУЧАЙ 02.10.2026: ключ подаётся МОНТИРОВАНИЕМ, и переменная
+    # называется `ERP_TOKEN_FILE` у обоих аккаунтов. Пока рабочий ключ опознавался
+    # по имени переменной, работа с тестовым аккаунтом отменялась наравне с
+    # боевой — и законного пути не было вовсе.
+    # Адрес учёта в команде назван нарочно: правило УЧЁТ_ЖИВОЙ опознаёт обращение
+    # ТОЛЬКО по имени хоста, и без него эти два пути не судятся вовсе (находка
+    # 02.10.2026, своя карточка).
+    (0, "тестовый ключ подан монтированием через ERP_TOKEN_FILE — это тестовый аккаунт",
+     "docker compose --profile test run --rm "
+     "-v /var/lib/harness/secrets/erp-token-тестовый.txt:/ключ:ro "
+     "-e ERP_TOKEN_FILE=/ключ -e ERP_URL=https://api.erp-obrazec.test/api/remap/1.2 "
+     "test node scripts/load-stock.ts"),
+    (2, "боевой ключ монтированием через ERP_TOKEN_FILE — дверь закрыта",
+     "docker compose --profile test run --rm "
+     "-v /var/lib/harness/secrets/erp-token.txt:/ключ:ro "
+     "-e ERP_TOKEN_FILE=/ключ -e ERP_URL=https://api.erp-obrazec.test/api/remap/1.2 "
+     "test node scripts/load-stock.ts"),
+    (2, "имя тестового файла НЕ читается как рабочий ключ, но и наоборот тоже",
+     "ERP_TOKEN_FILE=/var/lib/harness/secrets/erp-token.txt SYNC_PUSH_ENABLED=1 node worker.js"),
+    (0, "выгрузка с ТЕСТОВЫМ ключом — законна",
+     "ERP_TEST_TOKEN_FILE=/var/lib/harness/secrets/erp-token-тестовый.txt SYNC_PUSH_ENABLED=1 node worker.js"),
+    (0, "копия и записанные ответы — не живой учёт",
+     "node scripts/make-recorded-fixtures.ts"),
+    (0, "запись на заглушку — не живой учёт",
+     "curl -X PUT http://localhost:18191/entity/product/7a1 -d '{}'"),
+    (0, "рассказ про запись — не команда",
+     "echo 'в api.erp-obrazec.test ничего не пишем -X PUT'"),
+    (2, "включение выгрузки рядом с живым ключом",
+     "ERP_TOKEN_FILE=/var/lib/harness/secrets/erp-token.txt SYNC_PUSH_ENABLED=1 node worker.js"),
+    # Снятие ответов ходит в живой учёт своим адресом внутри скрипта, но в
+    # КОМАНДЕ адреса нет — правило его не видит и видеть не может: хук судит
+    # команду. Носитель этого пути — не хук, а сам скрипт (выгрузка выключена
+    # наглухо) и слово владельца на запуск.
+    (0, "запуск снятия ответов: адреса в команде нет, судит не хук",
+     "ERP_TOKEN_FILE=/var/lib/harness/secrets/erp-token.txt node scripts/record-erp-responses.ts"),
     (0, "запуск с пустым набором MCP", "claude -p \"x\" --mcp-config '{\"mcpServers\":{}}' --strict-mcp-config"),
     (0, "пересборка", "docker compose up -d --build backend"),
     (0, "обычная команда", "git status --short"),
@@ -350,6 +436,15 @@ CASES = [
     (0, "В-3: echo про pgrep — не команда", "echo 'не жди через pgrep -f progon_dvizhka.py'"),
 ]
 
+# Литералы стенда учёта стоят в случаях ТЕКСТОМ (подстановка внутри строки
+# случая не раскрылась бы молча), поэтому сходство со стендом проверяется
+# здесь: разойдись они — случаи учёта судили бы команду БЕЗ адреса учёта, то
+# есть были бы зелёными без работы.
+_КОМАНДЫ_СЛУЧАЕВ = " ".join(к for _, _, к in CASES)
+for _литерал in _ЛИТЕРАЛЫ_УЧЁТА:
+    assert _литерал in _КОМАНДЫ_СЛУЧАЕВ, (
+        f"стенд учёта знает «{_литерал}», а ни один случай его не называет")
+
 # Случаи БЕЗ install.conf: (ожидаемый код, описание, команда). Гоняются с
 # HARNESS_INSTALL_CONF на заведомо несуществующий файл. Раньше лежали в CASES,
 # где окружение наследуется целиком, — и на сервере с установленным
@@ -401,6 +496,200 @@ FAKE_GUARD_FREE = "import sys\nsys.exit(0)\n"
     (False, "путь прогона в разметке markdown — текст, не команда",
      "python3 - <<PY\nтекст = '(`.venv/bin/python -m pytest` сторож не видел)'\nPY"),
 ]
+
+
+def проверить_дверь_previous() -> tuple[int, int]:
+    """Пара красный/зелёный на честную дверь удаления образа отката.
+
+    Случай 28.09.2026: владелец велел снять продукт с сервера целиком, а
+    сторож отменял снос его образов «:previous» — законного пути исполнить
+    слово владельца не было вовсе. Дверь открывается ПРИЧИНОЙ в переменной,
+    и проба судит обе стороны: с причиной проходит, без неё отказ остаётся.
+    """
+    bad = 0
+    путей = 0
+    случаи = [
+        (2, "пустая причина дверь не открывает",
+         "HARNESS_PREVIOUS_DELETE_WHY='' docker rmi app-api:previous"),
+        (2, "причина из одних пробелов — не слово",
+         "HARNESS_PREVIOUS_DELETE_WHY='   ' docker rmi app-api:previous"),
+        (2, "без причины отказ как прежде", "docker rmi app-api:previous"),
+        (0, "дверь открывает только этот путь, latest и так разрешён",
+         "docker rmi app-api:latest"),
+    ]
+    # Переменная НЕ передаётся через окружение нарочно: хук получает от Claude
+    # Code только текст команды, и дверь по os.environ не открылась бы никогда
+    # (проба 28.09.2026 — первая редакция двери именно так и не сработала).
+    env = dict(os.environ)
+    env["HARNESS_PREVIOUS_DELETE_WHY"] = "окружение дверь открывать не должно"
+    путей += 1
+    if run("docker rmi app-api:previous", env=env) != 2:
+        print("  ПЛОХО дверь открылась ОКРУЖЕНИЕМ, а не словом в команде")
+        bad += 1
+    else:
+        print("  ок    окружение дверь не открывает — причина только в команде")
+    for ждём, имя, cmd in случаи:
+        путей += 1
+        код = run(cmd)
+        if код != ждём:
+            print(f"  ПЛОХО {имя}: ждали {ждём}, вышло {код}")
+            bad += 1
+        else:
+            print(f"  ок    {имя}")
+    # Со СЛОВОМ ВЛАДЕЛЬЦА дверь открывается. Стенд создаёт своё условие: свой
+    # LOG_DIR с МАШИННЫМ журналом диспетчера, боевые входящие не читаются.
+    # Каталог журнала подменяется ТОЛЬКО ключом стенда (ревью кода 28.09.2026,
+    # C-2): без ключа подмена — отказ, и это отдельный путь ниже.
+    команда = ("HARNESS_PREVIOUS_DELETE_WHY='его слово 28.09' "
+               "docker rmi app-api:previous")
+
+    def строка_журнала(текст: str, минут_назад: float = 0,
+                       message_id: str | None = "551") -> str:
+        когда = datetime.datetime.now().astimezone() - datetime.timedelta(minutes=минут_назад)
+        запись = {"ts": когда.isoformat(), "chat_id": "1000000001", "текст": текст}
+        if message_id is not None:
+            запись["message_id"] = message_id
+        return json.dumps(запись, ensure_ascii=False) + "\n"
+
+    with tempfile.TemporaryDirectory() as двор:
+        логи = pathlib.Path(двор, "log")
+        логи.mkdir(parents=True)
+        журнал = логи / "inbox.jsonl"
+        журнал.write_text(
+            строка_журнала("Надо все с сервера очистить полносттю, удали образы"),
+            encoding="utf-8")
+        конф = pathlib.Path(двор, "install.conf")
+        конф.write_text(f'LOG_DIR="{логи}"\n', encoding="utf-8")
+        env = dict(os.environ)
+        env["HARNESS_INSTALL_CONF"] = str(конф)
+        env["HARNESS_OWNER_WORD_STEND"] = "1"
+        # Сначала — БОЛЬНОЙ СЛУЧАЙ: входящих нет вовсе, причину написал сам
+        # агент. Судится на СВОЁМ дворе: на боевых входящих свежее слово
+        # владельца сделало бы этот путь зелёным по чужой причине.
+        пусто = pathlib.Path(двор, "log-pusto")
+        пусто.mkdir(parents=True)
+        (пусто / "inbox.jsonl").write_text("", encoding="utf-8")
+        конф_пусто = pathlib.Path(двор, "install-pusto.conf")
+        конф_пусто.write_text(f'LOG_DIR="{пусто}"\n', encoding="utf-8")
+        env_пусто = dict(env)
+        env_пусто["HARNESS_INSTALL_CONF"] = str(конф_пусто)
+        путей += 1
+        if run("HARNESS_PREVIOUS_DELETE_WHY='агент сам себе написал причину' "
+               "docker rmi app-api:previous", env=env_пусто) != 2:
+            print("  ПЛОХО причина без слова владельца открыла дверь")
+            bad += 1
+        else:
+            print("  ок    БОЛЬНОЙ СЛУЧАЙ: причина есть, слова владельца нет — дверь закрыта")
+        путей += 1
+        if run(команда, env=env) != 0:
+            print("  ПЛОХО со свежим словом владельца дверь не открылась")
+            bad += 1
+        else:
+            print("  ок    свежее слово владельца + причина в команде — дверь открыта")
+        # БОЛЬНОЙ СЛУЧАЙ: та же запись БЕЗ message_id. Признак авторства ставит
+        # телеграм, а не агент: файл очереди агент пишет сам, и на нём дверь
+        # открывалась его же текстом (C-1).
+        журнал.write_text(
+            строка_журнала("Надо все с сервера очистить полносттю, удали образы",
+                           message_id=None), encoding="utf-8")
+        путей += 1
+        if run(команда, env=env) != 2:
+            print("  ПЛОХО запись без message_id открыла дверь")
+            bad += 1
+        else:
+            print("  ок    БОЛЬНОЙ СЛУЧАЙ: запись без message_id дверь не открывает")
+        # БОЛЬНОЙ СЛУЧАЙ: журнала нет вовсе — «прочитать не смогли». Дверь
+        # обязана быть ЗАКРЫТА, а не открыта, и назвать причину.
+        журнал.unlink()
+        путей += 1
+        вывод = run_вывод(команда, env=env)
+        if вывод[0] != 2:
+            print("  ПЛОХО без журнала входящих дверь не закрылась")
+            bad += 1
+        elif "ПРОЧИТАТЬ НЕ СМОГЛИ" not in вывод[1]:
+            print(f"  ПЛОХО отказ без журнала не называет причину: {вывод[1][:200]}")
+            bad += 1
+        else:
+            print("  ок    БОЛЬНОЙ СЛУЧАЙ: журнала входящих нет — дверь закрыта и причина названа")
+        # БОЛЬНОЙ СЛУЧАЙ: тот же стенд БЕЗ ключа стенда. Подмена каталога
+        # журнала одной переменной окружения — это и была дыра C-2.
+        журнал.write_text(
+            строка_журнала("Надо все с сервера очистить полносттю, удали образы"),
+            encoding="utf-8")
+        env_без_ключа = dict(env)
+        env_без_ключа.pop("HARNESS_OWNER_WORD_STEND", None)
+        путей += 1
+        вывод = run_вывод(команда, env=env_без_ключа)
+        if вывод[0] != 2:
+            print("  ПЛОХО подмена каталога журнала БЕЗ ключа стенда открыла дверь")
+            bad += 1
+        elif "HARNESS_OWNER_WORD_STEND" not in вывод[1]:
+            print(f"  ПЛОХО отказ не называет ключ стенда: {вывод[1][:200]}")
+            bad += 1
+        else:
+            print("  ок    БОЛЬНОЙ СЛУЧАЙ: подмена каталога без ключа стенда — отказ с причиной")
+        # Слово трёхчасовой давности не считается свежим: окно то же, что у
+        # protected-delete.py, и берётся из harness.conf машины.
+        журнал.write_text(
+            строка_журнала("Надо все с сервера очистить полносттю, удали образы",
+                           минут_назад=180), encoding="utf-8")
+        путей += 1
+        if run(команда, env=env) != 2:
+            print("  ПЛОХО слово трёхчасовой давности открыло дверь")
+            bad += 1
+        else:
+            print("  ок    БОЛЬНОЙ СЛУЧАЙ: старое слово владельца дверь не открывает")
+
+        # ДВЕРЬ ЧТЕНИЯ ЖИВОГО УЧЁТА. Больной случай ЖИВОЙ, 29.09.2026: владелец
+        # выбрал вариант «2», потом написал «читай статусы и типы цен» — сторож
+        # отменил чтение оба раза, потому что брал словарь двери УДАЛЕНИЯ и искал
+        # «удали»/«токен». Дверь, которую нельзя открыть ничем, — не дверь.
+        чтение = ("HARNESS_ERP_READ_WHY='снять форму ответа справочников' "
+                  "curl -s https://api.erp-obrazec.test/api/remap/1.2/entity/store")
+        журнал.write_text(строка_журнала("2"), encoding="utf-8")
+        путей += 1
+        if run(чтение, env=env) != 2:
+            print("  ПЛОХО цифра «2» открыла дверь чтения учёта")
+            bad += 1
+        else:
+            print("  ок    БОЛЬНОЙ СЛУЧАЙ: ответ цифрой дверь чтения не открывает")
+        журнал.write_text(строка_журнала("удали токен"), encoding="utf-8")
+        путей += 1
+        if run(чтение, env=env) != 2:
+            print("  ПЛОХО слово об УДАЛЕНИИ открыло дверь ЧТЕНИЯ")
+            bad += 1
+        else:
+            print("  ок    БОЛЬНОЙ СЛУЧАЙ: слово удаления дверь чтения не открывает")
+        журнал.write_text(строка_журнала("читай статусы и типы цен"), encoding="utf-8")
+        путей += 1
+        if run(чтение, env=env) != 0:
+            print("  ПЛОХО «читай статусы и типы цен» + причина — дверь чтения не открылась")
+            bad += 1
+        else:
+            print("  ок    свежее «читай …» + причина в команде — дверь чтения открыта")
+        путей += 1
+        if run("curl -s https://api.erp-obrazec.test/api/remap/1.2/entity/store", env=env) != 2:
+            print("  ПЛОХО чтение БЕЗ причины в команде открылось по одному его слову")
+            bad += 1
+        else:
+            print("  ок    БОЛЬНОЙ СЛУЧАЙ: его слово есть, причины в команде нет — закрыто")
+        журнал.write_text(строка_журнала("не читай статусы пока"), encoding="utf-8")
+        путей += 1
+        if run(чтение, env=env) != 2:
+            print("  ПЛОХО отказ «не читай» открыл дверь чтения")
+            bad += 1
+        else:
+            print("  ок    БОЛЬНОЙ СЛУЧАЙ: «не читай» дверь не открывает")
+        # Разрешение на чтение НЕ открывает дверь удаления: словари развели
+        # нарочно, и один класс действий не берёт слово другого.
+        журнал.write_text(строка_журнала("читай статусы и типы цен"), encoding="utf-8")
+        путей += 1
+        if run(команда, env=env) != 2:
+            print("  ПЛОХО слово о ЧТЕНИИ открыло дверь УДАЛЕНИЯ образа")
+            bad += 1
+        else:
+            print("  ок    БОЛЬНОЙ СЛУЧАЙ: слово чтения дверь удаления не открывает")
+    return bad, путей
 
 
 def проверить_публикацию_мимо_двери() -> tuple[int, int]:
@@ -544,6 +833,20 @@ def run_процессом(cmd: str, tool: str = "Bash", env: dict | None = None
         capture_output=True, text=True, env=env,
     )
     return p.returncode
+
+
+def run_вывод(cmd: str, tool: str = "Bash", env: dict | None = None) -> tuple[int, str]:
+    """Код И ТЕКСТ отказа: дверь, молчащая о причине, неотличима от сломанной.
+
+    Отдельно от `run`: тот судит только вердикт и ради скорости зовёт сторожа
+    внутри процесса, а текст отказа сторож печатает в свой stderr.
+    """
+    p = subprocess.run(
+        GUARD,
+        input=json.dumps({"tool_name": tool, "tool_input": {"command": cmd}}),
+        capture_output=True, text=True, env=env,
+    )
+    return p.returncode, (p.stderr or "") + (p.stdout or "")
 
 
 def run(cmd: str, tool: str = "Bash", env: dict | None = None) -> int:
@@ -693,6 +996,22 @@ def main() -> int:
             if got != want:
                 bad += 1
             print(f"  {ok} ждали={want} получили={got}  {name}")
+
+    # Правила учёта — ДАННЫЕ установки, и это надо сказать вслух: без них
+    # запрета нет вовсе (fail-open). Иначе «сторож держит живой учёт» читалось
+    # бы как свойство кода, а код без данных не судит ничего.
+    with tempfile.TemporaryDirectory() as tmp:
+        env = dict(os.environ)
+        env["HARNESS_PRODUCT_CONF"] = str(pathlib.Path(tmp, "данных-нет.conf"))
+        env["HARNESS_PRODUCT_CONF_STEND"] = "1"
+        total += 1
+        got = run("curl -X PUT https://api.erp-obrazec.test/entity/product/7a1 -d '{}'",
+                  env=env)
+        if got != 0:
+            print("  ПЛОХО  без данных учёта сторож выдумал запрет "
+                  f"(код {got}) — у другой установки учёта нет вовсе"); bad += 1
+        else:
+            print("  ок  БОЛЬНОЙ СЛУЧАЙ: данных учёта нет — правил учёта нет (fail-open)")
 
     with tempfile.TemporaryDirectory() as tmp:
         envs = {True: gate_env(tmp + "/busy", True), False: gate_env(tmp + "/free", False)}
@@ -853,6 +1172,9 @@ def main() -> int:
     _плохо, _путей = проверить_публикацию_мимо_двери()
     bad += _плохо
     total += _путей
+    _плохо_д, _путей_д = проверить_дверь_previous()
+    bad += _плохо_д
+    total += _путей_д
     total += len(ФОНОВЫЕ_СЛУЧАИ)
 
     bad += прогоны_ворот()

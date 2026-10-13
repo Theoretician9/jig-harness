@@ -179,3 +179,46 @@ download
 upload
 mymaps  # имя продукта Google
 pgrep
+erp  # Enterprise Resource Planning — учётная система, стандартное сокращение
+enum  # перечисление, слово языка программирования
+enums
+drizzle  # имя библиотеки ORM
+vitest  # имя средства прогона тестов
+pnpm  # имя пакетного менеджера
+catalog  # каталог товаров — обычное английское слово, словаря в нём нет
+diff  # разница, дифф — слово инструментов
+def  # definition, объявление: FieldDef, attribute-def
+attr  # attribute, общепринятое сокращение
+barcode  # штрихкод
+seo  # Search Engine Optimization
+otp  # One-Time Password — одноразовый код
+utm  # Urchin Tracking Module — метки рекламных ссылок
+sku  # Stock Keeping Unit — товарная позиция
+iin  # ИИН, идентификационный номер Казахстана
+pgcrypto  # имя расширения PostgreSQL
+hmac  # Hash-based Message Authentication Code
+auth  # authentication/authorization, общепринятое сокращение
+byte
+requeue  # вернуть задачу в очередь: requeueFields/requeueTask
+counterparty  # контрагент — сущность учёта МоегоСклада, её имя в API
+retaildemand  # розничная продажа — имя сущности в API МоегоСклада
+productfolder  # папка товаров — имя сущности в API МоегоСклада
+workspace  # рабочая область монорепо: имя раздела pnpm-workspace.yaml
+reauth  # повторное подтверждение личности: имя ручки спеки POST /auth/reauth
+totp  # time-based one-time password: стандарт RFC 6238, имя второго фактора
+cookie  # печенье браузера: английское слово, а не транслит — словарь гейта его не знал
+storefront  # витрина сайта: английское слово (store + front), имя роли базы и её проб
+screenshot  # снимок экрана: английское слово (screen + shot), словарь гейта его не знал
+reachability  # достижимость по сети: английское слово (reach + ability), словарь гейта его не знал
+sitemap  # карта сайта: имя файла ЗАДАНО Next.js (app/sitemap.ts → /sitemap.xml), переименование ломает выдачу карты
+callback  # обратный звонок: английское слово (call + back), имя маршрута витрины /callback — словарь гейта его не знал
+wholesale  # опт: английское слово (whole + sale), имя маршрута витрины /wholesale — словарь гейта его не знал
+inquiry  # обращение с формы: английское слово, имя таблицы и маршрута (слово inbox в этом коде занято очередью входа учёта)
+email  # электронная почта: английское слово (electronic + mail), имя модуля двери приведения почты — словарь гейта его не знал
+instanceof  # оператор JavaScript: имя проверки «рождён этим конструктором», переводу не подлежит
+vm  # virtual machine: имя модуля Node (node:vm), исполняющего чужой скрипт в своём контексте
+idx  # index: суффикс ИМЕНИ ИНДЕКСА в базе (inbox_cleanup_idx, outbox_inflight_idx и ещё 40 таких) — имена задал drizzle-kit и они уже в применённых файлах изменений; имя файла миграции повторяет имя индекса, и переименование развело бы файл с журналом применения
+pii  # personally identifiable information: каталог `packages/core/src/pii` продукта и имя ключа `pii_key`
+crowdsec  # crowdsec — имя ЧУЖОЙ службы защиты (CrowdSec): так зовутся её образ, её команда `cscli`, каталоги настройки `/etc/crowdsec` и метки её решений. Перевод имени развёл бы наши файлы с документацией службы и с путями, которые она читает (фаза 4 защиты, 13.10.2026)
+appsec  # AppSec — ИМЯ компонента CrowdSec (application security): так зовутся тип источника `source: appsec`, каталог `appsec-configs`, раздел метрик «Appsec Metrics» и заголовки `X-Crowdsec-Appsec-*`. Перевод имени развёл бы файл с теми строками, которые он посылает и читает (фаза 4б защиты, 13.10.2026)
+seclog  # seclog — имя ФАЙЛА-носителя событий защиты, заданное спекой и настройкой: ключ `SECLOG_PATH` службы, том `seclog` в compose, путь `/var/log/seclog` в образе и в источнике `acquis.yaml` CrowdSec. Имя файла поворота повторяет имя носителя; перевод («журнал-защиты») развёл бы скрипт с ключом, который читает служба, и с путём, который читает чужая программа (круг ревью кода фазы 4, 13.10.2026)

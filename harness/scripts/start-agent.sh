@@ -36,6 +36,9 @@ konf_zagruzit PROJECT_DIR LOG_DIR TMUX_SESSION SECRETS_DIR AGENT_START_CMD
 
 TMUX_SESSION="${TMUX_SESSION:-agent}"
 AGENT_START_CMD="${AGENT_START_CMD:-claude --dangerously-skip-permissions}"
+# Вход — только по подписке владельца: носитель чужого ключа срывается у самой
+# команды (komanda_agenta, улика 10.10.2026 — его помнил сервер tmux).
+AGENT_START_CMD="$(komanda_agenta "$AGENT_START_CMD")"
 PROJECT_DIR="${PROJECT_DIR:-$HOME}"
 
 raised=0

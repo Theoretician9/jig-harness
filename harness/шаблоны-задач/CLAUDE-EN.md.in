@@ -103,7 +103,19 @@ consent means no action.
   the data structure is wrong.
 - A function does one thing and fits in your head. Three levels of nesting
   hide a second function inside.
-- Names say what a thing is. A comment explains WHY, not WHAT.
+- Names say what a thing is. A comment explains WHY, not WHAT — and why it is so
+  NOW. History ("was N, became M", "the shift of 30.09 found"), shift numbers and
+  the story of the fix go into the COMMIT MESSAGE: the commit is read by date, a
+  comment is read by whoever edits the line, and a file that keeps its own history
+  grows a third heavier in tokens for every reader (measured 30.09.2026:
+  comments are 30 % of lines, 13 267 of 44 020).
+- Nothing in code is written in Russian except comments (owner 30.09.2026):
+  identifiers are always English, transliteration is not English. A Cyrillic
+  object KEY that is DATA — a state value, a foreign system's field name — stays
+  Russian but in QUOTES: that is what says "data, not a name". Carriers: the name
+  gate in the product repo (`src/scripts/check-identifier-names.py`, judges
+  `.ts`, `.py`, `.sh` and files with a shebang) and `scripts/rename-identifiers.py`
+  for the translation itself.
 - No defence against imaginary trouble: handling an impossible error hides a
   possible one.
 - SOLID in spirit: separate responsibilities, depend on contracts. An
