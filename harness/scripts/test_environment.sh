@@ -2757,6 +2757,11 @@ GRUPPY="порт готовность память соседи окно жне�
     local grupp="${1:-}" imya nashlas=0
     DVOR_STENDA=$(mktemp -d "/tmp/${PREFIKS_PROBY}selftest-XXXXXX")
     trap 'rm -rf "${DVOR_STENDA:-/tmp/нет-такого-стенда}"' EXIT
+    # Самовызовы пробы читают СВОЙ конфиг с именем продукта: на машине без
+    # продукта PRODUCT_DIR пуст, и проба отказывала «данные неполны» раньше,
+    # чем доходила до случая, который стенд строил.
+    printf 'PRODUCT_DIR="proba"\n' > "$DVOR_STENDA/harness.conf"
+    export HARNESS_CONF="$DVOR_STENDA/harness.conf"
     стенд_подставного_docker
 
     for imya in $GRUPPY; do
