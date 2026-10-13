@@ -244,7 +244,7 @@ mkdir -p "$PROJECT_DIR/harness/config"
 # ему пакетные умолчания молча. Файл кладётся ТОЛЬКО если его ещё нет — так же,
 # как harness.conf в /etc. Гейт сверки с пакетом его тоже не сторожит.
 LIVE_SETTINGS="пайплайн.yaml очередь.yaml модели.yaml ревизия.yaml"   # имя латиницей: bash не берёт кириллические имена
-for f in "$HERE"/config/*.yaml "$HERE"/config/*.txt; do
+for f in "$HERE"/config/*.yaml "$HERE"/config/*.txt "$HERE"/config/*.gz; do
   [[ -f "$f" ]] || continue
   name="$(basename "$f")"
   if [[ " $LIVE_SETTINGS " == *" $name "* ]] && [[ -f "$PROJECT_DIR/harness/config/$name" ]]; then
