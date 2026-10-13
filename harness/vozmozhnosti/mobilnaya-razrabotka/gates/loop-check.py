@@ -21,6 +21,7 @@
 Код возврата: 0 — можно коммитить (или проверка неприменима, причина названа),
 1 — петли не было или она устарела (адрес назван).
 """
+import json
 import os
 import pathlib
 import re
@@ -89,8 +90,12 @@ def verdict(staged: list[str], conf: dict, repo: pathlib.Path, now: float) -> tu
     if not trace.is_file():
         return 1, (f"[петля] в коммите код приложения ({files}), а следа петли нет: {trace}\n"
                    + address)
-    body = trace.read_text(encoding="utf-8")
-    if '"итог": "ок"' not in body and '"итог":"ок"' not in body:
+    # След разбирается как JSON: запись (экранирование, отступы) — дело писателя.
+    try:
+        itog = json.loads(trace.read_text(encoding="utf-8")).get("итог")
+    except ValueError:
+        return 1, (f"[петля] след петли не разобран как JSON: {trace}\n" + address)
+    if itog != "ок":
         return 1, (f"[петля] последняя петля НЕ была успешной (след {trace})\n" + address)
     age_min = (now - trace.stat().st_mtime) / 60
     if age_min > max_age:
@@ -105,7 +110,7 @@ def selftest() -> int:
     bad = 0
 
     def case(name: str, want: int, staged, conf_extra: dict, trace_age_min=None,
-             trace_ok=True):
+             trace_ok=True, trace_body=None):
         nonlocal bad
         with tempfile.TemporaryDirectory() as t:
             repo = pathlib.Path(t, "repo", "app")
@@ -115,7 +120,8 @@ def selftest() -> int:
             if trace_age_min is not None:
                 trace = pathlib.Path(conf["LOG_DIR"], "mobile", "последняя-петля.json")
                 trace.parent.mkdir(parents=True, exist_ok=True)
-                trace.write_text(json.dumps({"итог": "ок" if trace_ok else "встала"},
+                trace.write_text(trace_body if trace_body is not None else
+                                 json.dumps({"итог": "ок" if trace_ok else "встала"},
                                             ensure_ascii=False), encoding="utf-8")
                 stamp = time.time() - trace_age_min * 60
                 os.utime(trace, (stamp, stamp))
@@ -139,7 +145,14 @@ def selftest() -> int:
          ["app/Экран.tsx"], {"LOOP_MAX_AGE_MIN": "240"}, trace_age_min=300)
     case("потолок из конфига (480) → зелёный", 0,
          ["app/Экран.tsx"], {"LOOP_MAX_AGE_MIN": "480"}, trace_age_min=300)
-    print("SELFTEST: зелёный (9 путей)" if not bad else f"SELFTEST: неудач {bad}")
+    # Один и тот же успех в разной записи JSON — тот же успех.
+    case("след с экранированной кириллицей — тот же успех → зелёный", 0, ["app/Экран.tsx"],
+         {}, trace_age_min=5, trace_body=json.dumps({"итог": "ок"}))
+    case("след с отступами — тот же успех → зелёный", 0, ["app/Экран.tsx"], {},
+         trace_age_min=5, trace_body=json.dumps({"итог": "ок"}, ensure_ascii=False, indent=2))
+    case("битый след → красный", 1, ["app/Экран.tsx"], {}, trace_age_min=5,
+         trace_body='{"итог": "ок"')
+    print("SELFTEST: зелёный (12 путей)" if not bad else f"SELFTEST: неудач {bad}")
     return 1 if bad else 0
 
 
