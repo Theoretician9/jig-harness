@@ -199,6 +199,9 @@ MANUAL_LIST=()
   printf '\nСТОП на шаге «%s»: %s\n' "$1" "$2" >&2
   printf 'Диагностика: %s\n' "$3" >&2
   printf 'После починки перезапустите: sudo bash %s --resume\n' "${BASH_SOURCE[0]}" >&2
+  # Сводка идёт ловушкой EXIT и без этой строки печатала «Упавших шагов нет»
+  # после стопа (llama 13.10.2026: шаг 9 встал, владелец увидел «всё хорошо»).
+  FAILED_LIST+=("СТОП на шаге «$1»: $2 — установка прервана, дальше не шла")
   exit 1
 }
 
@@ -258,7 +261,7 @@ import sys, yaml
 for з in (д.get("задания") or []):
     имя, когда = з.get("имя") or "", з.get("расписание") or ""
     команда, журнал = з.get("команда") or "", з.get("журнал") or ""
-    if not (имя and когда and команда) or имя.endswith("-порог"):
+    if not (имя and когда and команда):
         continue
     куда = f" >>{логи}/{журнал} 2>&1" if журнал else ""
     print(f"{когда}  {проект}/{команда}{куда}")
@@ -281,11 +284,24 @@ import re, sys, yaml
 д = yaml.safe_load(open(sys.argv[1], encoding="utf-8")) or {}
 for з in (д.get("задания") or []):
     имя = з.get("имя") or ""
-    if not имя or имя.endswith("-порог"):
+    if not имя:
         continue
-    найдено = re.search(r"([A-Za-z0-9_-]+)\.sh", з.get("команда") or "")
+    найдено = re.search(r"([A-Za-z0-9_-]+)\.(?:sh|py)", з.get("команда") or "")
     print(найдено.group(1) if найдено else имя)
 ' "$1" 2>/dev/null | sort -u
+}
+
+путь_скрипта() { # $1 = реестр, $2 = имя скрипта → путь от корня проекта
+  # Путь — из поля «команда», а не «harness/demons/<имя>.sh»: сторож срока входа
+  # и проба восстановления живут в scripts/, и вшитый каталог гонял бы
+  # несуществующий файл.
+  python3 -c '
+import re, sys, yaml
+for з in (yaml.safe_load(open(sys.argv[1], encoding="utf-8")) or {}).get("задания") or []:
+    первое = (з.get("команда") or "").split()[:1]
+    if первое and re.sub(r"\.(sh|py)$", "", первое[0].rsplit("/", 1)[-1]) == sys.argv[2]:
+        print(первое[0]); break
+' "$1" "$2"
 }
 
 сверить_демонов_со_спекой() { # $1 = реестр; строки crontab — на stdin
@@ -305,7 +321,7 @@ for з in (д.get("задания") or []):
     printf '  реестр %s не дал ни одного имени задания — сверка невозможна\n' "$spec"
     return 1
   fi
-  cron_names=$(grep -oE '/[A-Za-z0-9_-]+\.sh([[:space:]]|$)' | sed 's|^/||; s|\.sh[[:space:]]*$||; s|\.sh$||' | sort -u)
+  cron_names=$(grep -oE '/[A-Za-z0-9_-]+\.(sh|py)([[:space:]]|$)' | sed -E 's|^/||; s#\.(sh|py)[[:space:]]*$##' | sort -u)
   missing=$(comm -23 <(printf '%s\n' "$spec_names") <(printf '%s\n' "$cron_names"))
   extra=$(comm -13 <(printf '%s\n' "$spec_names") <(printf '%s\n' "$cron_names"))
   if [[ -n "$missing" || -n "$extra" ]]; then
@@ -358,7 +374,16 @@ if (( SELFTEST )); then
   PROJECT_DIR=/opt/x SECRETS_DIR=/etc/x LOG_DIR=/var/log/x HEARTBEAT_DIR=/var/lib/x \
     сверить_пути_конфига >/dev/null && printf '  ок    здоровый конфиг проходит\n' \
     || { printf '  ПЛОХО здоровый конфиг забракован\n'; ok_flag=0; }
-  (( ok_flag )) && { echo "SELFTEST: зелёный (16 путей, включая улику живой установки 11.08)"; exit 0; }
+  # БОЛЬНОЙ СЛУЧАЙ 13.10.2026: задание с .py в данных пакета, а сверка шага 9
+  # знала только .sh — установка вставала стопом. Расписание, построенное из
+  # данных САМОГО пакета, обязано проходить свою же сверку.
+  if python3 -c 'import yaml' 2>/dev/null; then
+    стройки_crontab "$SCRIPT_DIR/harness/config/system-jobs.yaml" /opt/x /var/log/x \
+      | сверить_демонов_со_спекой "$SCRIPT_DIR/harness/config/system-jobs.yaml" >/dev/null \
+      && printf '  ок    расписание из данных пакета проходит сверку шага 9\n' \
+      || { printf '  ПЛОХО расписание из данных пакета не проходит сверку шага 9 — установка встанет\n'; ok_flag=0; }
+  fi
+  (( ok_flag )) && { echo "SELFTEST: зелёный (17 путей, включая улику живой установки 11.08 и стоп шага 9 13.10)"; exit 0; }
   exit 1
 fi
 
@@ -1080,19 +1105,20 @@ EOF
     for pair in "${LIGHT_RUN[@]}"; do
       [[ "${pair%%=*}" = "$d" ]] && light="${pair#*=}"
     done
-    скажи "  + sudo -u $AGENT_USER env -i HOME=/home/$AGENT_USER PATH=/usr/local/bin:/usr/bin:/bin /bin/sh -c '$D/$d.sh'; echo exit=\$?"
+    local script; script="$PROJECT_DIR/$(путь_скрипта "$spec_md" "$d")"
+    скажи "  + sudo -u $AGENT_USER env -i HOME=/home/$AGENT_USER PATH=/usr/local/bin:/usr/bin:/bin /bin/sh -c '$script'; echo exit=\$?"
     if (( ! DRY )); then
       rc=0
       sudo -u "$AGENT_USER" env -i HOME="/home/$AGENT_USER" PATH=/usr/local/bin:/usr/bin:/bin \
         ${light:+"$light"} \
-        /bin/sh -c "$D/$d.sh" >>"$LOG_DIR/install-demon-probe.log" 2>&1 || rc=$?
+        /bin/sh -c "$script" >>"$LOG_DIR/install-demon-probe.log" 2>&1 || rc=$?
       [[ -n "$light" ]] && скажи "    (проверка запускаемости: $light — полный прогон этого демона идёт по расписанию)"
       if (( rc == 0 )); then
         скажи "    exit=0 — $d зелёный"
         CHECKED_LIST+=("$step: $d в env -i, exit=0")
       else
         скажи "    exit=$rc — $d УПАЛ (не прерываемся, свод в конце; лог: $LOG_DIR/install-demon-probe.log)"
-        FAILED_LIST+=("демон $d: exit=$rc в env -i — смотреть $LOG_DIR/install-demon-probe.log и $D/$d.sh")
+        FAILED_LIST+=("демон $d: exit=$rc в env -i — смотреть $LOG_DIR/install-demon-probe.log и $script")
       fi
     fi
   done
