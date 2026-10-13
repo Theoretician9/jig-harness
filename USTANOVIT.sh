@@ -957,15 +957,24 @@ EOF
   # общая для обоих вариантов проверка отправки: успех ТОЛЬКО при ok:true + message_id
   скажи "  + проба отправки: curl sendMessage (токен в команде скрыт), успех только при ok:true и message_id"
   if (( ! DRY )); then
-    local token sent_id
+    local token sent_id otvet
     token="$(cat "$TG_TOKEN_FILE")"
     # URL с токеном уходит через stdin (curl -K -), а не в argv: argv виден в ps.
-    sent_id=$(printf 'url = "%s/bot%s/sendMessage"\n' "$TG_API" "$token" \
+    otvet=$(printf 'url = "%s/bot%s/sendMessage"\n' "$TG_API" "$token" \
       | curl -s -K - \
-        -d chat_id="$TG_CHAT_ID" -d text="Канал установлен. Ответьте РЕПЛАЕМ на это сообщение словом: дошло" \
-      | jq -e '.result.message_id') \
-      || стоп "$step" "отправка НЕ подтверждена API (нет ok:true/message_id)" \
-              "TOKEN=\$(sudo cat $TG_TOKEN_FILE); curl -s \"$TG_API/bot\$TOKEN/sendMessage\" -d chat_id=$TG_CHAT_ID -d text=проба | jq ."
+        -d chat_id="$TG_CHAT_ID" -d text="Канал установлен. Ответьте РЕПЛАЕМ на это сообщение словом: дошло")
+    # «chat not found» — не поломка, а порядок: бот не может написать первым,
+    # пока владелец не нажал Start. 13.10.2026 (llama) этот ответ рвал установку
+    # стопом, и шаги 8–10 — расписание сторожей и панель — не выполнились вовсе.
+    if ! sent_id=$(jq -e '.result.message_id' <<< "$otvet"); then
+      if jq -e '.description | test("chat not found")' <<< "$otvet" >/dev/null 2>&1; then
+        MANUAL_LIST=("ПЕРВЫМ: открой своего бота в Telegram и нажми Start — пока этого нет, бот не может написать первым; затем: sudo bash $0 --resume (перепроверит канал)" "${MANUAL_LIST[@]}")
+        скажи "  бот ещё не может писать: владелец не нажал Start (chat not found) — иду дальше, канал перепроверит --resume"
+        return 0
+      fi
+      стоп "$step" "отправка НЕ подтверждена API (нет ok:true/message_id): $(jq -r '.description // "ответа нет"' <<< "$otvet")" \
+           "TOKEN=\$(sudo cat $TG_TOKEN_FILE); curl -s \"$TG_API/bot\$TOKEN/sendMessage\" -d chat_id=$TG_CHAT_ID -d text=проба | jq ."
+    fi
     CHECKED_LIST+=("$step: доставка подтверждена API, message_id=$sent_id")
     скажи "  OK: message_id=$sent_id — сообщение владельцу ушло; вторая половина проверки (реплай «дошло») — в «ОСТАЛОСЬ РУКАМИ»"
     SENT_ID="$sent_id"
