@@ -54,8 +54,12 @@ HARNESS_CONF = TMP / "harness.conf"
 HARNESS_CONF.write_text('PRODUCT_REPO=""\nAUTOMATION_LEVEL="partial"\nACTIVE_LINE=""\n',
                         encoding="utf-8")
 INSTALL_CONF = TMP / "install.conf"
+SECRETS = TMP / "secrets"
+SECRETS.mkdir()
+SECRET_VALUE = "deadbeefcafebabe0123456789abcdef01234567"
+(SECRETS / "probe_key").write_text(SECRET_VALUE + "\n", encoding="utf-8")
 INSTALL_CONF.write_text(f'LOG_DIR="{LOGS}"\nPANEL_STATE_DIR="{PANEL}"\n'
-                        f'STATE_DIR="{TMP / "state"}"\n', encoding="utf-8")
+                        f'STATE_DIR="{TMP / "state"}"\nSECRETS_DIR="{SECRETS}"\n', encoding="utf-8")
 os.environ.update({
     "HARNESS_CONF": str(HARNESS_CONF),
     "HARNESS_INSTALL_CONF": str(INSTALL_CONF),
@@ -108,7 +112,7 @@ import yaml  # noqa: E402
 
 STARTED = {"started": "2026-10-10"}   # позже всех дат «шаги_включены»: судятся все шаги
 DEPTH = {"уровень": "крупная", "характер": "разработка", "кем": "проба", "когда": "2026-10-10"}
-LONG = "длинный текст пробы " * 300      # 6000 знаков: снимок обязан обрезать до 4000
+LONG = "ключ " + "deadbeefcafebabe0123456789abcdef01234567" + " " + "длинный текст пробы " * 300
 SOURCE_ID = "1790000000.000000001"
 
 
@@ -449,6 +453,11 @@ if isinstance(board, dict):
     check(sources and sources[0].get("id") == f"inbox:{SOURCE_ID}" and 0 < len(text) <= 4000,
           f"текст источника из inbox обрезан до 4000 ({len(text)})",
           f"источник: {[(s.get('id'), len(s.get('текст') or '')) for s in sources]}")
+    # Владелец присылал в канал ключ (29.09.2026): карточка вырезает его
+    # фильтром разборщика, а доска брала сырой текст и несла ключ в веб-панель.
+    check(SECRET_VALUE not in json.dumps(board, ensure_ascii=False),
+          "ключ из сообщения владельца на доску не попадает",
+          "ключ из сообщения владельца лежит в снимке доски")
     log_text = full.get("журнал") or ""
     check(0 < len(log_text) <= 4000, f"журнал.md обрезан до 4000 ({len(log_text)})",
           f"журнал: {len(log_text)} знаков")
@@ -488,6 +497,11 @@ except Exception as exc:  # noqa: BLE001
 print("── main() ──")
 target = PANEL / "board.json"
 target.write_text("старый снимок", encoding="utf-8")
+# Каталог состояния пишет и служба панели: подложенный ею симлинк на месте
+# временного файла заставил бы снимок агента затирать чужой файл каждую минуту.
+victim = TMP / "victim.txt"
+victim.write_text("чужой файл", encoding="utf-8")
+(PANEL / "board.json.tmp").symlink_to(victim)
 old_inode = target.stat().st_ino
 fixture_board = board if isinstance(board, dict) else {
     "снято": NOW.isoformat(), "направление": "", "архив": 0, "колонки": COLUMNS,
@@ -518,6 +532,10 @@ except (OSError, ValueError) as exc:
 check(target.exists() and target.stat().st_ino != old_inode,
       "файл заменён целиком (os.replace), а не дописан поверх",
       "inode тот же — запись поверх живого файла, служба увидит полфайла")
+check(victim.read_text(encoding="utf-8") == "чужой файл",
+      "подложенный симлинк на tmp не ведёт запись в чужой файл",
+      "снимок записан через подложенный симлинк в чужой файл")
+(PANEL / "board.json.tmp").unlink(missing_ok=True)
 leftovers = sorted(p.name for p in PANEL.iterdir() if p.name != "board.json")
 check(not leftovers, "в каталоге состояния нет tmp-огрызков", f"огрызки: {leftovers}")
 mode = target.stat().st_mode & 0o777 if target.exists() else None
