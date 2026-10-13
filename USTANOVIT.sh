@@ -813,6 +813,28 @@ EOF
   проверка "$step" "/etc/harness/harness.conf существует и читается" \
     "[ -f /etc/harness/harness.conf ] && bash -n /etc/harness/harness.conf" \
     "ls -l /etc/harness/; bash -n /etc/harness/harness.conf"
+  # harness.conf пишет агент сам (решение владельца 13.10.2026): ключи при
+  # обновлениях, эталон аккаунта, переименования меток — без root-шага руками.
+  # Файл живёт в каталоге агента, а в /etc/harness — root-овая ссылка на него:
+  # каталог /etc/harness агенту не отдаётся, иначе он мог бы подменить и
+  # install.conf с AUTONOMY.
+  делай "mkdir -p /etc/harness/agent && chown $AGENT_USER:$AGENT_USER /etc/harness/agent && chmod 755 /etc/harness/agent; [ -L /etc/harness/harness.conf ] || { mv /etc/harness/harness.conf /etc/harness/agent/harness.conf && ln -s agent/harness.conf /etc/harness/harness.conf; }; chown $AGENT_USER:$AGENT_USER /etc/harness/agent/harness.conf"
+  проверка "$step" "harness.conf принадлежит агенту, /etc/harness — root" \
+    "[ -L /etc/harness/harness.conf ] && sudo -u $AGENT_USER test -w /etc/harness/agent/harness.conf && [ \"\$(stat -c %U /etc/harness /etc/harness/install.conf | sort -u)\" = root ]" \
+    "ls -la /etc/harness /etc/harness/agent"
+  # Раскладчик идёт от agent, и в /etc/logrotate.d и /etc/sysctl.d ему не
+  # писать: эти две строки владелец llama 13.10.2026 получил отдельным
+  # root-скриптом («мне как пользователю лишние действия»). Установщик — root,
+  # он и кладёт.
+  делай "cp '$pkg_dst/harness/config/logrotate-harness' /etc/logrotate.d/harness && chmod 644 /etc/logrotate.d/harness"
+  проверка "$step" "ротация логов харнеса принята logrotate" \
+    "logrotate -d /etc/logrotate.d/harness >/dev/null 2>&1" \
+    "logrotate -d /etc/logrotate.d/harness"
+  # Порог гигиены сервера — SWAPPINESS_MAX в harness.conf; ставим ровно его.
+  делай "echo \"vm.swappiness=\$(sed -n 's/^SWAPPINESS_MAX=\\\"\\?\\([0-9]*\\).*/\\1/p' /etc/harness/harness.conf)\" > /etc/sysctl.d/60-harness-swappiness.conf && sysctl -q -p /etc/sysctl.d/60-harness-swappiness.conf"
+  проверка "$step" "vm.swappiness не выше порога гигиены" \
+    "[ \"\$(sysctl -n vm.swappiness)\" -le \"\$(sed -n 's/^SWAPPINESS_MAX=\\\"\\?\\([0-9]*\\).*/\\1/p' /etc/harness/harness.conf)\" ]" \
+    "sysctl vm.swappiness; grep SWAPPINESS_MAX /etc/harness/harness.conf"
   # Вход агента: носитель ОДИН — подписка владельца из `/login`. Переменная
   # CLAUDE_CODE_OAUTH_TOKEN стоит в порядке выбора учётки ВЫШЕ подписки, и
   # второй ключ, подставляемый ею всем оболочкам и демонам, 19 суток молча
@@ -834,16 +856,16 @@ EOF
   # снятая ложная тревога вернулась бы на новом сервере (ревью кода 13.10.2026,
   # критическое). Повтор установки список тоже не портит: уже названный аккаунт
   # второй раз не дописывается.
-  делай "ORG=\$(sudo -u $AGENT_USER python3 '$PROJECT_DIR/scripts/check-login-expiry.py' --аккаунт-подписки 2>/dev/null || true); if [ -n \"\$ORG\" ]; then OLD=\$(sed -n 's|^LOGIN_EXPECTED_ORG=\\\"\\(.*\\)\\\"\$|\\1|p' /etc/harness/harness.conf | tail -1); case \" \$OLD \" in *\" \$ORG \"*) NEW=\"\$OLD\" ;; *) NEW=\$(printf '%s %s' \"\$OLD\" \"\$ORG\" | sed 's|^ *||') ;; esac; if grep -q '^LOGIN_EXPECTED_ORG=' /etc/harness/harness.conf; then sed -i \"s|^LOGIN_EXPECTED_ORG=.*|LOGIN_EXPECTED_ORG=\\\"\$NEW\\\"|\" /etc/harness/harness.conf; else printf 'LOGIN_EXPECTED_ORG=\"%s\"\\n' \"\$NEW\" >> /etc/harness/harness.conf; fi; echo \"эталон аккаунта записан замером: \$NEW\"; else echo 'входа в модель ещё нет — эталон аккаунта запишется после входа (строка в блоке ОСТАЛОСЬ РУКАМИ)'; fi"
+  делай "ORG=\$(sudo -u $AGENT_USER python3 '$PROJECT_DIR/scripts/check-login-expiry.py' --аккаунт-подписки 2>/dev/null || true); if [ -n \"\$ORG\" ]; then OLD=\$(sed -n 's|^LOGIN_EXPECTED_ORG=\\\"\\(.*\\)\\\"\$|\\1|p' /etc/harness/harness.conf | tail -1); case \" \$OLD \" in *\" \$ORG \"*) NEW=\"\$OLD\" ;; *) NEW=\$(printf '%s %s' \"\$OLD\" \"\$ORG\" | sed 's|^ *||') ;; esac; if grep -q '^LOGIN_EXPECTED_ORG=' /etc/harness/harness.conf; then sed -i --follow-symlinks \"s|^LOGIN_EXPECTED_ORG=.*|LOGIN_EXPECTED_ORG=\\\"\$NEW\\\"|\" /etc/harness/harness.conf; else printf 'LOGIN_EXPECTED_ORG=\"%s\"\\n' \"\$NEW\" >> /etc/harness/harness.conf; fi; echo \"эталон аккаунта записан замером: \$NEW\"; else echo 'входа в модель ещё нет — эталон аккаунта запишется после входа (строка в блоке ОСТАЛОСЬ РУКАМИ)'; fi"
   # Проверка судит ДВА законных исхода, а не один: аккаунт записан ЗАМЕРОМ, либо
   # входа нет вовсе. Третьего («записан рукой») она по-прежнему не принимает.
   проверка "$step" "аккаунт владельца записан замером либо входа ещё нет" \
     "grep -qE '^LOGIN_EXPECTED_ORG=\"[0-9a-f-]{36}\"' /etc/harness/harness.conf || ! sudo -u $AGENT_USER python3 '$PROJECT_DIR/scripts/check-login-expiry.py' --аккаунт-подписки >/dev/null 2>&1" \
     "grep -n LOGIN_EXPECTED_ORG /etc/harness/harness.conf; sudo -u $AGENT_USER python3 '$PROJECT_DIR/scripts/check-login-expiry.py' --аккаунт-подписки"
   if ! sudo -u "$AGENT_USER" python3 "$PROJECT_DIR/scripts/check-login-expiry.py" --аккаунт-подписки >/dev/null 2>&1; then
-    # Та же дисциплина, что и у шага выше: эталон ДОПИСЫВАЕТСЯ. Рука, затирающая
-    # список, стоит владельцу вернувшейся ложной тревоги на втором аккаунте.
-    MANUAL_LIST+=("после OAuth-входа записать эталон аккаунта (иначе сторож входа не с чем сверять): sudo bash -c 'ORG=\$(sudo -u $AGENT_USER python3 $PROJECT_DIR/scripts/check-login-expiry.py --аккаунт-подписки) && OLD=\$(sed -n \"s|^LOGIN_EXPECTED_ORG=\\\\\\\"\\\\(.*\\\\)\\\\\\\"\\$|\\\\1|p\" /etc/harness/harness.conf | tail -1) && case \" \$OLD \" in *\" \$ORG \"*) NEW=\"\$OLD\" ;; *) NEW=\$(printf \"%s %s\" \"\$OLD\" \"\$ORG\" | sed \"s|^ *||\") ;; esac && sed -i \"s|^LOGIN_EXPECTED_ORG=.*|LOGIN_EXPECTED_ORG=\\\"\$NEW\\\"|\" /etc/harness/harness.conf'")
+    # Руками это больше не делается: сторож входа (cron, каждые 15 мин) сам
+    # пишет эталон замером, когда список пуст, — конфиг принадлежит агенту.
+    скажи "  эталон аккаунта запишет сторож входа сам после OAuth-входа (check-login-expiry.py, каждые 15 мин)"
   fi
   скажи "  (после git init агент повторит раскладку — она подключит pre-commit симлинком; это его 03-ЗАДАНИЕ)"
   # Теперь скрипт запуска на месте — можно поднимать агента. Юнит поставлен
