@@ -724,7 +724,11 @@ STUB
             mkdir -p "$HARNESS_PANEL_STATE"
             if [ "$3" = да ]; then python3 "$PAUSE_PY" --поставить проба >/dev/null; fi
             SEND_MODE="$2"; BUSY="$4"
-            tmux() { if [ "$1" = display-message ]; then echo claude; fi; return 0; }
+            # Заглушка tmux — файлом в PATH, а не функцией: функция с именем
+            # команды выглядит для гейта «вызов до определения» по всему файлу.
+            mkdir -p "$T/bin"
+            printf '#!/bin/sh\n[ "$1" = display-message ] && echo claude\nexit 0\n' > "$T/bin/tmux"
+            chmod +x "$T/bin/tmux"; PATH="$T/bin:$PATH"
             send_to_pane() { echo "$1" >> "$T/kicks"; [ "$SEND_MODE" = ok ]; }
             smena_zanyata() { [ "$BUSY" = занята ]; }
             deliver_panel_comments >/dev/null
