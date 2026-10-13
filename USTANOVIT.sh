@@ -576,7 +576,7 @@ EOF
   # теряет вход. Строка обязана совпадать с команда_возврата() в
   # scripts/check-login-expiry.py буква в букву — иначе sudo откажет.
   записать_файл /etc/sudoers.d/50-agent 440 root:root <<EOF
-$AGENT_USER ALL=(root) NOPASSWD: /usr/bin/systemctl restart harness-agent, /usr/bin/systemctl status harness-agent, /usr/bin/systemctl restart harness-dispatcher.service
+$AGENT_USER ALL=(root) NOPASSWD: /usr/bin/systemctl restart harness-agent, /usr/bin/systemctl status harness-agent, /usr/bin/systemctl restart harness-dispatcher.service, /usr/bin/systemctl restart harness-panel.service
 $AGENT_USER ALL=(root) NOPASSWD: /usr/bin/chown -hR $AGENT_USER\:$AGENT_USER /home/$AGENT_USER/.claude /home/$AGENT_USER/.claude.json
 EOF
   проверка "$step" "sudoers корректен (visudo -cf)" \
@@ -588,7 +588,7 @@ EOF
   проверка "$step" "каталоги принадлежат агенту" \
     "[ \"\$(stat -c '%U' '$PROJECT_DIR' '$LOG_DIR' '$HEARTBEAT_DIR' /var/backups/harness | sort -u)\" = '$AGENT_USER' ]" \
     "stat -c '%U %n' '$PROJECT_DIR' '$LOG_DIR' '$HEARTBEAT_DIR' /var/backups/harness"
-  DONE_LIST+=("пользователь $AGENT_USER, каталоги, sudoers (2 systemctl и возврат своих файлов входа), /var/backups/harness")
+  DONE_LIST+=("пользователь $AGENT_USER, каталоги, sudoers (systemctl агента, диспетчера и панели; возврат своих файлов входа), /var/backups/harness")
   отметить шаг_1
 }
 

@@ -136,6 +136,8 @@ HARNESS_TASKS = [
     wip("t.approval2", "docs/specs/t-approval2.md"),
     wip("t.allpapers", "docs/specs/t-all.md", источник=f"inbox:{SOURCE_ID}"),
     wip("t.gitmute", "docs/specs/t-gitmute.md"),
+    card("t.nospec", "wip", глубина=dict(DEPTH)),
+    wip("t.named", "docs/specs/t-named.md", бумаги={"план": "docs/plans/общий-план.md"}),
     card("t.test1", "test", чем_подтверждено="селфтест 12 путей и живой прогон"),
     card("t.test2", "test"),
     card("t.accepted", "принято"),
@@ -190,13 +192,15 @@ papers("t.approval2", "t-approval2", ALL_PAPERS)
 papers("t.allpapers", "t-all", ALL_PAPERS)
 papers("t.gitmute", "t-gitmute", SPEC_ONLY)
 papers("t.blockedwip", "t-blockedwip", SPEC_ONLY)
+papers("t.named", "t-named", ["спека", "ревью_спеки", "контракт"])
+put("docs/plans/общий-план.md")
 put(".tasks/t.allpapers/журнал.md", LONG)
 (LOGS / "inbox" / "обработано" / f"{SOURCE_ID}.txt").write_text(LONG, encoding="utf-8")
 
 # Журнал одобрений спек: у одних задач слово владельца есть, у t.approval2
 # спека отправлена, но слова нет, у t.approval не отправлена вовсе.
 journal = []
-for task_id in ("t.debt", "t.debt2", "t.allpapers", "t.blockedwip"):
+for task_id in ("t.debt", "t.debt2", "t.allpapers", "t.blockedwip", "t.named"):
     journal.append({"ts": "2026-10-11T10:00:00", "событие": "отправлена", "задача": task_id})
     journal.append({"ts": "2026-10-11T11:00:00", "событие": "одобрена", "задача": task_id,
                     "сказано": "2026-10-11T11:00:00"})
@@ -308,6 +312,12 @@ ROWS = [
     # git не ответил: «не прочитали» — не «нарушений нет».
     ("t.gitmute", FIRST, ["история не прочитана"], ["бумаги собраны", "судить нечем"],
      "git молчит → «история не прочитана»"),
+    # Крупная без поля spec: гейт называет долг «нет поля spec:» без имени шага —
+    # доска обязана поставить карточку на спеку, а не пропустить её (ревью G-01).
+    ("t.nospec", FIRST, [], ["бумаги собраны"], "крупная без spec → колонка «спека»"),
+    # План назван картой (поле «бумаги») не по конвенции: гейт его видит — и
+    # доска тоже, путь шага — названный (ревью G-02).
+    ("t.named", "ревью кода", [], ["бумаги собраны"], "бумага по полю «бумаги» засчитана"),
     # test — ждёт живой проверки; чем подтверждено — видно на карточке.
     ("t.test1", "Проверка", ["селфтест 12 путей и живой прогон"], ["нечем подтверждено"],
      "test с чем_подтверждено → Проверка"),
@@ -445,6 +455,9 @@ if isinstance(board, dict):
           "положенные бумаги отмечены «есть»", f"шаги: {steps}")
     check(str(steps.get("спека", {}).get("путь", "")).endswith("docs/specs/t-all.md"),
           "путь спеки — тот, что назвал гейт", f"путь спеки: {steps.get('спека')}")
+    named = {s.get("шаг"): s for s in (by_id.get("t.named") or {}).get("шаги") or []}.get("план", {})
+    check(str(named.get("путь", "")).endswith("docs/plans/общий-план.md") and named.get("есть") is True,
+          "путь бумаги из поля «бумаги» — тот, что назвала карта", f"план t.named: {named}")
     contract = {s.get("шаг"): s for s in (by_id.get("t.debt") or {}).get("шаги") or []}.get("контракт", {})
     check(contract.get("есть") is False, "недостающая бумага отмечена «нет»", f"контракт t.debt: {contract}")
 
