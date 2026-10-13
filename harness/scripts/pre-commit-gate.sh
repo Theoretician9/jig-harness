@@ -30,17 +30,11 @@
 # Ненулевой код возврата отменяет коммит.
 set -euo pipefail
 
-source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/lib/config.sh"
-INSTALL_CONF="${HARNESS_INSTALL_CONF:-$(konf_koren)/install.conf}"
-HARNESS_CONF="${HARNESS_CONF:-$(konf_koren)/harness.conf}"
-# Конфиги грузятся так, чтобы ОКРУЖЕНИЕ было старше файла: иначе проба с
-# подставным путём судит БОЕВУЮ установку (улика 12.09.2026 — команда смены
-# модели ушла в рабочую панель агента).
-# shellcheck disable=SC1091
 # Путь берётся по РЕАЛЬНОМУ файлу (readlink -f): pre-commit подключён в
 # .git/hooks симлинком, и dirname дал бы .git/hooks, где библиотеки нет.
-# Поймано первым же коммитом после правки, 12.09.2026.
-konf_zagruzit PROJECT_DIR LOG_DIR TMUX_SESSION SECRETS_DIR AGENT_START_CMD
+# shellcheck disable=SC1091
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/lib/config.sh"
+konf_zagruzit
 GATES_LOG="$LOG_DIR/${GATES_LOG_NAME:-gates.jsonl}"
 
 # ── Валидатор схемы dev-map.yaml ────────────────────────────────────────────
