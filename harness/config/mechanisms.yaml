@@ -2414,7 +2414,7 @@
   без_него: 'Зелёные проверки перестают что-либо значить: они зелёные и на сломанном коде.
 
     '
-  проверяется: bash scripts/mutation-probe.sh
+  проверяется: bash scripts/mutation-probe.sh --selftest
   пишет: список порч, которые никто не поймал
 - файл: scripts/test_late_exit_watch.sh
   вид: гейт
