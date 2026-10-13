@@ -260,6 +260,10 @@ done
 проверка "служба панели"  python3 harness/panel/test_server.py
 проверка "подтверждение панели" python3 harness/panel/test_confirmation.py
 проверка "витрина панели"  python3 harness/panel/test_state.py
+# Канбан: снимок доски, её страницы в панели и приём комментариев с карточки.
+проверка "снимок доски"   python3 scripts/test_build_board.py
+проверка "доска панели"   python3 harness/panel/test_task_board.py
+проверка "приём комментариев" python3 scripts/test_comments_intake.py
 проверка "шаги пайплайна" python3 scripts/test_write_step.py
 проверка "правка памяти" python3 scripts/test_write_memory.py
 # Описание устройства стареет быстрее всего: механизмы заводятся каждую смену.
