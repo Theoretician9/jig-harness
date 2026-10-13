@@ -446,7 +446,7 @@ sudo crontab -u "$AGENT_USER" - <<EOF
 30 3 * * *    $D/server-hygiene.sh        >>$LOG_DIR/server-hygiene.log 2>&1
 0 4 * * *     $D/backup.sh                >>$LOG_DIR/backup.log 2>&1
 15 4 * * *    $D/devmap-selfheal.sh       >>$LOG_DIR/devmap-selfheal.log 2>&1
-5 * * * *     $D/evolution-collector.sh         >>$LOG_DIR/evo-collector.log 2>&1
+5 * * * *     $D/evolution-collector.sh         >>$LOG_DIR/evolution-collector.log 2>&1
 10 * * * *    $D/tokens-collector.sh      >>$LOG_DIR/tokens-collector.log 2>&1
 0 8 * * *     $D/heartbeat-watch.sh       >>$LOG_DIR/heartbeat-watch.log 2>&1
 0 9 1 * *     $D/memory-revision.sh       >>$LOG_DIR/memory-revision.log 2>&1
