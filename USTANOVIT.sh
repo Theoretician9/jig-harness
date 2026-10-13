@@ -265,7 +265,7 @@ for з in (д.get("задания") or []):
 ' "$1" "$2" "$3"
 }
 
-демоны_из_спеки() { # путь к системные-задания.yaml → имена демонов, по одному в строке
+демоны_из_спеки() { # путь к system-jobs.yaml → имена демонов, по одному в строке
   # Состав системы — ДАННЫЕ, а не проза. Прежде список вынимался awk-ом из §9
   # спеки установки, и спека отстала молча: 10 имён против 13 в данных
   # (замер 11.09.2026 — не было update-watch, memory-commit и
@@ -961,8 +961,8 @@ EOF
   # <…> у нас должен быть сразу набор установленный» и «Команды установки/
   # удаления плагинов и скилов не для человека, а для демонов и хуков».
   # Поэтому набор не печатается советом, а ставится: список — данные
-  # (harness/config/расширения.yaml), установка — scripts/extensions.py.
-  скажи "  набор берётся из данных: $PROJECT_DIR/harness/config/расширения.yaml"
+  # (harness/config/extensions.yaml), установка — scripts/extensions.py.
+  скажи "  набор берётся из данных: $PROJECT_DIR/harness/config/extensions.yaml"
   # П-13: совет про --channels уместен ТОЛЬКО при варианте А — в финале
   # варианта Б такой команды нет, печатать её значит путать владельца.
   if [[ "$TG_CHANNEL_VARIANT" == "A" ]]; then
@@ -976,7 +976,7 @@ EOF
   проверка "$step" "скилы и шаблоны разложены (дисциплина пайплайна)" \
     "[ -d '$PROJECT_DIR/harness/skills' ] && [ -d '$PROJECT_DIR/harness/шаблоны-задач' ]" \
     "ls '$PROJECT_DIR/harness'"
-  DONE_LIST+=("базовый набор расширений (данные: harness/config/расширения.yaml)")
+  DONE_LIST+=("базовый набор расширений (данные: harness/config/extensions.yaml)")
   отметить шаг_8
 }
 
@@ -989,7 +989,7 @@ EOF
     "[ -d '$D' ]" \
     "ls '$PROJECT_DIR/harness' 2>/dev/null || echo 'раскладка не выполнена (шаг 7-а)'"
   local cron_file="/tmp/harness-crontab.$$"
-  local spec_zadanij="$SCRIPT_DIR/harness/config/системные-задания.yaml"
+  local spec_zadanij="$SCRIPT_DIR/harness/config/system-jobs.yaml"
   local cron_body; cron_body=$(стройки_crontab "$spec_zadanij" "$PROJECT_DIR" "$LOG_DIR")
   [ -n "$cron_body" ] || стоп "$step" "реестр системных заданий не дал ни строки: $spec_zadanij"
   записать_файл "$cron_file" 644 root:root <<EOF
@@ -1002,12 +1002,12 @@ EOF
   делай "rm -f '$cron_file'"
   # Набор прогонов — из того же реестра, что и расписания: две копии
   # одного списка разъезжаются молча, и разъехались (13.09.2026).
-  local demons=(); mapfile -t demons < <(демоны_из_спеки "$SCRIPT_DIR/harness/config/системные-задания.yaml")
+  local demons=(); mapfile -t demons < <(демоны_из_спеки "$SCRIPT_DIR/harness/config/system-jobs.yaml")
   # П-1б (классовая починка): набор демонов сверяется с таблицей §9 САМОЙ
   # спеки, не с собственной копией — установщик лежит рядом со спекой.
   # В dry-run crontab не ставится — сверяется массив прогонов (тот же набор,
   # которым живёт шаг); расхождение установщика со спекой ловится и без root.
-  local spec_md="$SCRIPT_DIR/harness/config/системные-задания.yaml"
+  local spec_md="$SCRIPT_DIR/harness/config/system-jobs.yaml"
   if [[ -f "$spec_md" ]]; then
     скажи "  сверка набора демонов с реестром системных заданий: $spec_md"
     local sverka_rc=0
@@ -1030,7 +1030,7 @@ EOF
         "crontab -l -u $AGENT_USER; cat '$spec_md'"
     fi
     (( sverka_rc == 2 )) || скажи "  OK: набор демонов совпадает с реестром (${#demons[@]} демонов)"
-    (( DRY )) || CHECKED_LIST+=("$step: набор демонов crontab = реестру системные-задания.yaml")
+    (( DRY )) || CHECKED_LIST+=("$step: набор демонов crontab = реестру system-jobs.yaml")
   else
     скажи "  сверка с реестром пропущена: файла нет рядом ($spec_md)"
   fi

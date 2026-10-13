@@ -373,8 +373,8 @@ clean_old "$MEM_SESSION_DIR" '*.jsonl' "$MEM_SESSIONS_KEEP_D" "7. стеногр
 # У пути записи обязан быть ХОЗЯИН: до этого шага 1185 одноразовых логов
 # прогонов (33 МБ) не убирал никто, а гейт удержания уже называл этого хозяина
 # по имени — то есть обещал уборку, которой не было. Срок берётся ОТТУДА ЖЕ,
-# из harness/config/удержание.yaml: два источника разъехались бы молча.
-RETENTION="$PROJECT_DIR/harness/config/удержание.yaml"
+# из harness/config/retention.yaml: два источника разъехались бы молча.
+RETENTION="$PROJECT_DIR/harness/config/retention.yaml"
 LOG_KEEP=""
 if [ -r "$RETENTION" ]; then
     LOG_KEEP=$(python3 -c "
@@ -385,16 +385,16 @@ fi
 if [ -n "$LOG_KEEP" ] && [ "$LOG_KEEP" -gt 0 ] 2>/dev/null; then
     # Хроники не трогаем НИКОГДА (ревью 10.09.2026): guard_exceptions.log —
     # единственный след fail-open сторожа, install-*.log — протокол приёмки.
-    # Их политика в удержание.yaml стоит отдельной строкой со сроком 0.
+    # Их политика в retention.yaml стоит отдельной строкой со сроком 0.
     n_chr=$(find "$LOG_DIR" -maxdepth 1 -type f -mtime "+$LOG_KEEP" \
             \( -name 'guard_exceptions.log' -o -name 'install-*.log' -o -name 'rotation-forced.log' \) \
             2>/dev/null | wc -l)
     [ "${n_chr:-0}" -gt 0 ] && say "8. хроник старше ${LOG_KEEP} дн: ${n_chr} — не трогаю (история, не мусор)"
-    # Журналы, названные в инварианты.yaml, — улики жизни механизмов: покрытие
+    # Журналы, названные в invariants.yaml, — улики жизни механизмов: покрытие
     # ищет в них след срабатывания. Удалив их по сроку, уборка сама и создала бы
     # красное «следа нет» ровно в день, когда след становится обязателен
     # (ревью 10.09.2026). Список читается ОТТУДА ЖЕ, а не переписывается сюда.
-    INV="$PROJECT_DIR/harness/config/инварианты.yaml"
+    INV="$PROJECT_DIR/harness/config/invariants.yaml"
     KEEP_LOGS=$(python3 -c "
 import yaml, io, sys, re
 d = yaml.safe_load(io.open(sys.argv[1], encoding='utf-8'))

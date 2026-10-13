@@ -136,14 +136,14 @@ MODEL_SWITCH_STAMP="${MODEL_SWITCH_STAMP:-$LOG_DIR/model-switch.последни
 
 вид_работы() {  # имя скила → вид работы для таблицы моделей
     case "${1:-}" in
-        пишу-спеку)            echo "спека" ;;
-        ревью-спеки)           echo "ревью_спеки" ;;
-        пишу-план)             echo "план" ;;
-        pretask-контракт)      echo "контракт" ;;
-        тдд-тесты-до-кода)     echo "тесты" ;;
-        ревью-кода)            echo "ревью_кода" ;;
-        разбор-аварии|падение-тестов) echo "разбор_аварии" ;;
-        добыча-улик|постройка-прибора) echo "исследование" ;;
+        spec-writing)            echo "спека" ;;
+        spec-review)           echo "ревью_спеки" ;;
+        plan-writing)             echo "план" ;;
+        pretask-contract)      echo "контракт" ;;
+        tests-before-code)     echo "тесты" ;;
+        harness-code-review)            echo "ревью_кода" ;;
+        incident-analysis|test-failure) echo "разбор_аварии" ;;
+        добыча-улик|instrument-building) echo "исследование" ;;
         *)                     echo "" ;;   # шаг не назван — модель не трогаем
     esac
 }
@@ -190,7 +190,7 @@ MODEL_SWITCH_STAMP="${MODEL_SWITCH_STAMP:-$LOG_DIR/model-switch.последни
     # AGENT_START_CMD в системном конфиге, то есть выбор владельца навсегда.
     local vkl
     vkl=$(sed -n 's/^переключать_на_границе_шага:[[:space:]]*\([0-9]\).*/\1/p' \
-          "${MODELS_CONF:-$SCRIPTS_DIR/../harness/config/модели.yaml}" 2>/dev/null | head -1)
+          "${MODELS_CONF:-$SCRIPTS_DIR/../harness/config/models.yaml}" 2>/dev/null | head -1)
     if [ "${vkl:-0}" = "1" ]; then
         # «--только-сессия»: конфиг не трогаем. Запись AGENT_START_CMD — это
         # выбор владельца на все будущие перезапуски, шаг работы его не меняет.
@@ -203,9 +203,9 @@ MODEL_SWITCH_STAMP="${MODEL_SWITCH_STAMP:-$LOG_DIR/model-switch.последни
 if [ "${1:-}" = "--selftest" ]; then
     ok=1
     # БОЛЬНОЙ СЛУЧАЙ первым: настоящая нагрузка, снятая с живого вызова.
-    LIVE_PAYLOAD='{"session_id":"с1","hook_event_name":"PostToolUse","tool_name":"Skill","tool_input":{"skill":"пишу-спеку"},"tool_response":{"success":true,"commandName":"пишу-спеку"},"duration_ms":32}'
+    LIVE_PAYLOAD='{"session_id":"с1","hook_event_name":"PostToolUse","tool_name":"Skill","tool_input":{"skill":"spec-writing"},"tool_response":{"success":true,"commandName":"spec-writing"},"duration_ms":32}'
     LINE=$(HARNESS_TASK="hr.проба" запись "$LIVE_PAYLOAD")
-    if printf '%s' "$LINE" | grep -q '"skill": "пишу-спеку"' \
+    if printf '%s' "$LINE" | grep -q '"skill": "spec-writing"' \
        && printf '%s' "$LINE" | grep -q '"источник": "хук"' \
        && printf '%s' "$LINE" | grep -q '"task": "hr.проба"'; then
         echo "  ок    БОЛЬНОЙ СЛУЧАЙ: живая нагрузка даёт машинную запись с задачей"
@@ -275,7 +275,7 @@ if [ "${1:-}" = "--selftest" ]; then
     # БОЛЬНОЙ СЛУЧАЙ: два вызова подряд обязаны дать ОДНО переключение —
     # цепочка скилов в одном шаге иначе дёргала бы панель каждые полминуты.
     printf '%s' "$(date +%s)" > "$TMPD/метка"
-    if MODEL_SWITCH_STAMP="$TMPD/метка" LOG_DIR="$TMPD" переключить_модель "пишу-спеку" \
+    if MODEL_SWITCH_STAMP="$TMPD/метка" LOG_DIR="$TMPD" переключить_модель "spec-writing" \
        && [ ! -s "$TMPD/model-po-shagu.jsonl" ]; then
         echo "  ок    БОЛЬНОЙ СЛУЧАЙ: свежая метка — второго переключения нет (антидребезг)"
     else
@@ -287,7 +287,7 @@ if [ "${1:-}" = "--selftest" ]; then
     else
         echo "  ПЛОХО скил вне пайплайна получил вид работы"; ok=0
     fi
-    if [ "$(вид_работы "пишу-спеку")" = "спека" ] && [ "$(вид_работы "ревью-кода")" = "ревью_кода" ]; then
+    if [ "$(вид_работы "spec-writing")" = "спека" ] && [ "$(вид_работы "harness-code-review")" = "ревью_кода" ]; then
         echo "  ок    имя скила переводится в вид работы таблицы"
     else
         echo "  ПЛОХО перевод имени скила в вид работы"; ok=0
@@ -301,7 +301,7 @@ if [ "${1:-}" = "--selftest" ]; then
     mkdir -p "$TMPD2/docs/handover"
     rm -f "$TMPD2/метка"
     if PROJECT_DIR="$TMPD2" LOG_DIR="$TMPD2" MODEL_SWITCH_STAMP="$TMPD2/метка" \
-       MODEL_SWITCH_PAUSE_MIN=0 переключить_модель "пишу-спеку" \
+       MODEL_SWITCH_PAUSE_MIN=0 переключить_модель "spec-writing" \
        && grep -q "передача смены устарела" "$TMPD2/model-po-shagu.jsonl" 2>/dev/null; then
         echo "  ок    БОЛЬНОЙ СЛУЧАЙ: без свежей передачи модель не меняется"
     else

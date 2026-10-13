@@ -55,8 +55,8 @@ def _журнал_пробы(корень):
 # бы раздать всем его личную строгость.
 ЖИВЫЕ = ("STATE.md", "dev-map.yaml", "память/", "docs/", ".tasks/", "UNIFIED/",
          ".gitignore", ".git/",
-         "harness/config/пайплайн.yaml", "harness/config/очередь.yaml",
-         "harness/config/модели.yaml", "harness/config/ревизия.yaml")
+         "harness/config/pipeline.yaml", "harness/config/queue.yaml",
+         "harness/config/models.yaml", "harness/config/audit.yaml")
 
 # Проектный путь → путь внутри пакета. Каталоги идут с «/» на конце.
 # ПОРЯДОК ВАЖЕН: длинные префиксы раньше коротких, иначе scripts/hooks/x уедет
@@ -460,9 +460,9 @@ def селфтест() -> int:
     проба("ЗДОРОВЫЙ: скил набора и метка установки — зелёный, пакета не требуют", 0, rc)
 
     # БОЛЬНОЙ 4: скил ХАРНЕСА (не набора) без пары в пакете — по-прежнему красный.
-    (репо / "harness" / "skills" / "ревью-кода").mkdir(parents=True)
-    (репо / "harness" / "skills" / "ревью-кода" / "SKILL.md").write_text("правка\n", encoding="utf-8")
-    rc, _ = staged("harness/skills/ревью-кода/SKILL.md")
+    (репо / "harness" / "skills" / "harness-code-review").mkdir(parents=True)
+    (репо / "harness" / "skills" / "harness-code-review" / "SKILL.md").write_text("правка\n", encoding="utf-8")
+    rc, _ = staged("harness/skills/harness-code-review/SKILL.md")
     проба("БОЛЬНОЙ: скил харнеса без пары в пакете — красный", 1, rc)
 
     # Пакет не найден — сверка невозможна, но НЕ молча и не красным.

@@ -176,7 +176,7 @@ DEMON
     cp "$PROJECT_DIR/scripts/lib/"*.py "$dvor/scripts/lib/"
     printf '#!/usr/bin/env bash\nexit 0\n' > "$dvor/scripts/tg_send.sh"
     cp "$PROJECT_DIR/scripts/lib/models.sh" "$dvor/scripts/lib/" 2>/dev/null || true
-    cp "$PROJECT_DIR/harness/config/модели.yaml" "$dvor/" 2>/dev/null || true
+    cp "$PROJECT_DIR/harness/config/models.yaml" "$dvor/" 2>/dev/null || true
     cat > "$dvor/dev-map.yaml" <<'EOF'
 version: 1
 lines:

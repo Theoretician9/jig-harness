@@ -720,7 +720,7 @@ def самотест():
 
     # Свидетельства не правим.
     пропущено = [п for п in ("docs/handover/SESSION-HANDOFF-2026-09-11.md",
-                             "память/MEMORY.md", "harness/skills/пишу-спеку/SKILL.md")
+                             "память/MEMORY.md", "harness/skills/spec-writing/SKILL.md")
                  if any(п.startswith(и) for и in НЕ_ТРОГАТЬ)]
     if len(пропущено) == 3:
         путь("  ок    журналы, память и генерируемые скилы в правку не попадают")

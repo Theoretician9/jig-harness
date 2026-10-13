@@ -8,7 +8,7 @@
 
 Два решения:
 
-* **Список — ДАННЫЕ** (`harness/config/команды-бота.yaml`). Добавить кнопку —
+* **Список — ДАННЫЕ** (`harness/config/bot-commands.yaml`). Добавить кнопку —
   строка в файле, а не правка бота.
 * **Сверка, а не надежда.** `--проверить` спрашивает Telegram, что у него
   стоит, и сравнивает с данными. Поставить один раз и надеяться нельзя: меню
@@ -37,7 +37,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
 import config as конф                                     # noqa: E402
 
 КОРЕНЬ = Path(__file__).resolve().parent.parent
-ДАННЫЕ = КОРЕНЬ / "harness" / "config" / "команды-бота.yaml"
+ДАННЫЕ = КОРЕНЬ / "harness" / "config" / "bot-commands.yaml"
 API = os.environ.get("TG_API_BASE", "https://api.telegram.org")
 
 

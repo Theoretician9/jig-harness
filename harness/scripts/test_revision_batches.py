@@ -57,7 +57,7 @@ with tempfile.TemporaryDirectory() as врем:
     (проект / "scripts" / "x.sh").write_text("x" * 10, encoding="utf-8")
     (проект / "scripts" / "y.sh").write_text("y" * 10, encoding="utf-8")
     os.utime(проект / "scripts" / "y.sh", (2_000_000_000, 2_000_000_000))
-    конф = Path(врем) / "ревизия.yaml"
+    конф = Path(врем) / "audit.yaml"
     конф.write_text(
         "пороги: {знаков_на_порцию: 15, потолок_минут: 9, максимум_находок: 2,\n"
         "         максимум_знаков_карточки: 500, срок_находки_суток: 30}\n"

@@ -4,9 +4,9 @@ Project name and code directory are config data: `PROJECT_NAME` / `PROJECT_DIR`
 in `/etc/harness/install.conf`.
 
 @STATE.md
-@./память/УКАЗАНИЯ.md
+@./память/ORDERS.md
 @./память/MEMORY.md
-@./память/ТОН.md
+@./память/TONE.md
 
 > This file is BUILT from data by `scripts/build-claude-md.py`. Hand edits are
 > overwritten by the next build, and `build-claude-md.py --проверить` (part of
@@ -50,7 +50,7 @@ Each one is held by code, not by memory.
    `$LOG_DIR/inbox/обработано/`.
 2. **A rule from the owner goes to memory, not into the turn.** Any message
    that sets a rule ("always", "never", "I told you", "I don't want") is
-   copied VERBATIM into `память/УКАЗАНИЯ.md` — that file is loaded into every
+   copied VERBATIM into `память/ORDERS.md` — that file is loaded into every
    session; the processed-inbox folder is read by nobody. Gate: `orders.py`.
 3. **Announced means continue.** "Let me look" is the middle of a turn, not
    its end: keep going with tools right away.
@@ -65,7 +65,7 @@ Each one is held by code, not by memory.
 7. **Short and regular.** The channel gets the RESULT and NUMBERS, not your
    train of thought. Self-analysis goes to the log and to memory. Report at
    every checkpoint: a pulse matters more than volume.
-8. **How to talk** is a document, not a habit: `память/ТОН.md`, written by an
+8. **How to talk** is a document, not a habit: `память/TONE.md`, written by an
    agent from a measurement of the owner's own speech. The channel guard reads
    its length limits FROM that file.
 9. **Stop and wait only when a DECISION of the owner is required** — then say
@@ -82,7 +82,7 @@ consent means no action.
 ## Working rules (short form; full ones are the skills)
 
 - **Think before code**: state assumptions, ask what is unclear (in the
-  channel), propose the simple solution. Skill: `приём-задачи`.
+  channel), propose the simple solution. Skill: `task-intake`.
 - **Pipeline by task depth**: spec → spec review → plan → contract → tests
   before code → code → gates → review → deploy → live smoke → closing. Key
   steps are led by skills; a skill call is logged by a HOOK, so gates count
@@ -153,12 +153,12 @@ Bans are enforced by `scripts/hooks/guard_bash.py`, not by your memory.
 |---|---|
 | `CLAUDE.md` | rules and invariants (this file, generated) |
 | `STATE.md` | what is true right now; session entry point |
-| `память/УКАЗАНИЯ.md` | the owner's standing instructions in their own words |
+| `память/ORDERS.md` | the owner's standing instructions in their own words |
 | `память/MEMORY.md` | memory index + trigger table, loaded every session |
-| `память/ТОН.md` | how to talk to the owner, measured from their speech |
+| `память/TONE.md` | how to talk to the owner, measured from their speech |
 | `docs/handover/` | context handover between sessions |
 | `dev-map.yaml` | the task registry, source of truth for the dashboard |
-| `harness/config/устройство.yaml` | registry of mechanisms — DATA |
+| `harness/config/mechanisms.yaml` | registry of mechanisms — DATA |
 | `docs/УСТРОЙСТВО-ХАРНЕСА.md` | "how it all works" — BUILT from the registry |
 | `harness/skills/` | pipeline skills — generated, never hand-edited |
 | `.claude/skills/` | what the shell sees: links to `harness/skills/` plus the product's own skills |
@@ -169,7 +169,7 @@ Bans are enforced by `scripts/hooks/guard_bash.py`, not by your memory.
 ## What is watching (built from the registry)
 
 <!-- AUTO:mechanisms -->
-204 mechanisms are registered in `harness/config/устройство.yaml` (gates — 147, daemons — 27, skills — 19, hooks — 11). Each one names what it does, when it runs, what breaks without it and the command that proves it works. The registry is data: `python3 scripts/check-registry.py` fails when the code and the registry disagree.
+204 mechanisms are registered in `harness/config/mechanisms.yaml` (gates — 147, daemons — 27, skills — 19, hooks — 11). Each one names what it does, when it runs, what breaks without it and the command that proves it works. The registry is data: `python3 scripts/check-registry.py` fails when the code and the registry disagree.
 <!-- /AUTO -->
 
 ---

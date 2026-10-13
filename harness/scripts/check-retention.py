@@ -8,7 +8,7 @@
 политики, красит ворота — значит завели запись, не решив, кто её убирает.
 
 Что проверяется:
-  1. каждый файл в $LOG_DIR подпадает под маску из harness/config/удержание.yaml;
+  1. каждый файл в $LOG_DIR подпадает под маску из harness/config/retention.yaml;
   2. суммарный размер по маске не выше потолка;
   3. файлы старше срока называются числом (это не отказ, а работа для хозяина).
 
@@ -25,7 +25,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib
 from config import log_dir, конфиг  # noqa: E402 — один парсер конфига на все гейты
 
 КОРЕНЬ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-ДАННЫЕ = os.path.join(КОРЕНЬ, "harness", "config", "удержание.yaml")
+ДАННЫЕ = os.path.join(КОРЕНЬ, "harness", "config", "retention.yaml")
 
 
 def подходит(отн: str, маска: str) -> bool:
@@ -124,7 +124,7 @@ def проверить(корень: str, политики: list, подробн
         # Предупреждение, не отказ: случайный рабочий файл не должен блокировать
         # коммит чужой работы (живой случай 10.09 — копия журнала на минуту).
         print(f"  [удержание] ⚠ путей без хозяина: {len(ничьи)} — "
-              f"объяви политику в harness/config/удержание.yaml")
+              f"объяви политику в harness/config/retention.yaml")
         for отн in ничьи[:5]:
             print(f"      • {отн}")
     if not красных:

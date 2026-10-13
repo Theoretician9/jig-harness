@@ -32,7 +32,7 @@ from pathlib import Path
 import yaml
 
 КОРЕНЬ = Path(__file__).resolve().parent.parent
-ДАННЫЕ = КОРЕНЬ / "harness" / "config" / "признаки.yaml"
+ДАННЫЕ = КОРЕНЬ / "harness" / "config" / "signals.yaml"
 # Где ищем судей: код харнеса. Продукт и чужие деревья не наше дело.
 ОБХОД = ("scripts", "harness/demons", "harness/hooks", "harness/panel")
 РАСШИРЕНИЯ = (".py", ".sh")

@@ -356,7 +356,7 @@ def машина() -> dict:
 def шаги() -> dict:
     """Шаги работы по уровням задачи — из пульта владельца."""
     пульт = Path(os.environ.get("HARNESS_PAJPLAJN")
-                 or КОРЕНЬ / "harness" / "config" / "пайплайн.yaml")
+                 or КОРЕНЬ / "harness" / "config" / "pipeline.yaml")
     try:
         import yaml
         данные = yaml.safe_load(пульт.read_text(encoding="utf-8"))
@@ -395,7 +395,7 @@ def память(искать: str = "") -> dict:
     # заглянуть туда она не может и не должна. Набор она читает СПИСКОМ из
     # репозитория; пока список не заведён, признак честно неизвестен.
     список_набора = Path(os.environ.get("HARNESS_NABOR")
-                         or КОРЕНЬ / "harness" / "config" / "набор-памяти.txt")
+                         or КОРЕНЬ / "harness" / "config" / "memory-set.txt")
     try:
         в_наборе = {с.strip() for с in список_набора.read_text(encoding="utf-8").splitlines()
                     if с.strip() and not с.startswith("#")}
@@ -436,10 +436,10 @@ def устройство(искать: str = "") -> dict:
     """Из чего состоит харнес: тот же реестр, из которого собран документ.
 
     Панель и документ не имеют права разойтись, поэтому источник один —
-    harness/config/устройство.yaml, а не вторая копия описаний в коде экрана.
+    harness/config/mechanisms.yaml, а не вторая копия описаний в коде экрана.
     """
     файл = Path(os.environ.get("HARNESS_USTROJSTVO")
-                or КОРЕНЬ / "harness" / "config" / "устройство.yaml")
+                or КОРЕНЬ / "harness" / "config" / "mechanisms.yaml")
     import yaml
     try:
         записи = yaml.safe_load(файл.read_text(encoding="utf-8"))["механизмы"]
@@ -465,7 +465,7 @@ def _носитель_в_вид() -> dict:
     копия перевода разошлась бы со схемой молча — потому он один.
     """
     файл = Path(os.environ.get("HARNESS_PASPORT")
-                or КОРЕНЬ / "harness" / "config" / "паспорт.yaml")
+                or КОРЕНЬ / "harness" / "config" / "passport.yaml")
     import yaml
     try:
         return yaml.safe_load(файл.read_text(encoding="utf-8"))["носитель_в_вид"]

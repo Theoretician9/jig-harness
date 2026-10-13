@@ -15,7 +15,7 @@ from pathlib import Path
 import yaml
 
 КОРЕНЬ = Path(__file__).resolve().parent.parent
-ДАННЫЕ = КОРЕНЬ / "harness" / "config" / "ревизия.yaml"
+ДАННЫЕ = КОРЕНЬ / "harness" / "config" / "audit.yaml"
 ПОРОГИ = ("знаков_на_порцию", "потолок_минут", "максимум_находок",
           "максимум_знаков_карточки", "срок_находки_суток")
 путей = неудач = 0

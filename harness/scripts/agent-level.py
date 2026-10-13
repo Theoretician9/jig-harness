@@ -17,7 +17,7 @@
   запрещает всё и называет себя — молчаливое умолчание скрыло бы опечатку.
 
 Прогон:
-    python3 scripts/agent-level.py --повод ревью-кода [--уровень максимум]
+    python3 scripts/agent-level.py --повод harness-code-review [--уровень максимум]
     python3 scripts/agent-level.py --показать    # уровень и что он разрешает
     python3 scripts/agent-level.py --selftest
 Код возврата: 0 — зову, 1 — не зову (причина в выводе), 2 — спросить нечем.
@@ -36,7 +36,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
 import config as конф_модуль                              # noqa: E402
 
 КОРЕНЬ = Path(__file__).resolve().parent.parent
-ДАННЫЕ = КОРЕНЬ / "harness" / "config" / "агенты.yaml"
+ДАННЫЕ = КОРЕНЬ / "harness" / "config" / "agents.yaml"
 ЖУРНАЛ = Path(конф_модуль.log_dir()) / "вызовы-агентов.jsonl"
 
 

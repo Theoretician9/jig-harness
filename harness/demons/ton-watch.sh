@@ -39,7 +39,7 @@ PROJECT_DIR="${PROJECT_DIR:?пуст PROJECT_DIR — не прочитан па�
 # функции разъезжаются при первой же правке (находка ревью кода 12.09.2026).
 # shellcheck disable=SC1091
 [ -r "$PROJECT_DIR/scripts/lib/models.sh" ] && source "$PROJECT_DIR/scripts/lib/models.sh"
-TON="$PROJECT_DIR/память/ТОН.md"
+TON="$PROJECT_DIR/память/TONE.md"
 SOSTOYANIE="$LOG_DIR/ton-watch.json"
 # Сколько прогонов С ДАННЫМИ идут ежедневно, прежде чем перейти на месяц.
 TON_DAILY_RUNS="${TON_DAILY_RUNS:-10}"

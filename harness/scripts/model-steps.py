@@ -42,9 +42,9 @@ def main() -> int:
     # умолчаний он проверял бы пустоту, оставаясь зелёным (та же беда, что с
     # самотестом на синтетических файлах).
     таблица = читать(os.environ.get("MODELS_CONF")
-                     or os.path.join(КОРЕНЬ, "harness", "config", "модели.yaml")).get("модели") or {}
+                     or os.path.join(КОРЕНЬ, "harness", "config", "models.yaml")).get("модели") or {}
     шаги = читать(os.environ.get("PIPELINE_CONF")
-                  or os.path.join(КОРЕНЬ, "harness", "config", "пайплайн.yaml")).get("шаги") or {}
+                  or os.path.join(КОРЕНЬ, "harness", "config", "pipeline.yaml")).get("шаги") or {}
     if not шаги:
         print("шагов пайплайна не прочитать — проверять нечего", file=sys.stderr)
         return 1

@@ -29,7 +29,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
 from config import корень_дерева, путь_harness_conf  # noqa: E402
 
 КОРЕНЬ = корень_дерева(__file__)
-РЕЕСТР = "harness/config/устройство.yaml"
+РЕЕСТР = "harness/config/mechanisms.yaml"
 КОНФИГ = путь_harness_conf()
 КЛЮЧ = "HEARTBEAT_PERIODS"
 # Кого заводит расписание — тому и метка пульса.

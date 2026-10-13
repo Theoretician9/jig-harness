@@ -25,7 +25,7 @@
 # Код возврата: 0 — зелёная, 1 — красная.
 #
 # Имена переменных ЛАТИНИЦЕЙ: кириллические bash не берёт и печатает в ошибку
-# само значение (память: кириллица-в-именах-bash).
+# само значение (память: cyrillic-in-bash-names).
 set -uo pipefail
 export LC_ALL=C.UTF-8
 
@@ -57,7 +57,7 @@ command -v tmux >/dev/null 2>&1 || { echo "ПРОБА: нет tmux — дост�
 
 mkdir -p "$T/log" "$T/project/harness/config"
 cp "$KOREN/dev-map.yaml" "$T/project/dev-map.yaml"
-cp "$KOREN/harness/config/очередь.yaml" "$T/project/harness/config/очередь.yaml"
+cp "$KOREN/harness/config/queue.yaml" "$T/project/harness/config/queue.yaml"
 printf '%s' "$TOKEN" > "$T/token"
 
 # ── подставной Bot API: отдаёт два сообщения владельца один раз ─────────────

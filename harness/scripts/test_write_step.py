@@ -60,7 +60,7 @@ def путь_плохо(текст):
 
 
 def запуск(врем: Path, *доводы):
-    среда = dict(os.environ, HARNESS_PAJPLAJN=str(врем / "пайплайн.yaml"),
+    среда = dict(os.environ, HARNESS_PAJPLAJN=str(врем / "pipeline.yaml"),
                  LOG_DIR=str(врем / "логи"))
     готово = subprocess.run([sys.executable, str(СКРИПТ), *доводы],
                             capture_output=True, text=True, env=среда, timeout=30)
@@ -70,7 +70,7 @@ def запуск(врем: Path, *доводы):
 with tempfile.TemporaryDirectory() as tmp:
     врем = Path(tmp)
     (врем / "логи").mkdir()
-    пульт = врем / "пайплайн.yaml"
+    пульт = врем / "pipeline.yaml"
     пульт.write_text(ПУЛЬТ, encoding="utf-8")
 
     if not СКРИПТ.exists():
@@ -138,7 +138,7 @@ with tempfile.TemporaryDirectory() as tmp:
         путь_плохо("выдуманный уровень записан в пульт")
 
     # Копия прежнего пульта — до записи (И-1).
-    копии = list((врем / "логи" / "панель-копии").glob("пайплайн.yaml.*"))
+    копии = list((врем / "логи" / "панель-копии").glob("pipeline.yaml.*"))
     if копии:
         путь_ок("копия прежнего пульта снята до записи")
     else:
