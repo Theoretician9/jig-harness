@@ -684,4 +684,10 @@ printf '%s\n' "$CHANGED" | python3 "$SCRIPT_DIR/compare-with-package.py" || fail
 
 journal pass ""
 echo "[pre-commit] все гейты пройдены"
+# Коммит — рубеж, на котором несрочное сообщение владельца ждёт прочтения
+# (диспетчер шаг не прерывает). Напоминание держала память смены, и 13.10.2026
+# сообщение пролежало 10 минут через три коммита. Коммит не валит — называет.
+inbox_unread=$(find "$LOG_DIR/inbox" -maxdepth 1 -type f -name '*.txt' 2>/dev/null | wc -l)
+[ "$inbox_unread" -gt 0 ] \
+  && echo "[pre-commit] ВХОДЯЩИЕ: $inbox_unread непрочитанных в $LOG_DIR/inbox — прочитай до следующего шага"
 exit 0
