@@ -372,10 +372,10 @@ fi
 [[ -f "$HARNESS_SRC/razlozhit-harnes.sh" ]] || { скажи "нет $HARNESS_SRC/razlozhit-harnes.sh — пакет неполный" >&2; exit 1; }
 
 UNIFIED_SRC=""
-for cand in "$SCRIPT_DIR/../UNIFIED" "$SCRIPT_DIR/UNIFIED" "$SCRIPT_DIR/../../UNIFIED"; do
+for cand in "$SCRIPT_DIR/sluzhebnoe/UNIFIED" "$SCRIPT_DIR/../UNIFIED" "$SCRIPT_DIR/UNIFIED" "$SCRIPT_DIR/../../UNIFIED"; do
   [[ -d "$cand" ]] && UNIFIED_SRC="$(cd "$cand" && pwd)" && break
 done
-[[ -n "$UNIFIED_SRC" ]] || { скажи "каталог UNIFIED не найден рядом с пакетом (искал: ../UNIFIED, ./UNIFIED, ../../UNIFIED) — доставка глав обязательна (01-SPEC §7-а)" >&2; exit 1; }
+[[ -n "$UNIFIED_SRC" ]] || { скажи "каталог UNIFIED не найден рядом с пакетом (искал: ./sluzhebnoe/UNIFIED, ../UNIFIED, ./UNIFIED, ../../UNIFIED) — доставка глав обязательна (01-SPEC §7-а)" >&2; exit 1; }
 
 # ------------------------------------------- опрос: все вопросы одним блоком ----
 
