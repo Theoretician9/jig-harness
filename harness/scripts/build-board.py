@@ -11,11 +11,13 @@
 """
 from __future__ import annotations
 
+import functools
 import importlib.util
 import json
 import os
 import subprocess
 import sys
+import tempfile
 from datetime import datetime
 from pathlib import Path
 
@@ -30,11 +32,22 @@ COMMITS_LIMIT = 20
 QUEUE, CHECK, DONE = "Очередь", "Проверка", "Готово"
 
 
+def load_script(name: str, file: str):
+    spec = importlib.util.spec_from_file_location(name, HERE / file)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def load_gate():
-    spec = importlib.util.spec_from_file_location("check_pipeline", HERE / "check-pipeline.py")
-    gate = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(gate)
-    return gate
+    return load_script("check_pipeline", "check-pipeline.py")
+
+
+@functools.lru_cache(maxsize=1)
+def key_filter():
+    # Тот же фильтр, что у карточки: ключ, присланный владельцем в канал или
+    # попавший в журнал задачи, не едет ни в карту, ни на доску веб-панели.
+    return load_script("map_from_message", "map-from-message.py").без_ключей
 
 
 def column_name(step: str) -> str:
@@ -125,9 +138,10 @@ def column(card: dict, judge) -> tuple:
 
 def read_text(path: Path) -> str | None:
     try:
-        return path.read_text(encoding="utf-8", errors="replace")[:TEXT_LIMIT]
+        text = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return None
+    return key_filter()(text)[:TEXT_LIMIT]
 
 
 def sources(card: dict, log_dir: Path) -> list:
@@ -234,10 +248,17 @@ def build(map_path, judge, now: datetime) -> dict:
 
 
 def write_atomic(target: Path, board: dict) -> None:
-    temp = target.with_name(target.name + ".tmp")
-    temp.write_text(json.dumps(board, ensure_ascii=False, indent=1), encoding="utf-8")
-    os.chmod(temp, 0o640)
-    os.replace(temp, target)
+    # Каталог пишет и служба панели: временное имя — уникальное (O_EXCL, без
+    # перехода по симлинку), права — по дескриптору, а не по пути.
+    descriptor, temp = tempfile.mkstemp(dir=target.parent, prefix=".board.")
+    try:
+        os.fchmod(descriptor, 0o640)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump(board, handle, ensure_ascii=False, indent=1)
+        os.replace(temp, target)
+    except BaseException:
+        Path(temp).unlink(missing_ok=True)
+        raise
 
 
 def main() -> int:
