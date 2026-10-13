@@ -200,7 +200,7 @@ MANUAL_LIST=()
   printf 'Диагностика: %s\n' "$3" >&2
   printf 'После починки перезапустите: sudo bash %s --resume\n' "${BASH_SOURCE[0]}" >&2
   # Сводка идёт ловушкой EXIT и без этой строки печатала «Упавших шагов нет»
-  # после стопа (llama 13.10.2026: шаг 9 встал, владелец увидел «всё хорошо»).
+  # после стопа (первая установка 13.10.2026: шаг 9 встал, владелец увидел «всё хорошо»).
   FAILED_LIST+=("СТОП на шаге «$1»: $2 — установка прервана, дальше не шла")
   exit 1
 }
@@ -396,11 +396,26 @@ fi
 [[ -d "$HARNESS_SRC" ]] || { скажи "рядом со скриптом нет каталога harness/ — запускайте из каталога STARTER-PACKAGE" >&2; exit 1; }
 [[ -f "$HARNESS_SRC/razlozhit-harnes.sh" ]] || { скажи "нет $HARNESS_SRC/razlozhit-harnes.sh — пакет неполный" >&2; exit 1; }
 
+# ГЛАВЫ ИЩУТСЯ В ДВУХ РАСКЛАДКАХ. В пакете `UNIFIED/` лежит рядом с ним, а в
+# публичной сборке она уехала в `sluzhebnoe/UNIFIED` (данные
+# harness/config/публичная-сборка.yaml, ключ «перенести»): 1,1 МБ глав в корне
+# читаются человеком как груз. Установщик о новой раскладке не знал — и
+# установка владельца 13.10.2026 умерла здесь же, на первом шаге, со словами
+# «каталог UNIFIED не найден». Раскладчик и генератор скилов обе раскладки
+# знали, а первый, кого запускает человек, — нет.
+#
+# СПИСОК ОДИН: он же печатается в отказе. Два списка одного и того же
+# расходятся молча, и расходится тот, который реже читают.
+UNIFIED_CANDIDATES=(
+  "$SCRIPT_DIR/../UNIFIED" "$SCRIPT_DIR/UNIFIED" "$SCRIPT_DIR/../../UNIFIED"
+  "$SCRIPT_DIR/sluzhebnoe/UNIFIED" "$SCRIPT_DIR/../sluzhebnoe/UNIFIED"
+  "$SCRIPT_DIR/../../sluzhebnoe/UNIFIED"
+)
 UNIFIED_SRC=""
-for cand in "$SCRIPT_DIR/sluzhebnoe/UNIFIED" "$SCRIPT_DIR/../UNIFIED" "$SCRIPT_DIR/UNIFIED" "$SCRIPT_DIR/../../UNIFIED"; do
+for cand in "${UNIFIED_CANDIDATES[@]}"; do
   [[ -d "$cand" ]] && UNIFIED_SRC="$(cd "$cand" && pwd)" && break
 done
-[[ -n "$UNIFIED_SRC" ]] || { скажи "каталог UNIFIED не найден рядом с пакетом (искал: ./sluzhebnoe/UNIFIED, ../UNIFIED, ./UNIFIED, ../../UNIFIED) — доставка глав обязательна (01-SPEC §7-а)" >&2; exit 1; }
+[[ -n "$UNIFIED_SRC" ]] || { скажи "каталог UNIFIED не найден (искал: ${UNIFIED_CANDIDATES[*]}) — доставка глав обязательна (01-SPEC §7-а)" >&2; exit 1; }
 
 # ------------------------------------------- опрос: все вопросы одним блоком ----
 
@@ -570,8 +585,13 @@ EOF
   уже_сделан шаг_1 && { скажи "[$step] пропуск (--resume)"; return 0; }
   заголовок "$step"
   делай "id -u $AGENT_USER >/dev/null 2>&1 || adduser --disabled-password --gecos '' $AGENT_USER"
-  делай "mkdir -p '$PROJECT_DIR' '$LOG_DIR' '$HEARTBEAT_DIR' /var/backups/harness"
-  делай "chown -R $AGENT_USER:$AGENT_USER '$PROJECT_DIR' '$LOG_DIR' '$HEARTBEAT_DIR' /var/backups/harness"
+  # panel-state — часть каркаса состояния, а не собственность шага 10: задание
+  # build-board пишет в него снимок доски и проверяется ШАГОМ 9, то есть ДО
+  # панели. Без каталога оно падало «No such file or directory» и объявлялось
+  # находкой установки (замер 14.10.2026, проба установки с нуля). Шаг 10
+  # доводит права до 2770 agent:harness-panel своим install -d.
+  делай "mkdir -p '$PROJECT_DIR' '$LOG_DIR' '$HEARTBEAT_DIR' '$STATE_DIR/panel-state' /var/backups/harness"
+  делай "chown -R $AGENT_USER:$AGENT_USER '$PROJECT_DIR' '$LOG_DIR' '$HEARTBEAT_DIR' '$STATE_DIR/panel-state' /var/backups/harness"
   # Возврат файлов входа: `sudo claude` рядом делает их root-овыми, и агент
   # теряет вход. Строка обязана совпадать с команда_возврата() в
   # scripts/check-login-expiry.py буква в букву — иначе sudo откажет.
@@ -597,7 +617,7 @@ EOF
   уже_сделан шаг_2 && { скажи "[$step] пропуск (--resume)"; return 0; }
   заголовок "$step"
   делай "DEBIAN_FRONTEND=noninteractive apt-get update"
-  делай "DEBIAN_FRONTEND=noninteractive apt-get install -y git tmux curl jq python3 python3-pip python3-venv python3-yaml shellcheck ripgrep unzip"
+  делай "DEBIAN_FRONTEND=noninteractive apt-get install -y git tmux curl jq python3 python3-pip python3-venv python3-yaml shellcheck ripgrep unzip logrotate"
   делай "if command -v node >/dev/null 2>&1 && [ \"\$(node --version | sed 's/v//' | cut -d. -f1)\" -ge 20 ]; then echo 'node уже >=20 — nodesource пропущен'; else curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && DEBIAN_FRONTEND=noninteractive apt-get install -y nodejs; fi"
   # Браузер расширения playwright (базовый набор) скачивает агент без root, а
   # его системные библиотеки (libatk, libgbm, libasound…) — только root: без
@@ -856,7 +876,7 @@ EOF
     "[ -L /etc/harness/harness.conf ] && sudo -u $AGENT_USER test -w /etc/harness/agent/harness.conf && [ \"\$(stat -c %U /etc/harness /etc/harness/install.conf | sort -u)\" = root ]" \
     "ls -la /etc/harness /etc/harness/agent"
   # Раскладчик идёт от agent, и в /etc/logrotate.d и /etc/sysctl.d ему не
-  # писать: эти две строки владелец llama 13.10.2026 получил отдельным
+  # писать: эти две строки владелец первой установки 13.10.2026 получил отдельным
   # root-скриптом («мне как пользователю лишние действия»). Установщик — root,
   # он и кладёт.
   делай "cp '$pkg_dst/harness/config/logrotate-harness' /etc/logrotate.d/harness && chmod 644 /etc/logrotate.d/harness"
@@ -997,7 +1017,7 @@ EOF
       | curl -s -K - \
         -d chat_id="$TG_CHAT_ID" -d text="Канал установлен. Ответьте РЕПЛАЕМ на это сообщение словом: дошло")
     # «chat not found» — не поломка, а порядок: бот не может написать первым,
-    # пока владелец не нажал Start. 13.10.2026 (llama) этот ответ рвал установку
+    # пока владелец не нажал Start. 13.10.2026 (первая установка) этот ответ рвал установку
     # стопом, и шаги 8–10 — расписание сторожей и панель — не выполнились вовсе.
     if ! sent_id=$(jq -e '.result.message_id' <<< "$otvet"); then
       if jq -e '.description | test("chat not found")' <<< "$otvet" >/dev/null 2>&1; then
@@ -1108,7 +1128,7 @@ EOF
   # функции: строка «демон=переменная=значение».
   # Тяжёлые демоны — только на запускаемость: полный прогон ревизии проекта зовёт
   # модель по всем областям харнеса и держит лок карты десятки минут (установка
-  # llama 13.10.2026 встала на нём). Полный прогон — по расписанию.
+  # первая установка 13.10.2026 встала на нём). Полный прогон — по расписанию.
   local -a LIGHT_RUN=("nightly-gates=NIGHTLY_GATES_CMD=true" "project-revision=REVIZIA_ENABLED=0")
   local d rc light pair
   for d in "${demons[@]}"; do
@@ -1129,6 +1149,10 @@ EOF
         CHECKED_LIST+=("$step: $d в env -i, exit=0")
       else
         скажи "    exit=$rc — $d УПАЛ (не прерываемся, свод в конце; лог: $LOG_DIR/install-demon-probe.log)"
+        # Причина — в отчёт, а не только в журнал: на стенде журнал остаётся
+        # внутри контейнера, и читать его нечем (замер 14.10.2026).
+        tail -3 "$LOG_DIR/install-demon-probe.log" 2>/dev/null \
+            | sed 's/^/      причина: /' || true
         FAILED_LIST+=("демон $d: exit=$rc в env -i — смотреть $LOG_DIR/install-demon-probe.log и $script")
       fi
     fi

@@ -223,8 +223,10 @@ done
 проверка "загрузчик конфига" bash scripts/lib/config.sh --selftest
 проверка "корень установки" python3 scripts/check-install-root.py
 проверка "метка-лимита"   python3 scripts/limit_mark.py --selftest
+проверка "искатели-глав"  python3 scripts/check-unified-seekers.py
 проверка "семена"         python3 scripts/check-seed-templates.py
 проверка "семена-самотест" python3 scripts/check-seed-templates.py --selftest
+проверка "искатели-самотест" python3 scripts/check-unified-seekers.py --selftest
 проверка "сторож паузы" python3 scripts/hooks/pause_guard.py --selftest
 проверка "корень-самотест" python3 scripts/check-install-root.py --selftest
 # Функция оболочки, званная выше своего определения, печатает одну строку в
@@ -357,6 +359,9 @@ done
 # Две проверки, написанные 12.09.2026, не звал НИКТО — ни ворота, ни pre-commit
 # (ревью кода, №8). Проверка, которую не запускают, не сторожит.
 проверка "данные сборки"  python3 scripts/test_public_build.py
+# Догоняние публичной ветки: пока тот же общий гит правят две машины владельца,
+# расхождение повторяется, и переносить его правки руками — терять их молча.
+проверка "догоняние публичной" python3 scripts/catch-up-public.py --selftest
 проверка "юнит панели"    bash scripts/panel-unit.sh --selftest
 # Рубеж панели: код опирается на конфиг nginx в четырёх местах, а самого
 # конфига не было ни в репозитории, ни в пакете. Живая улика 13.09.2026 —
