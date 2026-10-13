@@ -1073,11 +1073,21 @@ while true; do
                 persist_offset "$UPDATE_ID"
                 continue ;;
             "panel")
-                PANEL_LINK=$(python3 "$PANEL_DIR/client.py" --ссылка "$CHAT" 2>&1)
-                # disable_web_page_preview обязателен: предпросмотр Telegram
-                # открывает ссылку сам, и вход сгорел бы до владельца (C4).
-                отправить_без_предпросмотра "$CHAT" "$PANEL_LINK"
-                say "ссылка на панель выдана: ${PANEL_LINK:0:60}"
+                # Отказ службы (панель не выведена наружу, служба молчит) — ответ
+                # владельцу, а не выход: голое присваивание под set -e роняло
+                # диспетчер, рестарт перечитывал тот же update, и владелец
+                # получал «принял: /panel» каждые 12 секунд.
+                PANEL_RC=0
+                PANEL_LINK=$(python3 "$PANEL_DIR/client.py" --ссылка "$CHAT" 2>&1) || PANEL_RC=$?
+                if [ "$PANEL_RC" = 0 ]; then
+                    # disable_web_page_preview обязателен: предпросмотр Telegram
+                    # открывает ссылку сам, и вход сгорел бы до владельца (C4).
+                    отправить_без_предпросмотра "$CHAT" "$PANEL_LINK"
+                    say "ссылка на панель выдана: ${PANEL_LINK:0:60}"
+                else
+                    ack "$CHAT" "Панель не открыть: ${PANEL_LINK:0:300}"
+                    say "ссылка на панель НЕ выдана (rc=$PANEL_RC): ${PANEL_LINK:0:200}"
+                fi
                 persist_offset "$UPDATE_ID"
                 continue ;;
         esac
