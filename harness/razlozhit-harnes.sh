@@ -425,4 +425,17 @@ if ! python3 "$PROJECT_DIR/harness/BUILD-SKILLS.py"; then
   exit 1
 fi
 
+# Служба, чей код раскладка только что обновила, работает на старом: гейт
+# внешних вызовов краснеет, и с ним — каждый коммит. Кого перезапускать,
+# решает тот же гейт (второго счёта свежести не заводим); право на рестарт —
+# строка sudoers из USTANOVIT.sh. Нет права — называем команду вслух.
+while read -r unit; do
+  if sudo -n systemctl restart "$unit" 2>/dev/null; then
+    echo "перезапущена служба на старом коде: $unit"
+  else
+    echo "ВНИМАНИЕ: $unit работает на старом коде, прав на рестарт нет — выполните: sudo systemctl restart $unit"
+  fi
+done < <(python3 "$PROJECT_DIR/scripts/check-external-callers.py" 2>/dev/null \
+  | sed -n 's/.*Перезапустить: sudo systemctl restart \([^ ]*\).*/\1/p' | sort -u)
+
 echo "раскладка завершена: $PROJECT_DIR"
