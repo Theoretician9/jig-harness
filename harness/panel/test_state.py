@@ -275,7 +275,7 @@ import os as _os2
 _врем_обн = Path(tempfile.mkdtemp(prefix="обновления-"))
 _os2.environ["LOG_DIR"] = str(_врем_обн)
 _os2.environ["PANEL_STATE_DIR_LOGS"] = str(_врем_обн)
-_лог_обн = _врем_обн / "obnovlenie-watch.log"
+_лог_обн = _врем_обн / "update-watch.log"
 пусто_обн = state.обновления()
 if пусто_обн.get("нет данных") == "проверок ещё не было":
     путь_ок("обновления: проверок ещё не было — сказано словами")

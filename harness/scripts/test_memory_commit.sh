@@ -137,7 +137,7 @@ progon
 itog "2" "$(skazano)" "об успехе владельцу не пишем"
 itog "нет" "$(doska_est)" \
      "запись о долге с доски снята"
-itog "нет" "$([ -f "$STAND/zhurnal/pamyat-kommit.неудач" ] && echo да || echo нет)" \
+itog "нет" "$([ -f "$STAND/zhurnal/memory-commit.неудач" ] && echo да || echo нет)" \
      "счёт неудач подряд обнулён"
 # quotepath=false: без него git печатает кириллицу escape-байтами, и проба
 # искала бы слово, которого в выводе нет (память: quotepath).
@@ -180,7 +180,7 @@ itog "" "$(git -C "$PROJECT" status --porcelain -- память 2>/dev/null || t
 # которые назвал и не внёс. Первая редакция пробы искала в нём слово «БЕДА» —
 # а оно уходит в вывод демона, не в файл: под мутацией проба оставалась
 # зелёной и сверку не доказывала.
-itog "0" "$(grep -c . "$STAND/zhurnal/pamyat-kommit.вывод.назвал-не-внёс" 2>/dev/null || true)" \
+itog "0" "$(grep -c . "$STAND/zhurnal/memory-commit.вывод.назвал-не-внёс" 2>/dev/null || true)" \
      "сверка состава: названных и не внесённых файлов нет"
 
 printf '\nПАМЯТЬ-В-ГИТ: путей %d, неудач %d\n' "$paths" "$fails"

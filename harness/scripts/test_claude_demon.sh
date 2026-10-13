@@ -4,7 +4,7 @@
 # СЛУЧАЙ 13.09.2026. Три демона получили от claude «You've hit your weekly
 # limit · resets Sep 16, 6pm» и отчитались обычной неудачей: devmap-selfheal
 # «починка НЕ удалась (код 1) — попробую в следующий раз», ton-watch «агент
-# тона вернул 1 — повторим завтра», stroitel-proverok «агент строителя вернул
+# тона вернул 1 — повторим завтра», check-builder «агент строителя вернул
 # 1». Карта не чинилась двое суток, и никто не сказал ни слова: сторож
 # limit-watch судит по отказам 429 в журнале СМЕНЫ, а headless-прогон демона в
 # этот журнал не пишет вовсе.
@@ -107,7 +107,7 @@ itog "тот же отказ у СОСЕДНЕГО демона — владел
 itog "в сообщении названа причина отказа" "да" \
      "$(grep -q 'disabled Claude subscription access' "$TG_VYHOD" && echo да || echo нет)"
 itog "в сообщении назван демон" "да" "$(grep -q 'ton-watch' "$TG_VYHOD" && echo да || echo нет)"
-bash "$OBERTKA" stroitel-proverok -p "z" >/dev/null 2>&1
+bash "$OBERTKA" check-builder -p "z" >/dev/null 2>&1
 itog "третий тот же отказ — второго сообщения нет" 1 "$(grep -c . "$TG_VYHOD")"
 
 echo "── другой отказ сбрасывает счёт: он не тот же самый ──"

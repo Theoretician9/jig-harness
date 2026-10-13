@@ -9,7 +9,7 @@
 # не удаляет — чужие строки в расписании принадлежат машине, а не харнесу.
 #
 # Поля задания: имя (оно же ключ), расписание (пять полей cron), команда,
-# журнал (куда писать вывод), метка — только если скрипт пишет метку не своим именем.
+# журнал (куда писать вывод).
 задания:
   - имя: session-warden
     расписание: "*/10 * * * *"
@@ -118,15 +118,13 @@
     расписание: "* * * * *"
     команда: "harness/demons/limit-watch.sh"
     журнал: limit-watch.log
-  - имя: check-srok-vhoda
+  - имя: check-login-expiry
     расписание: "*/15 * * * *"
     команда: "scripts/check-login-expiry.py"
-    метка: check-srok-vhoda
     журнал: check-login-expiry.log
-  - имя: proba-vosstanovleniya
+  - имя: restore-probe
     расписание: "0 5 * * 1"
     команда: "scripts/restore-probe.sh"
-    метка: proba-vosstanovleniya
     журнал: restore-probe.log
 
 # Период метки в минутах: через сколько молчание демона считается поломкой.
@@ -149,14 +147,14 @@
   backup: 1440
   devmap-selfheal: 1440
   heartbeat-watch: 1440
-  check-srok-vhoda: 30
+  check-login-expiry: 30
   limit-watch: 5
   product-health: 5
   acceptance-watch: 1440
   # 8 дней, а не 31: копии делаются каждую ночь, а доказательство их годности
   # обновлялось раз в месяц — то есть три недели «данные целы» держалось на
   # честном слове. Замер 28.09.2026: последний успешный прогон 10.09.
-  proba-vosstanovleniya: 11520
+  restore-probe: 11520
   check-builder: 1440
   ton-watch: 1440
   update-watch: 1440
@@ -192,5 +190,20 @@
 # бывает: правило «только добавляем» — про строки и значения ВЛАДЕЛЬЦА, а
 # собственный ключ, потерявший смысл, остаётся настройкой, которой ничто не
 # управляет — в ней написано одно, а делается другое.
+# Метки, сменившие имя: install-new.py переносит период владельца со старого
+# имени на новое. Без этого после обновления сторож меток звал бы мёртвой
+# старую метку, которую никто не пишет, и не ждал бы новую. 13.10.2026 метки
+# переведены с транслита на имя своего скрипта (правило владельца 21.09).
+переименовать_метки:
+  pamyat-kommit: memory-commit
+  evo-collector: evolution-collector
+  priyomka-watch: acceptance-watch
+  stroitel-proverok: check-builder
+  obnovlenie-watch: update-watch
+  rasshirenija-watch: extensions-watch
+  revizia-proekta: project-revision
+  check-srok-vhoda: check-login-expiry
+  proba-vosstanovleniya: restore-probe
+
 снять_ключи:
   - WORK_BRANCH             # публикуется СБОРКА, а не рабочая ветка пакета (спека §2.3)

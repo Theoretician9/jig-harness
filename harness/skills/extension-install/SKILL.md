@@ -1,6 +1,6 @@
 ---
 name: extension-install
-description: Когда наступило условие из данных harness/config/extensions.yaml (первый фронт, первый запрос документа, первая внешняя библиотека) или в задаче появилось мобильное/клиентское приложение — ставит код (scripts/extensions.py, демон rasshirenija-watch), не руки
+description: Когда наступило условие из данных harness/config/extensions.yaml (первый фронт, первый запрос документа, первая внешняя библиотека) или в задаче появилось мобильное/клиентское приложение — ставит код (scripts/extensions.py, демон extensions-watch), не руки
 ---
 
 > Сгенерировано из глав(ы) пакет скриптом BUILD-SKILLS.py —

@@ -751,7 +751,7 @@ knopka_revizii() {  # $1 = файл-флага, $2 = путь демона ре�
         return 1
     fi
     say "кнопка ревизии: запускаю $2 --сейчас"
-    setsid nohup bash "$2" --сейчас >> "$LOG_DIR/revizia-proekta.log" 2>&1 < /dev/null &
+    setsid nohup bash "$2" --сейчас >> "$LOG_DIR/project-revision.log" 2>&1 < /dev/null &
     return 0
 }
 

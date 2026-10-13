@@ -65,11 +65,11 @@ nechego_kommitit() {  # $1 — вывод git commit
 # 27.09, M-06): прежний путь был зашит буквой, и прогон стенда затирал его под
 # боевым сторожем — совпади он с обходом cron, владелец услышал бы про
 # «красный гейт проба_гейта», которого нет.
-VYVOD="${MEMORY_COMMIT_OUT:-$LOG_DIR/pamyat-kommit.вывод}"
+VYVOD="${MEMORY_COMMIT_OUT:-$LOG_DIR/memory-commit.вывод}"
 # Счёт неудач подряд: ОДИН литерал на все пути (M-10) и объявление ВЫШЕ всех
 # веток выхода — функция, вызванная до своего определения, в bash молча
 # пустеет (память: функция-вызвана-до-определения).
-FAILS_FILE="$LOG_DIR/pamyat-kommit.неудач"
+FAILS_FILE="$LOG_DIR/memory-commit.неудач"
 zabyt_neudachi() { rm -f "$FAILS_FILE" || say "счёт неудач не снят: $FAILS_FILE"; }
 
 # ── пауза владельца: демон, который ПИШЕТ, на паузе молчит ──────────────────
@@ -81,7 +81,7 @@ if python3 "$PROJECT_DIR/scripts/pause.py" --идёт-ли 2>/dev/null; then
     # Метка — про ПРОГОН, а не про работу: демон проснулся и принял решение.
     # 23–26.09.2026 владелец стоял на паузе, демон честно выходил здесь — и
     # сводка четверо суток звала мёртвым живого ([[a-sign-true-while-work-stands-still]]).
-    mkdir -p "$HEARTBEAT_DIR" && : > "$HEARTBEAT_DIR/pamyat-kommit"
+    mkdir -p "$HEARTBEAT_DIR" && : > "$HEARTBEAT_DIR/memory-commit"
     exit 0
 fi
 
@@ -107,7 +107,7 @@ if [ -z "$CHANGED" ]; then
     say "правок памяти нет"
     zabyt_neudachi        # не отказ гейта — счёт начинается заново (M-02)
     mkdir -p "$HEARTBEAT_DIR"
-    : > "$HEARTBEAT_DIR/pamyat-kommit"
+    : > "$HEARTBEAT_DIR/memory-commit"
     exit 0
 fi
 
@@ -142,7 +142,7 @@ fi
 NAMES="$(printf '%s\n' "$CHANGED" | awk '{print $NF}' | xargs -n1 basename 2>/dev/null | paste -sd', ' - || true)"
 MSG="Правка памяти с панели: ${NAMES:-записи}
 
-Записи изменены владельцем через веб-панель; демон pamyat-kommit переносит их
+Записи изменены владельцем через веб-панель; демон memory-commit переносит их
 в репозиторий, потому что память — часть кода, а не база.
 
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
@@ -167,7 +167,7 @@ if git commit -o "$MEMORY_SUBDIR" -m "$MSG" >"$VYVOD" 2>&1; then
     if [ "$POTERYANO" != 0 ]; then
         say "БЕДА: коммит назвал файлы, которых в нём нет ($POTERYANO):"
         sed 's/^/    /' "$VYVOD.назвал-не-внёс"
-        mkdir -p "$HEARTBEAT_DIR" && : > "$HEARTBEAT_DIR/pamyat-kommit"
+        mkdir -p "$HEARTBEAT_DIR" && : > "$HEARTBEAT_DIR/memory-commit"
         exit 1
     fi
     # Счёт неудач подряд обнуляется, долг с доски снимается: висящая запись о
@@ -193,7 +193,7 @@ else
         zabyt_neudachi
         sed 's/^/    /' $VYVOD | tail -5
         mkdir -p "$HEARTBEAT_DIR"
-        : > "$HEARTBEAT_DIR/pamyat-kommit"
+        : > "$HEARTBEAT_DIR/memory-commit"
         exit 0
     fi
     say "коммит НЕ прошёл (гейты) — подробности ниже"
@@ -248,9 +248,9 @@ else
     # принято. Без неё сторож пульса объявлял мёртвым живого сторожа уже на
     # двадцатой минуте красного гейта, и владелец получал два противоположных
     # сообщения об одном и том же.
-    mkdir -p "$HEARTBEAT_DIR" && : > "$HEARTBEAT_DIR/pamyat-kommit"
+    mkdir -p "$HEARTBEAT_DIR" && : > "$HEARTBEAT_DIR/memory-commit"
     exit 1
 fi
 
 mkdir -p "$HEARTBEAT_DIR"
-: > "$HEARTBEAT_DIR/pamyat-kommit"
+: > "$HEARTBEAT_DIR/memory-commit"

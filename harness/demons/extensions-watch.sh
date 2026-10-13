@@ -19,7 +19,7 @@
 # Запуск: cron, раз в сутки, от имени $AGENT_USER. Служебное: --selftest.
 set -euo pipefail
 
-say() { printf '%s rasshirenija-watch: %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"; }
+say() { printf '%s extensions-watch: %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"; }
 
 # ── самотест: больной случай на подменённом каталоге настроек ───────────────
 if [ "${1:-}" = "--selftest" ]; then
@@ -58,7 +58,7 @@ fi
 source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../../scripts/lib/config.sh"
 INSTALL_CONF="${HARNESS_INSTALL_CONF:-${INSTALL_CONF:-$(konf_koren)/install.conf}}"
 HARNESS_CONF="${HARNESS_CONF:-$(konf_koren)/harness.conf}"
-[ -r "$INSTALL_CONF" ] || { echo "rasshirenija-watch: нет $INSTALL_CONF — установка не завершена"; exit 1; }
+[ -r "$INSTALL_CONF" ] || { echo "extensions-watch: нет $INSTALL_CONF — установка не завершена"; exit 1; }
 konf_zagruzit
 : "${PROJECT_DIR:?пуст PROJECT_DIR}" "${HEARTBEAT_DIR:?пуст HEARTBEAT_DIR}"
 mkdir -p "$HEARTBEAT_DIR"
@@ -79,5 +79,5 @@ if [ "$CHANGED" -gt 0 ] || [ "$RC" -ne 0 ]; then
         say "доклад в канал не ушёл — смотри $LOG_DIR/tg_send.log"
 fi
 
-touch "$HEARTBEAT_DIR/rasshirenija-watch"
+touch "$HEARTBEAT_DIR/extensions-watch"
 exit "$RC"

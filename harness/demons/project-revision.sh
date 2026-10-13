@@ -157,11 +157,11 @@ zapusk_agenta() {  # $1 = область, $2 = вопрос, $3 = список, 
     # --allowedTools перекрывается настройками проекта (живая проба 11.09.2026).
     # --strict-mcp-config обязателен: без него рвётся канал с владельцем.
     # 9>&- — агент не наследует дескриптор лока карты.
-    timeout "$6" bash "$PROJECT_DIR/scripts/claude-demon.sh" revizia-proekta -p --model "$REVIZIA_MODEL" "$promt" \
+    timeout "$6" bash "$PROJECT_DIR/scripts/claude-demon.sh" project-revision -p --model "$REVIZIA_MODEL" "$promt" \
         --permission-mode manual \
         --allowedTools "Read,Edit,Write,Grep,Glob" \
         --mcp-config '{"mcpServers":{}}' --strict-mcp-config \
-        --output-format text 9>&- >> "$LOG_DIR/revizia-proekta.log" 2>&1
+        --output-format text 9>&- >> "$LOG_DIR/project-revision.log" 2>&1
 }
 
 chuzhie_puti() {  # $1 = дерево «до», $2 = дерево «после», $3 = документ
@@ -320,7 +320,7 @@ CONF
     progon zdorovyj "" "REVIZIA_ENABLED=0"
     proba "БОЛЬНОЙ: выключено данными — агент не звался" "0" "$(grep -c ВЫЗОВ "$T/claude.calls")"
     proba "выключено данными — метка присмотра поставлена" "есть" \
-          "$([ -s "$T/hb/revizia-proekta" ] && echo есть || echo нет)"
+          "$([ -s "$T/hb/project-revision" ] && echo есть || echo нет)"
 
     # 2. Выключено, но нажата кнопка: владелец обязан узнать причину (M-18).
     progon zdorovyj "--сейчас" "REVIZIA_ENABLED=0"
@@ -434,7 +434,7 @@ if [ "$REVIZIA_ENABLED" != "1" ]; then
         # узнает, почему ничего не произошло (ревью спеки, M-18).
         kanal "Ревизия выключена на панели (REVIZIA_ENABLED=0). Включи ручку и нажми снова."
     else
-        mkdir -p "$HEARTBEAT_DIR"; date -Is > "$HEARTBEAT_DIR/revizia-proekta"
+        mkdir -p "$HEARTBEAT_DIR"; date -Is > "$HEARTBEAT_DIR/project-revision"
     fi
     exit 0
 fi
@@ -664,6 +664,6 @@ fi
 say "готово: новых $NOVYH, дублей $DUBLEJ, областей $OBLASTEJ"
 if [ -z "$SEJCHAS" ]; then
     mkdir -p "$HEARTBEAT_DIR"
-    date -Is > "$HEARTBEAT_DIR/revizia-proekta"
+    date -Is > "$HEARTBEAT_DIR/project-revision"
 fi
 exit 0
