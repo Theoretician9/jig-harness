@@ -599,10 +599,14 @@ EOF
   делай "DEBIAN_FRONTEND=noninteractive apt-get update"
   делай "DEBIAN_FRONTEND=noninteractive apt-get install -y git tmux curl jq python3 python3-pip python3-venv python3-yaml shellcheck ripgrep unzip"
   делай "if command -v node >/dev/null 2>&1 && [ \"\$(node --version | sed 's/v//' | cut -d. -f1)\" -ge 20 ]; then echo 'node уже >=20 — nodesource пропущен'; else curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && DEBIAN_FRONTEND=noninteractive apt-get install -y nodejs; fi"
-  проверка "$step" "все инструменты отвечают версией, node >= 20" \
-    "git --version && tmux -V && python3 --version && jq --version && node --version && [ \"\$(node --version | sed 's/v//' | cut -d. -f1)\" -ge 20 ]" \
-    "git --version; tmux -V; python3 --version; jq --version; node --version"
-  DONE_LIST+=("apt: git tmux curl jq python3(+pip,venv,yaml) shellcheck ripgrep unzip; node LTS")
+  # Браузер расширения playwright (базовый набор) скачивает агент без root, а
+  # его системные библиотеки (libatk, libgbm, libasound…) — только root: без
+  # них chromium не стартует, и живой смоук фронта агенту недоступен.
+  делай "npx -y playwright install-deps chromium"
+  проверка "$step" "все инструменты отвечают версией, node >= 20, библиотеки браузера на месте" \
+    "git --version && tmux -V && python3 --version && jq --version && node --version && [ \"\$(node --version | sed 's/v//' | cut -d. -f1)\" -ge 20 ] && ldconfig -p | grep -q libatk-bridge-2.0.so.0 && ldconfig -p | grep -q libgbm.so.1" \
+    "git --version; tmux -V; python3 --version; jq --version; node --version; ldconfig -p | grep -E 'libatk-bridge|libgbm'"
+  DONE_LIST+=("apt: git tmux curl jq python3(+pip,venv,yaml) shellcheck ripgrep unzip; node LTS; библиотеки браузера playwright")
   отметить шаг_2
 }
 
