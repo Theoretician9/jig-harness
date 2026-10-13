@@ -55,19 +55,24 @@ def column_name(step: str) -> str:
 
 
 def step_list(card: dict, judge, root, settings) -> list:
-    """Все шаги «крупной» с отметкой: бумага есть / нет / шаг машиной не судится."""
+    """Все шаги «крупной» с отметкой: бумага есть / нет / шаг машиной не судится.
+    Отметку и путь даёт гейт (`беды_в_двух_корнях`, `путь_бумаги`), не доска."""
     required = judge.шаги_для_задачи(settings, "крупная", card)
     steps = []
     for step in judge.шаги_уровня(settings, "крупная"):
-        path, _name = judge._где_артефакт(step, card.get("id") or "", card.get("spec"), root)
         if step not in required:
             steps.append({"шаг": step, "путь": None, "есть": None, "почему": "не положен этой задаче"})
-        elif path is None:
+            continue
+        if step == "тесты":
             steps.append({"шаг": step, "путь": None, "есть": None, "почему": "машиной не судится"})
-        else:
-            debts = judge.беды_в_двух_корнях(card, [step], root)
-            steps.append({"шаг": step, "путь": str(path), "есть": not debts,
-                          "почему": "; ".join(debts)})
+            continue
+        debts = judge.беды_в_двух_корнях(card, [step], root)
+        path, _name, _trouble = judge.путь_бумаги(card, step, root)
+        if path is None and not debts:
+            steps.append({"шаг": step, "путь": None, "есть": None, "почему": "машиной не судится"})
+            continue
+        steps.append({"шаг": step, "путь": str(path) if path else None, "есть": not debts,
+                      "почему": "; ".join(debts)})
     return steps
 
 
@@ -193,14 +198,18 @@ def commits(task_id: str, repo: Path) -> list:
             for line in done.stdout.splitlines() if line.count("\t") == 2]
 
 
-def archived(map_path: Path) -> int:
+def archived(map_path: Path) -> int | None:
+    """Сколько карточек в архиве; None — архив не прочитан (0 соврал бы)."""
     import yaml
     try:
         data = yaml.safe_load((map_path.parent / "docs" / "dev-map-archive.yaml")
                               .read_text(encoding="utf-8")) or {}
-    except (OSError, ValueError):
-        return 0
-    return sum(len(line.get("tasks") or []) for line in data.get("lines") or [])
+    except (OSError, yaml.YAMLError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    return sum(len(line.get("tasks") or []) for line in data.get("lines") or []
+               if isinstance(line, dict))
 
 
 def snapshot_of(card: dict, judge, repo: Path, log_dir: Path) -> dict:
@@ -235,6 +244,9 @@ def build(map_path, judge, now: datetime) -> dict:
         data = yaml.safe_load(map_path.read_text(encoding="utf-8")) or {}
     except (OSError, yaml.YAMLError) as trouble:
         board["беда"] = f"карта не прочитана: {trouble}"
+        return board
+    if not isinstance(data, dict):
+        board["беда"] = "карта не прочитана: верхний уровень — не словарь"
         return board
     log_dir = Path(config.log_dir())
     # Направление, над которым работаем; пусто — все. Отложенные направления
