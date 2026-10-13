@@ -12,8 +12,9 @@
 #   ask    — спросить в боте, поставить по ответу;
 #   auto   — поставить сразу и отчитаться.
 #
-# Чем проверяется: --selftest (решение по режиму — чистой функцией) плюс
-# проверка ядра scripts/test_update.py (24 пути).
+# Чем проверяется: --selftest (решение по режиму — чистой функцией; демон
+# целиком на стенде через настоящее ядро) плюс проверка ядра
+# scripts/test_update.py.
 #
 # Запуск: cron, раз в сутки; метка heartbeat — update-watch.
 set -uo pipefail
@@ -57,7 +58,46 @@ if [ "${1:-}" = "--selftest" ]; then
     echo "  ок    БОЛЬНОЙ СЛУЧАЙ: нового нет — молчим даже в режиме «само»"
     RESULT=$(reshenie_po_rezhimu vydumannyj 1); [ "$RESULT" = "сказать" ] || { echo "  ПЛОХО незнакомый режим"; ok=0; }
     echo "  ок    БОЛЬНОЙ СЛУЧАЙ: незнакомый режим не ставит ничего сам"
-    [ "$ok" = 1 ] && { echo "SELFTEST: зелёный (5 путей, два больных)"; exit 0; }
+
+    # Демон гоняется целиком на стенде, ядро — НАСТОЯЩЕЕ (подменён только ответ
+    # хранилища): код «есть новое» записан и в ядре, и в демоне, и только
+    # прогон через ядро ловит их расхождение.
+    stend=$(mktemp -d); trap 'rm -rf "$stend"' EXIT
+    mkdir -p "$stend/scripts" "$stend/hb"
+    printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> "%s/kanal"\n' "$stend" > "$stend/scripts/tg_send.sh"
+    chmod +x "$stend/scripts/tg_send.sh"
+    yadro_stenda() { # $1 = python-выражение: ответ хранилища; $2 = чем ответить ядру
+        cat > "$stend/scripts/update.py" <<PY
+import importlib.util, sys
+спец = importlib.util.spec_from_file_location("ядро", "$YADRO_BOEVOE")
+ядро = importlib.util.module_from_spec(спец)
+спец.loader.exec_module(ядро)
+ядро.спросить_обновления = lambda: $1
+$2
+PY
+        rm -f "$stend/kanal" "$stend/hb/update-watch"
+        PROJECT_DIR="$stend" HEARTBEAT_DIR="$stend/hb" UPDATE_MODE=manual \
+            bash "$0" > "$stend/zhurnal" 2>&1
+    }
+    YADRO_BOEVOE="$(dirname "$(readlink -f "$0")")/../../scripts/update.py"
+    yadro_stenda '{"есть новое": True, "коммит": "a" * 40, "дата": "2026-10-14"}' \
+        'sys.exit(ядро.main(["--сверить"]))'
+    if grep -q "Вышла новая версия" "$stend/kanal" 2>/dev/null; then
+        echo "  ок    БОЛЬНОЙ СЛУЧАЙ: ядро ответило «есть новое» — владелец узнал"
+    else echo "  ПЛОХО код ядра «есть новое» демон не узнал: $(cat "$stend/zhurnal")"; ok=0; fi
+    yadro_stenda 'None' 'print("совсем другая формулировка"); sys.exit(ядро.КОД_ЕСТЬ_НОВОЕ)'
+    if grep -q "Вышла новая версия" "$stend/kanal" 2>/dev/null; then
+        echo "  ок    БОЛЬНОЙ СЛУЧАЙ: другая фраза с кодом «есть новое» — весть не погасла"
+    else echo "  ПЛОХО другая фраза ядра погасила весть: $(cat "$stend/zhurnal")"; ok=0; fi
+    yadro_stenda '{"есть новое": False, "коммит": "b" * 40}' 'sys.exit(ядро.main(["--сверить"]))'
+    if [ ! -e "$stend/kanal" ]; then
+        echo "  ок    нового нет — молчим"
+    else echo "  ПЛОХО весть ушла, когда нового нет"; ok=0; fi
+    yadro_stenda '{"беда": "хранилище недоступно"}' 'sys.exit(ядро.main(["--сверить"]))'
+    if [ ! -e "$stend/kanal" ] && [ -e "$stend/hb/update-watch" ]; then
+        echo "  ок    БОЛЬНОЙ СЛУЧАЙ: спросить не удалось — молчим, метка жива"
+    else echo "  ПЛОХО отказ хранилища: весть $([ -e "$stend/kanal" ] && echo ушла || echo нет), метка $([ -e "$stend/hb/update-watch" ] && echo есть || echo нет)"; ok=0; fi
+    [ "$ok" = 1 ] && { echo "SELFTEST: зелёный (9 путей, пять больных)"; exit 0; }
     echo "SELFTEST: КРАСНЫЙ"; exit 1
 fi
 
@@ -65,16 +105,19 @@ fi
 
 ANSWER=$(python3 "$YADRO" --сверить 2>&1)
 RC=$?
-if [ "$RC" != 0 ]; then
-    # Недоступное хранилище — не повод будить владельца каждые сутки: пишем в
-    # журнал, метку ставим (демон жив), молчим.
-    say "спросить обновления не удалось: $ANSWER"
-    touch "$HEARTBEAT_DIR/update-watch"
-    exit 0
-fi
-
-HAS_NEW=0
-printf '%s' "$ANSWER" | grep -q "есть новая версия" && HAS_NEW=1
+# Исход — по коду возврата ядра (КОД_ЕСТЬ_НОВОЕ в update.py), а не по словам
+# вывода: формулировка ядра меняется свободно. Совпадение кода с ядром держит
+# самотест — он гоняет демон через настоящее ядро.
+case "$RC" in
+    0) HAS_NEW=0 ;;
+    3) HAS_NEW=1 ;;
+    *)
+        # Недоступное хранилище — не повод будить владельца каждые сутки: пишем в
+        # журнал, метку ставим (демон жив), молчим.
+        say "спросить обновления не удалось (код $RC): $ANSWER"
+        touch "$HEARTBEAT_DIR/update-watch"
+        exit 0 ;;
+esac
 say "$ANSWER (режим $UPDATE_MODE)"
 
 case "$(reshenie_po_rezhimu "$UPDATE_MODE" "$HAS_NEW")" in

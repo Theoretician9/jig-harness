@@ -534,7 +534,7 @@
     месте до других машин не доходит вовсе.
 
     '
-  проверяется: bash harness/demons/update-watch.sh --selftest (5 путей)
+  проверяется: bash harness/demons/update-watch.sh --selftest
   пишет: $LOG_DIR/update-watch.log, метку свежести, сообщение владельцу при новой
     версии
   повод:
