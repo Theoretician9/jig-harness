@@ -237,7 +237,7 @@ say "5. кеши npm / pip / uv вычищены (какие есть)"
 #
 # Подстановки в путях — только $HOME и $LOG_DIR, и подставляются они заменой
 # строки, а не eval: данные из файла оболочка не исполняет.
-CAPS_DIR="${PROJECT_DIR:-}/harness/возможности"
+CAPS_DIR="${PROJECT_DIR:-}/harness/vozmozhnosti"
 caps_cleaned=0
 if [ -n "${PROJECT_DIR:-}" ] && [ -d "$CAPS_DIR" ]; then
     for pack in "$CAPS_DIR"/*/; do

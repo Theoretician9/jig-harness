@@ -60,7 +60,7 @@ caps_dir() {
     pd=$(sed -n 's/^[[:space:]]*PROJECT_DIR=\"\{0,1\}\([^"#]*\)\"\{0,1\}.*/\1/p' "$INSTALL_CONF" | tail -n1)
   fi
   local c
-  for c in "${pd:+$pd/harness/возможности}" "$HERE/../vozmozhnosti" "$HERE/../harness/возможности"; do
+  for c in "${pd:+$pd/harness/vozmozhnosti}" "$HERE/../vozmozhnosti" "$HERE/../harness/vozmozhnosti"; do
     [[ -d "$c" ]] && { (cd "$c" && pwd); return 0; }
   done
   return 1

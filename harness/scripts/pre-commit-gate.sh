@@ -659,7 +659,7 @@ fi
 # файлом гейты/*.py. Запускаются ТОЛЬКО у установленных возможностей: пока
 # набора нет, ни одного лишнего гейта в коммите не появляется.
 # Список staged-файлов уходит гейту на stdin — он сам решает, применим ли он.
-CAPS_DIR="${PROJECT_DIR:-$PWD}/harness/возможности"
+CAPS_DIR="${PROJECT_DIR:-$PWD}/harness/vozmozhnosti"
 caps_gates=0
 if [ -d "$CAPS_DIR" ]; then
     for pack in "$CAPS_DIR"/*/; do
