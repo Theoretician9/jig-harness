@@ -204,13 +204,13 @@ MAP
     # Таблица моделей нужна подставному проекту: без неё model-for.sh печатает
     # «таблицы нет», и проба «модель равна умолчанию» не создаёт своего условия
     # (поймано первым же прогоном самотеста).
-    cat > "$T/proekt/harness/config/модели.yaml" <<'MODELI'
+    cat > "$T/proekt/harness/config/models.yaml" <<'MODELI'
 модели:
   ревизия: opus
   дежурный: haiku
 умолчание: haiku
 MODELI
-    cat > "$T/proekt/harness/config/ревизия.yaml" <<'CONF'
+    cat > "$T/proekt/harness/config/audit.yaml" <<'CONF'
 пороги: {знаков_на_порцию: 5000, потолок_минут: 2, максимум_находок: 3,
          максимум_знаков_карточки: 900, срок_находки_суток: 90}
 области:
@@ -311,7 +311,7 @@ CONF
         env HARNESS_INSTALL_CONF="$T/install.conf" HARNESS_CONF="$T/harness.proba.conf" \
             PATH="$T/bin:$PATH" PROBA_DEJSTVIE="$dejstvie" PROBA_PROEKT="$T/proekt" \
             PROBA_DOK="docs/ревизии/$(date +%F).md" CLAUDE_CALLS="$T/claude.calls" \
-            TG_LOG="$T/tg.log" REVIZIA_CONF="${PROBA_CONF:-$T/proekt/harness/config/ревизия.yaml}" \
+            TG_LOG="$T/tg.log" REVIZIA_CONF="${PROBA_CONF:-$T/proekt/harness/config/audit.yaml}" \
             bash "$(readlink -f "${BASH_SOURCE[0]}")" ${dovod:+$dovod} > "$T/progon.log" 2>&1
     }
 
@@ -520,7 +520,7 @@ for OBLAST in "${PORYADOK[@]}"; do
     # Путь конфига передаётся ДОВОДОМ, а не через окружение: PROJECT_DIR —
     # переменная оболочки, в окружение python она не уезжает, и первый живой
     # прогон 12.09.2026 упал на KeyError, оставив вопрос области пустым.
-    VOPROS="$(python3 - "$OBLAST" "${REVIZIA_CONF:-$PROJECT_DIR/harness/config/ревизия.yaml}" <<'PY'
+    VOPROS="$(python3 - "$OBLAST" "${REVIZIA_CONF:-$PROJECT_DIR/harness/config/audit.yaml}" <<'PY'
 import sys, yaml
 from pathlib import Path
 данные = yaml.safe_load(Path(sys.argv[2]).read_text(encoding="utf-8")) or {}

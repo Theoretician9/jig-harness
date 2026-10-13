@@ -32,7 +32,7 @@ from pathlib import Path
 # заглушить автоархивацией, то есть выключить датчик, не поняв сигнала.
 #
 # Инвариант один: СТАРТ СЕССИИ ДЁШЕВ. В каждую сессию грузятся четыре файла —
-# CLAUDE.md, STATE.md, УКАЗАНИЯ.md и индекс памяти. Их сумма на 10.09.2026 —
+# CLAUDE.md, STATE.md, ORDERS.md и индекс памяти. Их сумма на 10.09.2026 —
 # 48 024 знака ≈ 16 000 токенов, и это плата за КАЖДУЮ сессию (5,4 ротации в
 # сутки). Растёт файл — растёт цена каждой смены, поэтому сигнал остаётся
 # кричащим: краснеет он не «слишком часто», а ровно тогда, когда цена выросла.
@@ -140,14 +140,14 @@ def check_state_size(repo: Path, r: Report) -> None:
 
 def check_orders_size(repo: Path, r: Report) -> None:
     """Указания владельца — файл контекста, а не архив переписки."""
-    orders = memory_home(repo) / "УКАЗАНИЯ.md"
+    orders = memory_home(repo) / "ORDERS.md"
     if not orders.exists():
-        r.block("память/УКАЗАНИЯ.md не найден — на него смотрит @-include в CLAUDE.md")
+        r.block("память/ORDERS.md не найден — на него смотрит @-include в CLAUDE.md")
         return
     size = цена(orders)
     if size > ORDERS_MAX:
         r.block(
-            f"память/УКАЗАНИЯ.md разросся: {size} токенов при потолке {ORDERS_MAX} ({chars(orders)} знаков).\n"
+            f"память/ORDERS.md разросся: {size} токенов при потолке {ORDERS_MAX} ({chars(orders)} знаков).\n"
             f"    Держит только ДЕЙСТВУЮЩИЕ указания; снятое убирает владелец, "
             f"подробности уезжают в запись памяти."
         )
@@ -220,7 +220,7 @@ def назвать_прополку_без_владельца(orders: Path, r: R
         return
     цена_цитат = sum(токенов(ц) for ц in цитаты)
     r.warn(
-        f"прополка без владельца: в УКАЗАНИЯ.md {len(цитаты)} цитат длиннее "
+        f"прополка без владельца: в ORDERS.md {len(цитаты)} цитат длиннее "
         f"{ДЛИННАЯ_ЦИТАТА} знаков, и дословного нет ни в одной записи — "
         f"это {цена_цитат} токенов.\n"
         f"    Перенеси дословное в запись памяти, оставь суть и [[ссылку]]: "
@@ -286,7 +286,7 @@ def check_zapisi_ne_osiroteli(repo: Path, r: "Report") -> None:
 
 
 # Указатель памяти узнаётся по ФОРМЕ ИМЕНИ, а не по списку имён: общий
-# «MEMORY.md»/«УКАЗАНИЯ.md» и продуктовые «<ИМЯ>-ПАМЯТЬ.md»/«<ИМЯ>-УКАЗАНИЯ.md».
+# «MEMORY.md»/«ORDERS.md» и продуктовые «<ИМЯ>-ПАМЯТЬ.md»/«<ИМЯ>-ORDERS.md».
 #
 # Владелец 12.09.2026 велел проверить, что харнес очищен от имени продукта.
 # Прежде здесь стоял список имён вместе с именем продукта — имя чужого
@@ -349,11 +349,11 @@ def check_includes_alive(repo: Path, r: Report) -> None:
     """@-include на несуществующий файл — тихая потеря контекста, а не ошибка старта.
 
     Второй способ потерять контекст молча — путь, который оболочка не считает
-    импортом. Улика 20.08.2026: `@память/УКАЗАНИЯ.md` и `@память/MEMORY.md`
+    импортом. Улика 20.08.2026: `@память/ORDERS.md` и `@память/MEMORY.md`
     стояли в CLAUDE.md, файлы существовали, гейт был зелёным — а в контекст
     сессии не приходили. Замер тремя прогонами `claude -p` на фикстурах:
-    `@ascii.md` доезжает, `@dir-ascii/УКАЗАНИЯ.md` доезжает (кириллица в имени
-    файла законна), `@память/rules.md` — нет, `@./память/УКАЗАНИЯ.md` — да.
+    `@ascii.md` доезжает, `@dir-ascii/ORDERS.md` доезжает (кириллица в имени
+    файла законна), `@память/rules.md` — нет, `@./память/ORDERS.md` — да.
     Разбор пути обрывается на не-ASCII В НАЧАЛЕ: лечится префиксом `./`.
     Цена промаха — ровно та задача владельца, ради которой указания заводили:
     правило пережило ротацию на диске и не пережило её в контексте.
@@ -389,7 +389,7 @@ def заполнение(repo: Path) -> dict:
     # Мера у файлов контекста — токены (ими они и платятся), у карты — знаки:
     # карта в контекст не грузится, её потолок про цену ОДНОГО чтения.
     for файл, потолок, мера in ((repo / "STATE.md", STATE_MAX, цена),
-                                (memory_home(repo) / "УКАЗАНИЯ.md", ORDERS_MAX, цена),
+                                (memory_home(repo) / "ORDERS.md", ORDERS_MAX, цена),
                                 (memory_home(repo) / "MEMORY.md", INDEX_MAX, цена),
                                 (repo / "dev-map.yaml", limit, chars)):
         if файл.exists():
@@ -440,11 +440,11 @@ def стенд(tmp: str) -> Path:
     (repo / "docs" / "handover").mkdir(parents=True)
     memory_home(repo).mkdir(parents=True)
     (repo / "CLAUDE.md").write_text(
-        "# правила\n@STATE.md\n@./память/УКАЗАНИЯ.md\n@./память/MEMORY.md\n",
+        "# правила\n@STATE.md\n@./память/ORDERS.md\n@./память/MEMORY.md\n",
         encoding="utf-8")
     (repo / "STATE.md").write_text("состояние\n", encoding="utf-8")
     (repo / "dev-map.yaml").write_text("epics: []\n", encoding="utf-8")
-    (memory_home(repo) / "УКАЗАНИЯ.md").write_text("указания\n", encoding="utf-8")
+    (memory_home(repo) / "ORDERS.md").write_text("указания\n", encoding="utf-8")
     (memory_home(repo) / "MEMORY.md").write_text("указатель\n", encoding="utf-8")
     return repo
 
@@ -554,7 +554,7 @@ def самотест() -> int:
         # здоровом файле, а такой гейт отключают.
         repo = стенд(tmp)
         (memory_home(repo) / "чужая.md").write_text("факт\n", encoding="utf-8")
-        (memory_home(repo) / "МОЙПРОЕКТ-УКАЗАНИЯ.md").write_text(
+        (memory_home(repo) / "МОЙПРОЕКТ-ORDERS.md").write_text(
             "указатель другого проекта [[чужая]]\n", encoding="utf-8")
         проба("указатель незнакомого проекта узнан по форме имени", "чисто", оценить(repo))
     # БОЛЬНОЙ СЛУЧАЙ 11.09.2026: карта растёт числом задач — это здоровье, а
@@ -628,7 +628,7 @@ def самотест() -> int:
 
     def стенд_указаний(tmp: str, текст: str, запись: str | None = None) -> Path:
         repo = стенд(tmp)
-        (memory_home(repo) / "УКАЗАНИЯ.md").write_text(текст, encoding="utf-8")
+        (memory_home(repo) / "ORDERS.md").write_text(текст, encoding="utf-8")
         if запись is not None:
             (memory_home(repo) / "запись.md").write_text(запись, encoding="utf-8")
             (memory_home(repo) / "MEMORY.md").write_text(

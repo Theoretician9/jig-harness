@@ -14,7 +14,7 @@
 * **повторный прогон ничего не меняет.** Доустановка идёт после каждого
   обновления, и «добавить ещё раз» означало бы дубли в cron.
 
-Что ставить — ДАННЫЕ: `harness/config/системные-задания.yaml`.
+Что ставить — ДАННЫЕ: `harness/config/system-jobs.yaml`.
 
 Прогон:
     python3 scripts/install-new.py            # доустановить недостающее
@@ -30,7 +30,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
 import config as конф_модуль                             # noqa: E402
 
 КОРЕНЬ = Path(__file__).resolve().parent.parent
-ДАННЫЕ = КОРЕНЬ / "harness" / "config" / "системные-задания.yaml"
+ДАННЫЕ = КОРЕНЬ / "harness" / "config" / "system-jobs.yaml"
 HARNESS_CONF = конф_модуль.путь_harness_conf()
 
 

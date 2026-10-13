@@ -11,7 +11,7 @@
 # связан с тем, что именно делается: сверка тем коммитов и разбор аварии шли
 # на одной модели.
 #
-# Таблица «вид работы → модель» — данные (harness/config/модели.yaml). Здесь
+# Таблица «вид работы → модель» — данные (harness/config/models.yaml). Здесь
 # только чтение и подстраховка: неизвестный вид получает умолчание и строку в
 # лог, а не пустоту — пустое `--model` уронило бы вызов claude.
 #
@@ -41,7 +41,7 @@ konf_zagruzit PROJECT_DIR LOG_DIR DEMON_MODEL
 source "$HERE/lib/models.sh"
 
 PROJECT_DIR="${PROJECT_DIR:-$(cd "$HERE/.." && pwd)}"
-MODELS_CONF="${MODELS_CONF:-$PROJECT_DIR/harness/config/модели.yaml}"
+MODELS_CONF="${MODELS_CONF:-$PROJECT_DIR/harness/config/models.yaml}"
 # Умолчание живёт ЗДЕСЬ, а не только в файле данных: на свежей установке файла
 # ещё нет, а демоны уже зовут — и пустая строка уронила бы им вызов.
 FALLBACK="haiku"
@@ -103,7 +103,7 @@ PY
 # верны оба исхода, не проверяет ничего.
 шаги_покрыты() {  # 0 — все шаги покрыты, 1 — нет
     MODELS_CONF="${MODELS_CONF}" \
-    PIPELINE_CONF="${PIPELINE_CONF:-$PROJECT_DIR/harness/config/пайплайн.yaml}" \
+    PIPELINE_CONF="${PIPELINE_CONF:-$PROJECT_DIR/harness/config/pipeline.yaml}" \
     python3 "$HERE/model-steps.py"
 }
 
@@ -117,29 +117,29 @@ selftest() {
             echo "  ПЛОХО $3: ждали «$1», вышло «$2»"; ok=0
         fi
     }
-    cat > "$tmp/модели.yaml" <<'YAML'
+    cat > "$tmp/models.yaml" <<'YAML'
 модели:
   спека: fable
   код: opus
   дежурный: haiku
 умолчание: haiku
 YAML
-    случай "fable" "$(MODELS_CONF=$tmp/модели.yaml LOG_DIR=$tmp DEMON_MODEL= для_вида спека)" \
+    случай "fable" "$(MODELS_CONF=$tmp/models.yaml LOG_DIR=$tmp DEMON_MODEL= для_вида спека)" \
         "спека идёт на fable — слово владельца"
-    случай "opus" "$(MODELS_CONF=$tmp/модели.yaml LOG_DIR=$tmp DEMON_MODEL= для_вида код)" \
+    случай "opus" "$(MODELS_CONF=$tmp/models.yaml LOG_DIR=$tmp DEMON_MODEL= для_вида код)" \
         "код идёт на opus"
     # БОЛЬНОЙ СЛУЧАЙ: вида нет в таблице. Пустая строка уронила бы вызов
     # claude — вместо неё умолчание и запись в лог.
-    случай "haiku" "$(MODELS_CONF=$tmp/модели.yaml LOG_DIR=$tmp DEMON_MODEL= для_вида новое-дело)" \
+    случай "haiku" "$(MODELS_CONF=$tmp/models.yaml LOG_DIR=$tmp DEMON_MODEL= для_вида новое-дело)" \
         "БОЛЬНОЙ СЛУЧАЙ: неизвестный вид даёт умолчание, а не пустоту"
     случай "haiku" "$(MODELS_CONF=$tmp/нет.yaml LOG_DIR=$tmp DEMON_MODEL= для_вида спека)" \
         "БОЛЬНОЙ СЛУЧАЙ: таблицы нет вовсе — умолчание, а не отказ"
     printf 'модели:\n  спека: "не-модель"\nумолчание: haiku\n' > "$tmp/битая.yaml"
     случай "haiku" "$(MODELS_CONF=$tmp/битая.yaml LOG_DIR=$tmp DEMON_MODEL= для_вида спека)" \
         "БОЛЬНОЙ СЛУЧАЙ: недопустимое имя из таблицы не уезжает в claude"
-    случай "sonnet" "$(MODELS_CONF=$tmp/модели.yaml LOG_DIR=$tmp DEMON_MODEL=sonnet для_вида дежурный)" \
+    случай "sonnet" "$(MODELS_CONF=$tmp/models.yaml LOG_DIR=$tmp DEMON_MODEL=sonnet для_вида дежурный)" \
         "ручка владельца (model.sh --демоны) старше таблицы"
-    случай "fable" "$(MODELS_CONF=$tmp/модели.yaml LOG_DIR=$tmp DEMON_MODEL=sonnet для_вида спека)" \
+    случай "fable" "$(MODELS_CONF=$tmp/models.yaml LOG_DIR=$tmp DEMON_MODEL=sonnet для_вида спека)" \
         "и при этом не трогает спеку: ручка — про дежурное"
     printf 'модели:\n  спека: claude-fable-5-1\nумолчание: haiku\n' > "$tmp/полное.yaml"
     случай "claude-fable-5-1" "$(MODELS_CONF=$tmp/полное.yaml LOG_DIR=$tmp DEMON_MODEL= для_вида спека)" \
@@ -148,11 +148,11 @@ YAML
     # Код возврата снимается через «|| rc=$?»: под set -e голый вызов, вернувший
     # 1, обрывает ВЕСЬ самотест молча — грабля «падение под set -e молчит».
     local rc=0
-    printf 'шаги:\n  обычная: [тесты, спека]\n' > "$tmp/пайплайн.yaml"
-    rc=0; MODELS_CONF="$tmp/модели.yaml" PIPELINE_CONF="$tmp/пайплайн.yaml" шаги_покрыты 2>/dev/null || rc=$?
+    printf 'шаги:\n  обычная: [тесты, спека]\n' > "$tmp/pipeline.yaml"
+    rc=0; MODELS_CONF="$tmp/models.yaml" PIPELINE_CONF="$tmp/pipeline.yaml" шаги_покрыты 2>/dev/null || rc=$?
     случай "1" "$rc" "БОЛЬНОЙ СЛУЧАЙ: шаг «тесты» без модели — красный"
     printf 'шаги:\n  обычная: [спека, код]\n' > "$tmp/пайплайн2.yaml"
-    rc=0; MODELS_CONF="$tmp/модели.yaml" PIPELINE_CONF="$tmp/пайплайн2.yaml" шаги_покрыты 2>/dev/null || rc=$?
+    rc=0; MODELS_CONF="$tmp/models.yaml" PIPELINE_CONF="$tmp/пайплайн2.yaml" шаги_покрыты 2>/dev/null || rc=$?
     случай "0" "$rc" "все шаги покрыты — зелёный"
     rm -rf "$tmp"
     (( ok )) && { echo "SELFTEST: зелёный (10 путей, среди них четыре больных случая)"; return 0; }

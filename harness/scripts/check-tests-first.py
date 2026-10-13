@@ -53,7 +53,7 @@ def конфиг():
     данные = {}
     try:
         import yaml
-        with open(КОРЕНЬ / "harness" / "config" / "пайплайн.yaml", encoding="utf-8") as fh:
+        with open(КОРЕНЬ / "harness" / "config" / "pipeline.yaml", encoding="utf-8") as fh:
             данные = yaml.safe_load(fh) or {}
     except (OSError, ValueError, ImportError):
         данные = {}

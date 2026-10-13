@@ -50,7 +50,7 @@ import login  # noqa: E402
 
 КОРЕНЬ = Path(__file__).resolve().parent.parent.parent
 РЕЕСТР = Path(os.environ.get("HARNESS_PERECLUCHATELI")
-              or КОРЕНЬ / "harness" / "config" / "переключатели.yaml")
+              or КОРЕНЬ / "harness" / "config" / "switches.yaml")
 ПИСАТЕЛЬ = КОРЕНЬ / "scripts" / "write-key.py"
 # Настройки — через общий модуль: разборов shell-конфига в панели было три, и
 # копия расходится с оригиналом молча (ревью 11.09.2026, фаза 2 спеки).

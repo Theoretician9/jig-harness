@@ -90,7 +90,7 @@ def запуск(врем: Path, ключ: str, значение: str):
     среда = dict(os.environ,
                  HARNESS_CONF=str(врем / "harness.conf"),
                  HARNESS_INSTALL_CONF=str(врем / "install.conf"),
-                 HARNESS_PERECLUCHATELI=str(врем / "переключатели.yaml"),
+                 HARNESS_PERECLUCHATELI=str(врем / "switches.yaml"),
                  LOG_DIR=str(врем / "логи"))
     готово = subprocess.run([sys.executable, str(ПИСАТЕЛЬ), ключ, значение],
                             capture_output=True, text=True, env=среда, timeout=30)
@@ -100,7 +100,7 @@ def запуск(врем: Path, ключ: str, значение: str):
 def стенд(врем: Path):
     (врем / "harness.conf").write_text(КОНФИГ, encoding="utf-8")
     (врем / "install.conf").write_text('AUTONOMY="semi"\n', encoding="utf-8")
-    (врем / "переключатели.yaml").write_text(РЕЕСТР, encoding="utf-8")
+    (врем / "switches.yaml").write_text(РЕЕСТР, encoding="utf-8")
     (врем / "логи").mkdir(exist_ok=True)
 
 

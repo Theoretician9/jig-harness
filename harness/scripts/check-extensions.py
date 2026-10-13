@@ -25,7 +25,7 @@ from pathlib import Path
 import yaml
 
 КОРЕНЬ = Path(__file__).resolve().parent.parent
-ДАННЫЕ = КОРЕНЬ / "harness" / "config" / "расширения.yaml"
+ДАННЫЕ = КОРЕНЬ / "harness" / "config" / "extensions.yaml"
 ГДЕ_ИНСТРУКЦИИ = ["harness/skills", "harness/skills-src", "UNIFIED", "docs", "CLAUDE.md"]
 
 # Команда к исполнению отличается от упоминания АРГУМЕНТОМ: живая команда

@@ -224,7 +224,7 @@ echo "SELFTEST: КРАСНЫЙ"; exit 1
     echo "SELFTEST: КРАСНЫЙ"; exit 1
 fi
 
-# Таблица мутаций — в harness/config/инварианты.yaml рядом с самими правилами
+# Таблица мутаций — в harness/config/invariants.yaml рядом с самими правилами
 # (ревью 10.09.2026, q-18): вшитая в скрипт, она не отвечала на главный вопрос
 # «какие механизмы мутацией ещё НЕ проверены». Теперь непокрытые названы.
 # Имена ЛАТИНИЦЕЙ: `read -r файл` — не идентификатор, bash отвечает ошибкой на
@@ -247,7 +247,7 @@ while IFS=$'\t' read -r src expr proof subst name; do
     проба "$src" "$expr" "$proof" "$subst" "$name"
 done < <(python3 - <<'PYEOF'
 import io, sys, yaml
-d = yaml.safe_load(io.open("harness/config/инварианты.yaml", encoding="utf-8"))["инварианты"]
+d = yaml.safe_load(io.open("harness/config/invariants.yaml", encoding="utf-8"))["инварианты"]
 корни = {и["файл"].split("/")[0] for и in d if и.get("мутация")}
 sys.stdout.write("\t".join(["#КОРНИ", " ".join(sorted(корни)), "-", "-", "-"]) + "\n")
 без = []

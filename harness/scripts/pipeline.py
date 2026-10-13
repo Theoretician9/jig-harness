@@ -40,7 +40,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
 import config as конф                                     # noqa: E402
 
 КОРЕНЬ = Path(__file__).resolve().parent.parent
-КОНФИГ = КОРЕНЬ / "harness" / "config" / "пайплайн.yaml"
+КОНФИГ = КОРЕНЬ / "harness" / "config" / "pipeline.yaml"
 HARNESS_CONF = конф.путь_harness_conf()
 
 # Умолчания на случай, когда конфига нет: механизм обязан работать из коробки,

@@ -10,7 +10,7 @@
 Отсюда устройство: неизменные принципы живут в шаблоне
 (harness/шаблоны-задач/CLAUDE-EN.md.in), а то, что стареет — чем держится
 каждый инвариант и сколько в системе механизмов, — подставляется ИЗ ДАННЫХ
-(harness/config/инварианты.yaml, harness/config/устройство.yaml) при каждой
+(harness/config/invariants.yaml, harness/config/mechanisms.yaml) при каждой
 сборке. Руками файл не правят: правка уедет при следующей сборке, и гейт
 check-claude-md.py её увидит.
 
@@ -86,7 +86,7 @@ def счёт_механизмов(реестр: dict) -> str:
     всего = sum(виды.values())
     порядок = ", ".join(f"{ВИДЫ_EN.get(вид, вид)} — {число}"
                         for вид, число in sorted(виды.items()))
-    return (f"{всего} mechanisms are registered in `harness/config/устройство.yaml` "
+    return (f"{всего} mechanisms are registered in `harness/config/mechanisms.yaml` "
             f"({порядок}). Each one names what it does, when it runs, what breaks "
             f"without it and the command that proves it works. The registry is "
             f"data: `python3 scripts/check-registry.py` fails when the code and "
@@ -103,9 +103,9 @@ def подставить(текст: str, имя: str, содержимое: str
 def собрать(база: Path) -> str:
     шаблон = (база / "шаблоны-задач" / "CLAUDE-EN.md.in").read_text(encoding="utf-8")
     инварианты = yaml.safe_load(
-        (база / "config" / "инварианты.yaml").read_text(encoding="utf-8")) or {}
+        (база / "config" / "invariants.yaml").read_text(encoding="utf-8")) or {}
     реестр = yaml.safe_load(
-        (база / "config" / "устройство.yaml").read_text(encoding="utf-8")) or {}
+        (база / "config" / "mechanisms.yaml").read_text(encoding="utf-8")) or {}
     текст = подставить(шаблон, "invariants", таблица_инвариантов(инварианты))
     return подставить(текст, "mechanisms", счёт_механизмов(реестр))
 

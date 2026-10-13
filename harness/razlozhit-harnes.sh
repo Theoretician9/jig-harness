@@ -32,7 +32,7 @@ EOF
   ok_flag=1
   for f in "$T/proj/scripts/hooks/guard_bash.py" "$T/proj/scripts/deploy.sh" \
            "$T/proj/harness/demons/heartbeat-watch.sh" "$T/proj/CLAUDE.md" \
-           "$T/proj/.claude/settings.json" "$T/proj/harness/skills/приём-задачи/SKILL.md" \
+           "$T/proj/.claude/settings.json" "$T/proj/harness/skills/task-intake/SKILL.md" \
            "$T/proj/harness/panel/server.py" \
            "$T/proj/harness/ОПИСЬ.md"; do
     [[ -f "$f" ]] || { echo "SELFTEST: нет $f"; ok_flag=0; }
@@ -239,11 +239,11 @@ polozhit_v "$PROJECT_DIR/harness/demons" "$HERE"/demons/*
 # правка в проекте пережила бы переустановку только случайно (10.09.2026).
 # harness.conf и logrotate-harness остаются в стороне: их место — /etc/harness.
 mkdir -p "$PROJECT_DIR/harness/config"
-# Пульт владельца (пайплайн.yaml) — ЖИВЫЕ данные сервера, а не пакета: 11.09
+# Пульт владельца (pipeline.yaml) — ЖИВЫЕ данные сервера, а не пакета: 11.09
 # владелец включил шаги для мелких и обычных задач, и раскладка 12.09 вернула
 # ему пакетные умолчания молча. Файл кладётся ТОЛЬКО если его ещё нет — так же,
 # как harness.conf в /etc. Гейт сверки с пакетом его тоже не сторожит.
-LIVE_SETTINGS="пайплайн.yaml очередь.yaml модели.yaml ревизия.yaml"   # имя латиницей: bash не берёт кириллические имена
+LIVE_SETTINGS="pipeline.yaml queue.yaml models.yaml audit.yaml"   # имя латиницей: bash не берёт кириллические имена
 for f in "$HERE"/config/*.yaml "$HERE"/config/*.txt "$HERE"/config/*.gz; do
   [[ -f "$f" ]] || continue
   name="$(basename "$f")"

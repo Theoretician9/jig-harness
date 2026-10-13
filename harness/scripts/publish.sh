@@ -368,11 +368,11 @@ if [ "${1:-}" = "--selftest" ]; then
                  "$dvor/пакет/harness/шаблоны-задач" "$dvor/сборка"
         printf '# харнес\n@STATE.md\n' > "$dvor/пакет/harness/CLAUDE.md"
         printf 'состояние\n' > "$dvor/пакет/harness/STATE.md"
-        printf '# ТОН\nзамер речи\n' > "$dvor/пакет/harness/память/ТОН.md"
+        printf '# ТОН\nзамер речи\n' > "$dvor/пакет/harness/память/TONE.md"
         printf '# ТОН\n\n<!-- потолки: мягкий=700 жёсткий=1500 -->\n' \
             > "$dvor/пакет/harness/шаблоны-задач/ТОН-заготовка.md"
-        printf 'исключить: []\nзаменить_шаблоном:\n  harness/память/ТОН.md: harness/шаблоны-задач/ТОН-заготовка.md\nобезличить_ключи: [PROJECT_DIR]\nоставить: [harness/CLAUDE.md]\n' \
-            > "$dvor/пакет/harness/config/публичная-сборка.yaml"
+        printf 'исключить: []\nзаменить_шаблоном:\n  harness/память/TONE.md: harness/шаблоны-задач/ТОН-заготовка.md\nобезличить_ключи: [PROJECT_DIR]\nоставить: [harness/CLAUDE.md]\n' \
+            > "$dvor/пакет/harness/config/public-build.yaml"
         git -C "$dvor/пакет" init -q -b master
         git -C "$dvor/пакет" add -A
         git -C "$dvor/пакет" -c user.name=t -c user.email=t@t commit -qm проба

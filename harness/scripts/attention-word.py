@@ -9,7 +9,7 @@
 обязан ставить тот, чьи это слова, а не тот, кому он выгоден (ревью спеки
 12.09.2026 — та же находка, по которой отвергнуто поле приоритета в карточке).
 
-Слова и отменяющие формы — данные `harness/config/очередь.yaml`. Отдельный файл,
+Слова и отменяющие формы — данные `harness/config/queue.yaml`. Отдельный файл,
 а не строчка в диспетчере: списку слов положено жить там же, где его читает
 прибор очереди.
 
@@ -26,7 +26,7 @@ import yaml
 ОКНО_ПЕРЕД = 3
 
 КОНФИГ = os.environ.get("QUEUE_CONF") or str(
-    Path(__file__).resolve().parent.parent / "harness" / "config" / "очередь.yaml")
+    Path(__file__).resolve().parent.parent / "harness" / "config" / "queue.yaml")
 
 
 def данные(путь: str | None = None) -> dict:

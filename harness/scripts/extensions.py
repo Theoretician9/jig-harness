@@ -9,7 +9,7 @@
 Слэш-команду вводит человек в терминале; агент её выполнить не может, а
 владелец терминала не видит никогда. Механизм был мёртв с рождения.
 
-Здесь он живой: список — данные (`harness/config/расширения.yaml`), установка —
+Здесь он живой: список — данные (`harness/config/extensions.yaml`), установка —
 CLI-форма `claude plugin install`, проверенная живьём в тот же день (поставил
 context7, снял, реестр до 0 → 1 → 0).
 
@@ -36,10 +36,10 @@ def найти_данные() -> Path:
     `harness/harness/config/…`, и две пробы самотеста молча пропускались
     (поймано 12.09.2026 на первом же прогоне)."""
     for каталог in Path(__file__).resolve().parents:
-        кандидат = каталог / "harness" / "config" / "расширения.yaml"
+        кандидат = каталог / "harness" / "config" / "extensions.yaml"
         if кандидат.exists():
             return кандидат
-    return Path(__file__).resolve().parent.parent / "harness" / "config" / "расширения.yaml"
+    return Path(__file__).resolve().parent.parent / "harness" / "config" / "extensions.yaml"
 
 
 ДАННЫЕ = найти_данные()

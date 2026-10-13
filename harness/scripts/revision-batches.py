@@ -32,7 +32,7 @@ import config as конф                                     # noqa: E402
 
 ПРОЕКТ = Path(os.environ.get("PROJECT_DIR") or Path(__file__).resolve().parent.parent)
 ЖУРНАЛЫ = Path(конф.log_dir())
-КОНФИГ = Path(os.environ.get("REVIZIA_CONF") or ПРОЕКТ / "harness" / "config" / "ревизия.yaml")
+КОНФИГ = Path(os.environ.get("REVIZIA_CONF") or ПРОЕКТ / "harness" / "config" / "audit.yaml")
 КУРСОР = ЖУРНАЛЫ / "revizia" / "курсор.json"
 
 # Имена порогов для оболочки — латиницей: bash кириллические имена не берёт и

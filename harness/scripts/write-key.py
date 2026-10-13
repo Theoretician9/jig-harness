@@ -14,7 +14,7 @@
     узким: имя ключа из реестра и значение из перечня, и ничего больше. Нет
     путей файлов, нет команд, нет подстановки в оболочку — инъектировать нечего.
 
-Что делает: проверяет ключ по реестру `harness/config/переключатели.yaml`,
+Что делает: проверяет ключ по реестру `harness/config/switches.yaml`,
 проверяет значение по виду (перечень или границы), снимает копию прежнего
 файла (И-1), пишет атомарно, дописывает строку в журнал панели.
 
@@ -37,7 +37,7 @@ import panel_writer as писатель                      # noqa: E402
 
 КОРЕНЬ = Path(__file__).resolve().parent.parent
 РЕЕСТР = Path(os.environ.get("HARNESS_PERECLUCHATELI")
-              or КОРЕНЬ / "harness" / "config" / "переключатели.yaml")
+              or КОРЕНЬ / "harness" / "config" / "switches.yaml")
 КОНФИГИ = {
     "install.conf": конф.путь_install_conf(),
     "harness.conf": конф.путь_harness_conf(),
