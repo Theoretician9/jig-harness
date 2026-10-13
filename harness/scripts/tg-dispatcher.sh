@@ -81,6 +81,19 @@ otmetit_vnimanie() {  # $1=метка времени сообщения, $2=сл
 # необратимого читают ТОЛЬКО этот файл, потому что `message_id` в нём ставит
 # телеграм, а не агент. Отказ записи не роняет цикл, но называется вслух:
 # молчаливо потерянная строка неотличима от «владелец не писал».
+# Можно ли разбирать update $1. Перед разбором пишется отметка «id попытка»;
+# сдвиг offset делает её неактуальной сам. Найти свою же отметку при новом
+# разборе значит, что прошлый разбор упал: после POISON_MAX падений update
+# пропускается — иначе systemd поднимает диспетчер, тот же update роняет его
+# снова, и владелец получает «принял» по кругу, а остальные слова стоят.
+may_process_update() {  # $1 = update_id
+    local prev tries=1
+    prev=$(cat "$PROCESSING_FILE" 2>/dev/null || true)
+    [ "${prev%% *}" = "$1" ] && tries=$(( ${prev##* } + 1 ))
+    [ "$tries" -gt "${POISON_MAX:-2}" ] && { rm -f "$PROCESSING_FILE"; return 1; }
+    printf '%s %s\n' "$1" "$tries" > "$PROCESSING_FILE"
+}
+
 inbox_zhurnal() {  # $1 = слова владельца (текст сообщения, подпись или расшифровка)
     [ -n "${MSG_ID:-}" ] || { say "входящее без message_id — в $INBOX_LOG не пишу: без признака авторства это не слово владельца"; return 0; }
     jq -cn --arg ts "$(date -Is)" --arg mid "$MSG_ID" --arg chat "$CHAT" --arg text "${1:-}" \
@@ -362,6 +375,21 @@ if [ "${1:-}" = "--selftest" ]; then
         else printf '  ПЛОХО %s: ждали «%s», получили «%s»\n' "$3" "$1" "$2"; ok_flag=0; fi
     }
 
+    # ── Сообщение, ронявшее диспетчер, не крутится по кругу ────────────────
+    # БОЛЬНОЙ СЛУЧАЙ 13.10.2026: /panel ронял разбор под set -e, systemd
+    # поднимал диспетчер, то же update разбиралось снова, и владелец получал
+    # «принял: /panel» каждые 12 секунд, а остальные его слова не доходили.
+    PROCESSING_FILE="$T/tg_processing"
+    rm -f "$PROCESSING_FILE"
+    итог "разбирать" "$(may_process_update 77 && echo разбирать || echo пропуск)" \
+         "новое сообщение разбирается"
+    итог "разбирать" "$(may_process_update 77 && echo разбирать || echo пропуск)" \
+         "упало один раз — вторая попытка"
+    итог "пропуск" "$(may_process_update 77 && echo разбирать || echo пропуск)" \
+         "БОЛЬНОЙ СЛУЧАЙ: упало дважды — третьего круга нет"
+    итог "разбирать" "$(may_process_update 78 && echo разбирать || echo пропуск)" \
+         "следующее сообщение разбирается заново, счёт с нуля"
+
     # ── Машинный журнал входящих: ОБЕ стороны одного формата (C-1) ──────────
     # Строку пишет диспетчер, читает её scripts/lib/owner_word.py — дверь
     # необратимого. Проба гоняет обе стороны разом нарочно: разъехавшийся
@@ -611,6 +639,7 @@ CONFIRM_LOG="$LOG_DIR/confirmations.jsonl"
 INBOX_LOG="$LOG_DIR/inbox.jsonl"
 DISPATCH_LOG="$LOG_DIR/tg-dispatcher.log"
 OFFSET_FILE="$LOG_DIR/tg_offset"
+PROCESSING_FILE="$LOG_DIR/tg_processing"
 # Лок — в каталоге СЕРВИСНЫХ локов (К-1б, конвенция SERVICE_LOCKS_SUBDIR):
 # ворота deploy_guard смотрят только $LOG_DIR/locks/ и не должны считать
 # вечно живой лок диспетчера «зависшей операцией».
@@ -761,6 +790,13 @@ while true; do
         U=$(printf '%s' "$RESP" | jq -c ".result[$i]")
         UPDATE_ID=$(printf '%s' "$U" | jq -r '.update_id')
         OFFSET=$((UPDATE_ID + 1))
+        if ! may_process_update "$UPDATE_ID"; then
+            printf '%s\n' "$U" > "$LOG_DIR/tg-skipped-$UPDATE_ID.json"
+            say "update $UPDATE_ID ронял диспетчер ${POISON_MAX:-2} раза — пропущен, сырое: $LOG_DIR/tg-skipped-$UPDATE_ID.json"
+            ack "$TG_CHAT_ID" "Одно твоё сообщение ломало приём — пропустил его, остальные доходят. Разберусь, что в нём сломалось."
+            persist_offset
+            continue
+        fi
         # persist_offset здесь НЕ зовётся (К-1а): сперва входящее должно лечь
         # в inbox; ветки-пропуски (не сообщение, чужой чат) сохраняют сразу.
 
