@@ -181,7 +181,7 @@ Bans are enforced by `scripts/hooks/guard_bash.py`, not by your memory.
 ## What is watching (built from the registry)
 
 <!-- AUTO:mechanisms -->
-227 mechanisms are registered in `harness/config/mechanisms.yaml` (gates — 168, daemons — 28, skills — 18, hooks — 13). Each one names what it does, when it runs, what breaks without it and the command that proves it works. The registry is data: `python3 scripts/check-registry.py` fails when the code and the registry disagree.
+234 mechanisms are registered in `harness/config/mechanisms.yaml` (gates — 173, daemons — 30, skills — 18, hooks — 13). Each one names what it does, when it runs, what breaks without it and the command that proves it works. The registry is data: `python3 scripts/check-registry.py` fails when the code and the registry disagree.
 <!-- /AUTO -->
 
 ---

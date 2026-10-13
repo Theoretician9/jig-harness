@@ -383,8 +383,23 @@ UPAVSHIE=$(grep -oE '^  - демон [a-z0-9-]+' "$UST_LOG" 2>/dev/null \
     | awk '{print $3}' | sort -u || true)
 NEOZHIDANNYE=""
 for demon in $UPAVSHIE; do
+    # Файл задания — из ДАННЫХ расписания (system-jobs.yaml, ключ «команда»), а
+    # не по шаблону harness/demons/<имя>.sh: задания живут и в scripts/*.py, и
+    # для них прежний путь не существовал — падение любого из них объявлялось
+    # находкой установки на пустом месте (замер 14.10.2026: build-board,
+    # check-login-expiry).
+    fajl=$(docker exec "$KONT" bash -lc \
+        "python3 -c \"
+import yaml
+data = yaml.safe_load(open('$KOREN_STENDA/harness/config/system-jobs.yaml', encoding='utf-8')) or {}
+for job in data.get('задания') or []:
+    if job.get('имя') == '$demon':
+        print(job.get('команда', ''))
+        break
+\"" 2>/dev/null | tr -d '\r')
+    [ -n "$fajl" ] || fajl="harness/demons/$demon.sh"
     if docker exec "$KONT" bash -lc \
-            "grep -qE 'claude|tg_send' $KOREN_STENDA/harness/demons/$demon.sh" 2>/dev/null; then
+            "grep -qE 'claude|tg_send|credentials' $KOREN_STENDA/$fajl" 2>/dev/null; then
         continue
     fi
     NEOZHIDANNYE="$NEOZHIDANNYE $demon"
