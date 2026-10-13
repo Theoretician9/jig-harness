@@ -84,7 +84,7 @@ COMMIT_HASH = "abc1234"
 COMMIT_SUBJECT = "Канбан: проба коммита задачи"
 SKILL_NAME = "spec-writing"
 PAPER_TEXT = "<b>спека пробы</b> & текст бумаги"
-OUTSIDE_SECRET = "СЕКРЕТ-СНАРУЖИ-КОРНЯ"
+OUTSIDE_SECRET = "СЕКРЕТ-СНАРУЖИ-КОРНЯ"  # не-секрет: образец файла вне корня бумаг
 
 
 def free_port() -> int:
