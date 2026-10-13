@@ -10,10 +10,12 @@
 вещи, и на экране владельца они не должны выглядеть одинаково
 ([[segment-state-three-answers]]).
 """
+import datetime
 import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -147,85 +149,228 @@ def _активное_направление() -> str:
     return значение or ""
 
 
-def глубина_словами(задача: dict) -> str:
-    """«обычная · разработка» или пусто, если глубины у задачи нет.
+# ── доска: снимок, который строит агентская сторона (scripts/build-board.py) ──
+# Стадию задачи панель НЕ вычисляет: её судит гейт пайплайна, и вторая
+# реализация для экрана разошлась бы с ним (спека hr.kanban §1). Панель читает
+# готовый снимок и только называет его возраст.
 
-    Вопрос владельца 28.09.2026: «Как я определю задачу без поля глубина? Где
-    мне это увидеть?» Нигде: ни витрина, ни прибор очереди про глубину не знали
-    ни слова, а без неё машина не знает, какие шаги задаче положены.
-    """
-    поле = задача.get("глубина")
-    if not isinstance(поле, dict):
-        return ""
-    уровень = str(поле.get("уровень") or "").strip()
-    характер = str(поле.get("характер") or "").strip()
-    if not уровень:
-        return ""
-    return f"{уровень} · {характер}" if характер else уровень
+# Снимок снимается каждую минуту (system-jobs.yaml) и при коммите; 15 минут
+# без снимка — демон молчит, а не опоздал на круг (спека §3.1).
+BOARD_STALE_MINUTES = 15
+PAPER_LIMIT_BYTES = 256 * 1024
+COMMENTS_DIR_MODE = 0o2770     # группа harness-panel наследуется: агент читает заявки
+COMMENT_FILE_MODE = 0o660
+DELIVERED_JOURNAL = "panel-comments-delivered.jsonl"
+# id задачи — имя файла комментария: без `/` и без точки в начале (`..`).
+# То же правило стоит в scripts/comments-intake.py — приём судит заявку сам.
+TASK_ID = re.compile(r"(?!\.)[\w.\-]{1,200}")
+# Каталог comments/ общий с группой агента и без sticky: файл службы там можно
+# подменить симлинком или FIFO. Открываем без перехода по ссылке и без
+# ожидания читателя, тип проверяем по открытому дескриптору.
+_NO_SURPRISES = os.O_NOFOLLOW | os.O_NONBLOCK
 
 
-def karta() -> dict:
-    """Карта разработки для экрана: сводка по статусам и что где стоит.
+def _board_path() -> Path:
+    return Path(os.environ.get("PANEL_BOARD") or settings.состояние_дир() / "board.json")
 
-    Владелец 11.09.2026 спросил: «Карта где используется? Где предполагается
-    быть использованной?» — ответ был честным: её читают двадцать механизмов и
-    ни один экран. Источник, по которому машина принимает решения, владелец
-    обязан видеть.
 
-    Полных описаний задач здесь НЕ отдаём: карта весит четверть миллиона знаков,
-    и экран из неё грузился бы минуту. Отдаём имя, состояние и чем доказана.
-    """
+def _minutes_since(moment: str | None) -> int | None:
+    """Возраст ISO-времени в минутах; время без пояса считается местным."""
+    try:
+        taken = datetime.datetime.fromisoformat(str(moment))
+    except ValueError:
+        return None
+    now = datetime.datetime.now(taken.tzinfo) if taken.tzinfo else datetime.datetime.now()
+    return int((now - taken).total_seconds() // 60)
+
+
+def board() -> dict:
+    """Снимок доски с возрастом. Нет снимка или он битый — «нет данных» с причиной:
+    пустая доска выглядела бы как «задач нет»."""
+    path = _board_path()
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {"нет данных": f"снимка доски нет: {path} не найден — демон "
+                              f"build-board его ещё не снимал"}
+    except (OSError, ValueError) as error:
+        return {"нет данных": f"снимок доски не прочитан: {path} битый или "
+                              f"недоступен ({error})"}
+    if not isinstance(data, dict) or not isinstance(data.get("задачи"), list):
+        return {"нет данных": f"снимок доски не прочитан: в {path} нет списка задач"}
+    age = _minutes_since(data.get("снято"))
+    return dict(data, возраст_минут=age,
+                устарела=age is None or age > BOARD_STALE_MINUTES)
+
+
+def find_task(snapshot: dict, task_id: str) -> dict | None:
+    """Задача по id — сверкой с id снимка, а не разбором символов пути."""
+    return next((task for task in snapshot.get("задачи") or []
+                 if isinstance(task, dict) and task.get("id") == task_id), None)
+
+
+def _paper_roots() -> list[str]:
+    """Корни, внутри которых лежат бумаги: проект и репозиторий продукта."""
+    roots = [settings.конф.конфиг().get("PROJECT_DIR"),
+             settings.конф.конфиг(settings.конф.путь_harness_conf()).get("PRODUCT_REPO")]
+    return [os.path.realpath(root) for root in roots if root]
+
+
+def read_paper(task: dict, number: str) -> tuple[int, str]:
+    """(код, текст или причина). Номер — индекс в шагах снимка, а не путь:
+    путь из адреса превратил бы панель в читалку любого файла машины."""
+    steps = task.get("шаги") or []
+    if not re.fullmatch(r"[0-9]+", number) or int(number) >= len(steps) \
+            or not steps[int(number)].get("путь"):
+        return 404, f"у задачи нет бумаги под номером «{number}»"
+    try:
+        # O_NONBLOCK: FIFO, открытый на чтение без него, повесил бы поток службы.
+        descriptor = os.open(steps[int(number)]["путь"], os.O_RDONLY | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return 404, "файла бумаги нет"
+    except OSError as error:
+        return 403, f"бумага не открывается: {error.strerror}"
+    try:
+        # Корень судится по ОТКРЫТОМУ файлу: путь до открытия агент может
+        # подменить симлинком между проверкой и open.
+        real = os.readlink(f"/proc/self/fd/{descriptor}")
+        if not any(os.path.commonpath([real, root]) == root for root in _paper_roots()):
+            return 403, "бумага лежит вне каталога проекта и продукта — не открываю"
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode):
+            return 403, "это не обычный файл — не открываю"
+        if info.st_size > PAPER_LIMIT_BYTES:
+            return 413, (f"бумага {info.st_size // 1024} КБ — больше потолка "
+                         f"{PAPER_LIMIT_BYTES // 1024} КБ, в панели не показываю")
+        return 200, os.read(descriptor, PAPER_LIMIT_BYTES).decode("utf-8", "replace")
+    finally:
+        os.close(descriptor)
+
+
+def comment_limit() -> int | None:
+    """Потолок длины комментария — тот же, что у сообщения в канал (данные)."""
     try:
         import yaml
-        карта = yaml.safe_load(_карта().read_text(encoding="utf-8"))
-    except Exception as беда:                       # noqa: BLE001 — витрина не падает
-        return {"нет данных": f"карта не прочитана: {беда}"}
-    задачи = []
+        data = yaml.safe_load(_pipeline_path().read_text(encoding="utf-8"))
+        return int(data["канал"]["отказ_с"])
+    except Exception:                                # noqa: BLE001 — витрина не падает
+        return None
 
-    def обход(узел):
-        if isinstance(узел, dict):
-            if "id" in узел and "status" in узел:
-                задачи.append(узел)
-            for значение in узел.values():
-                обход(значение)
-        elif isinstance(узел, list):
-            for элемент in узел:
-                обход(элемент)
 
-    обход(карта)
-    # Направления: над одним работаем, остальные отложены. Владелец 12.09.2026
-    # просил, чтобы отложенное не мешало, — но и не пропадало из виду.
-    активное = _активное_направление()
-    по_направлениям = {л.get("id"): len(л.get("tasks") or [])
-                       for л in (карта.get("lines") or [])}
-    if активное:
-        свои = {з["id"] for л in (карта.get("lines") or [])
-                if л.get("id") == активное
-                for з in (л.get("tasks") or [])}
-        задачи = [з for з in задачи if з["id"] in свои]
-    по_статусам = {}
-    for з in задачи:
-        по_статусам[з["status"]] = по_статусам.get(з["status"], 0) + 1
-    порядок = {"wip": 0, "test": 1, "plan": 2, "беклог": 3, "принято": 4,
-               "done": 5}
-    строки = []
-    for з in sorted(задачи, key=lambda з: (порядок.get(з["status"], 9), з["id"])):
-        проверка = з.get("проверка") or {}
-        строки.append({
-            "id": з["id"],
-            "название": str(з.get("title", ""))[:110],
-            "состояние": з["status"],
-            "глубина": глубина_словами(з),
-            "чем доказана": (проверка.get("команда") if isinstance(проверка, dict) else None)
-                            or з.get("проверить_владельцу") or "",
-            "блокер": з.get("blocked"),
-        })
-    отложено = sum(n for имя, n in по_направлениям.items() if имя != активное) \
-        if активное else 0
-    return {"по состояниям": по_статусам, "всего": len(задачи), "задачи": строки,
-            "рабочее направление": активное or "все",
-            "отложено задач": отложено,
-            "без глубины": sum(1 for з in задачи if not глубина_словами(з))}
+def _comments_dir() -> Path:
+    return settings.состояние_дир() / "comments"
+
+
+def _open_shared_dir(name: str, parent: int | None = None) -> int:
+    """Дескриптор каталога comments/ или new/; создаётся при первом комментарии.
+    mkdir под маской 022 отнял бы у группы запись и не поставил бы setgid —
+    права ставятся явно, и только своему, только что созданному каталогу."""
+    try:
+        os.mkdir(name, COMMENTS_DIR_MODE, dir_fd=parent)
+        created = True
+    except FileExistsError:
+        created = False
+    descriptor = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+    if created:
+        os.fchmod(descriptor, COMMENTS_DIR_MODE)
+    return descriptor
+
+
+def _write_shared(directory: int, name: str, data: str, flags: int) -> None:
+    descriptor = os.open(name, os.O_WRONLY | os.O_CREAT | _NO_SURPRISES | flags,
+                         COMMENT_FILE_MODE, dir_fd=directory)
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise OSError(f"{name} — не обычный файл")
+        os.fchmod(descriptor, COMMENT_FILE_MODE)
+        os.write(descriptor, data.encode("utf-8"))
+    finally:
+        os.close(descriptor)
+
+
+def add_comment(task_id: str, text: str) -> dict:
+    """Строка в comments/<id>.jsonl и заявка comments/new/<ts>.json.
+
+    Во входящие харнеса текст не кладётся НИКОГДА: оттуда ворота выката и
+    одобрение спеки берут согласия, и «да, выкатывай» с панели стал бы
+    согласием мимо канала (спека §4). Заявку доставляет агенту диспетчер.
+
+    Порядок — заявка черновиком, строка, переименование заявки: строка без
+    заявки висела бы «ждёт доставки» вечно, а черновик с точкой приём не
+    читает. Отказ на любом шаге — исключение без следа на странице."""
+    if not TASK_ID.fullmatch(task_id):
+        raise ValueError(f"id «{task_id}» не годится в имя файла")
+    record = {"ts": f"{time.time():.9f}", "id": task_id, "текст": text}
+    line = json.dumps(record, ensure_ascii=False)
+    draft, final = f".{record['ts']}.json", f"{record['ts']}.json"
+    state_dir = os.open(settings.состояние_дир(), os.O_RDONLY | os.O_DIRECTORY)
+    comments_dir = new_dir = None
+    try:
+        comments_dir = _open_shared_dir("comments", state_dir)
+        new_dir = _open_shared_dir("new", comments_dir)
+        _write_shared(new_dir, draft, line, os.O_EXCL)
+        try:
+            _write_shared(comments_dir, f"{task_id}.jsonl", line + "\n", os.O_APPEND)
+        except OSError:
+            os.unlink(draft, dir_fd=new_dir)
+            raise
+        os.rename(draft, final, src_dir_fd=new_dir, dst_dir_fd=new_dir)
+    finally:
+        for descriptor in (new_dir, comments_dir, state_dir):
+            if descriptor is not None:
+                os.close(descriptor)
+    return record
+
+
+def _delivered() -> dict:
+    """{ts: строка журнала доставки} — исход и время; журнал пишет приём."""
+    try:
+        lines = (settings.журнал_дир() / DELIVERED_JOURNAL).read_text(
+            encoding="utf-8").splitlines()
+    except OSError:
+        return {}
+    result = {}
+    for line in lines:
+        try:
+            row = json.loads(line)
+            result[str(row["ts"])] = row
+        except (ValueError, KeyError, TypeError):
+            continue
+    return result
+
+
+def _read_comment_lines(task_id: str) -> list:
+    path = _comments_dir() / f"{task_id}.jsonl"
+    try:
+        descriptor = os.open(path, os.O_RDONLY | _NO_SURPRISES)
+    except FileNotFoundError:
+        return []
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise OSError(f"{path} — не обычный файл")
+        with os.fdopen(os.dup(descriptor), "r", encoding="utf-8", errors="replace") as fh:
+            return fh.read().splitlines()
+    finally:
+        os.close(descriptor)
+
+
+def comments(task_id: str) -> dict:
+    """Комментарии к задаче с исходом доставки."""
+    if not TASK_ID.fullmatch(task_id):
+        return {"нет данных": f"id «{task_id}» не годится в имя файла комментариев"}
+    try:
+        lines = _read_comment_lines(task_id)
+    except OSError as error:
+        return {"нет данных": f"комментарии не прочитаны: {error}"}
+    delivered = _delivered()
+    rows = []
+    for line in lines:
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        rows.append(dict(row, доставка=delivered.get(str(row.get("ts")))))
+    return {"строки": rows}
 
 
 def сторожа() -> dict:
@@ -353,13 +498,16 @@ def машина() -> dict:
 }
 
 
+def _pipeline_path() -> Path:
+    return Path(os.environ.get("HARNESS_PAJPLAJN")
+                or КОРЕНЬ / "harness" / "config" / "pipeline.yaml")
+
+
 def шаги() -> dict:
     """Шаги работы по уровням задачи — из пульта владельца."""
-    пульт = Path(os.environ.get("HARNESS_PAJPLAJN")
-                 or КОРЕНЬ / "harness" / "config" / "pipeline.yaml")
     try:
         import yaml
-        данные = yaml.safe_load(пульт.read_text(encoding="utf-8"))
+        данные = yaml.safe_load(_pipeline_path().read_text(encoding="utf-8"))
         по_уровням = данные["шаги"]
     except Exception as беда:                       # noqa: BLE001
         return {"нет данных": f"пульт шагов не прочитан: {беда}"}

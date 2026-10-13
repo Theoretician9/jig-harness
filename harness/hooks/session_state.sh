@@ -298,6 +298,21 @@ if [ -d "$inbox_dir" ]; then
   fi
 fi
 
+# --- комментарии владельца из панели, не дошедшие до агента ---
+# Диспетчер пинает агента комментарием и отмечает доставку; пинок, не заставший
+# агента в панели, не отмечается. Без этой строки такое слово владельца ждало
+# бы только следующего удачного пинка (спека hr.kanban §4).
+if [ -n "$project_dir" ] && [ -f "$project_dir/scripts/comments-intake.py" ]; then
+  comment_claims=$(timeout 10 python3 "$project_dir/scripts/comments-intake.py" 2>/dev/null)
+  comment_rc=$?
+  if [ "$comment_rc" != 0 ]; then
+    echo "⚠ комментарии панели не прочитаны (comments-intake.py, код $comment_rc): ${comment_claims:0:300}"
+  elif [ -n "$comment_claims" ]; then
+    echo "⚠ комментариев не доставлено: $(printf '%s\n' "$comment_claims" | wc -l) — слова владельца из панели:"
+    printf '%s\n' "$comment_claims" | cut -f2- | head -c 1200 | iconv -f utf-8 -t utf-8 -c 2>/dev/null | sed 's/^/    /'
+  fi
+fi
+
 # Очередь и ПОРЯДОК — одним вызовом: карта весит 390 КБ, и разбирать её дважды
 # ради двух строк значит платить 0,8 с на каждом старте сессии.
 queue_tool="$project_dir/scripts/work-queue.py"

@@ -265,5 +265,70 @@ with tempfile.TemporaryDirectory() as tmp:
     else:
         path_bad(f"одобрение спеки: комментарий доставлен {printed}, нашли {found_approval}")
 
+    # ── ревью кода hr.kanban: S-03, S-07, G-09 ──────────────────────────────
+    # S-03: заявка — канал в панель агента. Управляющие символы ушли бы
+    # нажатиями в TUI (ESC прерывает ход, Ctrl-C закрывает claude).
+    intake("--доставлено", t2)
+    t_ctrl = f"{time.time() - 4:.9f}"
+    put_claim(t_ctrl, "hr.proba", "до\x1b[200~\x03\x15\x7f‮после")
+    code, lines = intake()
+    kick = kicks(lines).get(t_ctrl, "")
+    if code == 0 and kick and not any(ord(c) < 32 or 127 <= ord(c) < 160
+                                      or c == "‮" for c in kick) \
+            and "до" in kick and "после" in kick:
+        path_ok("БОЛЬНОЙ СЛУЧАЙ S-03: управляющие символы из заявки в пинок не идут")
+    else:
+        path_bad(f"управляющие символы в пинке: код {code}, {kick!r}")
+    intake("--доставлено", t_ctrl)
+
+    # S-03: длина и id заявки судятся приёмом, а не только формой панели.
+    # Негодная заявка не печатается и отмечается исходом «битая» один раз (G-09).
+    t_long = f"{time.time() - 3:.9f}"
+    t_badid = f"{time.time() - 2:.9f}"
+    put_claim(t_long, "hr.proba", "я" * 5000)
+    claims.mkdir(parents=True, exist_ok=True)
+    (claims / f"{t_badid}.json").write_text(
+        json.dumps({"ts": t_badid, "id": "../x", "текст": "проба"}, ensure_ascii=False),
+        encoding="utf-8")
+    code, lines = intake()
+    got = kicks(lines)
+
+    def outcome(ts: str) -> list:
+        try:
+            rows = [json.loads(s) for s in delivered.read_text(encoding="utf-8").splitlines()
+                    if s.strip()]
+        except (OSError, ValueError):
+            return []
+        return [r.get("исход") for r in rows if str(r.get("ts")) == ts]
+
+    if code == 0 and t_long not in got and t_badid not in got \
+            and outcome(t_long) == ["битая"] and outcome(t_badid) == ["битая"]:
+        path_ok("БОЛЬНОЙ СЛУЧАЙ S-03: заявка длиннее потолка и с негодным id — "
+                "не в пинок, исход «битая»")
+    else:
+        path_bad(f"негодные заявки: код {code}, напечатаны {sorted(got)}, "
+                 f"исходы {outcome(t_long)}/{outcome(t_badid)}")
+
+    # G-09: битая заявка (обрыв JSON выше) отмечена один раз и больше не шумит.
+    done = subprocess.run([sys.executable, str(INTAKE)], env=env, capture_output=True,
+                          text=True, timeout=30)
+    broken_marks = sum(1 for r in (json.loads(s) for s in delivered.read_text(
+        encoding="utf-8").splitlines() if s.strip()) if r.get("исход") == "битая")
+    if done.returncode == 0 and not done.stderr.strip() and broken_marks == 3:
+        path_ok("БОЛЬНОЙ СЛУЧАЙ G-09: битая заявка отмечена один раз, повторный круг молчит")
+    else:
+        path_bad(f"битые заявки: stderr {done.stderr[:120]!r}, отметок «битая» {broken_marks}")
+
+    # S-07: нечитаемый каталог заявок — это отказ, а не «комментариев нет».
+    os.chmod(claims, 0o000)
+    try:
+        code, lines = intake()
+    finally:
+        os.chmod(claims, 0o2770)
+    if code not in (0, -1) and lines and "не" in " ".join(lines):
+        path_ok(f"БОЛЬНОЙ СЛУЧАЙ S-07: каталог заявок не читается → код {code} и причина")
+    else:
+        path_bad(f"нечитаемый каталог заявок: код {code}, вывод {lines[:2]}")
+
 print(f"ПРИЁМ-КОММЕНТАРИЕВ: путей {paths_total}, неудач {failures}")
 sys.exit(1 if failures else 0)

@@ -687,6 +687,87 @@ with tempfile.TemporaryDirectory() as tmp:
     else:
         path_bad("состояния «ждёт доставки» на странице нет")
 
+    # ── ревью кода hr.kanban: архив null, S-04, S-05, G-13 ─────────────────
+    def post_comment(address: str, task_id: str, text: str):
+        """Комментарий со своим адресом: лимит частоты у каждой пробы свой."""
+        headers = dict(own, Cookie=f"panel={pass_b}", **{"X-Real-IP": address})
+        return request(f"{base}/kommentarij", headers=headers,
+                       data={"id": task_id, "текст": text, "csrf": csrf_b})
+
+    def comment_lines() -> list:
+        try:
+            return lines_file.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            return []
+
+    # «архив»: null — архив не прочитан. Это «—», а не 0 и не «None».
+    with_null_archive = board(papers, iso_minutes_ago(1))
+    with_null_archive["архив"] = None
+    write_board(board_file, with_null_archive)
+    reset_rates()
+    code, page = raw_get(port, "/karta", with_pass)
+    if code == 200 and re.search(r"архив\D{0,10}—", page) and "None" not in page:
+        path_ok("БОЛЬНОЙ СЛУЧАЙ: архив не прочитан (null) → «архив: —»")
+    else:
+        path_bad(f"архив null: {code}, {re.findall(r'архив.{0,20}', page)[:2]}")
+
+    # S-05: id из снимка — имя файла комментария. id с `..`/`/` увёл бы запись
+    # из comments/ к ключам входа.
+    hostile = board(papers, iso_minutes_ago(1))
+    hostile["задачи"].append(dict(plain_task(97), id="../x", название="Проба id"))
+    write_board(board_file, hostile)
+    code, body = post_comment("10.0.1.1", "../x", "проба id")
+    if code in (403, 404, 422) and not (panel_state / "x.jsonl").exists() \
+            and not (root / "x.jsonl").exists():
+        path_ok(f"БОЛЬНОЙ СЛУЧАЙ S-05: id «../x» не стал именем файла → {code}")
+    else:
+        path_bad(f"id «../x»: {code} {body[:80]}")
+    write_board(board_file, board(papers, iso_minutes_ago(1)))
+
+    # S-04: каталог comments/ общий с группой без sticky — агент может заменить
+    # файл службы симлинком. Служба не пишет и не меняет права по нему.
+    victim = panel_state / "проба-сессии.json"
+    victim.write_text('{"сессии": 1}', encoding="utf-8")
+    os.chmod(victim, 0o600)
+    saved = lines_file.read_text(encoding="utf-8")
+    lines_file.unlink()
+    os.symlink(victim, lines_file)
+    code, body = post_comment("10.0.1.2", DETAIL_ID, "проба симлинка")
+    victim_intact = victim.read_text(encoding="utf-8") == '{"сессии": 1}' \
+        and mode(victim) == "0o600"
+    if code not in (200, 201, 202, 303) and victim_intact:
+        path_ok(f"БОЛЬНОЙ СЛУЧАЙ S-04: симлинк вместо журнала комментариев → {code}, "
+                f"чужой файл цел")
+    else:
+        path_bad(f"симлинк: {code}, чужой файл цел {victim_intact}")
+    lines_file.unlink()
+
+    os.mkfifo(lines_file)
+    reset_rates()
+    started = time.time()
+    code, body = raw_get(port, f"/karta/{DETAIL_ID}", with_pass)
+    if code == 200 and time.time() - started < 9:
+        path_ok("БОЛЬНОЙ СЛУЧАЙ S-04: FIFO вместо журнала — страница задачи без зависания")
+    else:
+        path_bad(f"FIFO вместо журнала: {code} за {time.time() - started:.1f} с")
+    lines_file.unlink()
+    lines_file.write_text(saved, encoding="utf-8")
+    os.chmod(lines_file, 0o660)
+
+    # G-13: заявка не записалась — строки на странице быть не должно, иначе
+    # она висит «ждёт доставки» навсегда, а доставлять нечего.
+    before = comment_lines()
+    os.chmod(requests_dir, 0o550)
+    try:
+        code, body = post_comment("10.0.1.3", DETAIL_ID, "проба без заявки")
+    finally:
+        os.chmod(requests_dir, 0o2770)
+    if code == 500 and comment_lines() == before:
+        path_ok("БОЛЬНОЙ СЛУЧАЙ G-13: заявка не записана → 500, строки комментария нет")
+    else:
+        path_bad(f"заявка не записана: {code}, строк было {len(before)}, "
+                 f"стало {len(comment_lines())}")
+
     service.shutdown()
 
 summary_and_exit()

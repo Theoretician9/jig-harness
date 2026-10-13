@@ -300,6 +300,95 @@ smena_zanyata() {  # 0 — работа есть, 1 — работы нет (и�
     esac
 }
 
+# Немедленный пинок агенту о новом входящем (К-1в) — только при живом
+# claude/node в панели: в голой оболочке текст исполнился бы как команды.
+# Любой отказ (нет tmux, нет сессии) не роняет цикл — подстрахует
+# inbox-пинок session-warden.
+#
+# kick_agent молчит и оставляет причину отказа в KICK_REFUSAL (пусто — дошёл):
+# приёму комментариев нужно знать исход и говорить о нём один раз, а не на
+# каждом круге. Код возврата всегда 0 — под set -e отказ доставки не вправе
+# ронять цикл. Стоят выше самотеста: он судит их боевыми.
+kick_agent() {  # текст
+    KICK_REFUSAL=""
+    command -v tmux >/dev/null 2>&1 || { KICK_REFUSAL="tmux не установлен"; return 0; }
+    tmux has-session -t "$TMUX_SESSION" 2>/dev/null \
+        || { KICK_REFUSAL="tmux-сессии '$TMUX_SESSION' нет"; return 0; }
+    local cmd
+    cmd=$(tmux display-message -p -t "$TMUX_SESSION" '#{pane_current_command}' 2>/dev/null || echo "?")
+    case "$cmd" in
+        claude|node) send_to_pane "$1" 2>/dev/null || KICK_REFUSAL="send-keys не прошёл" ;;
+        *) KICK_REFUSAL="в панели '$cmd', не claude/node — оболочка исполнила бы текст как команды" ;;
+    esac
+}
+
+agent_kick() {  # текст
+    kick_agent "$1"
+    [ -z "$KICK_REFUSAL" ] || say "пинок агенту не отдан: $KICK_REFUSAL (подстрахует session-warden)"
+}
+
+# Комментарии владельца из панели (спека hr.kanban §4). Приём печатает
+# `<ts>\t<пинок>` на каждую недоставленную заявку; доставленная отмечается в
+# его журнале, не дошедшая — нет: повторится на следующем круге и видна в
+# session_state.sh. Судьи те же, что у сообщения канала (dostavit_agentu):
+# пауза держит всегда, несрочное в разгар шага ждёт рубежа.
+COMMENTS_INTAKE="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/comments-intake.py"
+URGENCY_PY="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/urgency.py"
+COMMENTS_TIMEOUT=10
+declare -A COMMENT_SAID=()
+
+# Сказать о ключе, только когда его состояние сменилось: круг идёт раз в
+# минуту, и недоставленная заявка иначе писала бы строку на каждом.
+say_on_change() {  # ключ, текст
+    [ "${COMMENT_SAID[$1]-}" = "$2" ] && return 0
+    COMMENT_SAID[$1]="$2"
+    say "$2"
+}
+
+# Почему комментарий сейчас не отдавать; пусто — отдавать. Текст судится без
+# обёртки пинка: «Комментарий владельца из панели к <id>: <текст> (полностью — …)».
+comment_hold() {  # пинок
+    if pauza_derzhit ""; then echo "стоит пауза владельца"; return 0; fi
+    local body="${1#*: }" urgent
+    body="${body% (полностью — *}"
+    urgent=$(python3 "$URGENCY_PY" "$body" 2>/dev/null || true)
+    if [ -z "$urgent" ] && smena_zanyata; then
+        echo "несрочный, шаг агента не прерываю — ждёт рубежа"
+    fi
+    return 0
+}
+
+deliver_panel_comments() {
+    local claims rc=0 ts kick hold
+    # Под set -e голое `X=$(cmd)` роняло демона (память/assignment-under-set-e.md).
+    claims=$(timeout "$COMMENTS_TIMEOUT" python3 "$COMMENTS_INTAKE" 2>>"$DISPATCH_LOG") || rc=$?
+    if [ "$rc" != 0 ]; then
+        say_on_change intake "приём комментариев панели не прошёл (код $rc): ${claims:0:300}"
+        return 0
+    fi
+    COMMENT_SAID[intake]=""
+    # Своим дескриптором: судьи внутри цикла — процессы, и stdin они бы съели.
+    while IFS=$'\t' read -r -u 3 ts kick; do
+        [ -n "$ts" ] || continue
+        hold=$(comment_hold "$kick")
+        if [ -n "$hold" ]; then
+            say_on_change "$ts" "комментарий $ts ждёт: $hold"
+            continue
+        fi
+        kick_agent "$kick"
+        if [ -n "$KICK_REFUSAL" ]; then
+            say_on_change "$ts" "комментарий $ts не отдан: $KICK_REFUSAL"
+            continue
+        fi
+        if timeout "$COMMENTS_TIMEOUT" python3 "$COMMENTS_INTAKE" --доставлено "$ts" < /dev/null; then
+            unset "COMMENT_SAID[$ts]"
+            say "комментарий $ts доставлен агенту"
+        else
+            say_on_change "$ts" "комментарий $ts доставлен, но отметка не записана — пинок повторится"
+        fi
+    done 3<<< "$claims"
+}
+
 # ── селфтест доставки: ЖИВОЙ tmux, свои одноразовые сессии ──────────────────
 # Прибор доказывается на больном случае (UNIFIED/08), а больной случай здесь —
 # потеря сообщения владельца. Поэтому первый путь гоняет СТАРЫЙ способ и ждёт
@@ -600,8 +689,65 @@ PY
     ALIVE2=$( set -euo pipefail; CMD=""; if [ -n "$CMD" ]; then ne_rabota_dlya_smeny "3"; fi; printf 'жив' )
     итог "жив" "$ALIVE2" "пустая команда не роняет диспетчер под set -e"
 
+    # ── комментарии панели (ревью hr.kanban G-03, G-04, G-09, G-10) ────────
+    # Судится БОЕВАЯ deliver_panel_comments; подменены только края: приём
+    # (заглушка-процесс), tmux и send_to_pane, занятость смены. Пауза — боевая
+    # pause.py на своём дворе. Каждый случай — два круга: «сказать один раз на
+    # смену состояния» видно только на повторе.
+    # Подоболочка — без `|| true`: в части списка `||` bash выключает set -e, и
+    # проба падения цикла под set -e перестала бы им быть.
+    cat > "$T/intake-stub.py" <<'STUB'
+import os, sys, time
+marks = os.environ["STUB_MARKS"]
+if sys.argv[1:2] == ["--доставлено"]:
+    with open(marks, "a") as fh:
+        fh.write(sys.argv[2] + "\n")
+    sys.exit(0)
+mode = os.environ["STUB_MODE"]
+if mode == "fail":
+    print("каталог заявок не читается")
+    sys.exit(1)
+if mode == "hang":
+    time.sleep(30)
+done = open(marks).read().split()
+for ts, word in (("1.1", "один"), ("2.2", "два")):
+    if ts not in done:
+        print(f"{ts}\tКомментарий владельца из панели к hr.x: почини карту {word} "
+              f"(полностью — панель, задача hr.x)")
+STUB
+    comments_rounds() {  # $1=приём: fail|hang|two, $2=send_to_pane: ok|fail, $3=пауза: да|нет, $4=смена: занята|свободна
+        (
+            set -euo pipefail
+            COMMENTS_INTAKE="$T/intake-stub.py"; COMMENTS_TIMEOUT=2; TMUX_SESSION="harness-selftest-comments"
+            DISPATCH_LOG="$T/said"; : > "$T/said"; : > "$T/marks"; : > "$T/kicks"
+            export STUB_MODE="$1" STUB_MARKS="$T/marks" HARNESS_PANEL_STATE="$T/двор-$3"
+            mkdir -p "$HARNESS_PANEL_STATE"
+            if [ "$3" = да ]; then python3 "$PAUSE_PY" --поставить проба >/dev/null; fi
+            SEND_MODE="$2"; BUSY="$4"
+            tmux() { if [ "$1" = display-message ]; then echo claude; fi; return 0; }
+            send_to_pane() { echo "$1" >> "$T/kicks"; [ "$SEND_MODE" = ok ]; }
+            smena_zanyata() { [ "$BUSY" = занята ]; }
+            deliver_panel_comments >/dev/null
+            deliver_panel_comments >/dev/null
+            printf 'пинков %s, отметок %s, слов %s, жив' "$(wc -l < "$T/kicks")" \
+                "$(wc -l < "$T/marks")" "$(wc -l < "$T/said")"
+        ) 2>/dev/null
+    }
+    итог "пинков 0, отметок 0, слов 1, жив" "$(comments_rounds fail ok нет свободна)" \
+         "БОЛЬНОЙ СЛУЧАЙ G-04: приём упал (код 1) — цикл жив, сказано один раз за два круга"
+    итог "пинков 0, отметок 0, слов 1, жив" "$(comments_rounds hang ok нет свободна)" \
+         "приём завис — timeout, цикл жив, сказано один раз"
+    итог "пинков 2, отметок 2, слов 2, жив" "$(comments_rounds two ok нет свободна)" \
+         "две заявки, смена свободна — два пинка, две отметки, повтора нет"
+    итог "пинков 4, отметок 0, слов 2, жив" "$(comments_rounds two fail нет свободна)" \
+         "БОЛЬНОЙ СЛУЧАЙ G-04: send_to_pane отказал — отметки нет, о каждой заявке сказано раз"
+    итог "пинков 0, отметок 0, слов 2, жив" "$(comments_rounds two ok да свободна)" \
+         "БОЛЬНОЙ СЛУЧАЙ G-03: пауза владельца держит комментарий — ни пинка, ни отметки"
+    итог "пинков 0, отметок 0, слов 2, жив" "$(comments_rounds two ok нет занята)" \
+         "БОЛЬНОЙ СЛУЧАЙ G-10: несрочный комментарий в разгар шага ждёт рубежа"
+
     rm -rf "$T"
-    [ "$ok_flag" = 1 ] && { echo "SELFTEST: зелёный (4 пути доставки + 4 пути разбора слов + 16 путей согласия + 3 пути очереди + 3 пути паузы + 3 пути журнала входящих; больные — «Enter»/«C-c», «да» второй строкой, «да для выката», «По выкату пишу да» два согласия одним сообщением и сообщение без согласия под set -e)"; exit 0; }
+    [ "$ok_flag" = 1 ] && { echo "SELFTEST: зелёный (4 пути доставки + 4 пути разбора слов + 16 путей согласия + 3 пути очереди + 3 пути паузы + 3 пути журнала входящих + 6 путей комментариев панели; больные — «Enter»/«C-c», «да» второй строкой, «да для выката», «По выкату пишу да» два согласия одним сообщением и сообщение без согласия под set -e)"; exit 0; }
     echo "SELFTEST: КРАСНЫЙ"; exit 1
 fi
 
@@ -688,22 +834,6 @@ ack() {  # chat_id, текст
 # владельца. Никогда не звать до того, как update дописан в очередь.
 persist_offset() { echo "$OFFSET" > "$OFFSET_FILE"; }
 
-# Немедленный пинок агенту о новом входящем (К-1в) — только при живом
-# claude/node в панели: в голой оболочке текст исполнился бы как команды.
-# Любой отказ (нет tmux, нет сессии) не роняет цикл — подстрахует
-# inbox-пинок session-warden.
-agent_kick() {  # текст
-    command -v tmux >/dev/null 2>&1 || return 0
-    tmux has-session -t "$TMUX_SESSION" 2>/dev/null || { say "tmux-сессии '$TMUX_SESSION' нет — пинок агенту не отдан (подстрахует session-warden)"; return 0; }
-    local cmd
-    cmd=$(tmux display-message -p -t "$TMUX_SESSION" '#{pane_current_command}' 2>/dev/null || echo "?")
-    case "$cmd" in
-        claude|node) send_to_pane "$1" 2>/dev/null \
-                         || say "send-keys не прошёл — пинок агенту не отдан" ;;
-        *) say "в панели '$cmd', не claude/node — пинок не шлю (оболочка исполнила бы текст как команды)" ;;
-    esac
-}
-
 # ── что прерывает шаг агента, а что копится до рубежа ───────────────────────
 # Владелец 12.09.2026: «когда идет активная разработка у агента, накидывать ему
 # задач в разных направлениях не самая лучшая идея, это сбивает процесс <…>
@@ -755,6 +885,7 @@ BACKOFF=2
 say "старт: слушаю чат $TG_CHAT_ID, offset=$OFFSET"
 
 while true; do
+    deliver_panel_comments
     # URL с токеном — через stdin (curl -K -), не в argv (К-7): long-poll висит
     # до 60 с, и всё это время токен был бы виден любому в ps.
     RESP=$(printf 'url = "%s/getUpdates"\n' "$API" \
