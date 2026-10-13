@@ -1331,6 +1331,7 @@ EOF
   # кода 13.09.2026, F-03), поэтому копия кладётся сюда, root:root.
   делай "install -d -o root -g root -m 0755 /usr/local/lib/harness"
   делай "install -o root -g root -m 0755 '$PROJECT_DIR/harness/panel/panel-expose-root.sh' /usr/local/lib/harness/panel-expose-root.sh"
+  делай "install -D -o root -g root -m 0644 '$PROJECT_DIR/scripts/lib/config.sh' /usr/local/lib/harness/lib/config.sh"
   делай "install -o root -g root -m 0644 '$PROJECT_DIR/harness/panel/nginx-panel.conf.in' /usr/local/lib/harness/nginx-panel.conf.in"
   проверка "$step" "скрипт вывода наружу лежит вне дерева агента (root:root)" \
     "[ \"\$(stat -c '%U %a' /usr/local/lib/harness/panel-expose-root.sh)\" = 'root 755' ]" \

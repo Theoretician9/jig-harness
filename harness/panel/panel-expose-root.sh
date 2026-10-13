@@ -17,7 +17,14 @@ set -euo pipefail
 ZDES="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
 SHABLON="${PANEL_NGINX_SHABLON:-$ZDES/nginx-panel.conf.in}"
 # shellcheck disable=SC1091
-. "$ZDES/../../scripts/lib/config.sh"
+# Установленная копия живёт в /usr/local/lib/harness рядом со своей root-копией
+# config.sh: подключать файл из дерева агента скрипту, что идёт от root, нельзя —
+# это root для любого, кто правит дерево. Путь дерева — для прогона из проекта.
+if [ -f "$ZDES/lib/config.sh" ]; then
+    . "$ZDES/lib/config.sh"
+else
+    . "$ZDES/../../scripts/lib/config.sh"
+fi
 KOREN="$(konf_koren)"
 HARNESS_CONF="${HARNESS_CONF:-$KOREN/harness.conf}"
 INSTALL_CONF="${INSTALL_CONF:-$KOREN/install.conf}"
