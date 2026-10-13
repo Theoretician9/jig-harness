@@ -124,7 +124,7 @@ USER_DB="${PROBE_DB_USER:-postgres}"
 # zloy» заводила роль в контейнере пробы (ревью 28.09.2026, F-12).
 роли_в_дампе() { # $1 = путь дампа
     grep -ohE '^(ALTER|CREATE|GRANT)[^;]* OWNER TO "?[A-Za-z0-9_-]+"?' "$1" 2>/dev/null \
-        | sed -E 's/.* OWNER TO "?([A-Za-z0-9_-]+)"?/\1/' | sort -u
+        | sed -E 's/.* OWNER TO "?([A-Za-z0-9_-]+)"?/\1/' | LC_ALL=C sort -u
 }
 
 # Пароль одноразовой базы: генерируется, в секреты не ходит — боевой пароль в
