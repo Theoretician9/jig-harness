@@ -56,7 +56,7 @@ HARNESS_CONF.write_text('PRODUCT_REPO=""\nAUTOMATION_LEVEL="partial"\nACTIVE_LIN
 INSTALL_CONF = TMP / "install.conf"
 SECRETS = TMP / "secrets"
 SECRETS.mkdir()
-SECRET_VALUE = "deadbeefcafebabe0123456789abcdef01234567"
+SECRET_VALUE = "deadbeefcafebabe0123456789abcdef01234567"  # не-секрет: образец больного случая
 (SECRETS / "probe_key").write_text(SECRET_VALUE + "\n", encoding="utf-8")
 INSTALL_CONF.write_text(f'LOG_DIR="{LOGS}"\nPANEL_STATE_DIR="{PANEL}"\n'
                         f'STATE_DIR="{TMP / "state"}"\nSECRETS_DIR="{SECRETS}"\n', encoding="utf-8")
@@ -112,7 +112,7 @@ import yaml  # noqa: E402
 
 STARTED = {"started": "2026-10-10"}   # позже всех дат «шаги_включены»: судятся все шаги
 DEPTH = {"уровень": "крупная", "характер": "разработка", "кем": "проба", "когда": "2026-10-10"}
-LONG = "ключ " + "deadbeefcafebabe0123456789abcdef01234567" + " " + "длинный текст пробы " * 300
+LONG = "ключ " + "deadbeefcafebabe0123456789abcdef01234567" + " " + "длинный текст пробы " * 300  # не-секрет: образец
 SOURCE_ID = "1790000000.000000001"
 
 
