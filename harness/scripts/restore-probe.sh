@@ -46,7 +46,7 @@ if [ "${1:-}" != "--selftest" ]; then
         # В метке лежит ВЕРДИКТ, а не пустота: «проба ходила» и «проверять
         # было что» — разные вопросы, и сводка обязана их различать.
         printf 'неприменимо: дампов баз нет (%s)\n' "$(date '+%Y-%m-%d %H:%M:%S')" \
-            > "${HEARTBEAT_DIR}/proba-vosstanovleniya" 2>/dev/null || true
+            > "${HEARTBEAT_DIR}/restore-probe" 2>/dev/null || true
         exit 0
     fi
 fi
@@ -187,7 +187,7 @@ if [ "${1:-}" = "--selftest" ]; then
     else
         echo "  ПЛОХО без баз в копиях проба вернула $rc_bez_baz: «$vyvod_bez_baz»"; ok=0
     fi
-    if [ -f "$dvor_bez_baz/metki/proba-vosstanovleniya" ]; then
+    if [ -f "$dvor_bez_baz/metki/restore-probe" ]; then
         echo "  ок    метка присмотра поставлена и при неприменимости — молчание не путается со смертью"
     else echo "  ПЛОХО метки нет: присмотр решит, что проба умерла"; ok=0; fi
     # БОЛЬНОЙ СЛУЧАЙ: ключ пуст, а дамп на диске ЛЕЖИТ. Судить надо явление:
@@ -428,7 +428,7 @@ echo "  убрать: DB_ADMIN_EXEC='docker exec -i $CONT' bash scripts/drop-dat
 # говорит сама проба своим кодом возврата. Улика 13.09.2026: демон стоял в
 # кроне без срока в HEARTBEAT_PERIODS, и его молчание не заметил бы никто.
 mkdir -p "${HEARTBEAT_DIR}" 2>/dev/null || true
-: > "${HEARTBEAT_DIR}/proba-vosstanovleniya" 2>/dev/null || true
+: > "${HEARTBEAT_DIR}/restore-probe" 2>/dev/null || true
 
 if [ "$RC" = 0 ] && [ "${ERRS:-1}" = 0 ] && [ "${TABLES:-0}" -gt 0 ]; then
     echo "$(date '+%Y-%m-%d %H:%M:%S')  ПРОБА ЗАВЕРШЕНА: дамп восстанавливается (таблиц ${TABLES}, ошибок 0)"

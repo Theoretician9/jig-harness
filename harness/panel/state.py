@@ -532,7 +532,7 @@ def обновления() -> dict:
         версия = json.loads(файл.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         версия = {}
-    журнал = _лог() / "obnovlenie-watch.log"
+    журнал = _лог() / "update-watch.log"
     try:
         строки = [с for с in журнал.read_text(encoding="utf-8",
                                               errors="replace").splitlines() if с.strip()]

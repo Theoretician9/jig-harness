@@ -30,7 +30,7 @@ konf_zagruzit
 PROJECT_DIR="${PROJECT_DIR:?пуст PROJECT_DIR — не прочитан паспорт установки}"
 OTCHET_DIR="$PROJECT_DIR/docs/приёмка"
 
-say() { printf '%s priyomka-watch: %s\n' "$(date -Is)" "$*"; }
+say() { printf '%s acceptance-watch: %s\n' "$(date -Is)" "$*"; }
 
 # Числа из вывода приёмки: первая строка — JSON со сводом.
 chisla() {  # вывод приёмки на stdin → «принято=N провал=M нечем=K»
@@ -226,7 +226,7 @@ KARTA
     if grep -q "ОТКАЗ: приёмка упала" "$PROGON_LOG_PREZHNIJ"; then
         echo "  ок    БОЛЬНОЙ СЛУЧАЙ: падение судьи названо словом «ОТКАЗ»"
     else echo "  ПЛОХО падение судьи (код 3) прошло как обычный прогон"; ok=0; fi
-    if [ ! -e "$T/метки-падение/priyomka-watch" ]; then
+    if [ ! -e "$T/метки-падение/acceptance-watch" ]; then
         echo "  ок    БОЛЬНОЙ СЛУЧАЙ: при падении судьи метка присмотра НЕ ставится"
     else echo "  ПЛОХО метка поставлена при упавшем судье — сторож промолчит"; ok=0; fi
     if [ -n "$SUDYA_ZHIVOJ" ]; then
@@ -397,5 +397,5 @@ if [ "$DVIZHENIE" = 1 ] || [ "$OCHERED_NOVA" = 1 ]; then
     fi
 fi
 
-date -Is > "$HEARTBEAT_DIR/priyomka-watch"
+date -Is > "$HEARTBEAT_DIR/acceptance-watch"
 exit 0

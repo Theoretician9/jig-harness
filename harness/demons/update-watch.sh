@@ -15,7 +15,7 @@
 # Чем проверяется: --selftest (решение по режиму — чистой функцией) плюс
 # проверка ядра scripts/test_update.py (24 пути).
 #
-# Запуск: cron, раз в сутки; метка heartbeat — obnovlenie-watch.
+# Запуск: cron, раз в сутки; метка heartbeat — update-watch.
 set -uo pipefail
 export LC_ALL=C.UTF-8
 
@@ -69,7 +69,7 @@ if [ "$RC" != 0 ]; then
     # Недоступное хранилище — не повод будить владельца каждые сутки: пишем в
     # журнал, метку ставим (демон жив), молчим.
     say "спросить обновления не удалось: $ANSWER"
-    touch "$HEARTBEAT_DIR/obnovlenie-watch"
+    touch "$HEARTBEAT_DIR/update-watch"
     exit 0
 fi
 
@@ -91,4 +91,4 @@ case "$(reshenie_po_rezhimu "$UPDATE_MODE" "$HAS_NEW")" in
         python3 "$YADRO" --поставить 2>&1 | while IFS= read -r stroka; do say "$stroka"; done ;;
 esac
 
-touch "$HEARTBEAT_DIR/obnovlenie-watch"
+touch "$HEARTBEAT_DIR/update-watch"

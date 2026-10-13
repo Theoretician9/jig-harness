@@ -24,8 +24,8 @@ set -euo pipefail
 source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../../scripts/lib/config.sh"
 INSTALL_CONF="${HARNESS_INSTALL_CONF:-${INSTALL_CONF:-$(konf_koren)/install.conf}}"
 HARNESS_CONF="${HARNESS_CONF:-$(konf_koren)/harness.conf}"
-[ -r "$INSTALL_CONF" ] || { echo "evo-collector: нет $INSTALL_CONF — установка не завершена (01-SPEC §0)"; exit 1; }
-[ -r "$HARNESS_CONF" ] || { echo "evo-collector: нет $HARNESS_CONF — скопируйте harness/config/harness.conf в $(konf_koren)/"; exit 1; }
+[ -r "$INSTALL_CONF" ] || { echo "evolution-collector: нет $INSTALL_CONF — установка не завершена (01-SPEC §0)"; exit 1; }
+[ -r "$HARNESS_CONF" ] || { echo "evolution-collector: нет $HARNESS_CONF — скопируйте harness/config/harness.conf в $(konf_koren)/"; exit 1; }
 # Окружение старше конфига: общий загрузчик вместо голого source (улика
 # 12.09.2026 — проба с TMUX_SESSION в окружении сменила модель в РАБОЧЕЙ панели).
 konf_zagruzit
@@ -35,7 +35,7 @@ say() { printf '%s  %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"; }
 
 # Один прогон за раз (Д-10, единый паттерн демонов): два сборщика написали бы
 # в summary.jsonl вперемешку. Лок — сервисный каталог (конвенция К-1б).
-LOCK_FILE="$LOG_DIR/locks/${SERVICE_LOCKS_SUBDIR:-services}/evo-collector.lock"
+LOCK_FILE="$LOG_DIR/locks/${SERVICE_LOCKS_SUBDIR:-services}/evolution-collector.lock"
 mkdir -p "$(dirname "$LOCK_FILE")"
 exec 9>>"$LOCK_FILE"
 flock -n 9 || { say "прогон уже идёт (лок $LOCK_FILE) — выхожу"; exit 0; }
@@ -144,4 +144,4 @@ if [ "$SUMMARY_LINES" -gt "$SUMMARY_MAX" ]; then
     say "summary.jsonl превысил потолок $SUMMARY_MAX — срезано $CUT_N строк"
 fi
 
-touch "$HEARTBEAT_DIR/evo-collector"
+touch "$HEARTBEAT_DIR/evolution-collector"

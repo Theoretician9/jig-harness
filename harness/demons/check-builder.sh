@@ -8,7 +8,7 @@
 # проверки, и создает их, сохраняет отчет. В след раз когда запускается
 # проверщик, у него уже есть новые механизмы для проверки.»
 #
-# Разделение ролей жёсткое: проверщик (priyomka-watch) только ПРОВЕРЯЕТ, этот
+# Разделение ролей жёсткое: проверщик (acceptance-watch) только ПРОВЕРЯЕТ, этот
 # только СОЗДАЁТ проверки. Иначе один и тот же агент и пишет проверку, и
 # объявляет её пройденной.
 #
@@ -41,7 +41,7 @@ DEVMAP="$PROJECT_DIR/dev-map.yaml"
 PORTSIYA="${STROITEL_BATCH:-5}"
 STROITEL_TIMEOUT="${STROITEL_CLAUDE_TIMEOUT_SEC:-900}"
 
-say() { printf '%s stroitel-proverok: %s\n' "$(date -Is)" "$*"; }
+say() { printf '%s check-builder: %s\n' "$(date -Is)" "$*"; }
 
 # Задачи, которым не хватает способа проверки: `id :: title :: почему`.
 #
@@ -201,7 +201,7 @@ EOF
     if printf '%s' "$vyvod" | grep -q "НЕ ГОТОВО"; then
         echo "  ок    отчёт называет прогон неудачным, а не «готово»"
     else echo "  ПЛОХО отчёт при отказе агента: «$(printf '%s' "$vyvod" | tail -1)»"; ok=0; fi
-    if [ ! -e "$T/метки/stroitel-proverok" ]; then
+    if [ ! -e "$T/метки/check-builder" ]; then
         echo "  ок    БОЛЬНОЙ СЛУЧАЙ: метка НЕ поставлена — сторож меток увидит немоту"
     else echo "  ПЛОХО метка поставлена при отказе: неудача неотличима от работы"; ok=0; fi
 
@@ -239,7 +239,7 @@ fi
 
 if [ -z "$SPISOK" ]; then
     say "у всех задач приёмки есть способ проверки — строить нечего"
-    date -Is > "$HEARTBEAT_DIR/stroitel-proverok"
+    date -Is > "$HEARTBEAT_DIR/check-builder"
     exit 0
 fi
 
@@ -263,7 +263,7 @@ ZADACH_DO=$(grep -c '^\s*- id:' "$DEVMAP" || echo 0)
 
 AGENT_RC=0
 timeout "$STROITEL_TIMEOUT" \
-bash "$PROJECT_DIR/scripts/claude-demon.sh" stroitel-proverok -p --model "$(model_dlya тесты)" \
+bash "$PROJECT_DIR/scripts/claude-demon.sh" check-builder -p --model "$(model_dlya тесты)" \
   "Ты строитель проверок для проекта ${PROJECT_NAME:-харнес} ($PROJECT_DIR).
 
 Задача харнеса — не заставлять владельца щупать руками то, что машина может
@@ -328,7 +328,7 @@ $FORMY
   --permission-mode manual \
   --allowedTools "Read,Edit,Write,Grep,Glob" \
   --mcp-config '{"mcpServers":{}}' --strict-mcp-config \
-  --output-format text 9>&- >> "$LOG_DIR/stroitel-proverok.log" 2>&1 || AGENT_RC=$?
+  --output-format text 9>&- >> "$LOG_DIR/check-builder.log" 2>&1 || AGENT_RC=$?
 
 if [ "$AGENT_RC" = 77 ]; then
     say "строитель пропущен: лимит подписки (обёртка claude-demon.sh сказала владельцу)"
@@ -396,5 +396,5 @@ if [ "$AGENT_RC" != 0 ]; then
 fi
 
 say "готово: задач без способа проверки осталось $OSTALOS"
-date -Is > "$HEARTBEAT_DIR/stroitel-proverok"
+date -Is > "$HEARTBEAT_DIR/check-builder"
 exit 0

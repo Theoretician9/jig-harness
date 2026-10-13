@@ -1021,7 +1021,7 @@ while true; do
                 # десять минут выглядит как сломанный.
                 ack "$CHAT" "Принял: ставлю обновление харнеса. Сниму копию, проверю себя воротами и, если что-то не так, вернусь на прежнюю версию. Отчитаюсь итогом."
                 setsid nohup python3 "$PROJECT_DIR/scripts/update.py" --поставить \
-                    >>"$LOG_DIR/obnovlenie-watch.log" 2>&1 < /dev/null &
+                    >>"$LOG_DIR/update-watch.log" 2>&1 < /dev/null &
                 say "владелец попросил обновление — запущено фоном"
                 persist_offset "$UPDATE_ID"
                 continue ;;

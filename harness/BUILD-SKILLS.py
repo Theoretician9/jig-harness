@@ -102,7 +102,7 @@ SKILLS = {
         "Когда наступило условие из данных harness/config/extensions.yaml "
         "(первый фронт, первый запрос документа, первая внешняя библиотека) или "
         "в задаче появилось мобильное/клиентское приложение — ставит код "
-        "(scripts/extensions.py, демон rasshirenija-watch), не руки",
+        "(scripts/extensions.py, демон extensions-watch), не руки",
         [("PACKAGE:skills-src/extension-install.md", None)],
     ),
     "test-failure": (
