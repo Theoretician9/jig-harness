@@ -630,6 +630,33 @@ EOF
   отметить шаг_2
 }
 
+шаг_2б() { # docker + compose для агента: продукт живёт на compose, без root агенту их не поставить
+  # Группа docker = права root для агента; принято, пока продукт на compose.
+  # Своя отметка: машина, установленная до шага, получает docker и при --resume.
+  # Отказ не обрывает установку, но идёт в итог громко и без отметки шага.
+  local step="шаг 2б — docker"; CURRENT_STEP="$step"
+  уже_сделан шаг_2б && { скажи "[$step] пропуск (--resume)"; return 0; }
+  заголовок "$step"
+  local cmd="bash '$HARNESS_SRC/scripts/install-docker.sh' '$AGENT_USER'"
+  printf '  + %s\n' "$cmd"
+  if (( DRY )); then return 0; fi
+  # Строки итога шаг пишет файлом: перезапуск агента ради группы владелец
+  # должен увидеть в сводке, а не в прокрутке.
+  local summary line
+  summary=$(mktemp)
+  if bash "$HARNESS_SRC/scripts/install-docker.sh" "$AGENT_USER" "$summary"; then
+    CHECKED_LIST+=("$step: docker compose version и docker info отвечают от имени $AGENT_USER")
+    DONE_LIST+=("docker.io + docker-compose-v2, служба docker, $AGENT_USER в группе docker")
+    while IFS= read -r line; do DONE_LIST+=("$line"); done < "$summary"
+    rm -f "$summary"
+    отметить шаг_2б
+  else
+    while IFS= read -r line; do FAILED_LIST+=("docker: $line"); done < "$summary"
+    rm -f "$summary"
+    FAILED_LIST+=("docker не поставлен (причина — строка «ОТКАЗ docker» выше): продукт на compose не поднимется; после починки — sudo bash $0 --resume")
+  fi
+}
+
 шаг_3() { # Claude Code: версия зафиксирована (01-SPEC §3); OAuth-вход — руками, в финале
   local step="шаг 3 — Claude Code"; CURRENT_STEP="$step"
   уже_сделан шаг_3 && { скажи "[$step] пропуск (--resume)"; return 0; }
@@ -1477,6 +1504,7 @@ trap 'финал' EXIT
 шаг_0
 шаг_1
 шаг_2
+шаг_2б
 шаг_3
 шаг_4
 шаг_5
