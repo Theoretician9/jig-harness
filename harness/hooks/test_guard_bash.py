@@ -469,6 +469,10 @@ GATE_CASES = [
     (0, "ворота заняты: текст про git push — не команда", 'echo "не забудь git push"', True),
     (0, "ворота свободны: git push проходит", "git push", False),
     (0, "ворота свободны: deploy.sh проходит", "./scripts/deploy.sh", False),
+    (0, "ворота заняты: deploy.sh --план ничего не выкатывает — проходит", "./scripts/deploy.sh --план", True),
+    (0, "ворота заняты: deploy.sh --selftest-dump — самотест, проходит", "bash scripts/deploy.sh --selftest-dump", True),
+    (2, "ворота заняты: --план и выкат в одной строке — выкат отменён", "./scripts/deploy.sh --план && ./scripts/deploy.sh", True),
+    (2, "ворота заняты: --планы — не ключ плана, отменён", "./scripts/deploy.sh --планы", True),
 ]
 
 FAKE_GUARD_BUSY = (
