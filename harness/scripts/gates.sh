@@ -463,6 +463,9 @@ if [ "${1:-}" = "--всё" ]; then
     # упади он на секретах или смоуке — согласие сгорело на действии, которого
     # не было. Проба поднимает свой стенд и судит состояние согласия.
     проверка "возврат согласия" bash scripts/test_deploy_consent_return.sh
+    # Объявленный продукт выкатывается только через deploy.sh: отказ при пустой
+    # секции STACK_*, тег и секреты по репозиторию продукта, откат при красном health.
+    проверка "выкат продукта"   bash scripts/test_deploy_product.sh
     for f in scripts/work-queue.py scripts/compare-with-package.py \
                 scripts/download_attachment.py scripts/orders.py \
                 scripts/check-cyrillic-in-names.py \

@@ -497,7 +497,13 @@ DOCKER_CP_IN = re.compile(
 # Ворота деплоя: git push и запуск deploy.sh сначала спрашивают deploy_guard.py.
 # Флаги между git и push: «git -C /path push» — тот же push (В-2).
 GIT_PUSH = re.compile(_POS + r"git\s+" + _FLAGS + r"push\b", re.MULTILINE)
-DEPLOY_SH = re.compile(_CMD_POS + _PRE + r"(?:(?:bash|sh)\s+)?\S*deploy\.sh\b", re.MULTILINE)
+# Ключи, которые ничего не выкатывают (план и самотест дампа), ворот не ждут:
+# выкат объявленного продукта проверяется планом ДО согласия владельца.
+DEPLOY_SH = re.compile(
+    _CMD_POS + _PRE + r"(?:(?:bash|sh)\s+)?\S*deploy\.sh\b"
+    r"(?!\s+--(?:план|selftest-dump)(?:\s|$|[;&|)]))",
+    re.MULTILINE,
+)
 
 # Завершение своей сессии мимо ротации. Улика 11.08.2026, 22:51: агент подал
 # себе «/exit» в панель и вышел, а поднять преемника умеет только сторож —

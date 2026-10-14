@@ -28,6 +28,7 @@
 # работу работающей, невозможно, поэтому сверка тут надёжнее запрета на коммит.
 #
 # Запуск: ./scripts/deploy.sh [--силой]   (--силой уходит в ворота как есть)
+#         ./scripts/deploy.sh --план     что сделал бы: шаги и команды, без ворот и выката
 set -euo pipefail
 
 # ── конфиги ─────────────────────────────────────────────────────────────────
@@ -52,12 +53,23 @@ mkdir -p "$LOG_DIR" "$LOG_DIR/locks"
 
 say() { printf '%s  %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" | tee -a "$DEPLOY_LOG"; }
 
-cd "$PROJECT_DIR"
+# Репозиторий того, что выкатывается: тег, сверка секретов, манифесты и файл
+# расписания судят ПРОДУКТ. Продукт живёт своим репозиторием рядом с харнесом,
+# и PROJECT_DIR здесь — каталог харнеса: тег и сверка секретов по нему судили
+# бы не то, что едет на прод.
+PRODUCT_TREE="${PRODUCT_REPO:-$PROJECT_DIR}"
+cd "$PRODUCT_TREE"
 
 # ── 0. Продукт задан? ───────────────────────────────────────────────────────
 # Пустая STACK_BUILD_CMD и отсутствие docker-compose.yml = продукта ещё нет.
 # Честный выход нулём, а не имитация выката: харнес ставится на чистый сервер
 # раньше первой строки кода продукта, и этот случай — штатный, не ошибка.
+# Но продукт, ОБЪЯВЛЕННЫЙ в harness.conf, при пустой секции — не «нечего», а
+# выкат мимо ворот: нуль здесь читался как «выкачено» (И-2).
+if [ -z "${STACK_BUILD_CMD:-}" ] && [ -n "${PRODUCT_DIR:-}${PRODUCT_REPO:-}" ]; then
+    say "ОШИБКА: продукт объявлен (PRODUCT_DIR=${PRODUCT_DIR:-}, PRODUCT_REPO=${PRODUCT_REPO:-}), а STACK_BUILD_CMD в $HARNESS_CONF пуст — заполни секцию STACK_*, деплой вслепую не выкатывает"
+    exit 1
+fi
 if [ -z "${STACK_BUILD_CMD:-}" ] && [ ! -f "$PROJECT_DIR/docker-compose.yml" ]; then
     say "продукт не задан (нет docker-compose.yml/сборки) — выкатывать нечего; заполни секцию STACK_* в $HARNESS_CONF с первой задачей продукта"
     exit 0
@@ -79,8 +91,8 @@ snapshot_db() {
         say "STACK_DB_DUMP_CMD пуст — дампа базы нет; заполни в harness.conf (И-1)"
         return 2
     fi
-    mkdir -p "$(dirname "$dst")"
-    if ! bash -c "$STACK_DB_DUMP_CMD" > "$dst" 2>>"$DEPLOY_LOG"; then
+    # Дамп несёт данные покупателей: читать его вправе только владелец файла.
+    if ! (umask 077; mkdir -p "$(dirname "$dst")" && bash -c "$STACK_DB_DUMP_CMD" > "$dst" 2>>"$DEPLOY_LOG"); then
         say "команда дампа упала — файл $dst негоден"
         return 1
     fi
@@ -129,6 +141,66 @@ if [ "${1:-}" = "--selftest-dump" ]; then
     exit 1
 fi
 
+# ── 0в. Дерево продукта чистое? ─────────────────────────────────────────────
+# Образ собирается из РАБОЧЕГО дерева, а тег ставится на HEAD: незакоммиченная
+# правка уехала бы на прод непроверенной, и тег адресовал бы не то, что
+# поехало (И-4). Выкатывается только закоммиченное.
+TREE_DIRTY=""
+if git -C "$PRODUCT_TREE" rev-parse --git-dir >/dev/null 2>&1; then
+    TREE_DIRTY=$(git -C "$PRODUCT_TREE" status --porcelain 2>&1) \
+        || TREE_DIRTY="git status не ответил: $TREE_DIRTY"
+fi
+TREE_NOTE="чисто"
+[ -z "$TREE_DIRTY" ] || TREE_NOTE="НЕЗАКОММИЧЕНО $(printf '%s\n' "$TREE_DIRTY" | wc -l) — выкат откажет"
+
+# ── 0г. План: что сделал бы — без docker, лока, ворот и выката ─────────────
+# Стоит ДО перезапуска под sg: плану docker не нужен, и ключ плана не
+# проходит через чужую оболочку, где мог бы исказиться.
+if [ "${1:-}" = "--план" ]; then
+    say "план выката (ничего не выполняется):"
+    say "  репозиторий продукта: $PRODUCT_TREE (тег deploy-…, сверка секретов, манифесты)"
+    say "  дерево продукта: $TREE_NOTE"
+    say "  образы для снимка :previous: ${STACK_IMAGES:-<пусто — отката не будет>}"
+    say "  сборка: $STACK_BUILD_CMD"
+    say "  сборка --no-cache (смена манифестов): ${STACK_BUILD_NOCACHE_CMD:-<пусто — обычная сборка>}"
+    say "  дамп базы: ${STACK_DB_DUMP_CMD:-<пусто — без дампа>}"
+    say "  миграции: ${STACK_MIGRATE_CMD:-<пусто>}"
+    say "  пересоздание служб: ${STACK_RELEASE_CMD:-<пусто — службы поднимает сборка>}"
+    say "  живость: ${STACK_HEALTH_CMD:-${STACK_HEALTH_URL:-<пусто — выкат откажет>}}"
+    say "  подъём при откате: ${STACK_UP_CMD:-<пусто>}"
+    say "  восстановление базы (руками): ${STACK_DB_RESTORE_HINT:-pg_restore по дампу}"
+    say "  reload прокси: ${STACK_PROXY_RELOAD_CMD:-<пусто>}"
+    exit 0
+fi
+
+if [ -n "$TREE_DIRTY" ]; then
+    say "ОШИБКА: в $PRODUCT_TREE незакоммиченные правки — выкатывается только закоммиченное, выкат отменён до ворот:"
+    printf '%s\n' "$TREE_DIRTY" | head -10 | sed 's/^/    /' | tee -a "$DEPLOY_LOG"
+    exit 1
+fi
+
+# ── 0д. Docker доступен? ────────────────────────────────────────────────────
+# Снимок и откат зовут docker сами. Сессия, начатая до вступления пользователя
+# в группу docker, сокета не видит, а `docker image inspect` без доступа
+# неотличим от «образа нет»: выкат шёл бы дальше со словами «первый выкат —
+# откатываться не на что». Член группы по /etc/group перезапускается под
+# `sg docker` — один раз (DEPLOY_UNDER_SG), иначе отказ словами до ворот.
+# Ключи передаются в одинарных кавычках POSIX: sg исполняет строку через
+# /bin/sh (dash), а `printf %q` в локали C даёт $'\320…', которого dash не знает.
+sh_quote() { printf "'%s' " "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
+if [ -n "${STACK_IMAGES:-}" ] && ! docker version >/dev/null 2>&1; then
+    if [ -z "${DEPLOY_UNDER_SG:-}" ] && command -v sg >/dev/null 2>&1 \
+       && getent group docker | cut -d: -f4 | tr ',' '\n' | grep -qx "$(id -un)"; then
+        say "docker не виден этой сессии, а в группе docker пользователь есть — перезапуск под sg docker"
+        export DEPLOY_UNDER_SG=1
+        SG_CMD=""
+        for arg in bash "$(readlink -f "$0")" "$@"; do SG_CMD="$SG_CMD$(sh_quote "$arg")"; done
+        exec sg docker -c "$SG_CMD"
+    fi
+    say "ОШИБКА: docker недоступен ($(docker version 2>&1 | tail -1 | cut -c1-160)) — снимка и отката не будет, выкат отменён до ворот; ключи: $*"
+    exit 1
+fi
+
 # ── 1. Свой лок ДО ворот, атомарно через flock (К-3) ────────────────────────
 # Раньше лок писался ПОСЛЕ ворот простым printf — окно «проверил→создал»
 # пропускало два одновременных deploy.sh (улика 05.08: контейнеры под
@@ -167,7 +239,9 @@ trap vernut_soglasie_pri_otkaze EXIT
 
 # ── 1а. Секреты не едут в прод (И-3: check-secrets и в pre-commit, и здесь) ──
 # Дубль не лишний: pre-commit можно обойти (--no-verify), деплой — нельзя.
-"$SCRIPT_DIR/check-secrets.sh" "$PROJECT_DIR" || { say "секреты в репозитории — выкат отменён (И-3)"; exit 1; }
+# Через bash, а не по биту исполнения: в пакете файл лежит 644, и отказ
+# «Permission denied» читался как «секреты найдены».
+bash "$SCRIPT_DIR/check-secrets.sh" "$PRODUCT_TREE" || { say "секреты в репозитории — выкат отменён (И-3)"; exit 1; }
 
 # ── 2. Тег выката: каждая выкатка адресуема ─────────────────────────────────
 TAG="deploy-$(date +%Y%m%d-%H%M%S)"
@@ -243,62 +317,101 @@ else
     say "STACK_DB_DUMP_CMD пуст — дампа базы перед миграциями нет; если у продукта есть база, заполни ключ в harness.conf"
 fi
 
+# Откат образов и подсказка восстановления — общие для упавших миграций и
+# красной живости. Восстановление базы НЕ выполняется: оно необратимо и
+# решается владельцем; называются дамп и команда.
+restore_images() {
+    if [ "$ROLLBACK_READY" != 1 ]; then
+        say "образов :previous нет (снимок не делался) — возвращать нечего"
+        return 1
+    fi
+    say "возвращаю образы :previous → :latest"
+    for img in $STACK_IMAGES; do
+        docker image inspect "$img:previous" >/dev/null 2>&1 && docker tag "$img:previous" "$img:latest"
+    done
+    return 0
+}
+name_db_restore() {
+    [ -n "$DB_DUMP" ] || return 0
+    say "схема базы НЕ откачена автоматически; дамп до миграций: $DB_DUMP"
+    if [ -n "${STACK_DB_RESTORE_HINT:-}" ]; then
+        say "восстановление руками (решение владельца): $STACK_DB_RESTORE_HINT"
+    else
+        say "восстановление руками (решение владельца): pg_restore -U ${DB_ADMIN_USER:-<DB_ADMIN_USER не задан>} -d ${DB_ADMIN_USER:-<DB_ADMIN_USER не задан>} --clean $DB_DUMP"
+    fi
+}
+
 # ── 5. Миграции ─────────────────────────────────────────────────────────────
 if [ -n "${STACK_MIGRATE_CMD:-}" ]; then
     say "миграции: $STACK_MIGRATE_CMD"
-    bash -c "$STACK_MIGRATE_CMD" || { say "миграции упали — стек в неопределённом состоянии, разбирать руками"; exit 1; }
+    if ! bash -c "$STACK_MIGRATE_CMD"; then
+        # Службы не трогались, но :latest уже указывает на НОВЫЕ образы: любое
+        # следующее пересоздание подняло бы новый код на полунакатанную схему.
+        say "миграции упали — службы не пересоздавались, схема могла накатиться частично"
+        restore_images
+        name_db_restore
+        exit 1
+    fi
 else
     say "STACK_MIGRATE_CMD пуст — миграций у продукта пока нет (честно пропущено)"
+fi
+
+# ── 5б. Пересоздание служб ПОСЛЕ миграций ───────────────────────────────────
+# Новый код поднимается на уже новой схеме. Пусто — службы поднимает сама
+# сборка (`up -d --build`), это штатно. Отказ пересоздания идёт в ветку
+# отката: старые контейнеры ответили бы на health 200, и выкат, которого не
+# было, назвался бы успешным.
+RELEASE_OK=1
+if [ -n "${STACK_RELEASE_CMD:-}" ]; then
+    say "пересоздание служб: $STACK_RELEASE_CMD"
+    bash -c "$STACK_RELEASE_CMD" || { say "пересоздание служб упало — выкат не состоялся, иду в откат"; RELEASE_OK=0; }
 fi
 
 # ── 6. Health циклом; провал → авто-откат на :previous ──────────────────────
 # Цикл: 30 попыток × (запрос до 5 с + пауза 2 с) — от 60 с до ~210 с (К-3:
 # раньше и комментарий, и сообщение врали про «60 с»).
+# STACK_HEALTH_CMD (код 0 = живо) старше STACK_HEALTH_URL (200 = живо): у
+# продукта может не быть одной ручки «служба поднята», а сводная деловая ручка
+# откатывала бы образы на уже новой схеме из-за отказа, к выкату не причастного.
+health_once() {
+    if [ -n "${STACK_HEALTH_CMD:-}" ]; then
+        bash -c "$STACK_HEALTH_CMD" >/dev/null 2>&1
+    else
+        [ "$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 "$STACK_HEALTH_URL" || true)" = "200" ]
+    fi
+}
 health_ok() {
-    local code i
+    local i
     for i in $(seq 1 30); do
-        code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 "$STACK_HEALTH_URL" || true)
-        [ "$code" = "200" ] && return 0
+        health_once && return 0
         sleep 2
     done
     return 1
 }
-if [ -n "${STACK_HEALTH_URL:-}" ]; then
-    if health_ok; then
+if [ -n "${STACK_HEALTH_CMD:-}${STACK_HEALTH_URL:-}" ]; then
+    if [ "$RELEASE_OK" = 1 ] && health_ok; then
         say "health 200 — выкат жив"
     else
-        say "health НЕ поднялся за цикл проверки (30 попыток, 60–210 с)"
-        if [ "$ROLLBACK_READY" = 1 ]; then
-            say "авто-откат: возвращаю образы :previous"
-            for img in $STACK_IMAGES; do
-                docker image inspect "$img:previous" >/dev/null 2>&1 && docker tag "$img:previous" "$img:latest"
-            done
+        [ "$RELEASE_OK" = 0 ] || say "health НЕ поднялся за цикл проверки (30 попыток, 60–210 с)"
+        if restore_images; then
             if [ -n "${STACK_UP_CMD:-}" ]; then
                 bash -c "$STACK_UP_CMD" || say "подъём откатанного стека упал — разбирать руками"
             else
                 say "STACK_UP_CMD пуст — образы возвращены, но стек не перезапущен; заполни в harness.conf"
             fi
-            # Образы откатились, схема — нет: alembic вперёд не отменяет сам себя.
-            # Путь к дампу называется здесь, потому что читать его будут в аварии,
-            # а не в спокойный день.
-            if [ -n "$DB_DUMP" ]; then
-                say "схема базы НЕ откачена автоматически; дамп до миграций: $DB_DUMP"
-                # Имя базы и пользователя — из конфига: вшитое имя продукта на
-                # чужом проекте дало бы владельцу команду, которая не восстановит.
-                say "восстановление руками: pg_restore -U ${DB_ADMIN_USER:-<DB_ADMIN_USER не задан>} -d ${DB_ADMIN_USER:-<DB_ADMIN_USER не задан>} --clean $DB_DUMP"
-            fi
+            name_db_restore
             if health_ok; then
                 say "откат жив (health 200) — выкат ПРОВАЛЕН, стек на прошлой версии"
             else
                 say "откат НЕ ожил — АВАРИЯ, стек лежит"
             fi
         else
-            say "отката нет (снимок не делался) — стек лежит, разбирать руками"
+            say "отката нет — стек лежит, разбирать руками"
         fi
         exit 1
     fi
 else
-    say "STACK_HEALTH_URL пуст — живость не проверена; выкат без health-проверки успехом НЕ считается, заполни ключ"
+    say "STACK_HEALTH_CMD и STACK_HEALTH_URL пусты — живость не проверена; выкат без health-проверки успехом НЕ считается, заполни ключ"
     exit 1
 fi
 
@@ -332,9 +445,9 @@ python3 "$SCRIPT_DIR/fix-claude-mem-project.py" || say "сведение имё�
 # кто-то помнил», — не решение. У заказчика тот же выкат поставит тот же файл.
 # Не блокирует деплой: без ночных расчётов система работает, просто числа
 # стареют, — а вот не поднявшийся стек это авария.
-if [ -n "${STACK_CRON_SRC:-}" ] && [ -f "$PROJECT_DIR/$STACK_CRON_SRC" ]; then
+if [ -n "${STACK_CRON_SRC:-}" ] && [ -f "$PRODUCT_TREE/$STACK_CRON_SRC" ]; then
     CRON_DST="/etc/cron.d/$(basename "$STACK_CRON_SRC")"
-    if sudo -n cp "$PROJECT_DIR/$STACK_CRON_SRC" "$CRON_DST" 2>/dev/null \
+    if sudo -n cp "$PRODUCT_TREE/$STACK_CRON_SRC" "$CRON_DST" 2>/dev/null \
        && sudo -n chown root:root "$CRON_DST" 2>/dev/null \
        && sudo -n chmod 644 "$CRON_DST" 2>/dev/null; then
         say "расписание продукта установлено: $CRON_DST"
