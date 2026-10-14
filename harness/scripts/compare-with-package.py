@@ -86,7 +86,6 @@ def _журнал_пробы(корень):
     "harness/CLAUDE.md": "harness/CLAUDE.md",
     ".claude/settings.json": "harness/hooks/project-settings.json",
     "harness/BUILD-SKILLS.py": "harness/BUILD-SKILLS.py",
-    "harness/ОПИСЬ.md": "harness/ОПИСЬ.md",
     "harness/README-ПЛАГИН.md": "harness/README-ПЛАГИН.md",
 }
 

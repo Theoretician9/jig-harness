@@ -72,7 +72,7 @@ sudo visudo -cf /etc/sudoers.d/50-agent
 **Проверка:** `sudo -u "$AGENT_USER" whoami` → имя агента; `visudo -cf` →
 «parsed OK»; `stat -c '%U' "$PROJECT_DIR" "$LOG_DIR" "$HEARTBEAT_DIR"` — везде
 пользователь агента. Расширение списка sudo — только правкой этого файла с
-записью причины в `ОПИСЬ.md` (право заводится под случившийся случай).
+записью причины в реестре `harness/config/mechanisms.yaml` (право заводится под случившийся случай).
 
 ## 2. Базовые пакеты
 
