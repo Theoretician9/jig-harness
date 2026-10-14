@@ -101,6 +101,18 @@ zvat "$T2" --снять >/dev/null; RC=$?
 proba "БОЛЬНОЙ: nginx нет — «--снять» снимает адрес без отказа" "0" "$RC"
 rm -rf "$T" "$T2"
 
+# ── 2в. БОЛЬНОЙ: harness.conf — симлинк (так его раскладывает установщик) ──
+# sed -i без --follow-symlinks заменяет ссылку обычным файлом: агент теряет
+# свой конфиг, а панель читает копию.
+T=$(mktemp -d); stend "$T"; mkdir -p "$T/agent"
+mv "$T/harness.conf" "$T/agent/harness.conf"; ln -s agent/harness.conf "$T/harness.conf"
+zvat "$T" "$IMYA_STENDA" >/dev/null
+proba "БОЛЬНОЙ: симлинк harness.conf остался симлинком" "да" \
+      "$([ -L "$T/harness.conf" ] && echo да || echo нет)"
+proba "БОЛЬНОЙ: адрес записан в файл, на который ведёт ссылка" "да" \
+      "$(grep -q 'PANEL_URL="https://panel.stend.example"' "$T/agent/harness.conf" && echo да || echo нет)"
+rm -rf "$T"
+
 # ── 3. Сертификат уже есть — certbot не зовётся (квота Let's Encrypt) ────
 T=$(mktemp -d); stend "$T"; mkdir -p "$T/letsencrypt/live/$IMYA_STENDA"
 zvat "$T" "$IMYA_STENDA" >/dev/null
