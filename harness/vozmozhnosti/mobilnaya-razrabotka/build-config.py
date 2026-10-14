@@ -12,6 +12,7 @@ SHOTS_DIR) заполняются первой задачей продукта �
 
 Запуск: build-config.py <конфиг> <ANDROID_HOME> <AVD> <МБ> <Xmx> <таймаут>
                           <устройства> <LOG_DIR> <SECRETS_DIR> <лок>
+                          <свежесть петли, мин>
 """
 import pathlib
 import re
@@ -26,10 +27,10 @@ def quote(value: str) -> str:
 
 
 def main() -> None:
-    if len(sys.argv) != 11:
-        sys.exit("build-config.py: ждал 10 аргументов, получил %d" % (len(sys.argv) - 1))
+    if len(sys.argv) != 12:
+        sys.exit("build-config.py: ждал 11 аргументов, получил %d" % (len(sys.argv) - 1))
     (conf, android, avd, mem, gradle_mem, ftl_timeout, ftl_devices,
-     log_dir, secrets_dir, service_lock) = sys.argv[1:11]
+     log_dir, secrets_dir, service_lock, loop_max_age) = sys.argv[1:12]
     path = pathlib.Path(conf)
     live = {}
     if path.is_file():
@@ -50,6 +51,7 @@ def main() -> None:
         "GRADLE_MAX_MEM=" + quote(gradle_mem),
         "FTL_TIMEOUT=" + quote(ftl_timeout),
         "FTL_DEVICES=" + quote(ftl_devices),
+        "LOOP_MAX_AGE_MIN=" + loop_max_age,
         "LOG_DIR=" + quote(log_dir),
         "SECRETS_DIR=" + quote(secrets_dir),
         "SERVICE_LOCK=" + quote(service_lock),
