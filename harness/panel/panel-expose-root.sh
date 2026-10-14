@@ -47,7 +47,7 @@ zapisat_adres() {  # $1 = значение PANEL_URL (может быть пус
     mkdir -p "$kopii"
     cp -p "$HARNESS_CONF" "$kopii/harness.conf.$metka"
     if grep -qE '^\s*PANEL_URL=' "$HARNESS_CONF"; then
-        sed -i "s|^\s*PANEL_URL=.*|PANEL_URL=\"$znachenie\"|" "$HARNESS_CONF"
+        sed -i --follow-symlinks "s|^\s*PANEL_URL=.*|PANEL_URL=\"$znachenie\"|" "$HARNESS_CONF"
     else
         printf 'PANEL_URL="%s"\n' "$znachenie" >> "$HARNESS_CONF"
     fi
