@@ -33,8 +33,7 @@ EOF
   for f in "$T/proj/scripts/hooks/guard_bash.py" "$T/proj/scripts/deploy.sh" \
            "$T/proj/harness/demons/heartbeat-watch.sh" "$T/proj/CLAUDE.md" \
            "$T/proj/.claude/settings.json" "$T/proj/harness/skills/task-intake/SKILL.md" \
-           "$T/proj/harness/panel/server.py" \
-           "$T/proj/harness/ОПИСЬ.md"; do
+           "$T/proj/harness/panel/server.py"; do
     [[ -f "$f" ]] || { echo "SELFTEST: нет $f"; ok_flag=0; }
   done
   # БОЛЬНОЙ СЛУЧАЙ C4: перезапись обязана менять inode. cp -f писал в тот же
@@ -296,7 +295,7 @@ if [[ -d "$HERE/vozmozhnosti" ]]; then
   rm -rf "$MARKS"
   echo "возможности доставлены: $(cd "$PROJECT_DIR/harness/vozmozhnosti" && printf '%s ' */ 2>/dev/null)"
 fi
-cp -f "$HERE"/BUILD-SKILLS.py "$HERE"/ОПИСЬ.md "$PROJECT_DIR/harness/"
+cp -f "$HERE"/BUILD-SKILLS.py "$PROJECT_DIR/harness/"
 [[ -f "$HERE/README-ПЛАГИН.md" ]] && cp -f "$HERE/README-ПЛАГИН.md" "$PROJECT_DIR/harness/"
 [[ -d "$HERE/.claude-plugin" ]] && cp -rf "$HERE/.claude-plugin" "$PROJECT_DIR/harness/"
 # CLAUDE.md проекта — ЖИВОЙ файл: в нём правила этого проекта, дополненные

@@ -1248,7 +1248,7 @@ EOF
   скажи ""
   скажи "   Вставьте в чат агента этот текст:"
   скажи ""
-  скажи "   Прочитай $PROJECT_DIR/harness/ОПИСЬ.md и файл"
+  скажи "   Прочитай $PROJECT_DIR/harness/config/mechanisms.yaml и файл"
   скажи "   /home/$AGENT_USER/starter/STARTER-PACKAGE/razrabotka/03-ЗАДАНИЕ-НОВОМУ-АГЕНТУ.md — и выполняй его"
   скажи "   по порядку, начиная с раздела 2. Отчитывайся в Telegram по каждому блоку."
   скажи ""
