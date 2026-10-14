@@ -40,7 +40,15 @@ mkdir -p "$TR_DIR"
 TRANSCRIPT="$TR_DIR/proba.jsonl"
 
 # Пороги и умолчания — из конфига пакета, сверху — свои места и пороги стенда.
-cp "$HERE/../harness/config/harness.conf" "$T/harness.conf"
+# Образец: в пакете он лежит рядом (harness/config), в проекте — только
+# установленный (/etc/harness). Без полного набора ключей сторож падает на
+# первом же незаданном (set -u), и проба судила бы падение, а не поведение.
+SEED=""
+for c in "$HERE/../config/harness.conf" "${HARNESS_CONF:-/etc/harness/harness.conf}"; do
+    [ -f "$c" ] && { SEED="$c"; break; }
+done
+[ -n "$SEED" ] || { echo "ПЛОХО: образца harness.conf нет ни в пакете, ни в /etc/harness — проверять нечем"; exit 1; }
+cp "$SEED" "$T/harness.conf"
 cat >> "$T/harness.conf" <<CONF
 AGENT_USER="$(id -un)"
 LOG_DIR="$T/log"
