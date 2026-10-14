@@ -1,5 +1,5 @@
 ---
-name: и-1-удаление-файла
+name: i1-file-deletion
 description: И-1 и удаление файла — `rm -f` по секрету проходил мимо сторожа; правило чинено кодом, цена названа
 metadata:
   type: feedback

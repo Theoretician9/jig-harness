@@ -1,5 +1,5 @@
 ---
-name: тест-зависит-от-запускающего
+name: test-depends-on-runner
 description: Тест зависит от запускающего — путь ждал rc=0, который получался только из сессии агента; из systemd краснел при исправном коде
 metadata:
   type: feedback

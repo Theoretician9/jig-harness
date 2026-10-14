@@ -1,5 +1,5 @@
 ---
-name: бэкап-рядом-с-конфигом
+name: backup-next-to-config
 description: Бэкап рядом с конфигом — копия в /etc/logrotate.d стала вторым конфигом и сломала починку
 metadata:
   type: feedback
