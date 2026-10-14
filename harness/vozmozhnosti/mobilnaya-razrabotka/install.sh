@@ -54,6 +54,7 @@ EOF
   grep -q 'EMULATOR_MEM_MB=2048' "$C" 2>/dev/null || { echo "SELFTEST: потолок памяти не взят из паспорта"; ok_flag=0; }
   grep -q 'FTL_TIMEOUT="15m"' "$C" 2>/dev/null || { echo "SELFTEST: таймаут Test Lab не взят из паспорта"; ok_flag=0; }
   grep -q 'APP_DIR=""' "$C" 2>/dev/null || { echo "SELFTEST: ключи приложения должны быть пустыми до первой задачи"; ok_flag=0; }
+  grep -q 'LOOP_MAX_AGE_MIN=120' "$C" 2>/dev/null || { echo "SELFTEST: порог свежести петли не взят из паспорта"; ok_flag=0; }
   # 3. скрипты петли на месте и исполняемы
   for b in emu-start emu-stop emu-status emu-shot emu-logs mobile-loop ftl-run; do
     [[ -x "$T/home/bin/$b" ]] || { echo "SELFTEST: нет исполняемого ~/bin/$b"; ok_flag=0; }
@@ -72,6 +73,11 @@ p.write_text(t.replace('APP_DIR=""', 'APP_DIR="/opt/app"'), encoding="utf-8")
 PY
   run_st >/dev/null 2>&1 || true
   grep -q 'APP_DIR="/opt/app"' "$C" || { echo "SELFTEST: повторная установка затёрла живой APP_DIR"; ok_flag=0; }
+  # Сборщик пишет порог из ДОВОДА, а не зашитым числом: паспортное 120 совпало
+  # бы и с зашитым, поэтому довод здесь нестандартный.
+  python3 "$PACK_DIR/build-config.py" "$T/порог.conf" a b 1 1m 1m d "$T/log" s l 77 >/dev/null 2>&1 \
+    || { echo "SELFTEST: сборщик конфига упал на пробе порога"; ok_flag=0; }
+  grep -q '^LOOP_MAX_AGE_MIN=77$' "$T/порог.conf" || { echo "SELFTEST: сборщик не взял порог свежести петли из довода"; ok_flag=0; }
   # 6. больной случай: паспорта нет — установка обязана отказать
   mkdir -p "$T/пустой"
   cp "$0" "$T/пустой/install.sh"
@@ -80,7 +86,7 @@ PY
     PACK_DIR="$T/пустой" bash "$T/пустой/install.sh" >/dev/null 2>&1 || rc=$?
   (( rc != 0 )) || { echo "SELFTEST: установка без паспорта не отказала"; ok_flag=0; }
   rm -rf "$T"
-  (( ok_flag )) && { echo "SELFTEST: зелёный (6 проверок, включая больной случай без паспорта)"; exit 0; }
+  (( ok_flag )) && { echo "SELFTEST: зелёный (7 проверок, включая больной случай без паспорта)"; exit 0; }
   exit 1
 fi
 
@@ -252,7 +258,7 @@ else
   # пополам («unterminated string literal») — улика этой сборки.
   python3 "$PACK_DIR/build-config.py" "$MOBILE_CONF" "$ANDROID_HOME" "$AVD_NAME" \
           "$EMULATOR_MEM_MB" "$GRADLE_MAX_MEM" "$FTL_TIMEOUT" "$FTL_DEVICES" \
-          "$LOG_DIR" "$SECRETS_DIR" "$SERVICE_LOCK"
+          "$LOG_DIR" "$SECRETS_DIR" "$SERVICE_LOCK" "$LOOP_MAX_AGE_MIN"
 fi
 
 # ── 7. Виртуальное устройство ────────────────────────────────────────────────

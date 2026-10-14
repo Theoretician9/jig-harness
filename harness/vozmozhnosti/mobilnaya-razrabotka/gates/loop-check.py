@@ -24,7 +24,6 @@
 import json
 import os
 import pathlib
-import re
 import sys
 import time
 
@@ -45,21 +44,8 @@ def _загрузчик():
             sys.path.insert(0, str(каталог / "scripts" / "lib"))
             import config                                  # noqa: PLC0415
             return config
-    return None
-
-
-def read_conf(path: pathlib.Path) -> dict:
-    """Парсер KEY="value" — без source: гейту нельзя исполнять чужой файл."""
-    conf = {}
-    try:
-        for line in path.read_text(encoding="utf-8").splitlines():
-            m = re.match(r'\s*([A-Z][A-Z0-9_]*)=("[^"]*"|[^#\s]*)', line)
-            if m:
-                raw = m.group(2)
-                conf[m.group(1)] = raw[1:-1] if raw[:1] == '"' else raw
-    except OSError:
-        pass
-    return conf
+    sys.exit(f"[петля] общий загрузчик scripts/lib/config.py не найден выше {здесь} — "
+             "гейт лежит вне раскладки харнеса")
 
 
 def verdict(staged: list[str], conf: dict, repo: pathlib.Path, now: float) -> tuple[int, str]:
@@ -81,8 +67,7 @@ def verdict(staged: list[str], conf: dict, repo: pathlib.Path, now: float) -> tu
     if not touched:
         return 0, "[петля] кода приложения в коммите нет — проверка неприменима"
 
-    загрузчик = _загрузчик()
-    log_dir = conf.get("LOG_DIR") or (загрузчик.log_dir() if загрузчик else "")
+    log_dir = conf.get("LOG_DIR") or _загрузчик().log_dir()
     trace = pathlib.Path(log_dir, "mobile", "последняя-петля.json")
     max_age = int(conf.get("LOOP_MAX_AGE_MIN") or DEFAULT_MAX_AGE_MIN)
     files = ", ".join(touched[:3]) + ("…" if len(touched) > 3 else "")
@@ -152,7 +137,29 @@ def selftest() -> int:
          trace_age_min=5, trace_body=json.dumps({"итог": "ок"}, ensure_ascii=False, indent=2))
     case("битый след → красный", 1, ["app/Экран.tsx"], {}, trace_age_min=5,
          trace_body='{"итог": "ок"')
-    print("SELFTEST: зелёный (12 путей)" if not bad else f"SELFTEST: неудач {bad}")
+    # Весь путь main на НАСТОЯЩЕМ файле конфига: разбор, который вернул бы
+    # пустой словарь, выключил бы гейт целиком («APP_DIR пуст — неприменима»).
+    import subprocess
+    for порог, want in (("240", 1), ("480", 0)):
+        with tempfile.TemporaryDirectory() as t:
+            repo = pathlib.Path(t, "repo")
+            (repo / "app").mkdir(parents=True)
+            trace = pathlib.Path(t, "log", "mobile", "последняя-петля.json")
+            trace.parent.mkdir(parents=True)
+            trace.write_text(json.dumps({"итог": "ок"}), encoding="utf-8")
+            stamp = time.time() - 300 * 60
+            os.utime(trace, (stamp, stamp))
+            conf = pathlib.Path(t, "harness-mobile.conf")
+            conf.write_text(f'LOG_DIR="{t}/log"\nAPP_DIR="{repo}/app"\n'
+                            f'FTL_DEVICES="model=a,version=33\nmodel=b,version=30"\n'
+                            f"LOOP_MAX_AGE_MIN={порог}\n", encoding="utf-8")
+            got = subprocess.run([sys.executable, __file__], input="app/Экран.tsx\n",
+                                 text=True, capture_output=True, cwd=repo,
+                                 env={**os.environ, "HARNESS_MOBILE_CONF": str(conf)}).returncode
+            mark = "ок " if got == want else "ПЛОХО"
+            bad += got != want
+            print(f"  {mark} ждали={want} получили={got}  main на файле конфига: порог {порог}, след 300 мин")
+    print("SELFTEST: зелёный (14 путей)" if not bad else f"SELFTEST: неудач {bad}")
     return 1 if bad else 0
 
 
@@ -166,7 +173,10 @@ def main() -> int:
               "не установлена, проверка неприменима")
         return 0
     staged = [ln.strip() for ln in sys.stdin.read().splitlines() if ln.strip()]
-    code, message = verdict(staged, read_conf(conf_path), pathlib.Path.cwd(), time.time())
+    # Конфиг — общим разборщиком харнеса (без source: гейту нельзя исполнять
+    # чужой файл); своя регулярка расходилась бы с ним на тех же строках.
+    conf = _загрузчик().из_файла(str(conf_path))
+    code, message = verdict(staged, conf, pathlib.Path.cwd(), time.time())
     print(message)
     return code
 
