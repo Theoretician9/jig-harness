@@ -123,6 +123,17 @@ EOF
     echo "$OUT" | grep -q 'проба видимости' \
         || { echo "САМОТЕСТ ПРОВАЛЕН: сводка назвала число обходов без ПРИЧИНЫ"; echo "$OUT"; exit 1; }
     rm -f "$T/пайплайн-обходы.jsonl"
+    # БОЛЬНОЙ СЛУЧАЙ: подробный отчёт расхода длиннее потолка канала. Сторож
+    # канала отклоняет такой текст; отчёт уходит вложением, текст — коротким.
+    python3 -c "print('РАСХОД ЗА СУТКИ — длинный\n' + '  строка отчёта расхода\n' * 150)" \
+        > "$T/tokens-daily.report"
+    OUT=$(INSTALL_CONF="$T/install.conf" HARNESS_CONF="$T/harness.conf" \
+          HEARTBEAT_DRY_SEND=1 bash "$0") || { echo "САМОТЕСТ ПРОВАЛЕН: прогон с длинным отчётом упал"; echo "$OUT"; exit 1; }
+    echo "$OUT" | grep -q "вложение: $T/tokens-daily.report" \
+        || { echo "САМОТЕСТ ПРОВАЛЕН: длинный отчёт расхода не ушёл вложением"; echo "$OUT"; exit 1; }
+    DLINA=$(echo "$OUT" | sed -n 's/.*текст сводки: \([0-9]*\) знаков.*/\1/p' | tail -1)
+    [ -n "$DLINA" ] && [ "$DLINA" -lt 1400 ] \
+        || { echo "САМОТЕСТ ПРОВАЛЕН: текст сводки ${DLINA:-?} знаков — сторож канала его не пропустит"; echo "$OUT"; exit 1; }
     rm -f "$T/tokens-daily.report" "$T/tokens-daily.report.вчера"
     # Д-4-остаток: свежий каталог БЕЗ метки — «ещё не прогонялся», не МЁРТВ;
     # заодно П-15: при TG_CHANNEL_VARIANT="A" — «диспетчер выключен», не крик.
@@ -290,20 +301,17 @@ TOKENS_REPORT="${LOG_DIR}/tokens-daily.report"
 # «РАСХОД ЗА СУТКИ». Копию прошедшего дня кладёт сборщик (tokens-collector).
 [ -f "$TOKENS_REPORT.вчера" ] && TOKENS_REPORT="$TOKENS_REPORT.вчера"
 [ -f "$TOKENS_REPORT" ] && TOKENS_SUMMARY="$TOKENS_REPORT"
-if [ -f "$TOKENS_SUMMARY" ]; then
-    # П-15: head -c 1000 резал БАЙТЫ и рвал многобайтную кириллицу посередине.
-    # Срез по СИМВОЛАМ: ${var:0:N} в подоболочке с LC_ALL=C.UTF-8 (в env -i
-    # cron живёт в локали C, где ${var:0:N} снова считал бы байты).
-    # Потолок 2000: подробный отчёт — тридцать строк, прежняя тысяча резала бы
-    # его посередине, и владелец получал бы сводку без последних показателей.
-    TOKENS_LINE=$(
-        LC_ALL=C.UTF-8
-        export LC_ALL
-        line=$(cat "$TOKENS_SUMMARY")
-        printf '%s' "${line:0:2000}"
-    )
+# Короткая строка счётчика входит в текст; подробный отчёт (тридцать строк)
+# уходит вложением: целиком в текст он выводит сводку за потолок канала, и
+# сторож канала её отклоняет.
+TOKENS_FILE=""
+if [ "$TOKENS_SUMMARY" = "$TOKENS_REPORT" ] && [ -f "$TOKENS_REPORT" ]; then
+    TOKENS_FILE="$TOKENS_REPORT"
     SUMMARY="$SUMMARY
-$TOKENS_LINE"
+Расход за сутки — во вложении."
+elif [ -f "$TOKENS_SUMMARY" ]; then
+    SUMMARY="$SUMMARY
+$(head -n 3 "$TOKENS_SUMMARY")"
 fi
 
 # ── Обходы гейта пайплайна: честная дверь обязана быть ВИДНА ────────────────
@@ -343,6 +351,8 @@ $OBHODY_TEKST"
 fi
 
 say "$SUMMARY"
+[ -n "$TOKENS_FILE" ] && say "$(cat "$TOKENS_FILE")"
+say "текст сводки: $(LC_ALL=C.UTF-8 bash -c 'printf %s "${#1}"' _ "$SUMMARY") знаков${TOKENS_FILE:+, вложение: $TOKENS_FILE}"
 
 # Самотест не ходит в сеть: доставка доказывается на живом при установке.
 if [ "${HEARTBEAT_DRY_SEND:-0}" = 1 ]; then
@@ -372,6 +382,11 @@ tg_deliver() {
 
 if tg_deliver; then
     say "сводка доставлена (ok:true)"
+    if [ -n "$TOKENS_FILE" ]; then
+        "$PROJECT_DIR/scripts/tg_send.sh" --file "$TOKENS_FILE" \
+            --caption "Расход токенов за прошедшие сутки — подробный отчёт" \
+            || say "отчёт расхода вложением НЕ доставлен — сводка ушла без него"
+    fi
     remember_guard_size
 else
     # Недоставленная сводка = сторож молчит = сторож мёртв. Метку не ставим,
