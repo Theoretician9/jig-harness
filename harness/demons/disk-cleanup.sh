@@ -375,13 +375,15 @@ clean_old "$MEM_SESSION_DIR" '*.jsonl' "$MEM_SESSIONS_KEEP_D" "7. стеногр
 # по имени — то есть обещал уборку, которой не было. Срок берётся ОТТУДА ЖЕ,
 # из harness/config/retention.yaml: два источника разъехались бы молча.
 RETENTION="$PROJECT_DIR/harness/config/retention.yaml"
-LOG_KEEP=""
-if [ -r "$RETENTION" ]; then
-    LOG_KEEP=$(python3 -c "
+srok_iz_retention() {  # $1 = маска; печатает срок_дней или пусто
+    [ -r "$RETENTION" ] || return 0
+    python3 -c "
 import yaml, io, sys
 d = yaml.safe_load(io.open(sys.argv[1], encoding='utf-8'))
-print(next((p['срок_дней'] for p in d['пути'] if p['маска'] == '*.log'), ''))" "$RETENTION" 2>/dev/null)
-fi
+print(next((p['срок_дней'] for p in d['пути'] if p['маска'] == sys.argv[2]), ''))" \
+        "$RETENTION" "$1" 2>/dev/null || true
+}
+LOG_KEEP=$(srok_iz_retention '*.log')
 if [ -n "$LOG_KEEP" ] && [ "$LOG_KEEP" -gt 0 ] 2>/dev/null; then
     # Хроники не трогаем НИКОГДА (ревью 10.09.2026): guard_exceptions.log —
     # единственный след fail-open сторожа, install-*.log — протокол приёмки.
@@ -404,6 +406,40 @@ print('|'.join(sorted(re.escape(n) for n in имена if n)))" "$INV" 2>/dev/nu
         "guard_exceptions.log|install-.*\.log|rotation-forced\.log${KEEP_LOGS:+|$KEEP_LOGS}" 
 else
     say "8. срок хранения логов не прочитался из $RETENTION — шаг пропущен"
+fi
+
+# ── 9. Секреты из канала ────────────────────────────────────────────────────
+# Ключ, который владелец прислал в канал, агент перекладывает на место
+# (`secret-intake.py --переложить` удаляет копию). Забытая копия — второй
+# экземпляр секрета, держать её вечно незачем. Срок — оттуда же, где политика.
+# Удаление непереложенного ключа владелец узнаёт сам: иначе он считал бы, что
+# ключ в работе. Удаление остаётся — второй экземпляр секрета хуже повторной
+# присылки.
+skazat_vladeltsu() {  # текст
+    if [ "$DRY_RUN" = 1 ]; then say "  [пробный запуск] владельцу: $1"; return 0; fi
+    if [ -x "${PROJECT_DIR:-/nonexistent}/scripts/tg_send.sh" ] \
+       && "$PROJECT_DIR/scripts/tg_send.sh" "$1" >/dev/null 2>&1; then
+        say "  владельцу сказано (tg_send.sh)"
+    else
+        say "  владельцу НЕ сказано (tg_send.sh недоступен или отказал): $1"
+    fi
+}
+ubrat_sekrety_kanala() {  # каталог, дни
+    local dir="$1" days="$2" metki
+    if [ -d "$dir" ]; then
+        metki=$(find "$dir" -maxdepth 1 -type f -mtime "+$days" -printf '%f ' 2>/dev/null || true)
+        if [ -n "$metki" ]; then
+            say "9. секреты из канала: не переложены за ${days} дн. — сообщения ${metki% }"
+            skazat_vladeltsu "Ключ из канала (сообщения ${metki% }) не переложен за ${days} дн. — удалён. Нужен — пришли заново."
+        fi
+    fi
+    clean_old "$dir" '*' "$days" "9. секреты из канала"
+}
+SECRET_KEEP=$(srok_iz_retention 'inbox/секреты/*')
+if [ -n "$SECRET_KEEP" ] && [ "$SECRET_KEEP" -gt 0 ] 2>/dev/null; then
+    ubrat_sekrety_kanala "$LOG_DIR/inbox/секреты" "$SECRET_KEEP"
+else
+    say "9. срок хранения секретов из канала не прочитался из $RETENTION — шаг пропущен"
 fi
 
 # --- итог ---------------------------------------------------------------------
