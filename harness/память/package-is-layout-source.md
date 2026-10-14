@@ -1,5 +1,5 @@
 ---
-name: пакет-источник-раскладки
+name: package-is-layout-source
 description: Пакет — источник раскладки — правка только в проекте затирается; держится гейтом package_sync и журналом ИЗМЕНЕНИЯ.md
 metadata:
   type: feedback

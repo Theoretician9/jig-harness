@@ -1,5 +1,5 @@
 ---
-name: tmux-send-keys-имя-клавиши
+name: tmux-send-keys-key-name
 description: tmux: текст как имя клавиши — сообщение «Enter» становилось нажатием, а Enter одним вызовом терялся: только `send_to_pane`
 metadata:
   type: feedback

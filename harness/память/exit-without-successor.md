@@ -1,5 +1,5 @@
 ---
-name: уход-без-смены
+name: exit-without-successor
 description: Уход без смены — сессия вышла сама, преемника поднять было некому: уходить только через `--rotate-now`
 metadata:
   type: feedback
