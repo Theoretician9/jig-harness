@@ -285,6 +285,29 @@ def check_zapisi_ne_osiroteli(repo: Path, r: "Report") -> None:
                 + ", ".join(sorted(п.name for п in указатели)) + ") либо удалить запись.")
 
 
+def check_index_links_alive(repo: Path, r: "Report") -> None:
+    """Каждая ссылка указателя памяти ведёт на существующую запись.
+
+    Указатель приезжает с пакетом, а записи — нет: правило из таблицы
+    срабатываний, ведущее в пустоту, читается как знание, которого на машине нет.
+    """
+    дом = memory_home(repo)
+    if not дом.is_dir():
+        return
+    мёртвые = set()
+    for указатель in дом.glob("*.md"):
+        if not это_указатель(указатель.name):
+            continue
+        текст = указатель.read_text(encoding="utf-8", errors="replace")
+        имена = set(re.findall(r"\[\[([^\]]+)\]\]", текст))
+        имена |= {Path(с).stem for с in re.findall(r"\]\(([^)/]+\.md)\)", текст)}
+        мёртвые |= {и for и in имена if not (дом / f"{и}.md").exists()}
+    if мёртвые:
+        r.block("указатель памяти ссылается на записи, которых нет: "
+                + ", ".join(sorted(мёртвые)[:8]) + ("…" if len(мёртвые) > 8 else "")
+                + "\n    Положить запись в память/ либо снять ссылку из указателя.")
+
+
 # Указатель памяти узнаётся по ФОРМЕ ИМЕНИ, а не по списку имён: общий
 # «MEMORY.md»/«ORDERS.md» и продуктовые «<ИМЯ>-ПАМЯТЬ.md»/«<ИМЯ>-ORDERS.md».
 #
@@ -458,6 +481,7 @@ def оценить(repo: Path) -> "Report":
     r = Report()
     близко_к_потолку(repo, r)
     check_zapisi_ne_osiroteli(repo, r)
+    check_index_links_alive(repo, r)
     check_state_size(repo, r)
     check_orders_size(repo, r)
     check_single_memory(repo, r)
@@ -546,6 +570,15 @@ def самотест() -> int:
         (memory_home(repo) / "MEMORY.md").write_text(
             "указатель [[живая]]\n", encoding="utf-8")
         проба("запись, на которую ссылается указатель, — чисто", "чисто", оценить(repo))
+    # Обратная сторона: указатель ссылается на запись, которой нет. Правило из
+    # таблицы срабатываний ведёт в пустоту — знание есть только в ссылке.
+    with tempfile.TemporaryDirectory() as tmp:
+        repo = стенд(tmp)
+        (memory_home(repo) / "MEMORY.md").write_text(
+            "| когда | правило — [[нет-такой]] |\n- [Нет такой](нет-такой.md) — x\n",
+            encoding="utf-8")
+        проба("БОЛЬНОЙ СЛУЧАЙ: указатель ссылается на несуществующую запись — отказ",
+              "блок", оценить(repo))
     with tempfile.TemporaryDirectory() as tmp:
         repo = стенд(tmp)
         (memory_home(repo) / "своя.md").write_text("факт\n", encoding="utf-8")
