@@ -137,6 +137,7 @@ echo "=== ворота харнеса: $(date '+%d.%m %H:%M') ==="
 # ровно тот случай, ради которого он написан (проверка есть, вызова нет).
 проверка "кто на порту"   python3 scripts/test_who_is_on_port.py
 проверка "права наружу"   bash scripts/test_panel_root.sh
+проверка "установка docker" bash scripts/test_install_docker.sh
 проверка "глубина автоматом" python3 scripts/test_depth_automatic.py
 проверка "задание и метка" python3 scripts/check-job-and-mark.py
 проверка "метка-самотест" python3 scripts/check-job-and-mark.py --selftest
