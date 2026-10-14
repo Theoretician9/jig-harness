@@ -2585,7 +2585,7 @@
 
     '
   доказательство: 'harness/panel/server.py'
-  проверяется: python3 harness/panel/test_task_board.py (70 путей)
+  проверяется: python3 harness/panel/test_task_board.py (73 путей)
   пишет: число прошедших и упавших путей
 - файл: harness/panel/test_server.py
   вид: гейт
@@ -2755,7 +2755,7 @@
     с экраном.
 
     '
-  проверяется: python3 scripts/test_build_board.py (85 путей)
+  проверяется: python3 scripts/test_build_board.py (95 путей)
   пишет: 'board.json в каталоге состояния панели и строку «доска: задач N, снято ЧЧ:ММ»'
 - файл: scripts/test_build_board.py
   вид: гейт
@@ -2772,7 +2772,7 @@
 
     '
   доказательство: 'scripts/build-board.py'
-  проверяется: python3 scripts/test_build_board.py (85 путей)
+  проверяется: python3 scripts/test_build_board.py (95 путей)
   пишет: число прошедших и упавших путей
 - файл: scripts/comments-intake.py
   вид: демон

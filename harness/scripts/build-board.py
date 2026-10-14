@@ -25,11 +25,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
 import config  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
+BOARD_DATA = HERE.parent / "harness" / "config" / "board.yaml"
 TEXT_LIMIT = 4000
 SKILLS_TAIL = 2000
 COMMITS_LIMIT = 20
-
-QUEUE, CHECK, DONE = "Очередь", "Проверка", "Готово"
+# Стадия без бумаги: её признак — коммиты задачи в git проекта, а не файл.
+# Ворот она не доказывает: git commit --no-verify обходит pre-commit.
+CODE_STAGE = "код"
+# Карточку со всеми бумагами спека ставит на ревью кода с «закрыть в test».
+READY_STAGE = "ревью_кода"
 
 
 def load_script(name: str, file: str):
@@ -50,15 +54,41 @@ def key_filter():
     return load_script("map_from_message", "map-from-message.py").без_ключей
 
 
+@functools.lru_cache(maxsize=1)
+def board_data() -> dict:
+    import yaml
+    return yaml.safe_load(BOARD_DATA.read_text(encoding="utf-8")) or {}
+
+
+def stages() -> list:
+    return list(board_data()["колонки"])
+
+
+def status_stage(status) -> str | None:
+    return (board_data().get("по_статусу") or {}).get(status)
+
+
 def column_name(step: str) -> str:
     return step.replace("_", " ")
 
 
-def step_list(card: dict, judge, root, settings) -> list:
-    """Все шаги «крупной» с отметкой: бумага есть / нет / шаг машиной не судится.
-    Отметку и путь даёт гейт (`беды_в_двух_корнях`, `путь_бумаги`), не доска."""
-    required = judge.шаги_для_задачи(settings, "крупная", card)
-    steps = []
+def code_step(features) -> dict:
+    if features is None:
+        return {"шаг": CODE_STAGE, "путь": None, "есть": None,
+                "почему": "git молчит — коммиты задачи не прочитаны"}
+    count = features.get("коммитов") or 0
+    return {"шаг": CODE_STAGE, "путь": None, "есть": bool(count),
+            "почему": f"коммитов с Dev-Map: {count}" if count else "коммитов с Dev-Map нет"}
+
+
+def step_list(card: dict, judge, root, settings, features) -> list:
+    """Шаги и код — в порядке колонок, с отметкой: есть / нет / машиной не
+    судится. Список требуемых — тот, по которому гейт судит ЗАКРЫТИЕ
+    (`шаги_под_состояние` при status=test), а не объявленный уровень: иначе
+    доска говорит «бумаги собраны», а закрывающий коммит красный. Отметку и
+    путь бумаги даёт гейт (`беды_в_двух_корнях`, `путь_бумаги`), не доска."""
+    required = judge.шаги_под_состояние(settings, {**card, "status": "test"})
+    steps = [code_step(features)]
     for step in judge.шаги_уровня(settings, "крупная"):
         if step not in required:
             steps.append({"шаг": step, "путь": None, "есть": None, "почему": "не положен этой задаче"})
@@ -73,7 +103,8 @@ def step_list(card: dict, judge, root, settings) -> list:
             continue
         steps.append({"шаг": step, "путь": str(path) if path else None, "есть": not debts,
                       "почему": "; ".join(debts)})
-    return steps
+    order = stages()
+    return sorted(steps, key=lambda s: order.index(s["шаг"]) if s["шаг"] in order else len(order))
 
 
 def first_missing(steps: list) -> str | None:
@@ -90,54 +121,89 @@ def approval_pill(card: dict, judge) -> str:
         "ждёт твоего слова по спеке, не отправлена"
 
 
-def wip_column(card: dict, judge) -> tuple:
-    """(колонка, пилюли, шаги) задачи в работе — по суждению гейта."""
-    price = judge._модуль_цены()
-    settings = price.конфиг()
-    first = column_name(judge.шаги_уровня(settings, "крупная")[0])
-    if not card.get("глубина"):
-        return first, ["глубины нет — шаги не назначены"], []
-    root, trouble = judge.корень_бумаг(card)
-    if trouble:
-        reason = "PRODUCT_REPO пуст" if "пуст" in trouble else trouble
-        return first, [f"судить нечем: {reason}"], []
+def light_gate_pill(card: dict, value, level: str, features) -> str:
+    """Почему гейт бумаг не требует. У задачи с объявленным уровнем голое
+    «цена 0, по коммитам мелкая» читалось как «задача мелкая»."""
+    declared = (card.get("глубина") or {}).get("уровень")
+    if not declared:
+        return f"гейт шагов не требует: цена {value}, по коммитам {level}"
+    if not (features or {}).get("коммитов"):
+        return f"объявлена «{declared}», коммитов с Dev-Map ещё нет — гейт не судил"
+    return (f"объявлена «{declared}», по коммитам пока «{level}» (цена {value}) — "
+            f"бумаг гейт ещё не требует")
+
+
+def wip_column(card: dict, judge, price, settings, root, steps, features) -> tuple:
+    """(колонка, пилюли) задачи в работе — по суждению гейта."""
     value, debts = judge.долг_задачи(card, price, settings)
-    steps = step_list(card, judge, root, settings)
     if value is None:
-        return first, ["история не прочитана: git молчит — это не «чисто»"], steps
+        return None, ["история не прочитана: git молчит — это не «чисто»"]
     level = price.уровень(value, settings["пороги"])
     if level != "крупная":
-        return (first_missing(steps) or column_name("ревью_кода"),
-                [f"гейт шагов не требует: цена {value}, по коммитам {level}"], steps)
+        return (first_missing(steps) or column_name(READY_STAGE),
+                [light_gate_pill(card, value, level, features)])
     waiting = judge.spec_approval.беды_одобрения(card.get("id") or "", card, root)
     if any(d in waiting for d in debts):
-        return column_name("ревью_спеки"), [approval_pill(card, judge)], steps
+        return column_name("ревью_спеки"), [approval_pill(card, judge)]
     missing = first_missing(steps)
     if missing:
-        return missing, [], steps
-    return column_name("ревью_кода"), ["бумаги собраны — закрыть в test"], steps
+        return missing, []
+    return column_name(READY_STAGE), ["бумаги собраны — закрыть в test"]
+
+
+def closed_steps(card: dict, judge, price, settings, steps: list) -> tuple:
+    """(шаги, пилюли) задачи, прошедшей закрытие. Цена не крупная — гейт бумаг
+    не требовал: ✗ на бумаге читался бы как «пропустили», поэтому ○ и одна
+    пилюля с ценой. Цена крупная — недостающие бумаги словами: задачу закрыли
+    мимо гейта, и это новость."""
+    value, _debts = judge.долг_задачи({**card, "status": "test"}, price, settings)
+    if value is not None and price.уровень(value, settings["пороги"]) != "крупная":
+        waived = [dict(s, есть=None, почему=f"не требовалось: цена {value}")
+                  if s["есть"] is False and s["шаг"] != CODE_STAGE else s for s in steps]
+        return waived, [f"гейт бумаг не требовал: цена {value}"]
+    missing = [column_name(s["шаг"]) for s in steps if s["есть"] is False]
+    return steps, [f"нет: {', '.join(missing)}"] if missing else []
+
+
+STATUS_PILLS = {"беклог": "не трогаю без слова", "принято": "проверено машиной",
+                "done": "проверено вами"}
 
 
 def column(card: dict, judge) -> tuple:
-    """(колонка, пилюли, шаги) карточки любого статуса."""
+    """(колонка, пилюли, шаги) карточки любого статуса. Шаги строятся для
+    любого статуса: у test и done пройденный путь и нужен владельцу."""
+    price = judge._модуль_цены()
+    settings = price.конфиг()
     status = card.get("status")
-    if status == "wip":
-        place, pills, steps = wip_column(card, judge)
-    elif status == "plan":
-        place, pills, steps = QUEUE, [], []
-    elif status == "беклог":
-        place, pills, steps = QUEUE, ["не трогаю без слова"], []
-    elif status == "test":
-        place, steps = CHECK, []
-        pills = [card["чем_подтверждено"]] if card.get("чем_подтверждено") else ["нечем подтверждено"]
-    elif status == "принято":
-        place, pills, steps = DONE, ["проверено машиной"], []
-    elif status == "done":
-        place, pills, steps = DONE, ["проверено вами"], []
+    order = stages()
+    first_step = column_name(next(s for s in order if s in judge.шаги_уровня(settings, "крупная")))
+    steps, pills, place = [], [], None
+    root, trouble = judge.корень_бумаг(card)
+    if not card.get("глубина"):
+        pills = ["глубины нет — шаги не назначены"] if status == "wip" else []
+    elif trouble:
+        pills = [f"судить нечем: {'PRODUCT_REPO пуст' if 'пуст' in trouble else trouble}"]
     else:
-        place, pills, steps = QUEUE, [f"непонятный статус: {status}"], []
+        features = price.признаки_задачи(card.get("id") or "")
+        steps = step_list(card, judge, root, settings, features)
+        if status == "wip":
+            place, pills = wip_column(card, judge, price, settings, root, steps, features)
+    if status == "wip":
+        place = place or first_step
+    elif status_stage(status):
+        place = column_name(status_stage(status))
+        if status == "test":
+            pills = [card.get("чем_подтверждено") or "нечем подтверждено"]
+        elif status in STATUS_PILLS:
+            pills = [STATUS_PILLS[status]]
+        if steps and status_stage(status) != order[0]:   # в очереди недостача — норма
+            steps, verdict = closed_steps(card, judge, price, settings, steps)
+            pills = pills + verdict
+    else:
+        place, pills = column_name(order[0]), [f"непонятный статус: {status}"]
     if card.get("blocked"):
-        pills = pills + [f"ждёт: {card['blocked']}"]
+        reason = str(card["blocked"])
+        pills = pills + [reason if reason.startswith("ждёт") else f"ждёт: {reason}"]
     return place, pills, steps
 
 
@@ -234,9 +300,7 @@ def snapshot_of(card: dict, judge, repo: Path, log_dir: Path) -> dict:
 
 def build(map_path, judge, now: datetime) -> dict:
     map_path = Path(map_path)
-    price = judge._модуль_цены()
-    columns = [QUEUE] + [column_name(s) for s in judge.шаги_уровня(price.конфиг(), "крупная")] \
-        + [CHECK, DONE]
+    columns = [column_name(s) for s in stages()]
     board = {"снято": now.isoformat(timespec="seconds"), "направление": config.активная_линия(),
              "архив": archived(map_path), "колонки": columns, "задачи": [], "беда": None}
     import yaml

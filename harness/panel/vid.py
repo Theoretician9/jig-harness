@@ -476,15 +476,17 @@ def _механизм(строка: dict) -> str:
 # Колонки идут вбок и прокручиваются пальцем: на телефоне 390 px десять колонок
 # в ряд не помещаются, а перенос строки смешал бы порядок шагов.
 BOARD_STYLE = """
-.board{display:flex;gap:12px;overflow-x:auto;padding-bottom:10px;
+.board{display:flex;align-items:flex-start;gap:12px;overflow-x:auto;padding-bottom:10px;
   scroll-snap-type:x proximity;-webkit-overflow-scrolling:touch}
 .board-column{flex:0 0 250px;background:var(--карта);border:1px solid var(--рамка);
-  border-radius:18px;padding:12px;scroll-snap-align:start}
+  border-radius:18px;padding:12px;scroll-snap-align:start;
+  max-height:calc(100vh - 32px);overflow-y:auto}
 .board-column h3{margin:0 0 10px;font-size:.92rem;color:var(--тихо);font-weight:600}
 .board-card{display:block;background:var(--карта2);border:1px solid var(--рамка);
   border-radius:14px;padding:10px 12px;margin-bottom:8px;color:inherit;
   text-decoration:none}
-.board-card .пилюля{margin-top:6px;white-space:normal}
+.board-card .пилюля{margin-top:6px;white-space:normal;border-radius:12px;display:block}
+.board-steps{margin-top:6px;line-height:1.5}
 .problem{border-color:var(--красн);margin-bottom:14px}
 .stale{border-color:var(--оранж);margin-bottom:14px}
 pre{white-space:pre-wrap;word-break:break-word;font:13px/1.5 ui-monospace,Menlo,monospace}
@@ -525,6 +527,17 @@ def task_href(task_id: str) -> str:
     return "/karta/" + urllib.parse.quote(str(task_id), safe="")
 
 
+def _card_steps(task: dict) -> str:
+    """Пройденный путь на самой карточке: колонка называет, где задача сейчас,
+    а владелец спрашивает и про то, что пройдено."""
+    steps = [s for s in task.get("шаги") or [] if isinstance(s, dict)]
+    if not steps:
+        return ""
+    marks = " · ".join(f'{STEP_MARKS.get(s.get("есть"), "○")} '
+                       f'{html.escape(str(s.get("шаг", "")).replace("_", " "))}' for s in steps)
+    return f'<div class="мелко board-steps">{marks}</div>'
+
+
 def board(snapshot: dict) -> str:
     """Канбан: колонки из снимка в его порядке, все задачи без обрезки."""
     header = _header("Карта работы", "/", "На панель")
@@ -557,7 +570,7 @@ def board(snapshot: dict) -> str:
             f'<a class="board-card" href="{task_href(t.get("id", ""))}">'
             f'<div style="font-weight:600">{html.escape(str(t.get("название") or t.get("id")))}</div>'
             f'<div class="мелко">{html.escape(str(t.get("id", "")))}</div>'
-            f'{_pills(t.get("пилюли"))}</a>' for t in column_tasks)
+            f'{_card_steps(t)}{_pills(t.get("пилюли"))}</a>' for t in column_tasks)
         rendered.append(f'<section class="board-column"><h3>{html.escape(column)} · '
                         f'{len(column_tasks)}</h3>'
                         f'{cards or "<div class=мелко>пусто</div>"}</section>')

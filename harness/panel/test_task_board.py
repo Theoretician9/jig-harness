@@ -70,10 +70,11 @@ PUBLISH_NEEDS_OWNER=1
 AUTOMATION_LEVEL="partial"
 """
 
-# Колонки — в порядке спеки §3.2. Панель обязана брать их из снимка, а не из
-# своего списка: «мутации» здесь нарочно пустая — она рисуется словом «пусто».
-COLUMNS = ["Очередь", "спека", "ревью спеки", "контракт", "тесты", "план",
-           "ревью кода", "мутации", "Проверка", "Готово"]
+# Колонки — полный пайплайн, как их отдаёт снимок. Панель обязана брать их из
+# снимка, а не из своего списка: «мутации» здесь нарочно пустая — она рисуется
+# словом «пусто».
+COLUMNS = ["очередь", "спека", "ревью спеки", "план", "контракт", "тесты", "код",
+           "ревью кода", "мутации", "живая проверка", "закрытие"]
 FILLED_COLUMNS = [c for c in COLUMNS if c != "мутации"]
 TASK_COUNT = 45                     # больше прежней обрезки [:40]
 DETAIL_ID = "hr.proba"
@@ -195,7 +196,7 @@ def detail_task(papers: dict) -> dict:
 def board(papers: dict, taken: str) -> dict:
     tasks = [plain_task(i) for i in range(TASK_COUNT - 2)]
     tasks.append(dict(plain_task(98), id="pr.xss", название=XSS_TITLE,
-                      колонка="Очередь"))
+                      колонка="очередь"))
     tasks.append(detail_task(papers))
     return {"снято": taken, "направление": "harness", "архив": 11,
             "колонки": COLUMNS, "задачи": tasks, "беда": None}
@@ -332,9 +333,11 @@ with tempfile.TemporaryDirectory() as tmp:
     # Колонки идут в порядке СНИМКА, и каждая карточка стоит в своей колонке.
     # Своего списка колонок у панели быть не должно: второй список стадий
     # разошёлся бы с гейтом (спека §1).
-    positions, cursor = [], page.find(COLUMNS[0])
+    # Ищется ЗАГОЛОВОК колонки: имена шагов теперь стоят и на карточках, и
+    # голое «план» нашлось бы в карточке раньше своей колонки.
+    positions, cursor = [], 0
     for column in COLUMNS:
-        found = page.find(column, max(cursor, 0))
+        found = page.find(f"<h3>{column} · ", cursor)
         positions.append(found)
         cursor = found + len(column) if found >= 0 else cursor
     in_order = all(p >= 0 for p in positions) and positions == sorted(positions)
@@ -369,6 +372,34 @@ with tempfile.TemporaryDirectory() as tmp:
         path_ok("архив назван числом")
     else:
         path_bad("числа архива на доске нет")
+
+    # Больной случай 14.10: пройденный путь был виден только на странице
+    # задачи — на доске одна пилюля. Шаги со своими отметками стоят на карточке.
+    detail_at = page.find("Проба страницы задачи")
+    detail_card = page[detail_at:page.find("</a>", detail_at)] if detail_at >= 0 else ""
+    if all(mark in detail_card for mark in ("✓ спека", "○ тесты", "✗ контракт")):
+        path_ok("шаги задачи с отметками видны на карточке доски")
+    else:
+        path_bad(f"шагов на карточке доски нет: {detail_card[:200]!r}")
+
+    # Колонки по высоте содержимого: под короткой колонкой на телефоне
+    # оставалось ~4000 px пустоты до низа самой длинной.
+    if re.search(r"\.board\{[^}]*align-items:flex-start", page):
+        path_ok("колонки доски по высоте содержимого (align-items:flex-start)")
+    else:
+        path_bad("колонки доски тянутся до самой длинной: нет align-items:flex-start")
+    # Многострочная пилюля на карточке — прямоугольник со скруглением: с
+    # радиусом 99px она становится эллипсом, и текст вылезает за контур (N-2).
+    if re.search(r"\.board-card \.пилюля\{[^}]*border-radius:12px", page):
+        path_ok("пилюля на карточке доски — скруглённый прямоугольник")
+    else:
+        path_bad("пилюля на карточке доски — эллипс (border-radius 99px)")
+    # Длинная колонка листается внутри себя: иначе вся страница тянется до её
+    # низа, и под остальными колонками та же пустота.
+    if re.search(r"\.board-column\{[^}]*max-height:[^}]*overflow-y:auto", page):
+        path_ok("длинная колонка листается внутри себя, страница не тянется")
+    else:
+        path_bad("у колонки нет потолка высоты с прокруткой")
 
     if "ждёт твоего слова по спеке" in page:
         path_ok("пилюля карточки из снимка видна на доске")
