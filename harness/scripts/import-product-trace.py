@@ -32,7 +32,7 @@
 столько, сколько добавляли, и каждая карточка разбирается в то, что писали.
 
     import-product-trace.py [--trace П] [--map П] [--archive П] [--lock П]
-                            [--line lama] [--show]
+                            [--line <линия>] [--show]
     import-product-trace.py --selftest
 Код возврата: 0 — записано или нечего добавлять, 1 — отказ.
 """
@@ -56,7 +56,6 @@ from neighbor import модуль  # noqa: E402
 
 exporter = модуль("export-map-to-product")
 
-DEFAULT_LINE = "lama"
 LINE_NAME = "Продукт: карта, перенесённая со старого харнеса"
 LINE_SHORT = "Продукт (перенос)"
 SECTION = re.compile(r"^## (.+?) — (\d+)\s*$")
@@ -422,47 +421,47 @@ def paths(root: Path, check, read, tasks_of) -> None:
     except ValueError:
         check("БОЛЬНОЙ СЛУЧАЙ: заголовок раздела обещает больше, чем разобрано — отказ", True)
 
-    shown = run(trace, map_path, archive, lock, "lama", True, "2026-10-14")
+    shown = run(trace, map_path, archive, lock, "shop", True, "2026-10-14")
     check("--show ничего не пишет", read(map_path) == SELFTEST_MAP
           and not archive.exists() and shown["to_map"] == 3, str(shown))
 
-    first = run(trace, map_path, archive, lock, "lama", False, "2026-10-14")
-    lama = tasks_of(map_path, "lama")
+    first = run(trace, map_path, archive, lock, "shop", False, "2026-10-14")
+    shop = tasks_of(map_path, "shop")
     data = yaml.safe_load(read(map_path))
-    card = lama.get("pr.a", {})
-    check("карточка следа в линии lama слоя product с «чем проверить»",
+    card = shop.get("pr.a", {})
+    check("карточка следа в линии shop слоя product с «чем проверить»",
           card.get("как_проверить") == "открыть и увидеть"
-          and any(l["id"] == "lama" and l["layer"] == "product" for l in data["lines"]), str(lama))
+          and any(l["id"] == "shop" and l["layer"] == "product" for l in data["lines"]), str(shop))
     check("БОЛЬНОЙ СЛУЧАЙ (указание о ревизии): test следа — plan + blocked «ждёт ревизии», "
           "прежний статус в статус_в_следе",
           card.get("status") == "plan" and card.get("blocked") == NEEDS_REVIEW
           and card.get("статус_в_следе") == "test", str(card))
     check("каждая импортированная карточка несёт blocked, своя карточка смены — нет",
-          lama and all(t.get("blocked") == NEEDS_REVIEW for t in lama.values())
-          and "blocked" not in tasks_of(map_path, "product").get("pr.existing", {}), str(lama))
-    gone = lama.get("pr.gone", {})
+          shop and all(t.get("blocked") == NEEDS_REVIEW for t in shop.values())
+          and "blocked" not in tasks_of(map_path, "product").get("pr.existing", {}), str(shop))
+    gone = shop.get("pr.gone", {})
     check("закрытая из истории — plan + blocked, статус_в_следе done, «подтверждение не доехало»",
           gone.get("status") == "plan" and gone.get("статус_в_следе") == "done"
           and "не доехало" in gone.get("источник", ""), str(gone))
     check("многострочный summary с кавычками и обратным слэшем — дословно",
-          lama.get("pr.multi", {}).get("summary") == MULTI_SUMMARY, str(lama.get("pr.multi")))
-    archived = list(tasks_of(archive, "lama"))
+          shop.get("pr.multi", {}).get("summary") == MULTI_SUMMARY, str(shop.get("pr.multi")))
+    archived = list(tasks_of(archive, "shop"))
     check("реплика канала — в архив, не на доску",
-          archived == ["pr.reply"] and "pr.reply" not in lama, f"архив {archived}")
+          archived == ["pr.reply"] and "pr.reply" not in shop, f"архив {archived}")
     existing = tasks_of(map_path, "product").get("pr.existing", {})
     check("БОЛЬНОЙ СЛУЧАЙ: карточка с уже существующим id не перетирается",
           existing.get("title") == "Своя карточка смены" and existing.get("status") == "plan"
           and "pr.existing" in first["skipped"], str(existing))
 
     frozen = (read(map_path), read(archive))
-    second = run(trace, map_path, archive, lock, "lama", False, "2026-10-15")
+    second = run(trace, map_path, archive, lock, "shop", False, "2026-10-15")
     check("БОЛЬНОЙ СЛУЧАЙ: повтор не дублирует — карта и архив байт в байт",
           frozen == (read(map_path), read(archive))
           and second["to_map"] == 0 and second["to_archive"] == 0, str(second))
 
     duplicate = {"id": "pr.a", "status": "plan", "title": "дубль", "summary": "дубль"}
     try:
-        prepare(read(map_path), "карта", [duplicate], "lama", True)
+        prepare(read(map_path), "карта", [duplicate], "shop", True)
         check("БОЛЬНОЙ СЛУЧАЙ: вставка дубля id — сверка «было + добавляли = стало» отказывает",
               False, "дубль прошёл")
     except ValueError:
@@ -472,19 +471,19 @@ def paths(root: Path, check, read, tasks_of) -> None:
     before = read(map_path)
     with open(lock, "a", encoding="utf-8") as other_writer:
         fcntl.flock(other_writer, fcntl.LOCK_EX)
-        worker = threading.Thread(target=run, args=(trace, map_path, archive, lock, "lama",
+        worker = threading.Thread(target=run, args=(trace, map_path, archive, lock, "shop",
                                                     False, "2026-10-15"))
         worker.start()
         worker.join(0.5)
         waited = worker.is_alive() and read(map_path) == before
     worker.join(10)
     check("БОЛЬНОЙ СЛУЧАЙ: другой писатель держит dev-map.lock — импорт ждёт и пишет после",
-          waited and "pr.new" in tasks_of(map_path, "lama"),
+          waited and "pr.new" in tasks_of(map_path, "shop"),
           "записал, не дождавшись лока" if not waited else "после лока не записал")
     data = yaml.safe_load(read(map_path))
     lines = [l["id"] for l in data["lines"]]
     check("новая карточка следа ложится в ту же линию, вторая линия не заводится",
-          lines == ["product", "lama"] and list(tasks_of(map_path, "lama"))[-1] == "pr.new", str(lines))
+          lines == ["product", "shop"] and list(tasks_of(map_path, "shop"))[-1] == "pr.new", str(lines))
 
 
 # ── главный ход ────────────────────────────────────────────────────────────
@@ -495,7 +494,7 @@ def main() -> int:
     parser.add_argument("--map")
     parser.add_argument("--archive")
     parser.add_argument("--lock")
-    parser.add_argument("--line", default=DEFAULT_LINE)
+    parser.add_argument("--line")
     parser.add_argument("--show", action="store_true")
     parser.add_argument("--selftest", action="store_true")
     args = parser.parse_args()
@@ -503,7 +502,15 @@ def main() -> int:
         return selftest()
 
     settings = конфиг()
-    trace = Path(args.trace) if args.trace else exporter.trace_path(из_файла(путь_harness_conf()))
+    # Линия продукта — его имя на этой машине (PRODUCT_DIR), а не зашитое в
+    # харнес: у другой установки продукт зовётся иначе.
+    harness_conf = из_файла(путь_harness_conf())
+    line = args.line or harness_conf.get("PRODUCT_DIR")
+    if not line:
+        print("в harness.conf пуст PRODUCT_DIR — в какую линию класть карточки, неизвестно; "
+              "задайте ключ или позовите с --line <имя>", file=sys.stderr)
+        return 1
+    trace = Path(args.trace) if args.trace else exporter.trace_path(harness_conf)
     if trace is None:
         print("в harness.conf пуст PRODUCT_REPO — где след, неизвестно; "
               "задайте ключ или позовите с --trace <путь>", file=sys.stderr)
@@ -513,7 +520,7 @@ def main() -> int:
     lock = Path(args.lock or Path(settings["LOG_DIR"]) / "locks"
                 / (settings.get("SERVICE_LOCKS_SUBDIR") or "services") / "dev-map.lock")
     try:
-        result = run(trace, map_path, archive, lock, args.line, args.show,
+        result = run(trace, map_path, archive, lock, line, args.show,
                      datetime.date.today().isoformat())
     except (OSError, ValueError, yaml.YAMLError) as error:
         print(f"[импорт следа] ОТКАЗ, ничего не записано: {error}", file=sys.stderr)

@@ -14,7 +14,7 @@
 
 КУДА. След лежит в РЕПОЗИТОРИИ продукта (PRODUCT_REPO в harness.conf), а не
 в его каталоге на машине (PRODUCT_PATH): у продукта, чей compose вложен в
-репозиторий (`lama-cms/deploy`), это разные места, и след от PRODUCT_PATH ложился
+репозиторий (`<продукт>/deploy`), это разные места, и след от PRODUCT_PATH ложился
 в `deploy/src/docs/` мимо репозитория. Ключ пуст — отказ словами, а не запись
 в выдуманный каталог. Тот же путь читает импорт следа (import-product-trace.py).
 
@@ -188,7 +188,7 @@ def selftest() -> int:
     cases = [
         ({"PRODUCT_PATH": "/srv/shop/deploy", "PRODUCT_REPO": "/srv/shop"},
          Path("/srv/shop/docs/КАРТА-РАЗРАБОТКИ.md"),
-         "БОЛЬНОЙ СЛУЧАЙ: compose вложен в репозиторий (lama-cms/deploy) — след в docs/ репозитория"),
+         "БОЛЬНОЙ СЛУЧАЙ: compose вложен в репозиторий (<продукт>/deploy) — след в docs/ репозитория"),
         ({"PRODUCT_PATH": "/srv/shop", "PRODUCT_REPO": "/srv/shop"},
          Path("/srv/shop/docs/КАРТА-РАЗРАБОТКИ.md"),
          "каталог продукта и репозиторий совпадают — тот же путь"),
