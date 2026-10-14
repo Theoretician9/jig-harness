@@ -128,6 +128,7 @@ def wip(task_id: str, spec: str, **fields) -> dict:
 HARNESS_TASKS = [
     card("t.plan", "plan", источник="ревизия:проба:scripts/x.py:строка как есть"),
     card("t.backlog", "беклог"),
+    card("t.queued", "plan", глубина=dict(DEPTH), spec="docs/specs/t-queued.md"),
     card("t.nodepth", "wip", spec="docs/specs/t-nodepth.md"),
     wip("t.small", "docs/specs/t-small.md"),
     wip("t.debt", "docs/specs/t-debt.md"),
@@ -138,12 +139,22 @@ HARNESS_TASKS = [
     wip("t.gitmute", "docs/specs/t-gitmute.md"),
     card("t.nospec", "wip", глубина=dict(DEPTH)),
     wip("t.named", "docs/specs/t-named.md", бумаги={"план": "docs/plans/общий-план.md"}),
-    card("t.test1", "test", чем_подтверждено="селфтест 12 путей и живой прогон"),
+    wip("t.nocode", "docs/specs/t-nocode.md"),
+    # Объявлена «обычная», цена коммитов крупная, плана нет: гейт при закрытии
+    # судит по «крупной» и плана потребует (ревью кода, B-1).
+    card("t.obych", "wip", spec="docs/specs/t-obych.md", глубина=dict(DEPTH, уровень="обычная")),
+    # Характер «починка» оставляет тесты и ревью кода: спека и план не положены.
+    card("t.fix", "wip", глубина=dict(DEPTH, характер="починка")),
+    card("t.test1", "test", чем_подтверждено="селфтест 12 путей и живой прогон",
+         глубина=dict(DEPTH), spec="docs/specs/t-test1.md"),
     card("t.test2", "test"),
+    # Мелкая по цене задача в test без бумаг «крупной»: гейт их не требовал.
+    card("t.smalltest", "test", глубина=dict(DEPTH, уровень="мелкая"), spec="docs/specs/t-smalltest.md"),
     card("t.accepted", "принято"),
-    card("t.done", "done", tested_at="2026-10-12"),
+    card("t.done", "done", tested_at="2026-10-12", глубина=dict(DEPTH), spec="docs/specs/t-done.md"),
     card("t.weird", "почти"),
     card("t.blockedplan", "plan", blocked="ключ от владельца"),
+    card("t.blockedtwice", "plan", blocked="ждёт владельца: ребут"),
     wip("t.blockedwip", "docs/specs/t-blockedwip.md", blocked="чужая поставка"),
 ]
 PRODUCT_TASKS = [wip("t.product", "docs/specs/t-product.md")]
@@ -186,7 +197,13 @@ SPEC_ONLY = ["спека", "ревью_спеки"]
 ALL_PAPERS = ["спека", "ревью_спеки", "контракт", "план", "ревью_кода", "мутации"]
 papers("t.small", "t-small", SPEC_ONLY)
 papers("t.debt", "t-debt", SPEC_ONLY)
-papers("t.debt2", "t-debt2", SPEC_ONLY + ["контракт"])
+papers("t.debt2", "t-debt2", SPEC_ONLY + ["план", "контракт"])
+papers("t.nocode", "t-nocode", SPEC_ONLY + ["план", "контракт"])
+papers("t.test1", "t-test1", ALL_PAPERS)
+papers("t.obych", "t-obych", ["спека", "ревью_спеки", "контракт", "ревью_кода", "мутации"])
+put(".tasks/t.fix/harness-code-review.md")
+papers("t.done", "t-done", SPEC_ONLY)
+papers("t.smalltest", "t-smalltest", SPEC_ONLY)
 papers("t.approval", "t-approval", SPEC_ONLY)
 papers("t.approval2", "t-approval2", ALL_PAPERS)
 papers("t.allpapers", "t-all", ALL_PAPERS)
@@ -200,7 +217,7 @@ put(".tasks/t.allpapers/журнал.md", LONG)
 # Журнал одобрений спек: у одних задач слово владельца есть, у t.approval2
 # спека отправлена, но слова нет, у t.approval не отправлена вовсе.
 journal = []
-for task_id in ("t.debt", "t.debt2", "t.allpapers", "t.blockedwip", "t.named"):
+for task_id in ("t.debt", "t.debt2", "t.allpapers", "t.blockedwip", "t.named", "t.nocode", "t.obych", "t.fix"):
     journal.append({"ts": "2026-10-11T10:00:00", "событие": "отправлена", "задача": task_id})
     journal.append({"ts": "2026-10-11T11:00:00", "событие": "одобрена", "задача": task_id,
                     "сказано": "2026-10-11T11:00:00"})
@@ -219,6 +236,8 @@ MID = {"коммитов": 1, "сторож_или_гейт": True}
 FEATURES = {task_id: dict(BIG) for task_id in ALL_IDS}
 FEATURES["t.small"] = dict(MID)
 FEATURES["t.gitmute"] = None
+FEATURES["t.nocode"] = {"коммитов": 0}
+FEATURES["t.smalltest"] = dict(MID)
 
 _loaded = 0
 
@@ -258,9 +277,28 @@ except Exception as exc:  # noqa: BLE001 — красный прогон обя�
 judge, price = make_judge(ROOT, FEATURES)
 settings = getattr(price, "конфиг")()
 STEP_KEYS = getattr(price, "шаги_уровня")(settings, "крупная")
-STEP_COLUMNS = [step.replace("_", " ") for step in STEP_KEYS]
-COLUMNS = ["Очередь"] + STEP_COLUMNS + ["Проверка", "Готово"]
-FIRST = STEP_COLUMNS[0]
+CODE_STAGE = "код"
+# Порядок колонок — пайплайн CLAUDE.md («spec → spec review → plan → contract →
+# tests before code → code → gates → review → …»); мутации идут за ревью кода
+# (pipeline.yaml). Ожидание записано здесь, а снимок обязан брать порядок из
+# ДАННЫХ (harness/config/board.yaml): тест сверяет и то, и другое.
+PIPELINE_ORDER = ["очередь", "спека", "ревью_спеки", "план", "контракт", "тесты", CODE_STAGE,
+                  "ревью_кода", "мутации", "живая_проверка", "закрытие"]
+COLUMNS = [stage.replace("_", " ") for stage in PIPELINE_ORDER]
+QUEUE, CHECK, DONE = "очередь", "живая проверка", "закрытие"
+FIRST = "спека"
+BOARD_DATA = HERE.parent / "harness" / "config" / "board.yaml"
+try:
+    board_stages = (yaml.safe_load(BOARD_DATA.read_text(encoding="utf-8")) or {}).get("колонки")
+except OSError as exc:
+    board_stages = None
+    path_bad(f"данных колонок нет: {BOARD_DATA} — {exc}")
+check(board_stages == PIPELINE_ORDER, "колонки в данных board.yaml — в порядке пайплайна CLAUDE.md",
+      f"колонки board.yaml {board_stages}, ждали {PIPELINE_ORDER}")
+# Шаг, заведённый в пульте, но без колонки, положил бы карточку «вне списка».
+all_steps = {s for level in (settings.get("шаги") or {}).values() for s in level or []}
+check(all_steps <= set(board_stages or []), "у каждого шага пульта есть колонка доски",
+      f"шаги без колонки: {sorted(all_steps - set(board_stages or []))}")
 cards = {c["id"]: c for c in getattr(judge, "_все_карточки")()}
 check(set(cards) == set(ALL_IDS), "гейт видит все карточки фикстуры",
       f"гейт видит не те карточки: {sorted(set(cards) ^ set(ALL_IDS))}")
@@ -271,7 +309,7 @@ check(cards.get("t.product", {}).get("layer") == "product",
 def price_pill(features: dict) -> str:
     value = getattr(price, "цена")(features, settings["веса"])
     level = getattr(price, "уровень")(value, settings["пороги"])
-    return f"цена {value}, по коммитам {level}"
+    return f"по коммитам пока «{level}» (цена {value})"
 
 
 # ── строки таблицы §3.2 ──────────────────────────────────────────────────
@@ -281,21 +319,38 @@ def price_pill(features: dict) -> str:
 # ту стадию: «чисто» там, где судить нечем, или «готово» там, где долг.
 ROWS = [
     # plan — задача ещё не взята: место в очереди, без пометок.
-    ("t.plan", "Очередь", [], ["ждёт", "непонятный"], "plan → Очередь"),
+    ("t.plan", QUEUE, [], ["ждёт", "непонятный"], "plan → очередь"),
+    # У задачи в очереди бумаг ещё нет по определению: «нет: …» было бы шумом.
+    ("t.queued", QUEUE, [], ["нет:"], "plan с глубиной → очередь без «нет: …»"),
     # Беклог трогает только владелец (28.09.2026) — доска говорит это прямо.
-    ("t.backlog", "Очередь", ["не трогаю без слова"], [], "беклог → Очередь с «не трогаю без слова»"),
+    ("t.backlog", QUEUE, ["не трогаю без слова"], [], "беклог → очередь с «не трогаю без слова»"),
     # Взята без глубины: гейт шагов не назначил — шагов нет, жёлтая пометка.
     ("t.nodepth", FIRST, ["глубины нет — шаги не назначены"], [],
      "wip без глубины → первая колонка шагов"),
-    # Цена по коммитам ниже «крупной»: гейт бумаг не требует, доска ставит
-    # первый шаг без бумаги и называет цену и уровень — иначе «молчит» = «готово».
-    ("t.small", "контракт", ["гейт шагов не требует", price_pill(MID)], ["бумаги собраны"],
-     "wip ниже крупной → первый шаг без бумаги, пилюля с ценой"),
+    # Цена по коммитам ниже «крупной», уровень объявлен: гейт бумаг не требует,
+    # доска ставит первый шаг без бумаги и говорит, ЧТО объявлено и что пока
+    # насчитал гейт. Прежняя «гейт шагов не требует: цена 0, по коммитам мелкая»
+    # у крупной задачи читалась как «задача мелкая» (владелец 14.10).
+    ("t.small", "план", ["объявлена «крупная»", price_pill(MID), "бумаг гейт ещё не требует"],
+     ["бумаги собраны", "гейт шагов не требует"],
+     "wip ниже крупной → первый шаг без бумаги, пилюля: объявлено и насчитано"),
+    # Коммитов с Dev-Map нет: цена 0 — это «гейт ещё не судил», а не «мелкая»;
+    # бумаги до кода собраны — карточка на стадии кода.
+    ("t.nocode", "код", ["объявлена «крупная»", "коммитов с Dev-Map ещё нет"],
+     ["цена 0", "мелкая", "бумаги собраны"], "крупная без коммитов, бумаги до кода есть → код"),
+    # Одна правда: список шагов — тот, по которому гейт судит закрытие, а не
+    # объявленный уровень. «Обычная» без плана при крупной цене — долг по плану.
+    ("t.obych", "план", [], ["бумаги собраны"],
+     "объявлена «обычная», цена крупная, плана нет → план (как судит гейт)"),
+    # Характер сужает список гейта — и доски: починке спеку не требуют.
+    ("t.fix", "ревью кода", ["бумаги собраны"], [], "починка с ревью кода → «бумаги собраны»"),
     # Крупная с долгом: колонка — первый шаг, по которому гейт называет долг
-    # по ПОЛНОМУ списку. Без этого доска ставила бы «ревью кода» при пустом контракте.
-    ("t.debt", "контракт", [], ["бумаги собраны"], "wip крупная, нет контракта → контракт"),
-    # Шаг «тесты» гейт файлом не судит — карточку он не держит.
-    ("t.debt2", "план", [], ["бумаги собраны"], "wip крупная, нет плана → план (тесты не держат)"),
+    # по ПОЛНОМУ списку. Без этого доска ставила бы «ревью кода» при пустом плане.
+    ("t.debt", "план", [], ["бумаги собраны"], "wip крупная, нет плана и контракта → план"),
+    # Шаг «тесты» гейт файлом не судит — карточку он не держит; коммиты есть —
+    # код пройден, держит ревью кода.
+    ("t.debt2", "ревью кода", [], ["бумаги собраны"],
+     "wip крупная, нет ревью кода → ревью кода (тесты не держат, код пройден)"),
     # Спека и ревью есть, уровень «частичный», спека не отправлена — ждём слова владельца.
     ("t.approval", "ревью спеки", ["ждёт твоего слова по спеке", "не отправлена"], ["бумаги собраны"],
      "ждёт одобрения, не отправлена → ревью спеки"),
@@ -319,17 +374,25 @@ ROWS = [
     # доска тоже, путь шага — названный (ревью G-02).
     ("t.named", "ревью кода", [], ["бумаги собраны"], "бумага по полю «бумаги» засчитана"),
     # test — ждёт живой проверки; чем подтверждено — видно на карточке.
-    ("t.test1", "Проверка", ["селфтест 12 путей и живой прогон"], ["нечем подтверждено"],
-     "test с чем_подтверждено → Проверка"),
-    ("t.test2", "Проверка", ["нечем подтверждено"], [], "test без чем_подтверждено → Проверка, жёлтая"),
+    ("t.test1", CHECK, ["селфтест 12 путей и живой прогон"], ["нечем подтверждено", "нет:"],
+     "test с чем_подтверждено → живая проверка"),
+    ("t.test2", CHECK, ["нечем подтверждено"], [], "test без чем_подтверждено → живая проверка, жёлтая"),
+    # Гейт бумаг не требовал (цена не крупная): «нет: …» читалось бы как
+    # «пропустили», а надо «не требовалось» (повторное ревью, N-1).
+    ("t.smalltest", CHECK, ["гейт бумаг не требовал: цена"], ["нет:"],
+     "test с некрупной ценой → «гейт бумаг не требовал», без «нет: …»"),
     # Готово: чьей проверкой — машины или владельца.
-    ("t.accepted", "Готово", ["проверено машиной"], ["проверено вами"], "принято → Готово, машиной"),
-    ("t.done", "Готово", ["проверено вами"], ["проверено машиной"], "done → Готово, вами"),
+    ("t.accepted", DONE, ["проверено машиной"], ["проверено вами"], "принято → закрытие, машиной"),
+    # Недостающие шаги у закрытой задачи названы словами, а не молчаливыми ✗.
+    ("t.done", DONE, ["проверено вами", "нет: план, контракт, ревью кода, мутации"],
+     ["проверено машиной"], "done → закрытие, вами; недостающие шаги словами"),
     # Статус вне списка не теряется и не прячется в очередь молча.
-    ("t.weird", "Очередь", ["непонятный статус: почти"], [], "статус вне списка → красная пилюля"),
+    ("t.weird", QUEUE, ["непонятный статус: почти"], [], "статус вне списка → красная пилюля"),
     # blocked не двигает карточку, а добавляет причину — в любой колонке.
-    ("t.blockedplan", "Очередь", ["ждёт: ключ от владельца"], [], "blocked в Очереди → «ждёт: …»"),
-    ("t.blockedwip", "контракт", ["ждёт: чужая поставка"], ["бумаги собраны"],
+    ("t.blockedplan", QUEUE, ["ждёт: ключ от владельца"], [], "blocked в очереди → «ждёт: …»"),
+    # Причина уже начинается с «ждёт» — второго префикса нет (N-3).
+    ("t.blockedtwice", QUEUE, ["ждёт владельца: ребут"], ["ждёт: ждёт"], "blocked «ждёт …» без двойного «ждёт: »"),
+    ("t.blockedwip", "план", ["ждёт: чужая поставка"], ["бумаги собраны"],
      "blocked в колонке шага → та же колонка + «ждёт: …»"),
 ]
 
@@ -419,7 +482,7 @@ if isinstance(board, dict):
     check(top <= set(board), "ключи верхнего уровня на месте",
           f"нет ключей: {sorted(top - set(board))}")
     check(board.get("колонки") == COLUMNS,
-          f"колонки: Очередь · шаги «крупной» из pipeline.yaml ({len(STEP_COLUMNS)}) · Проверка · Готово",
+          f"колонки — полный пайплайн ({len(COLUMNS)}): от очереди до закрытия",
           f"колонки {board.get('колонки')}, ждали {COLUMNS}")
     check(str(board.get("снято", "")).startswith("2026-10-14T12:00"), "«снято» — переданное время в ISO",
           f"«снято» = {board.get('снято')!r}")
@@ -444,8 +507,30 @@ if isinstance(board, dict):
 
     full = by_id.get("t.allpapers") or {}
     steps = {s.get("шаг"): s for s in full.get("шаги") or []}
-    check(set(steps) == set(STEP_KEYS), "шаги задачи — полный список «крупной»",
-          f"шаги задачи: {sorted(steps)}, ждали {STEP_KEYS}")
+    check(set(steps) == set(STEP_KEYS) | {CODE_STAGE}, "шаги задачи — полный список «крупной» и код",
+          f"шаги задачи: {sorted(steps)}, ждали {STEP_KEYS} + {CODE_STAGE}")
+    order = [s.get("шаг") for s in full.get("шаги") or []]
+    check(order == [s for s in PIPELINE_ORDER if s in steps],
+          "шаги задачи идут в порядке колонок доски", f"порядок шагов: {order}")
+    check(steps.get(CODE_STAGE, {}).get("есть") is True and "3" in str(steps.get(CODE_STAGE, {}).get("почему")),
+          "код: есть — коммиты с Dev-Map (3)", f"код: {steps.get(CODE_STAGE)}")
+
+    # Больной случай 14.10: задача в test и done показывала «шаги: []» —
+    # пройденный путь не виден ровно тогда, когда он важен.
+    tested = {s.get("шаг"): s for s in (by_id.get("t.test1") or {}).get("шаги") or []}
+    check(tested and all(tested.get(k, {}).get("есть") is True for k in ALL_PAPERS + [CODE_STAGE]),
+          "задача в test показывает пройденные шаги (бумаги и код — есть)",
+          f"шаги t.test1 (test): {tested or 'пусто'}")
+    closed = {s.get("шаг"): s for s in (by_id.get("t.done") or {}).get("шаги") or []}
+    check(closed.get("спека", {}).get("есть") is True and closed.get("план", {}).get("есть") is False,
+          "задача в done показывает шаги: что было и чего не было",
+          f"шаги t.done (done): {closed or 'пусто'}")
+    small = [s for s in (by_id.get("t.smalltest") or {}).get("шаги") or [] if s.get("есть") is False]
+    check(not small, "гейт бумаг не требовал — ✗ на шагах нет, только ○",
+          f"✗ у t.smalltest: {[s.get('шаг') for s in small]}")
+    nocode = {s.get("шаг"): s for s in (by_id.get("t.nocode") or {}).get("шаги") or []}
+    check(nocode.get(CODE_STAGE, {}).get("есть") is False, "нет коммитов с Dev-Map — код отмечен «нет»",
+          f"код t.nocode: {nocode.get(CODE_STAGE)}")
     step_keys = {"шаг", "путь", "есть", "почему"}
     check(all(step_keys <= set(s) for s in steps.values()), "у шага есть шаг/путь/есть/почему",
           f"неполные шаги: {[s for s in steps.values() if not step_keys <= set(s)]}")
