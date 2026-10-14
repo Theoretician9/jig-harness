@@ -88,7 +88,10 @@ sobrat_rubezh() {  # $1 = имя хоста
 # упал бы на середине (полуработа хуже её отсутствия), а проба на подставных
 # каталогах обязана идти тем же путём, что боевой запуск.
 [ -w "$HARNESS_CONF" ] || otkaz "нет права писать $HARNESS_CONF — скрипт запускают через sudo одной строкой правил"
-[ -w "$NGINX_DIR/sites-available" ] || otkaz "нет права писать $NGINX_DIR/sites-available — скрипт запускают через sudo"
+# Каталога nginx на чистой машине ещё нет — его создаст установка ниже, а
+# право root уже доказано строкой выше.
+[ ! -e "$NGINX_DIR" ] || [ -w "$NGINX_DIR/sites-available" ] \
+    || otkaz "нет права писать $NGINX_DIR/sites-available — скрипт запускают через sudo"
 
 if [ "${1:-}" = "--снять" ]; then
     zapisat_adres ""
