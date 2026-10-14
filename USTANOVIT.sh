@@ -1396,7 +1396,7 @@ EOF
   # Restart=always крутится в отказе — проверка «панель отвечает» зеленела бы
   # при мёртвой панели (S-03).
   local PANEL_PORT
-  PANEL_PORT=$(grep -o -- '--порт [0-9]\+' "$PROJECT_DIR/harness/panel/harness-panel.service.in" | grep -o '[0-9]\+' | head -1)
+  PANEL_PORT=$(grep -o -- '--порт [0-9]\+' "$PROJECT_DIR/harness/panel/harness-panel.service.in" | grep -o '[0-9]\+' | head -1 || true)
   PANEL_PORT="${PANEL_PORT:-8787}"
   # Проверка питоном, а не `ss`: iproute2 на чистой машине нет (живая проба в
   # контейнере 13.09.2026), а python3 ставится шагом 2 и есть всегда. Порт,
