@@ -1436,7 +1436,6 @@ EOF
     "sudo -u $AGENT_USER python3 '$PROJECT_DIR/harness/panel/client.py' --ссылка '$TG_CHAT_ID'; journalctl -u harness-panel -n 30 --no-pager"
 
   DONE_LIST+=("панель владельца: служба harness-panel, каталог состояния, права, запасной код")
-  MANUAL_LIST+=("Вывести панель наружу: напишите боту «панель наружу» — имя, сертификат и nginx он сделает сам")
   отметить шаг_10
 }
 

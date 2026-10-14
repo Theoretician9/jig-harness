@@ -130,6 +130,10 @@
     расписание: "*/5 * * * *"
     команда: "scripts/build-board.py"
     журнал: build-board.log
+  - имя: panel-tunnel
+    расписание: "* * * * *"
+    команда: "harness/demons/panel-tunnel.sh"
+    журнал: panel-tunnel-demon.log
   - имя: restore-probe
     расписание: "0 5 * * 1"
     команда: "scripts/restore-probe.sh"
@@ -159,6 +163,7 @@
   build-board: 5
   limit-watch: 5
   product-health: 5
+  panel-tunnel: 5
   acceptance-watch: 1440
   # 8 дней, а не 31: копии делаются каждую ночь, а доказательство их годности
   # обновлялось раз в месяц — то есть три недели «данные целы» держалось на
@@ -190,6 +195,7 @@
   REVIZIA_ENABLED: "1"      # ежемесячная ревизия проекта включена; ручка на панели
   REVIZIA_MODEL: "opus"     # модель ревизии: opus по умолчанию, fable — по выбору владельца
   MODEL_CALLS_PER_DAY: "50"  # потолок вызовов модели из кода на один «зачем» в сутки
+  PANEL_TUNNEL: "1"        # панель наружу туннелем cloudflared без root; 0 — выключен
   PULSE_OWNER_MIN: "60"     # через сколько минут молчания смены сторож скажет о нём САМОМУ владельцу
   PUBLIC_BUILD_DIR: "/var/lib/harness/публичная-сборка"   # дерево публичной сборки; НЕ в логах: их чистят по mtime и сканируют с правкой
   PUBLIC_COMMIT_NAME: "jig-harness"                       # автор публичных коммитов — имя харнеса, а не личность машины
