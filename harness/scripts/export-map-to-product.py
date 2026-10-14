@@ -12,13 +12,21 @@
 `dev-map.yaml` харнеса; здесь СЛЕД этого источника с отметкой времени, и
 читатель видит, насколько след свеж.
 
-КУДА. Путь к продукту — ДАННЫЕ (PRODUCT_PATH в harness.conf), а не литерал:
-вшитый путь это след нашей установки в общем инструменте. Ключ пуст — отказ
-словами, а не запись в выдуманный каталог.
+КУДА. След лежит в РЕПОЗИТОРИИ продукта (PRODUCT_REPO в harness.conf), а не
+в его каталоге на машине (PRODUCT_PATH): у продукта, чей compose вложен в
+репозиторий (`lama-cms/deploy`), это разные места, и след от PRODUCT_PATH ложился
+в `deploy/src/docs/` мимо репозитория. Ключ пуст — отказ словами, а не запись
+в выдуманный каталог. Тот же путь читает импорт следа (import-product-trace.py).
 
-Запуск: python3 scripts/export-map-to-product.py [--куда <путь>]
+НЕ ЗАТИРАЕТ НЕСВЕРЕННОЕ. След бывает единственным носителем карточек: продукт
+приехал на сервер без своей карты, и пока след не импортирован
+(import-product-trace.py), перезапись оставила бы от 130 карточек две. Поэтому
+карточка, которая есть в следе, но нет ни в карте, ни в архиве, — отказ словами.
+
+Запуск: python3 scripts/export-map-to-product.py [--куда <путь>] [--selftest]
 """
 import argparse
+import re
 import subprocess
 import sys
 from datetime import datetime
@@ -32,8 +40,29 @@ from config import конфиг, путь_harness_conf  # noqa: E402
 
 # Где внутри репозитория продукта лежит след. Относительный путь — не след
 # установки: так устроен репозиторий, а не машина.
-MAP_IN_PRODUCT = "src/docs/КАРТА-РАЗРАБОТКИ.md"
+MAP_IN_PRODUCT = "docs/КАРТА-РАЗРАБОТКИ.md"
 PRODUCT_PREFIX = "pr."
+# Заголовки разделов следа по статусу. Их же читает импорт следа обратно в
+# карту — один словарь на писателя и читателя.
+STATUS_ORDER = ["wip", "test", "plan", "беклог", "done"]
+STATUS_HEADINGS = {"wip": "В работе", "test": "Ждут проверки владельца или живой",
+                   "plan": "Запланировано", "беклог": "Беклог — не трогать без его слова",
+                   "done": "Закрыто"}
+
+
+TRACE_CARD = re.compile(r"^### `(.+)`\s*$", re.M)
+ARCHIVE = "docs/dev-map-archive.yaml"
+
+
+def lost_by_overwrite(trace_text: str, kept: set) -> list[str]:
+    """id из следа, которых нет ни в карте, ни в архиве: перезапись их потеряет."""
+    return sorted(set(TRACE_CARD.findall(trace_text)) - kept)
+
+
+def trace_path(settings: dict) -> Path | None:
+    """Путь следа в репозитории продукта; None — PRODUCT_REPO не задан."""
+    repo = (settings.get("PRODUCT_REPO") or "").strip()
+    return Path(repo) / MAP_IN_PRODUCT if repo else None
 
 
 def cards(node):
@@ -68,20 +97,34 @@ def state_point() -> str:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--куда", default="")
+    parser.add_argument("--selftest", action="store_true")
     args = parser.parse_args()
+    if args.selftest:
+        return selftest()
     куда = getattr(args, "куда")
     if not куда:
-        корень = (конфиг(путь_harness_conf()).get("PRODUCT_PATH") or "").strip()
-        if not корень:
-            print("в harness.conf пуст PRODUCT_PATH — куда писать след, "
+        default = trace_path(конфиг(путь_harness_conf()))
+        if default is None:
+            print("в harness.conf пуст PRODUCT_REPO — куда писать след, "
                   "неизвестно; задайте ключ или позовите с --куда <путь>",
                   file=sys.stderr)
             return 2
-        куда = str(Path(корень) / MAP_IN_PRODUCT)
+        куда = str(default)
     out = Path(куда)
 
     data = yaml.safe_load((ROOT / "dev-map.yaml").read_text(encoding="utf-8"))
     all_cards = list(cards(data))
+    if out.exists():
+        kept = {str(c["id"]) for c in all_cards}
+        if (ROOT / ARCHIVE).exists():
+            kept |= {str(c["id"]) for c in cards(yaml.safe_load(
+                (ROOT / ARCHIVE).read_text(encoding="utf-8")))}
+        lost = lost_by_overwrite(out.read_text(encoding="utf-8"), kept)
+        if lost:
+            print(f"ОТКАЗ: в следе {out} карточек нет ни в карте, ни в архиве — {len(lost)} "
+                  f"(например {', '.join(lost[:3])}). Перезапись их потеряет; сначала "
+                  f"python3 scripts/import-product-trace.py", file=sys.stderr)
+            return 1
     mine = [c for c in all_cards if str(c.get("id", "")).startswith(PRODUCT_PREFIX)]
     if not mine:
         print("в карте нет ни одной карточки продукта — выгружать нечего", file=sys.stderr)
@@ -111,15 +154,11 @@ def main() -> int:
     lines += [f"{i}. `{task}`" for i, task in enumerate(queue, 1)] or ["Очередь пуста."]
     lines.append("")
 
-    порядок = ["wip", "test", "plan", "беклог", "done"]
-    имена = {"wip": "В работе", "test": "Ждут проверки владельца или живой",
-             "plan": "Запланировано", "беклог": "Беклог — не трогать без его слова",
-             "done": "Закрыто"}
-    for status in порядок + [s for s in by_status if s not in порядок]:
+    for status in STATUS_ORDER + [s for s in by_status if s not in STATUS_ORDER]:
         rows = by_status.get(status) or []
         if not rows:
             continue
-        lines.append(f"## {имена.get(status, status)} — {len(rows)}")
+        lines.append(f"## {STATUS_HEADINGS.get(status, status)} — {len(rows)}")
         lines.append("")
         if status == "done":
             lines.append(f"Закрытых карточек продукта: {len(rows)}. Их список — в карте харнеса.")
@@ -142,6 +181,37 @@ def main() -> int:
           f"из них в работе {len(by_status.get('wip', []))}, "
           f"ждут проверки {len(by_status.get('test', []))}")
     return 0
+
+
+def selftest() -> int:
+    """Путь следа — от репозитория продукта, не от его каталога на машине."""
+    cases = [
+        ({"PRODUCT_PATH": "/srv/shop/deploy", "PRODUCT_REPO": "/srv/shop"},
+         Path("/srv/shop/docs/КАРТА-РАЗРАБОТКИ.md"),
+         "БОЛЬНОЙ СЛУЧАЙ: compose вложен в репозиторий (lama-cms/deploy) — след в docs/ репозитория"),
+        ({"PRODUCT_PATH": "/srv/shop", "PRODUCT_REPO": "/srv/shop"},
+         Path("/srv/shop/docs/КАРТА-РАЗРАБОТКИ.md"),
+         "каталог продукта и репозиторий совпадают — тот же путь"),
+        ({"PRODUCT_PATH": "/srv/shop/deploy", "PRODUCT_REPO": " "}, None,
+         "PRODUCT_REPO пуст — отказ словами, а не каталог от PRODUCT_PATH"),
+    ]
+    trace = "### `pr.a`\n**A**\n\n### `pr.b`\n**B**\n"
+    overwrite = [
+        (trace, {"pr.first"}, ["pr.a", "pr.b"],
+         "БОЛЬНОЙ СЛУЧАЙ: импорта ещё не было — в карте 1 карточка, в следе 2 других: отказ"),
+        (trace, {"pr.a", "pr.b", "pr.first"}, [], "всё из следа есть в карте или архиве — пишем"),
+    ]
+    ok = True
+    for text, kept, expected, why in overwrite:
+        got = lost_by_overwrite(text, kept)
+        ok &= got == expected
+        print(f"  {'ок   ' if got == expected else 'ПЛОХО'} {why} (потеряет {got})")
+    for settings, expected, why in cases:
+        got = trace_path(settings)
+        ok &= got == expected
+        print(f"  {'ок   ' if got == expected else 'ПЛОХО'} {why} (получено {got})")
+    print(f"САМОТЕСТ {'ПРОЙДЕН' if ok else 'ПРОВАЛЕН'}: {len(cases) + len(overwrite)} путей, два больных случая")
+    return 0 if ok else 1
 
 
 if __name__ == "__main__":
