@@ -83,6 +83,24 @@ proba "панель перезапущена" "да" \
       "$(grep -q 'restart harness-panel' "$T/systemctl-zvan" && echo да || echo нет)"
 rm -rf "$T"
 
+# ── 2б. БОЛЬНОЙ: чистый сервер — nginx ещё нет, его ставит сам скрипт ────
+# Проверка права писать в sites-available стояла ДО установки nginx и на
+# чистой машине отказывала под root: каталога ещё нет.
+T=$(mktemp -d); stend "$T"; rm -rf "$T/nginx"
+printf '#!/usr/bin/env bash\ntouch "%s/apt-zvan"\nmkdir -p "%s/nginx/sites-available" "%s/nginx/sites-enabled"\nprintf "#!/usr/bin/env bash\\nexit 0\\n" > "%s/bin/nginx-new"; chmod +x "%s/bin/nginx-new"\n' \
+    "$T" "$T" "$T" "$T" "$T" > "$T/bin/apt-get"
+VYVOD=$(PATH="$T/bin:/usr/bin:/bin" HARNESS_CONF="$T/harness.conf" \
+    PANEL_NGINX_SHABLON="$T/shablon.in" NGINX_DIR="$T/nginx" \
+    NGINX_BIN="$T/bin/nginx-new" LE_DIR="$T/letsencrypt" APT_BIN="$T/bin/apt-get" \
+    CERTBOT_BIN="$T/bin/certbot" LOG_DIR="$T/log" bash "$SKRIPT" "$IMYA_STENDA" 2>&1); RC=$?
+proba "БОЛЬНОЙ: nginx нет — скрипт ставит его и доходит до конца (rc 0)" "0" "$RC"
+proba "БОЛЬНОЙ: nginx нет — рубеж включён после установки" "1" \
+      "$(find "$T/nginx/sites-enabled" -name harness-panel 2>/dev/null | wc -l)"
+T2=$(mktemp -d); stend "$T2"; rm -rf "$T2/nginx"
+zvat "$T2" --снять >/dev/null; RC=$?
+proba "БОЛЬНОЙ: nginx нет — «--снять» снимает адрес без отказа" "0" "$RC"
+rm -rf "$T" "$T2"
+
 # ── 3. Сертификат уже есть — certbot не зовётся (квота Let's Encrypt) ────
 T=$(mktemp -d); stend "$T"; mkdir -p "$T/letsencrypt/live/$IMYA_STENDA"
 zvat "$T" "$IMYA_STENDA" >/dev/null
