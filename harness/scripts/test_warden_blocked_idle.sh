@@ -57,6 +57,13 @@ STATE_DIR="$T/state"
 TMUX_SESSION="$PANE"
 AGENT_START_CMD="$T/claude 600"
 SERVICE_LOCKS_SUBDIR="проверка"
+# Направление карты стенд задаёт САМ: прибор очереди фильтрует задачи по
+# ACTIVE_LINE, а образец конфига берётся боевой. Без этой строки проба судила
+# не поведение сторожа, а настройку машины: на линии, отличной от «hr», все
+# задачи стенда отбрасывались, «ждут» приходило пустым, и сторож законно будил
+# смену — три случая краснели на ЛЮБОМ исправном коде (замер 15.10.2026, линия
+# машины переставлена на harness).
+ACTIVE_LINE="hr"
 CTX_WINDOW_TOKENS=400000  # не-секрет: размер окна модели в токенах, а не ключ
 SILENCE_MAX_MIN=30
 PULSE_MAX_MIN=30
@@ -101,7 +108,12 @@ owner_said() { echo "слово" > "$T/log/inbox/обработано/$1.txt"; t
 mark() { printf '%s %s\n' "$(ago "$2")" "$1" > "$T/log/лимит-подписки.состояние"; }
 
 run() {
+    # HARNESS_ACTIVE_LINE задаётся И ЗДЕСЬ: судья направления (config.py)
+    # ставит окружение ВЫШЕ файла, и строка в конфиге стенда одна настройку
+    # машины не перебивает — проба оставалась красной на исправном коде при
+    # HARNESS_ACTIVE_LINE=product (находка ревью 15.10.2026).
     env -u TMUX HARNESS_CONF="$T/harness.conf" HARNESS_INSTALL_CONF="$T/harness.conf" \
+        HARNESS_ACTIVE_LINE=hr \
         HARNESS_PANEL_STATE="$T/state/panel-state" CLAUDE_PROJECTS_DIR="$T/projects" \
         bash "$DAEMON" >> "$T/log/warden.out" 2>&1 < /dev/null
 }

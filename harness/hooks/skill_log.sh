@@ -308,8 +308,36 @@ if [ "${1:-}" = "--selftest" ]; then
         echo "  ПЛОХО смена модели прошла без свежей передачи смены"; ok=0
     fi
     rm -rf "$TMPD2"
+    # БОЛЬНОЙ СЛУЧАЙ: ключ данных обязан решать ДЕЙСТВИЕ, а не только запись в
+    # журнал. До 16.10.2026 его единицу не судил никто: правило «ключ включён —
+    # зовём model.sh» держалось чтением кода. Ловушка вместо настоящего
+    # переключения: подставные соседи пишут вызов в файл, и пустой файл при
+    # ключе 1 — такой же провал, как лишний вызов при ключе 0.
+    TMPD3=$(mktemp -d)
+    printf 'модели:\n  спека: sonnet\nумолчание: haiku\n' > "$TMPD3/стенд.yaml"
+    printf '#!/usr/bin/env bash\necho sonnet\n' > "$TMPD3/model-for.sh"
+    printf '#!/usr/bin/env bash\n[ "${1:-}" = "--только-сессия" ] && { printf "%%s\\n" "$*" >> "$TMPD3/вызовы"; exit 0; }\necho "модель сейчас: opus"\n' > "$TMPD3/model.sh"
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$TMPD3/handover-check.sh"
+    chmod +x "$TMPD3"/*.sh
+    for want in 1 0; do
+        rm -f "$TMPD3/вызовы" "$TMPD3/метка"
+        sed -i "s/^переключать_на_границе_шага:.*/переключать_на_границе_шага: $want/" "$TMPD3/стенд.yaml" 2>/dev/null \
+            || printf 'переключать_на_границе_шага: %s\n' "$want" >> "$TMPD3/стенд.yaml"
+        grep -q '^переключать_на_границе_шага:' "$TMPD3/стенд.yaml" \
+            || printf 'переключать_на_границе_шага: %s\n' "$want" >> "$TMPD3/стенд.yaml"
+        TMPD3="$TMPD3" SCRIPTS_DIR="$TMPD3" MODELS_CONF="$TMPD3/стенд.yaml" \
+            LOG_DIR="$TMPD3" MODEL_SWITCH_STAMP="$TMPD3/метка" \
+            переключить_модель "spec-writing" >/dev/null 2>&1
+        got=$([ -s "$TMPD3/вызовы" ] && echo 1 || echo 0)
+        if [ "$got" = "$want" ]; then
+            echo "  ок    ключ $want — вызов переключения $( [ "$want" = 1 ] && echo "сделан" || echo "не сделан")"
+        else
+            echo "  ПЛОХО ключ $want, а вызовов в ловушке: $(cat "$TMPD3/вызовы" 2>/dev/null | wc -l)"; ok=0
+        fi
+    done
+    rm -rf "$TMPD3"
     rm -rf "$TMPD"
-    [ "$ok" = 1 ] && { echo "САМОТЕСТ ПРОЙДЕН: 12 путей, первым — больной случай"; exit 0; }
+    [ "$ok" = 1 ] && { echo "САМОТЕСТ ПРОЙДЕН: 14 путей, первым — больной случай"; exit 0; }
     echo "САМОТЕСТ ПРОВАЛЕН"; exit 1
 fi
 

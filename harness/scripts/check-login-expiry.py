@@ -22,7 +22,9 @@ to renew», и владелец спросил: «А с чего вдруг во
 import datetime
 import json
 import os
+import pathlib
 import pwd
+import re
 import subprocess
 import sys
 import time
@@ -30,7 +32,8 @@ import urllib.error
 import urllib.request
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib"))
-from config import heartbeat_dir, log_dir, конфиг, путь_harness_conf  # noqa: E402
+from config import (heartbeat_dir, log_dir, конфиг, из_файла,  # noqa: E402
+                    путь_harness_conf, путь_install_conf)
 
 ФАЙЛ = os.path.expanduser(os.environ.get("CLAUDE_CREDENTIALS")
                           or "~/.claude/.credentials.json")
@@ -294,8 +297,14 @@ def ожидаемые_орг(путь=None):
     исчерпанном лимите. Разделители — запятая и пробел, чтобы ключ правился
     рукой без оглядки на вид.
     """
-    строка = конфиг(путь or КОНФИГ_ДЕМОНОВ).get("LOGIN_EXPECTED_ORG", "")
-    return tuple(one for one in строка.replace(",", " ").split() if one)
+    return орг_из_значения(конфиг(путь or КОНФИГ_ДЕМОНОВ).get("LOGIN_EXPECTED_ORG", ""))
+
+
+def орг_из_значения(строка: str) -> tuple:
+    """Разбор ЗНАЧЕНИЯ ключа — отдельным швом: его же судит проба согласия с
+    образцом установщика, и своя копия разбора разъехалась бы с настоящим
+    молча ([[comparing-two-implementations-turns-tautological]])."""
+    return tuple(one for one in (строка or "").replace(",", " ").split() if one)
 
 
 def записать_эталон(орг, путь=None) -> bool:
@@ -892,6 +901,56 @@ def самотест():
              == ["sudo", "-n", "/usr/bin/chown", "-hR", "agent:agent", "/h/.claude"],
              "команда совпадает со строкой sudoers буква в букву"),
         ]
+    # БОЛЬНОЙ СЛУЧАЙ 14.10.2026: образец установщика и ЭТОТ читатель — две
+    # реализации одного правила «как выглядит ключ аккаунтов». Шаг установки
+    # дописывает в ключ каждый новый аккаунт через пробел, а его собственная
+    # проверка требовала РОВНО один uuid: на машине владельца (у него два
+    # аккаунта, его слово 12.10) установка встала бы на верном конфиге.
+    # Проба судит СОГЛАСИЕ: что принимает образец, то и читает набором.
+    один = "feaf1d3b-0019-4bf8-944d-69d4e645731f"
+    два = "5534b44f-51f5-424c-ae17-55043cac3e12"
+    # Где лежит пакет — ДАННЫЕ, а не литерал: STARTER_DIR в harness.conf, а
+    # пустой ключ означает конвенцию установки (дом АГЕНТА из паспорта) — так
+    # же его читают сверка с пакетом и гейт кириллицы. Прежний вызов спрашивал
+    # ключ у install.conf, где его нет вовсе, и уходил в умолчание
+    # `/home/<наш агент>/starter/…`: случай держался вшитым следом НАШЕЙ
+    # установки, и гейт чистоты нашёл этот след в публичной сборке
+    # (17.10.2026). Не нашли ни ключа, ни имени агента — «искать негде», и
+    # случай обязан сказать это вслух, а не искать в текущем каталоге.
+    каталог_пакета = (из_файла(путь_harness_conf()).get("STARTER_DIR") or "").strip()
+    if not каталог_пакета:
+        агент = (из_файла(путь_install_conf()).get("AGENT_USER") or "").strip()
+        каталог_пакета = f"/home/{агент}/starter/STARTER-PACKAGE" if агент else ""
+    устан = pathlib.Path(каталог_пакета) / "USTANOVIT.sh" if каталог_пакета else None
+    образец_случаи = []
+    if устан is not None and устан.is_file():
+        найден = re.search(r"grep -qE '\^LOGIN_EXPECTED_ORG=([^']+)'",
+                           устан.read_text(encoding="utf-8", errors="replace"))
+        образец = найден.group(1).replace('\\"', '"') if найден else ""
+        образец_случаи.append((bool(образец),
+                               "образец ключа аккаунтов найден в установщике"))
+        if образец:
+            правило = re.compile("^LOGIN_EXPECTED_ORG=" + образец)
+            for строка, ждём, зачем in (
+                (f'LOGIN_EXPECTED_ORG="{один}"', True, "один аккаунт"),
+                (f'LOGIN_EXPECTED_ORG="{один} {два}"', True,
+                 "БОЛЬНОЙ: два аккаунта через пробел — так пишет сам шаг установки"),
+                (f'LOGIN_EXPECTED_ORG="{один},{два}"', True, "два через запятую"),
+                ('LOGIN_EXPECTED_ORG=""', False, "пустой ключ не принят"),
+            ):
+                принял = bool(правило.match(строка))
+                прочёл = len(орг_из_значения(строка.split("=", 1)[1].strip('"')))
+                образец_случаи.append((принял is ждём and (прочёл > 0) is ждём,
+                                       f"образец и читатель согласны: {зачем}"))
+    else:
+        где = устан if устан is not None else "STARTER_DIR в паспорте не задан"
+        образец_случаи.append((False,
+                               f"установщик не найден ({где}) — согласие образца "
+                               "и читателя НЕ проверено"))
+    for хорошо, зачем in образец_случаи:
+        ok = ok and хорошо
+        print(("  ок    " if хорошо else "  ПЛОХО ") + зачем)
+
     for хорошо, зачем in дома_случаи:
         ok = ok and хорошо
         print(("  ок    " if хорошо else "  ПЛОХО ") + зачем)
@@ -901,7 +960,8 @@ def самотест():
           % ("ПРОЙДЕН" if ok else "ПРОВАЛЕН",
              len(случаи) + len(применение_случаи) + len(смена_случаи)
              + len(окружение_случаи) + len(доступ_случаи)
-             + len(свежесть_случаи) + len(дома_случаи) + 9))
+             + len(свежесть_случаи) + len(дома_случаи)
+             + len(образец_случаи) + 9))
     return 0 if ok else 1
 
 

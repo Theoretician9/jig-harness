@@ -1,0 +1,558 @@
+# Класс живой проверки механизма — ДАННЫЕ, не код.
+#
+# Спека docs/specs/2026-10-15-живая-проверка-механизмов.md §3.1: предикат
+# «проверено живьём» у каждого класса свой, и класс берётся отсюда, а не из
+# головы проверяющего. До этого файла «проверено» значило «я посмотрел»:
+# ревью спеки 15.10 измерило цену — «повод = крон» покрывает 15 демонов из 19,
+# а 158 «гейтов» включают библиотеки scripts/lib, сборщики и семь опасных
+# инструментов, к которым предикат судьи неприменим.
+#
+# Здесь ТОЛЬКО класс и, где нужно, причина. Дублировать реестр
+# (harness/config/mechanisms.yaml) запрещено: вид, тема и команда проверки
+# живут там, и два списка одного факта разъезжаются молча.
+#
+# Классы (закрытый список, читает scripts/build-live-check-list.py):
+#   A1 — демон по расписанию: прочитан журнал ПОСЛЕДНЕГО кронового прогона
+#        (путь из crontab -l, не из реестра) либо вызов в среде крона (env -i)
+#   A2 — демон или служба без расписания: вызов тем способом, которым его
+#        зовут (команда владельца, сторож, другой демон) + чтение следа
+#   B1 — хук оболочки: совершено перехватываемое действие и увидено решение
+#   B2 — обработчик входящих: прогон на ЗАПИСАННОМ живом сообщении владельца
+#        из inbox/обработано/ (подделать входящее нельзя — проверяемый написал
+#        бы себе улику)
+#   C1 — гейт-судья: больной случай в КОПИИ дерева краснеет с названной
+#        причиной, затем здоровый зеленеет; одного зелёного мало
+#   C2 — инструмент или библиотека: вызван с настоящим входом, вывод прочитан
+#   C3 — опасный: только на стенде со своим префиксом и портом либо
+#        «не-проверяемо» с причиной. Причина обязательна, её требует прибор
+#   D  — файл пробы: мутация в судимом механизме краснит пробу; зелёная
+#        мутация — находка о ПРОБЕ, а не допуск
+#   E  — скил: вызов в ЭТОЙ задаче (запись журнала с ts позже начала задачи,
+#        судится разбором JSON) и артефакт, который скил обязан оставить
+#
+# Как заполнен первый раз (16.10.2026) и чем это НЕ является доказательством:
+# класс проставлен по явным правилам — скилы E, три хука оболочки B1, пять
+# обработчиков входящих B2, семь опасных поимённо C3, файлы проб D (имя
+# начинается с test_ либо кончается -probe.sh), демоны A1/A2 по наличию имени
+# в живом crontab -l, библиотеки и сборщики C2, остальные судьи C1. Правило —
+# это предположение о механизме, а не проверка его; живая проверка класс
+# подтверждает или опровергает, и тогда строка правится здесь.
+#
+# Числа при заполнении: A1 22, A2 8, B1 3, B2 5, C1 115, C2 18, C3 7, D 53,
+# E 18 — сумма 249, столько же механизмов в реестре.
+
+классы:
+  "harness/BUILD-SKILLS.py":
+    класс: C1
+  "harness/demons/acceptance-watch.sh":
+    класс: A1
+  "harness/demons/backup.sh":
+    класс: A1
+  "harness/demons/check-builder.sh":
+    класс: A1
+  "harness/demons/devmap-selfheal.sh":
+    класс: A1
+  "harness/demons/disk-cleanup.sh":
+    класс: A1
+  "harness/demons/evolution-collector.sh":
+    класс: A1
+  "harness/demons/extensions-watch.sh":
+    класс: A1
+  "harness/demons/heartbeat-watch.sh":
+    класс: A1
+  "harness/demons/limit-watch.sh":
+    класс: A1
+  "harness/demons/memory-commit.sh":
+    класс: A1
+  "harness/demons/memory-revision.sh":
+    класс: A1
+  "harness/demons/nightly-gates.sh":
+    класс: A1
+  "harness/demons/panel-tunnel.sh":
+    класс: A1
+  "harness/demons/product-health.sh":
+    класс: A1
+  "harness/demons/project-revision.sh":
+    класс: A1
+  "harness/demons/sentinel.sh":
+    класс: A2
+  "harness/demons/server-hygiene.sh":
+    класс: A1
+  "harness/demons/server_hygiene_check.py":
+    класс: A2
+  "harness/demons/session-warden.sh":
+    класс: A1
+  "harness/demons/task-closer.sh":
+    класс: A1
+  "harness/demons/tokens-collector.sh":
+    класс: A1
+  "harness/demons/ton-watch.sh":
+    класс: A1
+  "harness/demons/update-watch.sh":
+    класс: A1
+  "harness/panel/client.py":
+    класс: C1
+  "harness/panel/confirmation.py":
+    класс: C1
+  "harness/panel/login.py":
+    класс: C1
+  "harness/panel/panel-expose-root.sh":
+    класс: C1
+  "harness/panel/server.py":
+    класс: A2
+  "harness/panel/settings.py":
+    класс: C1
+  "harness/panel/state.py":
+    класс: C1
+  "harness/panel/test_confirmation.py":
+    класс: D
+  "harness/panel/test_login.py":
+    класс: D
+  "harness/panel/test_server.py":
+    класс: D
+  "harness/panel/test_settings.py":
+    класс: D
+  "harness/panel/test_state.py":
+    класс: D
+  "harness/panel/test_task_board.py":
+    класс: D
+  "harness/panel/vid.py":
+    класс: C1
+  "harness/skills/android-env/SKILL.md":
+    класс: E
+  "harness/skills/deploy-and-smoke/SKILL.md":
+    класс: E
+  "harness/skills/extension-install/SKILL.md":
+    класс: E
+  "harness/skills/harness-code-review/SKILL.md":
+    класс: E
+  "harness/skills/incident-analysis/SKILL.md":
+    класс: E
+  "harness/skills/instrument-building/SKILL.md":
+    класс: E
+  "harness/skills/mobile-release/SKILL.md":
+    класс: E
+  "harness/skills/mobile-testing/SKILL.md":
+    класс: E
+  "harness/skills/parallel-agents/SKILL.md":
+    класс: E
+  "harness/skills/plan-writing/SKILL.md":
+    класс: E
+  "harness/skills/pretask-contract/SKILL.md":
+    класс: E
+  "harness/skills/spec-review/SKILL.md":
+    класс: E
+  "harness/skills/spec-writing/SKILL.md":
+    класс: E
+  "harness/skills/subagent-work/SKILL.md":
+    класс: E
+  "harness/skills/task-closing/SKILL.md":
+    класс: E
+  "harness/skills/task-intake/SKILL.md":
+    класс: E
+  "harness/skills/test-failure/SKILL.md":
+    класс: E
+  "harness/skills/tests-before-code/SKILL.md":
+    класс: E
+  "harness/vozmozhnosti/mobilnaya-razrabotka/build-config.py":
+    класс: C2
+  "harness/vozmozhnosti/mobilnaya-razrabotka/gates/loop-check.py":
+    класс: C1
+  "harness/vozmozhnosti/mobilnaya-razrabotka/install.sh":
+    класс: C1
+  "scripts/acceptance.py":
+    класс: C1
+  "scripts/agent-level.py":
+    класс: C1
+  "scripts/agent-lock-check.py":
+    класс: C1
+  "scripts/archive-map.py":
+    класс: C1
+  "scripts/ask-the-model.py":
+    класс: C1
+  "scripts/attention-word.py":
+    класс: B2
+  "scripts/board.py":
+    класс: B2
+  "scripts/bot-commands.py":
+    класс: C1
+  "scripts/build-board.py":
+    класс: A1
+  "scripts/build-claude-md.py":
+    класс: C2
+  "scripts/build-live-check-list.py":
+    класс: C2
+  "scripts/build-public.py":
+    класс: C2
+  "scripts/build-registry-doc.py":
+    класс: C2
+  "scripts/build-watch-periods.py":
+    класс: C2
+  "scripts/capability.sh":
+    класс: C1
+  "scripts/catch-up-public.py":
+    класс: C1
+  "scripts/check-channel-messages.py":
+    класс: C1
+  "scripts/check-commands-in-docs.py":
+    класс: C1
+  "scripts/check-config-loading.py":
+    класс: C1
+  "scripts/check-context-hygiene.py":
+    класс: C1
+  "scripts/check-cyrillic-in-names.py":
+    класс: C1
+  "scripts/check-daemon-calls-model.py":
+    класс: C1
+  "scripts/check-extensions.py":
+    класс: C1
+  "scripts/check-external-callers.py":
+    класс: C1
+  "scripts/check-external-surface.py":
+    класс: C1
+  "scripts/check-failure-under-set-e.py":
+    класс: C1
+  "scripts/check-file-names.py":
+    класс: C1
+  "scripts/check-function-before-definition.py":
+    класс: C1
+  "scripts/check-harness-clean.py":
+    класс: C1
+  "scripts/check-host-independence.py":
+    класс: C1
+  "scripts/check-imports.py":
+    класс: C1
+  "scripts/check-install-root.py":
+    класс: C1
+  "scripts/check-job-and-mark.py":
+    класс: C1
+  "scripts/check-login-expiry.py":
+    класс: C1
+  "scripts/check-map-keeps-tasks.py":
+    класс: C1
+  "scripts/check-map-writers.py":
+    класс: C1
+  "scripts/check-model-call.py":
+    класс: C1
+  "scripts/check-one-judge.py":
+    класс: C1
+  "scripts/check-own-text-probes.py":
+    класс: C1
+  "scripts/check-panel-boundary.py":
+    класс: C1
+  "scripts/check-panel-permissions.py":
+    класс: C1
+  "scripts/check-panel-tone.py":
+    класс: C1
+  "scripts/check-pipeline.py":
+    класс: C1
+  "scripts/check-ports-from-outside.py":
+    класс: C1
+  "scripts/check-proposals.py":
+    класс: C1
+  "scripts/check-public-clean.py":
+    класс: C1
+  "scripts/check-quotepath-flag.py":
+    класс: C1
+  "scripts/check-registry.py":
+    класс: C1
+  "scripts/check-retention.py":
+    класс: C1
+  "scripts/check-revision-coverage.py":
+    класс: C1
+  "scripts/check-secret-in-logs.py":
+    класс: C1
+  "scripts/check-secrets-perms.py":
+    класс: C1
+  "scripts/check-secrets.sh":
+    класс: C1
+  "scripts/check-seed-templates.py":
+    класс: C1
+  "scripts/check-signals.py":
+    класс: C1
+  "scripts/check-skill-usage.py":
+    класс: C1
+  "scripts/check-switches.py":
+    класс: C1
+  "scripts/check-tests-first.py":
+    класс: C1
+  "scripts/check-unified-seekers.py":
+    класс: C1
+  "scripts/check-who-calls.py":
+    класс: C1
+  "scripts/claude-demon.sh":
+    класс: A2
+  "scripts/comments-intake.py":
+    класс: A2
+  "scripts/compare-with-package.py":
+    класс: C1
+  "scripts/deploy.sh":
+    класс: C3
+    причина: "выкат на производство"
+  "scripts/deploy_guard.py":
+    класс: C1
+  "scripts/download_attachment.py":
+    класс: C1
+  "scripts/drop-database.sh":
+    класс: C3
+    причина: "удаляет базу"
+  "scripts/emergency-send.sh":
+    класс: C3
+    причина: "шлёт сообщение владельцу"
+  "scripts/export-map-to-product.py":
+    класс: C1
+  "scripts/extensions.py":
+    класс: C1
+  "scripts/firewall-docker-ports.sh":
+    класс: C1
+  "scripts/fix-claude-mem-project.py":
+    класс: C1
+  "scripts/gates.sh":
+    класс: C3
+    причина: "полный прогон 20-40 минут, пишет владельцу о красном"
+  "scripts/handover-check.sh":
+    класс: C1
+  "scripts/hooks/agent_skill_guard.py":
+    класс: C1
+  "scripts/hooks/guard_bash.py":
+    класс: C1
+  "scripts/hooks/pause_guard.py":
+    класс: B1
+  "scripts/hooks/pre_compact_handover.sh":
+    класс: B1
+  "scripts/hooks/session_state.sh":
+    класс: C1
+  "scripts/hooks/skill_log.sh":
+    класс: C1
+  "scripts/hooks/stop_reminder.sh":
+    класс: B1
+  "scripts/hooks/test_guard_bash.py":
+    класс: D
+  "scripts/import-product-trace.py":
+    класс: C1
+  "scripts/inbox-digest.py":
+    класс: B2
+  "scripts/install-docker.sh":
+    класс: C3
+    причина: "ставит системные пакеты"
+  "scripts/install-new.py":
+    класс: A2
+  "scripts/install-probe.sh":
+    класс: D
+  "scripts/invariant-coverage.py":
+    класс: C1
+  "scripts/language-level.py":
+    класс: C1
+  "scripts/lib/cards.py":
+    класс: C2
+  "scripts/lib/channel_queue.py":
+    класс: C2
+  "scripts/lib/config.py":
+    класс: C2
+  "scripts/lib/config.sh":
+    класс: C2
+  "scripts/lib/git_probe.py":
+    класс: C2
+  "scripts/lib/models.sh":
+    класс: C2
+  "scripts/lib/neighbor.py":
+    класс: C2
+  "scripts/lib/owner_word.py":
+    класс: C2
+  "scripts/lib/panel_writer.py":
+    класс: C2
+  "scripts/lib/patterns.py":
+    класс: C2
+  "scripts/lib/selftest_cases.py":
+    класс: C2
+  "scripts/lib/selftest_cases.sh":
+    класс: C2
+  "scripts/limit-in-log.py":
+    класс: C1
+  "scripts/limit_mark.py":
+    класс: C1
+  "scripts/map-from-message.py":
+    класс: C1
+  "scripts/memory-to-package.py":
+    класс: C1
+  "scripts/miss.py":
+    класс: C1
+  "scripts/model-for.sh":
+    класс: C1
+  "scripts/model-steps.py":
+    класс: C1
+  "scripts/model.sh":
+    класс: C1
+  "scripts/mutation-probe.sh":
+    класс: D
+  "scripts/nginx-panel.sh":
+    класс: C1
+  "scripts/orders.py":
+    класс: C1
+  "scripts/panel-expose.sh":
+    класс: C1
+  "scripts/panel-unit.sh":
+    класс: C1
+  "scripts/pause.py":
+    класс: C1
+  "scripts/pipeline.py":
+    класс: C1
+  "scripts/pre-commit-gate.sh":
+    класс: C1
+  "scripts/probe-login-without-failure.sh":
+    класс: D
+  "scripts/probe-secret-from-channel.sh":
+    класс: D
+  "scripts/product-power.sh":
+    класс: C1
+  "scripts/protected-delete.py":
+    класс: C1
+  "scripts/publish.sh":
+    класс: C3
+    причина: "публикует сборку в общий гит — наружу и навсегда"
+  "scripts/quiet-window.py":
+    класс: C1
+  "scripts/rename-to-latin.py":
+    класс: C1
+  "scripts/restore-probe.sh":
+    класс: D
+  "scripts/revision-batches.py":
+    класс: C1
+  "scripts/revision-findings.py":
+    класс: C1
+  "scripts/secret-intake.py":
+    класс: B2
+  "scripts/spec_approval.py":
+    класс: C1
+  "scripts/stall-in-log.py":
+    класс: C1
+  "scripts/start-agent.sh":
+    класс: C3
+    причина: "поднимает смену и может убить идущую"
+  "scripts/tasks-from-channel.py":
+    класс: C1
+  "scripts/test_agent_level.py":
+    класс: D
+  "scripts/test_board.py":
+    класс: D
+  "scripts/test_bot_commands.py":
+    класс: D
+  "scripts/test_build_board.py":
+    класс: D
+  "scripts/test_build_watch_periods.py":
+    класс: D
+  "scripts/test_claude_demon.sh":
+    класс: D
+  "scripts/test_comments_intake.py":
+    класс: D
+  "scripts/test_data_delete_door.py":
+    класс: D
+  "scripts/test_deploy_consent_return.sh":
+    класс: D
+  "scripts/test_deploy_guard.py":
+    класс: D
+  "scripts/test_deploy_guard_consent.py":
+    класс: D
+  "scripts/test_deploy_guard_own_user.py":
+    класс: D
+  "scripts/test_deploy_product.sh":
+    класс: D
+  "scripts/test_depth_automatic.py":
+    класс: D
+  "scripts/test_dispatcher_busy.sh":
+    класс: D
+  "scripts/test_environment.sh":
+    класс: D
+  "scripts/test_install_docker.sh":
+    класс: D
+  "scripts/test_install_new.py":
+    класс: D
+  "scripts/test_late_exit_watch.sh":
+    класс: D
+  "scripts/test_limit_watch.sh":
+    класс: D
+  "scripts/test_memory_commit.sh":
+    класс: D
+  "scripts/test_nginx_panel.sh":
+    класс: D
+  "scripts/test_panel_boundary.py":
+    класс: D
+  "scripts/test_panel_expose.sh":
+    класс: D
+  "scripts/test_panel_install.py":
+    класс: D
+  "scripts/test_panel_root.sh":
+    класс: D
+  "scripts/test_public_build.py":
+    класс: D
+  "scripts/test_registry.py":
+    класс: D
+  "scripts/test_revision_batches.py":
+    класс: D
+  "scripts/test_revision_config.py":
+    класс: D
+  "scripts/test_revision_findings.py":
+    класс: D
+  "scripts/test_selftest_cases.sh":
+    класс: D
+  "scripts/test_signals.py":
+    класс: D
+  "scripts/test_skills_build.py":
+    класс: D
+  "scripts/test_update.py":
+    класс: D
+  "scripts/test_version.py":
+    класс: D
+  "scripts/test_warden_blocked_idle.sh":
+    класс: D
+  "scripts/test_who_is_on_port.py":
+    класс: D
+  "scripts/test_write_key.py":
+    класс: D
+  "scripts/test_write_memory.py":
+    класс: D
+  "scripts/test_write_step.py":
+    класс: D
+  "scripts/tg-dispatcher.sh":
+    класс: A2
+  "scripts/tg_send.sh":
+    класс: C1
+  "scripts/tone-measurement.py":
+    класс: C1
+  "scripts/transcribe_voice.py":
+    класс: C1
+  "scripts/transliterate.py":
+    класс: C1
+  "scripts/update.py":
+    класс: A2
+  "scripts/urgency.py":
+    класс: B2
+  "scripts/verify-mechanisms.py":
+    класс: C1
+  "scripts/version.py":
+    класс: C1
+  "scripts/vitrina_status.py":
+    класс: C1
+  "scripts/weed-the-map.py":
+    класс: C1
+  "scripts/weed-the-orders.py":
+    класс: C1
+  "scripts/who-is-on-port.py":
+    класс: C1
+  "scripts/work-queue.py":
+    класс: C1
+  "scripts/write-key.py":
+    класс: C1
+  "scripts/write-memory.py":
+    класс: C1
+  "scripts/write-step.py":
+    класс: C1
+  # Носители живой проверки, заведённые 17.10 (Task 0 и Task 1 плана).
+  # Обёртка — инструмент: её зовут с настоящим механизмом и читают след.
+  "scripts/live-check.sh":
+    класс: C2
+  # Пробы судятся мутацией в том, что они доказывают: обёртку и прибор разреза.
+  "scripts/test_live_check_sh.sh":
+    класс: D
+  "scripts/test_live_check_classes.py":
+    класс: D

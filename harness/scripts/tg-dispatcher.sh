@@ -443,7 +443,7 @@ if [ "${1:-}" = "--selftest" ]; then
     INBOX_LOG="$T/inbox.jsonl"
     DISPATCH_LOG="$T/dispatcher.log"
     MSG_ID="551"; CHAT="1000000001"
-    inbox_zhurnal "Удали дамп ктэка из копии"
+    inbox_zhurnal "Удали дамп старого продукта из копии"
     итог "1" "$(grep -c '"message_id":"551"' "$INBOX_LOG" || true)" \
          "диспетчер пишет входящее строкой JSON с message_id телеграма"
     LIB_PROBY="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/lib"
