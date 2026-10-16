@@ -939,8 +939,12 @@ EOF
   делай "ORG=\$(sudo -u $AGENT_USER python3 '$PROJECT_DIR/scripts/check-login-expiry.py' --аккаунт-подписки 2>/dev/null || true); if [ -n \"\$ORG\" ]; then OLD=\$(sed -n 's|^LOGIN_EXPECTED_ORG=\\\"\\(.*\\)\\\"\$|\\1|p' /etc/harness/harness.conf | tail -1); case \" \$OLD \" in *\" \$ORG \"*) NEW=\"\$OLD\" ;; *) NEW=\$(printf '%s %s' \"\$OLD\" \"\$ORG\" | sed 's|^ *||') ;; esac; if grep -q '^LOGIN_EXPECTED_ORG=' /etc/harness/harness.conf; then sed -i --follow-symlinks \"s|^LOGIN_EXPECTED_ORG=.*|LOGIN_EXPECTED_ORG=\\\"\$NEW\\\"|\" /etc/harness/harness.conf; else printf 'LOGIN_EXPECTED_ORG=\"%s\"\\n' \"\$NEW\" >> /etc/harness/harness.conf; fi; echo \"эталон аккаунта записан замером: \$NEW\"; else echo 'входа в модель ещё нет — эталон аккаунта запишется после входа (строка в блоке ОСТАЛОСЬ РУКАМИ)'; fi"
   # Проверка судит ДВА законных исхода, а не один: аккаунт записан ЗАМЕРОМ, либо
   # входа нет вовсе. Третьего («записан рукой») она по-прежнему не принимает.
+  # Ключ хранит СПИСОК: шаг выше дописывает к нему каждый новый аккаунт, а у
+  # владельца их два (его слово 12.10.2026), и читатель `ожидаемые_орг` берёт
+  # набор. Образец на ОДИН uuid останавливал бы установку на верном конфиге —
+  # ровно там, где шаг сам же этот список и записал (замер 14.10.2026).
   проверка "$step" "аккаунт владельца записан замером либо входа ещё нет" \
-    "grep -qE '^LOGIN_EXPECTED_ORG=\"[0-9a-f-]{36}\"' /etc/harness/harness.conf || ! sudo -u $AGENT_USER python3 '$PROJECT_DIR/scripts/check-login-expiry.py' --аккаунт-подписки >/dev/null 2>&1" \
+    "grep -qE '^LOGIN_EXPECTED_ORG=\"[0-9a-f-]{36}([ ,]+[0-9a-f-]{36})*\"' /etc/harness/harness.conf || ! sudo -u $AGENT_USER python3 '$PROJECT_DIR/scripts/check-login-expiry.py' --аккаунт-подписки >/dev/null 2>&1" \
     "grep -n LOGIN_EXPECTED_ORG /etc/harness/harness.conf; sudo -u $AGENT_USER python3 '$PROJECT_DIR/scripts/check-login-expiry.py' --аккаунт-подписки"
   if ! sudo -u "$AGENT_USER" python3 "$PROJECT_DIR/scripts/check-login-expiry.py" --аккаунт-подписки >/dev/null 2>&1; then
     # Руками это больше не делается: сторож входа (cron, каждые 15 мин) сам

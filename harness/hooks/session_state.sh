@@ -17,7 +17,10 @@ set -uo pipefail
 # source запуска — из JSON-нагрузки хука на stdin (startup|clear|compact|resume).
 # После компакта полный отчёт о состоянии не нужен — нужен короткий блок-якорь
 # (В-1: stdout PreCompact модель не видит, поэтому напоминание живёт здесь).
-hook_source=$(cat 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin).get("source") or "")' 2>/dev/null || echo "")
+# `cat` без предела ЖДЁТ ВЕЧНО, когда stdin — открытая труба без данных: так
+# хук, позванный из смены руками, провисел 19 минут 15.10.2026, а сторож считал
+# это работой. Хук Claude Code подаёт JSON сразу, поэтому двух секунд довольно.
+hook_source=$(timeout 2 cat 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin).get("source") or "")' 2>/dev/null || echo "")
 if [ "$hook_source" = "compact" ]; then
   echo "=== после компакта ==="
   echo "Контекст только что пережат — решения могли потеряться. Сверься с памятью"

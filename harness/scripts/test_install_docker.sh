@@ -14,7 +14,23 @@ set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT="${INSTALL_DOCKER_SCRIPT:-$HERE/install-docker.sh}"
-INSTALLER="${INSTALL_DOCKER_INSTALLER:-$HERE/../../USTANOVIT.sh}"
+# Установщик лежит в КОРНЕ пакета. В пакете scripts/ — это harness/scripts/, и
+# «два уровня выше» попадают куда надо; в проекте раскладчик кладёт scripts/ в
+# корень, и тот же путь уходит в /var/www — awk падал «cannot open file», а
+# четыре случая краснели без внятной причины (прогон 15.10.2026). Правило
+# поиска пакета одно и живёт в scripts/lib/config.py — здесь его спрашивают,
+# а не повторяют.
+INSTALLER="${INSTALL_DOCKER_INSTALLER:-}"
+if [ -z "$INSTALLER" ]; then
+  INSTALLER="$HERE/../../USTANOVIT.sh"
+  if [ ! -f "$INSTALLER" ]; then
+    INSTALLER="$(python3 -c "import sys; sys.path.insert(0, '$HERE/lib'); import config; print(config.katalog_paketa() / 'USTANOVIT.sh')" 2>/dev/null || true)"
+  fi
+fi
+if [ ! -f "$INSTALLER" ]; then
+  printf 'ПЛОХО установщика нет ни рядом, ни в пакете: судить шаг установки нечем (искали «%s»)\n' "$INSTALLER"
+  exit 1
+fi
 AGENT=stendagent
 DOCKER_GID=999
 SERVER_PID=4242
