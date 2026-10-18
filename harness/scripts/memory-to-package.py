@@ -17,7 +17,6 @@ import json
 import os
 import re
 import shutil
-import subprocess
 import sys
 from pathlib import Path
 
@@ -44,6 +43,8 @@ def _пакет_по_паспорту() -> str:
 ПАМЯТЬ = Path(os.environ.get("HARNESS_PAMYAT") or КОРЕНЬ / "память")
 ПАКЕТ = Path(os.environ.get("HARNESS_STARTER")
              or _пакет_по_паспорту()) / "harness" / "память"
+# Список, который видит панель: в пакет, лежащий в домашнем каталоге, служба не заглядывает.
+НАБОР = Path(os.environ.get("HARNESS_NABOR") or КОРЕНЬ / "harness" / "config" / "memory-set.txt")
 LOG_DIR = Path(log_dir())
 ИМЯ = формы.ИМЯ_ЗАПИСИ_ПАМЯТИ      # один судья формы имени (ревизия §4.3)
 
@@ -60,6 +61,12 @@ def в_наборе() -> list[str]:
         return []
 
 
+def записать_набор() -> None:
+    """Список панели = записи пакета; шапка с комментариями остаётся как была."""
+    шапка = [с for с in НАБОР.read_text(encoding="utf-8").splitlines() if с.startswith("#")] if НАБОР.is_file() else []
+    НАБОР.write_text("\n".join(шапка + в_наборе()) + "\n", encoding="utf-8")
+
+
 def записать_журнал(имя: str, действие: str) -> None:
     запись = {"ts": __import__("datetime").datetime.now().isoformat(timespec="seconds"),
               "набор памяти": имя, "действие": действие,
@@ -73,7 +80,6 @@ def записать_журнал(имя: str, действие: str) -> None:
 
 
 def main(argv: list[str]) -> int:
-    argv = [а for а in argv if а != "--под-sudo"]
     if "--список" in argv:
         print("\n".join(в_наборе()))
         return 0
@@ -89,14 +95,10 @@ def main(argv: list[str]) -> int:
     if цель.resolve().parent != ПАКЕТ.resolve():
         return отказ(2, "путь выводит за каталог набора")
 
-    нужен_подъём = not os.access(ПАКЕТ, os.W_OK)
-    if нужен_подъём and "--под-sudo" not in sys.argv:
-        готово = subprocess.run(
-            ["sudo", "-n", "/usr/bin/python3", str(Path(__file__).resolve()),
-             имя, действие, "--под-sudo"], capture_output=True, text=True, timeout=60)
-        sys.stdout.write(готово.stdout)
-        sys.stderr.write(готово.stderr)
-        return готово.returncode
+    # Без права записи отказ, а не подъём через sudo: sudo сбрасывает окружение и
+    # привёл бы к боевому пакету вместо заданного.
+    if not os.access(ПАКЕТ, os.W_OK):
+        return отказ(5, f"пакет {ПАКЕТ} недоступен на запись — запустите от владельца пакета")
 
     try:
         if действие == "включить":
@@ -110,6 +112,7 @@ def main(argv: list[str]) -> int:
             if not цель.exists():
                 return отказ(5, f"записи «{имя}» в наборе и не было")
             цель.unlink()
+        записать_набор()
     except OSError as беда:
         return отказ(5, f"не вышло: {беда}")
 

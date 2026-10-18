@@ -264,13 +264,84 @@ PROVERKA
     if grep -q 'sess-0002' "$T/log/tokens.cursor"; then
         echo "САМОТЕСТ ПРОВАЛЕН: запись исчезнувшего файла не вычищена из курсора (П-17)"; exit 1
     fi
+    # ── Разрез «По шагам» (18.10.2026): СВОЯ площадка, чтобы числа выше не
+    # сдвинулись. Одна смена S1 с двумя шагами, помощники в subagents/, вторая
+    # смена S2 без единого шага.
+    S2="$T/s2"
+    mkdir -p "$S2/hb" "$S2/log" "$S2/tr/-home-agent-proj/S1/subagents"
+    cat > "$S2/install.conf" <<CONF
+AGENT_USER="no-such-user-selftest"
+HEARTBEAT_DIR="$S2/hb"
+LOG_DIR="$S2/log"
+CONF
+    : > "$S2/harness.conf"
+    # БОЛЬНЫЕ СЛУЧАИ журнала: запись ЧУЖИХ суток той же смены (иначе она взяла бы
+    # утренний ответ 08:30), запись ЧУЖОЙ смены, и рукописная запись в 10:00
+    # (украла бы ответ 10:30 у шага spec-x).
+    printf '%s\n' \
+        "{\"ts\":\"2000-01-01T00:00:00Z\",\"skill\":\"чужие-сутки\",\"источник\":\"хук\",\"сессия\":\"S1\"}" \
+        "{\"ts\":\"${TODAY}T08:00:00Z\",\"skill\":\"чужая-смена\",\"источник\":\"хук\",\"сессия\":\"S9\"}" \
+        "{\"ts\":\"${TODAY}T09:00:00Z\",\"skill\":\"spec-x\",\"источник\":\"хук\",\"сессия\":\"S1\"}" \
+        "{\"ts\":\"${TODAY}T10:00:00Z\",\"skill\":\"рукописный\",\"источник\":\"руками\",\"сессия\":\"S1\"}" \
+        "{\"ts\":\"${TODAY}T11:00:00Z\",\"skill\":\"code-y\",\"источник\":\"хук\",\"сессия\":\"S1\"}" \
+        > "$S2/log/skills.jsonl"
+    cat > "$S2/tr/-home-agent-proj/S1.jsonl" <<EOF2
+{"type":"assistant","timestamp":"${TODAY}T08:30:00.000Z","sessionId":"S1","message":{"model":"claude-opus-9","usage":{"input_tokens":10,"output_tokens":1,"cache_read_input_tokens":100}}}
+{"type":"assistant","timestamp":"${TODAY}T10:30:00.000Z","sessionId":"S1","message":{"model":"claude-opus-9","usage":{"input_tokens":10,"output_tokens":2,"cache_read_input_tokens":200}}}
+{"type":"assistant","timestamp":"${TODAY}T11:30:00.000Z","sessionId":"S1","message":{"model":"claude-opus-9","usage":{"input_tokens":10,"output_tokens":4,"cache_read_input_tokens":400}}}
+EOF2
+    cat > "$S2/tr/-home-agent-proj/S1/subagents/agent-a.jsonl" <<EOF2
+{"type":"assistant","isSidechain":true,"timestamp":"${TODAY}T11:40:00.000Z","sessionId":"S1","message":{"model":"claude-sonnet-9","usage":{"input_tokens":10,"output_tokens":8,"cache_read_input_tokens":800}}}
+{"type":"assistant","isSidechain":true,"timestamp":"${TODAY}T08:10:00.000Z","sessionId":"S1","message":{"model":"claude-haiku-9","usage":{"input_tokens":10,"output_tokens":16,"cache_read_input_tokens":1600}}}
+EOF2
+    cat > "$S2/tr/-home-agent-proj/S2.jsonl" <<EOF2
+{"type":"assistant","timestamp":"${TODAY}T12:00:00.000Z","sessionId":"S2","message":{"model":"claude-opus-9","usage":{"input_tokens":10,"output_tokens":32,"cache_read_input_tokens":3200}}}
+EOF2
+    TZ=Etc/UTC TOKENS_TODAY="$TODAY" INSTALL_CONF="$S2/install.conf" HARNESS_CONF="$S2/harness.conf" \
+        TOKENS_TRANSCRIPTS_DIR="$S2/tr" bash "$0" >/dev/null \
+        || { echo "САМОТЕСТ ПРОВАЛЕН: прогон площадки «По шагам» упал"; exit 1; }
+    R2="$S2/log/tokens-daily.report"
+    grep -q '^По шагам$' "$R2" \
+        || { echo "САМОТЕСТ ПРОВАЛЕН: раздела «По шагам» в отчёте нет"; cat "$R2"; exit 1; }
+    # Роли: смена — opus-9 (S1: 3 шага, S2: 1), помощники — sonnet-9 и haiku-9.
+    grep -q '^  основная сессия (смена): claude-opus-9 — шагов 4 · вх 40 · вых 39 ' "$R2" \
+        || { echo "САМОТЕСТ ПРОВАЛЕН: строка основной сессии неверна (помощник вошёл в смену?):"; cat "$R2"; exit 1; }
+    grep -q '^  помощники: claude-haiku-9 — шагов 1 · вх 10 · вых 16 .*; claude-sonnet-9 — шагов 1 · вх 10 · вых 8 ' "$R2" \
+        || { echo "САМОТЕСТ ПРОВАЛЕН: строка помощников неверна:"; cat "$R2"; exit 1; }
+    # Шаг от своей записи до следующей ТОЙ ЖЕ смены; помощник идёт под шагом смены.
+    grep -qE '^  spec-x \(смена\) +claude-opus-9 +шагов 1 · ответов 2 · кэш-чтение 200$' "$R2" \
+        || { echo "САМОТЕСТ ПРОВАЛЕН: ответ 10:30 не приписан шагу spec-x (рукописная запись украла?):"; cat "$R2"; exit 1; }
+    grep -qE '^  code-y \(смена\) +claude-opus-9 +шагов 1 · ответов 4 ' "$R2" \
+        || { echo "САМОТЕСТ ПРОВАЛЕН: ответ 11:30 не приписан шагу code-y:"; cat "$R2"; exit 1; }
+    grep -qE '^  code-y \(помощник\) +claude-sonnet-9 +шагов 1 · ответов 8 ' "$R2" \
+        || { echo "САМОТЕСТ ПРОВАЛЕН: помощник не приписан шагу смены code-y:"; cat "$R2"; exit 1; }
+    # БОЛЬНОЙ: шаг из ЧУЖИХ суток и из ЧУЖОЙ смены не приписан никому.
+    sed -n '/^По шагам$/,$p' "$R2" | grep -qE 'чужие-сутки|чужая-смена|рукописный' \
+        && { echo "САМОТЕСТ ПРОВАЛЕН: шаг чужих суток, чужой смены или рукописный попал в разрез"; cat "$R2"; exit 1; }
+    grep -qE '^  основная сессия +claude-opus-9 +шагов 2 · ответов 33 ' "$R2" \
+        || { echo "САМОТЕСТ ПРОВАЛЕН: ответы смены вне шагов (08:30 и смена S2) потеряны:"; cat "$R2"; exit 1; }
+    grep -qE '^  помощник без шага +claude-haiku-9 +шагов 1 · ответов 16 ' "$R2" \
+        || { echo "САМОТЕСТ ПРОВАЛЕН: помощник вне шагов потерян:"; cat "$R2"; exit 1; }
+    # БОЛЬНОЙ: токены вне шагов не потеряны — сумма строк равна суткам.
+    grep -q 'вне шагов: шагов 3 · ответов 49 ' "$R2" \
+        || { echo "САМОТЕСТ ПРОВАЛЕН: итог «вне шагов» неверен:"; cat "$R2"; exit 1; }
+    grep -q 'по строкам шагов 6, за сутки 6 — сошлось' "$R2" \
+        || { echo "САМОТЕСТ ПРОВАЛЕН: сумма раздела «По шагам» не равна суткам:"; cat "$R2"; exit 1; }
+    # Выжимка сводки читает строки под «По моделям» — раздел шагов стоит ПОСЛЕ «Отдача».
+    awk '/^По шагам$/{s=NR} /^Отдача$/{o=NR} END{exit !(s>o && o>0)}' "$R2" \
+        || { echo "САМОТЕСТ ПРОВАЛЕН: «По шагам» стоит до «Отдача» — выжимка сводки примет шаги за модели"; cat "$R2"; exit 1; }
+    # Метка помощника только у помощников: события смены не меняют вид.
+    [ "$(grep -c '"side": true' "$S2/log/tokens-2026-06.jsonl")" = 2 ] \
+        || { echo "САМОТЕСТ ПРОВАЛЕН: метка side стоит не на двух событиях помощников"; exit 1; }
+
     [ -f "$T/hb/tokens-collector" ] \
         || { echo "САМОТЕСТ ПРОВАЛЕН: метка heartbeat не поставлена"; exit 1; }
     echo "САМОТЕСТ ПРОЙДЕН: 7 событий (битая посчитана, 2 стриминговых дубля пропущены), ts из транскрипта,"
     echo "сутки по часам владельца (одни данные, пояса UTC+5 и UTC дают разный итог), кэш-запись в сводке,"
     echo "прибор шага (шагов 6, контекст на шаг 85, одиночных 50% — знаменатель только по шагам с вызовами),"
     echo "подробный отчёт (медиана 7 и максимум 300 при среднем 85, попаданий кэша 29,3%, сверка баланса),"
-    echo "помесячный файл с символлинком, повторный прогон без дублей, мёртвый файл вычищен из курсора"
+    echo "помесячный файл с символлинком, повторный прогон без дублей, мёртвый файл вычищен из курсора,"
+    echo "«По шагам»: шаг чужих суток и чужой смены не приписан, помощники отдельно, токены вне шагов не потеряны"
     exit 0
 fi
 
@@ -415,7 +486,13 @@ now_iso = datetime.datetime.now().astimezone().isoformat(timespec="seconds")
 events, broken, dups = [], 0, 0
 finished_pairs = []  # пары дочитанных до конца файлов — уходят в общее окно
 
-for path in sorted(glob.glob(os.path.join(troot, "*", "*.jsonl"))):
+# Работа помощников лежит НЕ рядом с сессией, а на уровень глубже:
+# <проект>/<сессия>/subagents/agent-*.jsonl. Прежняя маска «*/*.jsonl» их не
+# видела вовсе (замер 18.10.2026: 356 файлов, 34 619 ответов помощников, из них
+# 31 737 на opus-5 — ни один не попадал в расход). sessionId в их строках —
+# родительская смена, поэтому привязка к шагам журнала скилов работает как есть.
+for path in sorted(glob.glob(os.path.join(troot, "*", "*.jsonl"))
+                   + glob.glob(os.path.join(troot, "*", "*", "subagents", "*.jsonl"))):
     size = os.path.getsize(path)
     rec = files.get(path)
     if not isinstance(rec, dict):
@@ -463,7 +540,7 @@ for path in sorted(glob.glob(os.path.join(troot, "*", "*.jsonl"))):
                 ts = obj.get("timestamp")
                 if not isinstance(ts, str) or not ts:
                     ts = now_iso
-                events.append({
+                событие = {
                     "ts": ts,
                     "session": obj.get("sessionId") or session,
                     "model": model,
@@ -472,7 +549,12 @@ for path in sorted(glob.glob(os.path.join(troot, "*", "*.jsonl"))):
                     "cache_w": int(usage.get("cache_creation_input_tokens") or 0),
                     "cache_r": int(usage.get("cache_read_input_tokens") or 0),
                     "tools": вызовов_инструментов(msg),
-                })
+                }
+                # Метка помощника ставится ТОЛЬКО ему: событие смены остаётся
+                # байт в байт прежним, а старые события без метки читаются как смена.
+                if obj.get("isSidechain") is True:
+                    событие["side"] = True
+                events.append(событие)
             rec["pos"] = done + cut + 1
             rec["seen"] = file_seen
     # Окно дедупа не растёт вечно: у файла, дочитанного до конца, пофайловые
@@ -533,6 +615,7 @@ by_model = collections.OrderedDict()
 одиночных = 0      # из них с ровно одним вызовом
 вызовов_всего = 0  # сумма вызовов инструментов по шагам, где поле есть
 контексты = []     # размер контекста каждого шага — для распределения
+события_суток = []  # события дня целиком — для разреза «По шагам»
 if os.path.exists(events_path):
     with open(events_path, encoding="utf-8") as fh:
         for raw in fh:
@@ -552,6 +635,7 @@ if os.path.exists(events_path):
             tot["cache_r"] += int(e.get("cache_r") or 0)
             m["cache_r"] += int(e.get("cache_r") or 0)
             m["шагов"] += 1
+            события_суток.append(e)
             шагов += 1
             контексты.append(int(e.get("in") or 0) + int(e.get("cache_w") or 0)
                              + int(e.get("cache_r") or 0))
@@ -711,6 +795,104 @@ def перечень(счёт: collections.Counter, сколько: int = 6) -> 
 # Пусто — пусто: приписать работу смены наугад хуже, чем не приписать.
 модель_смены = max(by_model, key=lambda name: by_model[name]["шагов"], default=None)
 
+# ── По шагам (18.10.2026, слово владельца) ──────────────────────────────────
+# «в нём должно быть чётко написано — какие шаги на какой модели были запущены.
+# основная сессия на какой модели и сколько токенов, и все остальные шаги на
+# каких моделях и сколько токенов. тогда это будет прозрачно».
+#
+# Шаг — запись журнала скилов, написанная ХУКОМ (`источник: хук`): рукописной
+# записи верить нельзя, журнал ведёт код. Шаг действует от своей записи до
+# следующей записи ТОЙ ЖЕ сессии. Записи берутся только за сутки отчёта: запись
+# вчерашнего дня в этой же сессии иначе присвоила бы себе ночные ответы, а
+# запись ЧУЖОЙ сессии не говорит ничего о нашей. Роль (смена или помощник) —
+# по метке side, которую ставит сбор из isSidechain транскрипта.
+#
+# Токены без шага не отбрасываются: они идут строками «основная сессия» и
+# «помощник без шага», а в конце сверка «по строкам = за сутки». Расхождение
+# этих чисел — дефект разреза, и молчать о нём нельзя.
+def момент(ts):
+    try:
+        dt = datetime.datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return dt if dt.tzinfo else dt.astimezone()
+
+
+def шаги_журнала(день: str) -> dict:
+    """сессия → [(момент, имя шага)] по возрастанию; только машинные записи суток."""
+    по_сессиям = collections.defaultdict(list)
+    путь = os.path.join(log_dir, "skills.jsonl")
+    if not os.path.exists(путь):
+        return по_сессиям
+    with open(путь, encoding="utf-8") as fh:
+        for raw in fh:
+            try:
+                r = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            когда = момент(r.get("ts") or r.get("время") or "")
+            сессия = r.get("сессия")
+            if (когда is None or r.get("источник") != "хук"
+                    or дата_события(str(r.get("ts") or "")) != день):
+                continue
+            по_сессиям[str(сессия)].append((когда, str(r.get("skill") or "?")))
+    for ряд in по_сессиям.values():
+        ряд.sort()
+    return по_сессиям
+
+
+def разрез_по_шагам(события: list, день: str) -> list:
+    журнал = шаги_журнала(день)
+    строки = collections.OrderedDict()   # (метка, роль, модель) → счётчики
+    роли = {"смена": collections.OrderedDict(), "помощники": collections.OrderedDict()}
+    вне = {"шагов": 0, "out": 0, "cache_r": 0}
+    for e in события:
+        помощник = e.get("side") is True
+        роль = "помощники" if помощник else "смена"
+        модель = str(e.get("model", "unknown"))
+        когда = момент(e.get("ts", ""))
+        имя = None
+        for начало, шаг in журнал.get(str(e.get("session")), []):
+            if когда is not None and начало <= когда:
+                имя = шаг
+            else:
+                break
+        if имя is None:
+            метка = "помощник без шага" if помощник else "основная сессия"
+            вне["шагов"] += 1
+            вне["out"] += int(e.get("out") or 0)
+            вне["cache_r"] += int(e.get("cache_r") or 0)
+        else:
+            метка = f"{имя} ({'помощник' if помощник else 'смена'})"
+        for счёт in (строки.setdefault((метка, роль, модель),
+                                       {"шагов": 0, "in": 0, "out": 0, "cache_w": 0, "cache_r": 0}),
+                     роли[роль].setdefault(модель,
+                                           {"шагов": 0, "in": 0, "out": 0, "cache_w": 0, "cache_r": 0})):
+            счёт["шагов"] += 1
+            for k in ("in", "out", "cache_w", "cache_r"):
+                счёт[k] += int(e.get(k) or 0)
+    вывод = ["По шагам"]
+    for роль, подпись in (("смена", "основная сессия (смена)"), ("помощники", "помощники")):
+        части = [f"{м} — шагов {v['шагов']} · вх {кратко(v['in'])} · вых {кратко(v['out'])}"
+                 f" · кэш-запись {кратко(v['cache_w'])} · кэш-чтение {кратко(v['cache_r'])}"
+                 for м, v in sorted(роли[роль].items(), key=lambda kv: -kv[1]["out"])]
+        вывод.append(f"  {подпись}: " + ("; ".join(части) if части else "—"))
+    for (метка, роль, модель), v in sorted(строки.items(), key=lambda kv: (-kv[1]["out"], kv[0])):
+        вывод.append(f"  {метка}" + " " * max(1, 34 - len(метка)) + модель + " " * max(1, 26 - len(модель))
+                     + f"шагов {v['шагов']} · ответов {кратко(v['out'])} · кэш-чтение {кратко(v['cache_r'])}")
+    вывод.append(f"  вне шагов: шагов {вне['шагов']} · ответов {кратко(вне['out'])}"
+                 f" · кэш-чтение {кратко(вне['cache_r'])}")
+    итого = sum(v["шагов"] for v in строки.values())
+    вывод.append(f"  по строкам шагов {итого}, за сутки {len(события)}"
+                 + (" — сошлось" if итого == len(события) else " — РАСХОДИТСЯ"))
+    return вывод
+
+
+# Раздел стоит ПОСЛЕ «Отдача», а не рядом с «По моделям»: выжимка утренней сводки
+# (tokens_vyzhimka в heartbeat-watch.sh) читает строки с двумя пробелами под
+# «По моделям» как модели, и строки шагов попали бы в «По моделям:» сводки.
+блок_шагов = разрез_по_шагам(события_суток, today)
+
 блок_моделей = ["По моделям"]
 for имя, v in sorted(by_model.items(), key=lambda kv: -kv[1]["out"]):
     блок_моделей.append(
@@ -761,6 +943,8 @@ if len(блок_моделей) == 1:
     f"  шагов на коммит           {шагов // коммитов if коммитов else '—'}",
     f"  ответов на коммит         {кратко(tot['out'] // коммитов) if коммитов else '—'}",
     f"  прогонов гейтов           {гейтов}, красных {красных}",
+    "",
+    *блок_шагов,
     "",
     f"Сверка: {кратко(контекст_на_шаг)} × {шагов} шагов = {кратко(сверка)}; "
     f"фактически прошло {кратко(контекст_всего)}.",

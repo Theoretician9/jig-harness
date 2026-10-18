@@ -225,6 +225,38 @@ HEAD_AT_AUDIT=$(git -C "$PROJECT_DIR" rev-parse HEAD)
 # забывчивости не должен зависеть от того, повезло ли агенту.
 advance() { echo "$HEAD_AT_AUDIT" > "$CURSOR"; }
 
+# Статусы карточек, как они в дереве сейчас: «id статус» по строке. Агент
+# дописывает карту, но статус существующей карточки решает приёмка и владелец,
+# и сверка «до/после» держит это, пока у агента есть Write.
+statusy_kart() {
+    python3 - "$DEVMAP" <<'PY'
+import sys, yaml
+def обход(узел):
+    if isinstance(узел, dict):
+        if "id" in узел and "status" in узел:
+            print(узел["id"], узел["status"])
+        for значение in узел.values():
+            обход(значение)
+    elif isinstance(узел, list):
+        for значение in узел:
+            обход(значение)
+обход(yaml.safe_load(open(sys.argv[1], encoding="utf-8")))
+PY
+}
+
+# Карточки, чей статус после прогона другой, чем до, и карточки, которых не
+# стало: снимок «до» взят под общим локом карты, а в архив карточку переносит
+# приёмка под тем же локом, так что пропавшую убрала модель. Новая — не смена.
+смененные_статусы() {  # $1 — снимок «до»
+    python3 - "$1" <(statusy_kart) <<'PY'
+import sys
+def читать(путь):
+    return dict(строка.split(" ", 1) for строка in open(путь, encoding="utf-8").read().splitlines() if строка)
+до, после = читать(sys.argv[1]), читать(sys.argv[2])
+print(" ".join(f"{id}({до[id]}->{после.get(id, 'удалена')})" for id in до if до[id] != после.get(id)))
+PY
+}
+
 # Встроенная сверка: коммиты после водораздела (или за $DAYS дней) без
 # трейлера `Dev-Map:` и не трогающие ТОЛЬКО сам манифест.
 if [ -s "$CURSOR" ] && git -C "$PROJECT_DIR" cat-file -e "$(cat "$CURSOR")" 2>/dev/null; then
@@ -272,6 +304,13 @@ say "мимо карты: $UNLINKED коммит(ов) — запускаю по
 # Модель — дешёвая (DEMON_MODEL, harness.conf): сверка тем коммитов не стоит
 # opus-цены; переключатель модели агента (AGENT_START_CMD) на headless-вызовы
 # не действует, у демонов свой ключ.
+STATUSES_BEFORE=$(mktemp)
+MAP_BEFORE=$(mktemp)
+trap 'rm -f "$STATUSES_BEFORE" "$MAP_BEFORE"' EXIT
+statusy_kart > "$STATUSES_BEFORE"
+# Копия карты, какой её застали: отказ возвращает дерево к ней, иначе правка
+# модели остаётся грязью, и второй проход коммитит её как «чужую».
+cp -p "$DEVMAP" "$MAP_BEFORE"
 AGENT_RC=0
 timeout "$CLAUDE_TIMEOUT" \
 bash "$PROJECT_DIR/scripts/claude-demon.sh" devmap-selfheal -p --model "$(model_dlya дежурный)" "Ты дежурный по карте разработки проекта $PROJECT_NAME ($PROJECT_DIR).
@@ -346,10 +385,25 @@ fi
 # берёт id задач из трейлеров истории, карточки с таким именем в карте нет, и
 # отправка сборки в общий гит отказала словами «задачи, которых владелец НЕ
 # проверял».
+# Архив карты уходит тем же коммитом: приёмка переносит задачу в архив без
+# коммита, и карта без архива отказывает pre-commit («пропала без архива»).
+COMMIT_PATHS=(dev-map.yaml)
+ARCHIVE=docs/dev-map-archive.yaml
+if [ -n "$(git -C "$PROJECT_DIR" status --porcelain -- "$ARCHIVE")" ]; then
+    COMMIT_PATHS+=("$ARCHIVE")
+fi
 if [ -n "$(git -C "$PROJECT_DIR" status --porcelain -- dev-map.yaml)" ]; then
-    git -C "$PROJECT_DIR" add dev-map.yaml
+    CHANGED=$(смененные_статусы "$STATUSES_BEFORE")
+    if [ -n "$CHANGED" ]; then
+        REJECTED="$LOG_DIR/devmap/rejected-$(date +%Y%m%d-%H%M%S).yaml"
+        cp -p "$DEVMAP" "$REJECTED"
+        cp -p "$MAP_BEFORE" "$DEVMAP"
+        say "коммита нет: агент сменил статус или удалил существующие карточки: $CHANGED — карта возвращена к снимку до модели, отвергнутая лежит в $REJECTED, водораздел на месте"
+        exit 1
+    fi
+    git -C "$PROJECT_DIR" add -- "${COMMIT_PATHS[@]}"
     if soobshchenie_kommita "$FOREIGN_EDIT" \
-        | git -C "$PROJECT_DIR" commit -q -F - -- dev-map.yaml; then
+        | git -C "$PROJECT_DIR" commit -q -F - -- "${COMMIT_PATHS[@]}"; then
         say "карта закоммичена${FOREIGN_EDIT:+ (вместе с чужой правкой, сказано в сообщении)}"
     else
         say "коммит карты НЕ прошёл — правка в рабочем дереве, водораздел на месте"

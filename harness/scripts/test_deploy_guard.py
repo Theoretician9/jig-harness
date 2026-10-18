@@ -30,11 +30,27 @@ def судить(зачем: str, вышло, ждём) -> None:
         print(f"  ПЛОХО {зачем}: вышло {вышло!r}, ждали {ждём!r}")
 
 
-def ворота(двор: pathlib.Path) -> str:
-    среда = dict(os.environ, HARNESS_LOG_DIR=str(двор))
-    готово = subprocess.run([sys.executable, str(ПРИБОР), "push"],
+def стендовый_конфиг(двор: pathlib.Path) -> pathlib.Path:
+    """Живой harness.conf плюс PUSH_NEEDS_OWNER=0 последней строкой (последняя
+    побеждает): ответ ворот «можно» иначе зависит от ручки согласия машины, и
+    проба на установке с PUSH_NEEDS_OWNER=1 краснела бы не от своего правила."""
+    sys.path.insert(0, str(КОРЕНЬ / "scripts" / "lib"))
+    import config as конф
+    живой = pathlib.Path(конф.путь_harness_conf())
+    текст = живой.read_text(encoding="utf-8") if живой.is_file() else ""
+    свой = двор / "harness.conf"
+    свой.write_text(текст + "\nPUSH_NEEDS_OWNER=0\n", encoding="utf-8")
+    return свой
+
+
+def ворота(двор: pathlib.Path) -> tuple[int, str]:
+    """(код, ответ) ворот. Код судится вместе со словом: незнакомый ключ
+    отвечает rc 2, и проба, судившая одно слово, принимала отказ разбора за
+    «не блокирует»."""
+    среда = dict(os.environ, HARNESS_LOG_DIR=str(двор), HARNESS_CONF=str(стендовый_конфиг(двор)))
+    готово = subprocess.run([sys.executable, str(ПРИБОР), "--действие", "push"],
                             capture_output=True, text=True, env=среда, check=False)
-    return готово.stdout + готово.stderr
+    return готово.returncode, готово.stdout + готово.stderr
 
 
 with tempfile.TemporaryDirectory() as врем:
@@ -57,24 +73,24 @@ with tempfile.TemporaryDirectory() as врем:
                       encoding="utf-8")
     час_назад = time.time() - 3600
     os.utime(старый, (час_назад, час_назад))
-    ответ = ворота(двор)
-    судить("БОЛЬНОЙ СЛУЧАЙ: номер переиспользован — лок не блокирует",
-           "переиспользован" in ответ and "занято: лок deploy.lock" not in ответ, True)
+    код, ответ = ворота(двор)
+    судить("БОЛЬНОЙ СЛУЧАЙ: номер переиспользован — лок не блокирует (rc 0)",
+           (код, "переиспользован" in ответ, "занято: лок deploy.lock" in ответ), (0, True, False))
 
     # ОБРАТНАЯ СТОРОНА: лок МОЛОЖЕ старта процесса — настоящий держатель, блокирует.
     старый.write_text(f"{живой}\nвыкат deploy.sh, начат только что\n", encoding="utf-8")
     сейчас = time.time()
     os.utime(старый, (сейчас, сейчас))
-    ответ = ворота(двор)
-    судить("живой держатель моложе лока — ворота заняты",
-           "занято: лок deploy.lock" in ответ, True)
+    код, ответ = ворота(двор)
+    судить("живой держатель моложе лока — ворота заняты (rc 1)",
+           (код, "занято: лок deploy.lock" in ответ), (1, True))
 
     # Мёртвый номер по-прежнему протухший (прежнее поведение цело).
     мёртвый = 4194303
     старый.write_text(f"{мёртвый}\nвыкат deploy.sh\n", encoding="utf-8")
-    ответ = ворота(двор)
-    судить("мёртвый номер — протухший лок, как было",
-           "держатель мёртв" in ответ, True)
+    код, ответ = ворота(двор)
+    судить("мёртвый номер — протухший лок, как было (rc 0)",
+           (код, "держатель мёртв" in ответ), (0, True))
 
     отвязанный.terminate()
 

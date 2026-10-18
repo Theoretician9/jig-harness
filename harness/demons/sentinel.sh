@@ -314,7 +314,11 @@ if [ -s "$QUEUE" ]; then
     while IFS= read -r line; do
         [ -n "$line" ] || continue
         msg=$(printf '%s' "$line" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("текст",""))' 2>/dev/null || true)
-        if [ -n "$msg" ] && tg_send "$msg"; then
+        # Ключ «--досыл» говорит двери: это УЖЕ очередь, и при лимите второй
+        # записи не делать — иначе каждый круг досыла множил бы строки.
+        # Придержанное останется в очереди и уедет после обновления.
+        if [ -n "$msg" ] && [ -x "$PROJECT_DIR/scripts/tg_send.sh" ] \
+           && "$PROJECT_DIR/scripts/tg_send.sh" --досыл "$msg" >/dev/null; then
             continue
         fi
         printf '%s\n' "$line" >> "$REST"

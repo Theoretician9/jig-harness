@@ -86,8 +86,12 @@ def _сказать(текст: str) -> None:
     if если_молчим or not ОТПРАВКА.exists():
         return
     try:
-        subprocess.run(["bash", str(ОТПРАВКА), текст], timeout=30,
-                       capture_output=True)
+        # «--несмотря-на-лимит»: это ОТВЕТ на нажатие владельца (код
+        # подтверждения, исход переключения), а не весть демона. Дверь канала
+        # при держащемся лимите молчит всем, и его собственный вопрос остался бы
+        # без ответа до обновления.
+        subprocess.run(["bash", str(ОТПРАВКА), "--несмотря-на-лимит", текст],
+                       timeout=30, capture_output=True)
     except (OSError, subprocess.SubprocessError):
         pass
 

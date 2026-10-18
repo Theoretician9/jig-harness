@@ -447,6 +447,35 @@ AFTER_KB=$(used_kb)
 FREED_MB=$(( (BEFORE_KB - AFTER_KB) / 1024 ))
 say "=== уборка завершена: освобождено ${FREED_MB} МБ, занято $(pct)% ==="
 
+# Оповещение владельцу. Успех только при ok:true (норма 01-SPEC §7). Отказ
+# двери (правила сторожа канала или сбой транспорта) — недоставка, а не повод её
+# обойти: прямой путь ниже — только когда двери нет вовсе.
+tg_send() {
+    local text="$1"
+    if [ -x "${PROJECT_DIR:-/nonexistent}/scripts/tg_send.sh" ]; then
+        "$PROJECT_DIR/scripts/tg_send.sh" "$text" >/dev/null && return 0
+        say "tg_send.sh отказал — оповещение не доставлено"
+        return 1
+    fi
+    # Ненастроенный канал обязан оставить след. Иначе получится молчаливый отказ:
+    # уборка выглядит работающей, а сигнал «диск забит» не приходит никогда, и
+    # об этом никто не узнаёт (правило «мягкий отказ оставляет след»).
+    if [ -z "${TG_CHAT_ID:-}" ] || [ -z "${TG_TOKEN_FILE:-}" ]; then
+        say "ОПОВЕЩЕНИЕ НЕ НАСТРОЕНО: заполните TG_TOKEN_FILE и TG_CHAT_ID в install.conf — сообщение о занятом диске отправить некуда"
+        return 1
+    fi
+    if [ ! -r "$TG_TOKEN_FILE" ]; then
+        say "ОПОВЕЩЕНИЕ НЕ УШЛО: файл с токеном $TG_TOKEN_FILE не читается"
+        return 1
+    fi
+    local token; token=$(cat "$TG_TOKEN_FILE")
+    # URL с токеном — через stdin (curl -K -), не в argv: argv виден любому в ps.
+    printf 'url = "https://api.telegram.org/bot%s/sendMessage"\n' "$token" \
+        | curl -s -m 20 -K - -X POST \
+        -d chat_id="$TG_CHAT_ID" \
+        --data-urlencode "text=$text" | jq -e '.ok == true' >/dev/null
+}
+
 # Если после уборки всё равно тесно — молчать нельзя. Оповещение идёт тем же
 # каналом, что и остальные сигналы харнеса, чтобы всё приходило в одно место.
 NOW_PCT=$(pct)
@@ -456,32 +485,11 @@ if [ "$DRY_RUN" = 0 ] && [ "$NOW_PCT" -ge "$DISK_MAX_PCT" ]; then
     ALERT="Автоуборка отработала, но диск всё ещё занят на ${NOW_PCT}%.
 Освободить удалось ${FREED_MB} МБ — этого мало, нужен разбор вручную.
 Крупное: ${TOP}"
-    # Сначала штатный отправитель tg_send.sh (режет длинное, пишет отказы в
-    # tg_failures.log); прямой curl — только запасной путь, если его нет/отказал.
-    if [ -x "${PROJECT_DIR:-/nonexistent}/scripts/tg_send.sh" ] \
-       && "${PROJECT_DIR:-/nonexistent}/scripts/tg_send.sh" "$ALERT" >/dev/null 2>&1; then
-        say "оповещение доставлено (tg_send.sh, ok:true)"
-    # Адресат и токен — из install.conf, не из кода.
-    # Ненастроенный канал обязан оставить след. Иначе получится молчаливый отказ:
-    # уборка выглядит работающей, а сигнал «диск забит» не приходит никогда, и
-    # об этом никто не узнаёт (правило «мягкий отказ оставляет след»).
-    elif [ -z "${TG_CHAT_ID:-}" ] || [ -z "${TG_TOKEN_FILE:-}" ]; then
-        say "ОПОВЕЩЕНИЕ НЕ НАСТРОЕНО: заполните TG_TOKEN_FILE и TG_CHAT_ID в install.conf — сообщение о занятом диске отправить некуда"
-    elif [ ! -r "$TG_TOKEN_FILE" ]; then
-        say "ОПОВЕЩЕНИЕ НЕ УШЛО: файл с токеном $TG_TOKEN_FILE не читается"
+    if tg_send "$ALERT"; then
+        say "оповещение доставлено (ok:true)"
     else
-        TOKEN=$(cat "$TG_TOKEN_FILE")
-        # Успех отправки — только ok:true (норма 01-SPEC §7); URL с токеном —
-        # через stdin (curl -K -), не в argv: argv виден любому в ps.
-        if printf 'url = "https://api.telegram.org/bot%s/sendMessage"\n' "$TOKEN" \
-            | curl -s -m 20 -K - -X POST \
-            -d chat_id="$TG_CHAT_ID" \
-            --data-urlencode "text=$ALERT" | jq -e '.ok == true' >/dev/null; then
-            say "оповещение доставлено (ok:true)"
-        else
-            say "оповещение НЕ доставлено — API не вернул ok:true"
-            exit 1
-        fi
+        say "оповещение НЕ доставлено"
+        exit 1
     fi
 fi
 

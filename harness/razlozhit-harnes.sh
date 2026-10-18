@@ -242,7 +242,9 @@ mkdir -p "$PROJECT_DIR/harness/config"
 # владелец включил шаги для мелких и обычных задач, и раскладка 12.09 вернула
 # ему пакетные умолчания молча. Файл кладётся ТОЛЬКО если его ещё нет — так же,
 # как harness.conf в /etc. Гейт сверки с пакетом его тоже не сторожит.
-LIVE_SETTINGS="pipeline.yaml queue.yaml models.yaml audit.yaml"   # имя латиницей: bash не берёт кириллические имена
+LIVE_SETTINGS="pipeline.yaml queue.yaml models.yaml audit.yaml live-check-state.yaml"   # имя латиницей: bash не берёт кириллические имена
+# live-check-state.yaml — записи живой проверки ЭТОЙ установки: затирание
+# заменило бы их заготовкой из пакета, то есть потеряло бы работу (И-1).
 for f in "$HERE"/config/*.yaml "$HERE"/config/*.txt "$HERE"/config/*.gz; do
   [[ -f "$f" ]] || continue
   name="$(basename "$f")"

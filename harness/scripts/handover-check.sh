@@ -53,6 +53,32 @@ verdict() {  # $1 = каталог проекта, $2 = порог в минут
     return 0
 }
 
+# ── вердикт «передача дописана ПОСЛЕ названного мига» ──────────────────────
+# Второй вопрос к тому же документу, и он НЕ про возраст. Владелец 18.10.2026
+# прислал беду с другого сервера: ротация сменила сессию, а передачи не было —
+# под лимитом подписки модель не отвечает на поручение регламента вовсе.
+# Порог возраста (`verdict` выше) там бессилен: передача, дописанная за минуту
+# ДО поручения, свежа по любому порогу, а дел смены в ней нет.
+#
+# Судит ТОТ ЖЕ судья, что и свежесть: маску docs/handover/SESSION-HANDOFF-*.md
+# и понятие «свежайшая передача» знает один файл — разъехавшись по двоим, они
+# разъедутся молча ([[the-check-fell-behind-the-code]]).
+после_мига() {  # $1 = каталог проекта, $2 = миг поручения (unix-время)
+    local dir="$1" mig="$2" newest mt
+    newest=$(ls -1t "$dir"/docs/handover/SESSION-HANDOFF-*.md 2>/dev/null | head -1 || true)
+    if [ -z "$newest" ]; then
+        echo "handover: передачи нет вовсе — docs/handover/SESSION-HANDOFF-*.md пуст"
+        return 1
+    fi
+    mt=$(stat -c %Y "$newest")
+    if [ "$mt" -le "$mig" ]; then
+        echo "handover: передача НЕ обновлялась после поручения — $(basename "$newest") записана на $(( (mig - mt) / 60 )) мин РАНЬШЕ поручения"
+        return 1
+    fi
+    echo "handover: передача дописана после поручения — $(basename "$newest"), $(( (mt - mig) / 60 )) мин после"
+    return 0
+}
+
 # ── самотест: больной и здоровый случай во временном каталоге ───────────────
 if [ "${1:-}" = "--selftest" ]; then
     T=$(mktemp -d)
@@ -64,7 +90,7 @@ if [ "${1:-}" = "--selftest" ]; then
     if verdict "$T" 240 >/dev/null; then
         echo "SELFTEST FAIL: отсутствие передачи при активности не поймано"; exit 1
     fi
-    echo "selftest 1/3: нет передачи при активности — пойман (красный) — OK"
+    echo "selftest 1/6: нет передачи при активности — пойман (красный) — OK"
 
     # Больной случай 2: передача есть, но старее порога → красный.
     mkdir -p "$T/docs/handover"
@@ -72,14 +98,37 @@ if [ "${1:-}" = "--selftest" ]; then
     if verdict "$T" 240 >/dev/null; then
         echo "SELFTEST FAIL: протухшая передача не поймана"; exit 1
     fi
-    echo "selftest 2/3: протухшая передача — поймана (красный) — OK"
+    echo "selftest 2/6: протухшая передача — поймана (красный) — OK"
 
     # Здоровый случай: свежая передача → зелёный.
     touch "$T/docs/handover/SESSION-HANDOFF-2026-08-08-1700.md"
     if ! verdict "$T" 240 >/dev/null; then
         echo "SELFTEST FAIL: свежая передача покраснела"; exit 1
     fi
-    echo "selftest 3/3: свежая передача — прошла (зелёный) — OK"
+    echo "selftest 3/6: свежая передача — прошла (зелёный) — OK"
+
+    # ── вторая дверь: «дописана ПОСЛЕ поручения» ───────────────────────────
+    PORUCHENIE=$(date +%s)
+    T2=$(mktemp -d); mkdir -p "$T2/docs/handover"
+    if после_мига "$T2" "$PORUCHENIE" >/dev/null; then
+        echo "SELFTEST FAIL: отсутствие передачи принято за состоявшуюся"; rm -rf "$T2"; exit 1
+    fi
+    echo "selftest 4/6: передачи нет вовсе — поймано (красный) — OK"
+
+    # БОЛЬНОЙ СЛУЧАЙ владельца 18.10.2026: передача свежа по возрасту (минуту
+    # назад), но написана ДО поручения — дел этой смены в ней нет.
+    touch -d "@$((PORUCHENIE - 60))" "$T2/docs/handover/SESSION-HANDOFF-2026-10-18.md"
+    if после_мига "$T2" "$PORUCHENIE" >/dev/null; then
+        echo "SELFTEST FAIL: передача ДО поручения принята за состоявшуюся"; rm -rf "$T2"; exit 1
+    fi
+    echo "selftest 5/6: передача написана ДО поручения — поймано (красный) — OK"
+
+    touch -d "@$((PORUCHENIE + 5))" "$T2/docs/handover/SESSION-HANDOFF-2026-10-18.md"
+    if ! после_мига "$T2" "$PORUCHENIE" >/dev/null; then
+        echo "SELFTEST FAIL: передача ПОСЛЕ поручения не признана"; rm -rf "$T2"; exit 1
+    fi
+    echo "selftest 6/6: передача дописана после поручения — прошла (зелёный) — OK"
+    rm -rf "$T2"
     exit 0
 fi
 
@@ -96,4 +145,13 @@ HARNESS_CONF="${HARNESS_CONF:-$(konf_koren)/harness.conf}"
 # Поймано первым же коммитом после правки, 12.09.2026.
 konf_zagruzit PROJECT_DIR LOG_DIR HANDOVER_MAX_AGE_MIN
 : "${PROJECT_DIR:?в install.conf пуст PROJECT_DIR}"
+if [ "${1:-}" = "--после" ]; then
+    # Миг обязателен и обязан быть числом: пустой довод превратился бы в
+    # сравнение с нулём, то есть в вечное «передача состоялась».
+    case "${2:-}" in
+        ''|*[!0-9]*) echo "handover: --после требует миг в unix-времени, а дано «${2:-пусто}»"; exit 2 ;;
+    esac
+    после_мига "$PROJECT_DIR" "$2"
+    exit $?
+fi
 verdict "$PROJECT_DIR" "${HANDOVER_MAX_AGE_MIN:-240}"

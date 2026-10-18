@@ -657,6 +657,26 @@ EOF
   fi
 }
 
+шаг_2в() { # venv с faster-whisper для голосовых: scripts/transcribe_voice.py ищет его в STATE_DIR/voice/venv
+  # Голосовые — не основа: отказ pip идёт в итог громко, без отметки шага (повтор
+  # доставит venv), но установку не обрывает. Всё от имени агента: диспетчер и
+  # расшифровка живут им, venv от root агенту не прочесть и не обновить.
+  local step="шаг 2в — голосовые (venv faster-whisper)"; CURRENT_STEP="$step"
+  уже_сделан шаг_2в && { скажи "[$step] пропуск (--resume)"; return 0; }
+  заголовок "$step"
+  local venv="$STATE_DIR/voice/venv"
+  # STATE_DIR создан root (шаг 2 отдаёт агенту только panel-state): без этой
+  # строки venv агента не может создать voice/.
+  if делай "install -d -o '$AGENT_USER' -g '$AGENT_USER' '$STATE_DIR/voice'" \
+     && делай "sudo -u '$AGENT_USER' python3 -m venv '$venv'" \
+     && делай "sudo -u '$AGENT_USER' '$venv/bin/pip' install faster-whisper"; then
+    DONE_LIST+=("голосовые: venv с faster-whisper в $venv от имени $AGENT_USER")
+    отметить шаг_2в
+  else
+    FAILED_LIST+=("голосовые: не вышло создать venv $venv или поставить в него faster-whisper через pip — проверьте сеть, доступ к pypi и пакет python3-venv; первое голосовое владельца не расшифруется; после починки — sudo bash $0 --resume")
+  fi
+}
+
 шаг_3() { # Claude Code: версия зафиксирована (01-SPEC §3); OAuth-вход — руками, в финале
   local step="шаг 3 — Claude Code"; CURRENT_STEP="$step"
   уже_сделан шаг_3 && { скажи "[$step] пропуск (--resume)"; return 0; }
@@ -1509,6 +1529,7 @@ trap 'финал' EXIT
 шаг_1
 шаг_2
 шаг_2б
+шаг_2в
 шаг_3
 шаг_4
 шаг_5

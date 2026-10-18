@@ -69,14 +69,17 @@ PY
 для_вида() {  # вид работы → имя модели
     local kind="${1:-}" handle="${DEMON_MODEL:-}" model=""
     if [ -r "$MODELS_CONF" ]; then
-        model=$(MODELS_CONF="$MODELS_CONF" VID="$kind" python3 - <<'PY' 2>/dev/null || true
-import os, yaml
+        model=$(MODELS_CONF="$MODELS_CONF" VID="$kind" python3 - <<'PY' || true
+import os, sys, yaml
 try:
     d = yaml.safe_load(open(os.environ["MODELS_CONF"], encoding="utf-8")) or {}
 except Exception:
     raise SystemExit
-взято = (d.get("модели") or {}).get(os.environ.get("VID", "")) or d.get("умолчание") or ""
-print(взято)
+вид = os.environ.get("VID", "")
+взято = (d.get("модели") or {}).get(вид)
+if not взято:
+    print(f"model-for: вид «{вид}» не из таблицы, беру умолчание", file=sys.stderr)
+print(взято or d.get("умолчание") or "")
 PY
 )
     fi

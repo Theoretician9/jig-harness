@@ -5,6 +5,21 @@
 # он в домашнем каталоге, а служба живёт с ProtectHome). Файлы в пакет
 # кладёт scripts/memory-to-package.py от имени агента.
 MEMORY.md
+ORDERS.md
+TONE.md
+a-check-creates-its-own-condition.md
+a-half-updated-tree.md
+a-new-carrier-without-the-duties.md
+a-setting-ignored-in-silence.md
+a-signal-that-does-not-discriminate.md
+a-test-that-depends-on-who-runs-it.md
+an-attached-client-is-not-forever.md
+an-order-dies-with-the-session.md
+announcement-is-not-a-command.md
+answer-arrived-during-rotation.md
+backup-next-to-config.md
+cyrillic-in-bash-names.md
+exit-closes-the-pane.md
 feedback-code-bar.md
 feedback-command-bans.md
 feedback-communication.md
@@ -13,8 +28,10 @@ feedback-effort-max.md
 feedback-handover-discipline.md
 feedback-semi-auto.md
 feedback-test-not-done.md
-ORDERS.md
-announcement-is-not-command.md
-cyrillic-in-bash-names.md
-lock-leaked-to-child.md
-order-died-with-session.md
+i1-covers-single-file-deletion.md
+leaving-without-raising-a-successor.md
+lock-leaked-into-a-child.md
+probe-loads-the-live-mechanism.md
+the-departure-was-not-ordered-by-me.md
+the-package-is-the-source-of-the-layout.md
+tmux-send-keys-takes-key-name.md

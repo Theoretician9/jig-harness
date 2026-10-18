@@ -1,0 +1,74 @@
+# Команды ЖИВОГО вызова механизмов класса C2 — ДАННЫЕ для scripts/live-check-tool.py.
+#
+# Откуда взято: спека docs/specs/2026-10-15-живая-проверка-механизмов.md §3.1,
+# класс C2 — «вызван с настоящим входом, вывод прочитан и записан», и слово
+# владельца 15.10.2026: «проверить не просто тестами, а именно наживую, в
+# практике».
+#
+# ПЕРЕСКАЗ ПАСПОРТНОГО САМОТЕСТА ЗАПРЕЩЁН И СУДИТСЯ КОДОМ. Первая редакция этих
+# данных (17.10, 35 строк) побуквенно повторяла поле «проверяется» из реестра —
+# то есть доказывала инструмент повтором его же теста. Ревью это замерило
+# (35 из 35), записи сняты, а прибор теперь такую команду отказывается
+# исполнять: функция «пересказ_самотеста» в scripts/live-check-tool.py.
+#
+# Что годится: вызов на НАСТОЯЩИХ данных этой машины (живой журнал, живая карта,
+# живой гит, живое расписание) либо зов ЧУЖОГО живого потребителя, который эту
+# библиотеку использует в работе. Вывод обязан содержать строку от 12 знаков:
+# по ней берётся цитата, и она должна быть ЧУЖИМ текстом.
+#
+# ЖИВОЙ ВЫЗОВ scripts/lib/owner_word.py (18.10.2026). Его предикат — слово
+# владельца в машинном журнале $LOG_DIR/inbox.jsonl (пишет диспетчер, признак
+# авторства — message_id телеграма). Боевую дверь удаления звать нельзя: её
+# зелёный исход — РЕАЛЬНОЕ удаление файла. Поэтому распознаватель читает КОПИЮ
+# боевого журнала: вход настоящий (его собственные слова и message_id
+# телеграма), а боевая дверь не трогается. Подмена пути журнала разрешена
+# только ключом стенда HARNESS_OWNER_WORD_STEND=1 — без него любая подмена
+# даёт «НетНосителя» с названной причиной.
+
+команды:
+  harness/panel/state.py: python3 harness/panel/state.py
+  harness/vozmozhnosti/mobilnaya-razrabotka/build-config.py: tmp=$(mktemp -d) && cp ~/.config/harness-mobile.conf "$tmp/harness-mobile.conf" && source harness/vozmozhnosti/mobilnaya-razrabotka/МАНИФЕСТ.conf && source scripts/lib/config.sh && konf_zagruzit && python3 harness/vozmozhnosti/mobilnaya-razrabotka/build-config.py "$tmp/harness-mobile.conf" "$HOME/$ANDROID_HOME_REL" "$AVD_NAME" "$EMULATOR_MEM_MB" "$GRADLE_MAX_MEM" "$FTL_TIMEOUT" "$FTL_DEVICES" "$LOG_DIR" "$SECRETS_DIR" "$SERVICE_LOCK" "$LOOP_MAX_AGE_MIN"
+  scripts/board.py: 'python3 scripts/board.py --сказать живая-проверка "остаток живой проверки — 46 механизмов" --на 60 >/dev/null && bash scripts/hooks/session_state.sh 2>/dev/null | grep -A2 "НА ДОСКЕ"'
+  scripts/build-public.py: source scripts/lib/config.sh && out=$(mktemp -d) && python3 scripts/build-public.py --пакет "/home/$(konf_iz_fajla AGENT_USER)/starter/STARTER-PACKAGE" --куда "$out"
+  scripts/download_attachment.py: source scripts/lib/config.sh && konf_zagruzit LOG_DIR && soobshchenie=$(grep -rl '"photo"' "$LOG_DIR/inbox/обработано" | head -1) && python3 scripts/download_attachment.py "$soobshchenie"
+  scripts/language-level.py: python3 scripts/language-level.py --пересчитать
+  scripts/lib/owner_word.py: |-
+    export T=$(mktemp -d) && cp "$(python3 -c 'import sys;sys.path.insert(0,"scripts/lib");import config;print(config.log_dir())')/inbox.jsonl" "$T/" && HARNESS_OWNER_WORD_STEND=1 python3 -c 'import sys,os,pathlib;sys.path.insert(0,"scripts/lib");import owner_word as s;z=s.разрешение(60*24*40, pathlib.Path(os.environ["T"]));print("разрешение владельца:", z["текст"][:60], "| message_id:", z["message_id"]) if z else print("разрешения в окне нет")'; rm -rf "$T"
+  scripts/lib/channel_queue.py: python3 scripts/orders.py
+  scripts/lib/config.sh: bash scripts/handover-check.sh
+  scripts/lib/models.sh: bash scripts/model.sh --список
+  scripts/lib/panel_writer.py: python3 scripts/check-login-expiry.py
+  scripts/lib/patterns.py: git ls-files -- '*.py' '*.sh' | python3 scripts/check-file-names.py
+  scripts/lib/pane.sh: |-
+    source scripts/lib/config.sh && konf_zagruzit && source scripts/lib/pane.sh && printf 'в панели агента: %s (сессия %s)\n' "$(pane_cmd)" "$TMUX_SESSION"
+  scripts/lib/selftest_cases.sh: bash scripts/test_memory_commit.sh
+  scripts/live-check-daemon.py: python3 scripts/live-check-daemon.py harness/demons/backup.sh
+  scripts/live-check-hook.py: python3 scripts/live-check-hook.py scripts/hooks/guard_bash.py
+  scripts/live-check-inbox.py: python3 scripts/live-check-inbox.py scripts/attention-word.py
+  scripts/live-check-skill.py: python3 scripts/live-check-skill.py harness/skills/spec-review/SKILL.md --задача hr.zhivaya-proverka-vseh-mehanizmov
+  scripts/model-for.sh: bash scripts/model-for.sh --таблица
+  scripts/pipeline.py: python3 scripts/pipeline.py --подсказать hr.zhivaya-proverka-vseh-mehanizmov
+  scripts/revision-findings.py: python3 scripts/revision-findings.py --до <(git show HEAD~1:dev-map.yaml) --после dev-map.yaml --максимум 12 --максимум-знаков 1500
+  scripts/transliterate.py: python3 scripts/transliterate.py 'живая-проверка-механизмов.md'
+  scripts/version.py: source scripts/lib/config.sh && konf_zagruzit && python3 scripts/version.py --следующая --пакет "/home/$(konf_iz_fajla AGENT_USER)/starter/STARTER-PACKAGE" --сборка "$PUBLIC_BUILD_DIR"
+  harness/panel/settings.py: python3 harness/panel/state.py
+  harness/panel/vid.py: python3 -c 'import sys; sys.path.insert(0,"harness/panel"); import server, state, vid; print(vid.панель(state.снять(), server.переключатели(), "zamer-zhivoj-proverki"))'
+  scripts/lib/cards.py: python3 scripts/archive-map.py
+  scripts/lib/config.py: python3 scripts/check-secrets-perms.py
+  scripts/lib/git_probe.py: python3 scripts/check-cyrillic-in-names.py --selftest | grep 'git не ответил'
+  scripts/lib/neighbor.py: source scripts/lib/config.sh; konf_zagruzit; python3 scripts/urgency.py --замер "$LOG_DIR/inbox/обработано"
+  scripts/lib/selftest_cases.py: python3 scripts/lib/patterns.py --selftest | grep '^  ок    '
+  scripts/limit-in-log.py: python3 scripts/limit-in-log.py --сброс "$(ls -t "$HOME/.claude/projects/$(pwd | tr / -)"/*.jsonl | head -1)"
+  scripts/live-check-sick.py: python3 scripts/live-check-sick.py scripts/check-file-names.py
+  scripts/live-check-tool.py: python3 scripts/live-check-tool.py scripts/weed-the-orders.py
+  scripts/model.sh: bash scripts/model.sh --help
+  scripts/verify-mechanisms.py: python3 scripts/verify-mechanisms.py --список
+  scripts/weed-the-orders.py: python3 scripts/weed-the-orders.py --проверить
+  scripts/ask-the-model.py: python3 scripts/ask-the-model.py --повод о-чём-сообщение-владельца --вопрос-файл /var/log/harness/inbox/обработано/1792137010.314340857.txt
+
+# ЖИВОГО ВЫЗОВА НЕТ ещё у ЧЕТЫРЁХ механизмов доли 1 (причины — карточка
+# hr.shest-mehanizmov-c2-bez-zhivogo-vyzova): download_attachment.py (настоящий file_id и ключ
+# бота), lib/panel_writer.py (живой путь ПИШЕТ конфиг, нулевого кода без
+# правки боевых данных не бывает), quiet-window.py (отвечает только кодом,
+# своего текста не печатает, и окно тишины приёмника продукта на машине
+# больше нет), stall-in-log.py (печатает одно число короче порога цитаты).

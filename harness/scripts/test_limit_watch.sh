@@ -31,9 +31,17 @@ TR_DIR_NAME="${STAND_PROJECT//\//-}"
 mkdir -p "$STAND/proekt/scripts/lib" "$STAND/zhurnal" "$STAND/transkripty/$TR_DIR_NAME"
 cp "$HERE/limit-in-log.py" "$HERE/stall-in-log.py" "$HERE/limit_mark.py" "$STAND/proekt/scripts/"
 cp "$HERE/lib/config.sh" "$HERE/lib/config.py" "$STAND/proekt/scripts/lib/"
+# Подставной канал повторяет разбор доводов БОЕВОЙ двери: ключ
+# «--несмотря-на-лимит» (им помечены сообщения о лимите и о смене сессии) не
+# является текстом. Первая редакция писала «$1» и после появления ключа стала
+# записывать в канал сам ключ — проба читала текст и перестала его видеть.
 cat > "$STAND/proekt/scripts/tg_send.sh" <<'KANAL'
 #!/usr/bin/env bash
-printf '%s\n' "$1" >> "$LOG_DIR/kanal.txt"
+for A in "$@"; do
+    [ "$A" = "--несмотря-на-лимит" ] && continue
+    printf '%s\n' "$A" >> "$LOG_DIR/kanal.txt"
+    break
+done
 KANAL
 chmod +x "$STAND/proekt/scripts/tg_send.sh"
 

@@ -27,7 +27,7 @@
 # единственный путь, которым код попадает на прод: пропустить его, оставив
 # работу работающей, невозможно, поэтому сверка тут надёжнее запрета на коммит.
 #
-# Запуск: ./scripts/deploy.sh [--силой]   (--силой уходит в ворота как есть)
+# Запуск: ./scripts/deploy.sh [--силой]   (единственный ключ, который уходит в ворота)
 #         ./scripts/deploy.sh --план     что сделал бы: шаги и команды, без ворот и выката
 set -euo pipefail
 
@@ -48,6 +48,9 @@ konf_zagruzit PROJECT_DIR LOG_DIR TMUX_SESSION SECRETS_DIR AGENT_START_CMD
 : "${PROJECT_DIR:?в install.conf пуст PROJECT_DIR}" "${LOG_DIR:?пуст LOG_DIR}"
 
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+# Путь к себе считается ДО `cd "$PRODUCT_TREE"`: относительный `$0` после смены каталога
+# указывал бы в дерево продукта, и перезапуск под sg звал бы несуществующий файл.
+DEPLOY_SELF="$(readlink -f "$0")"
 DEPLOY_LOG="$LOG_DIR/deploy.log"
 mkdir -p "$LOG_DIR" "$LOG_DIR/locks"
 
@@ -173,6 +176,15 @@ if [ "${1:-}" = "--план" ]; then
     exit 0
 fi
 
+# Свои ключи deploy.sh разбирает сам, ДО лока и ворот. Служебные ключи ворот
+# (--вернуть-согласие, --только-согласие, --не-тратить) зовут другие двери;
+# пропусти их deploy.sh, и выкат шёл бы без траты «да» или возвращал бы его.
+GATE_FORCE=""
+for key in "$@"; do
+    [ "$key" = "--силой" ] || { say "незнакомый ключ $key; известны: --силой, --план — выкат отменён"; exit 1; }
+    GATE_FORCE="--силой"
+done
+
 if [ -n "$TREE_DIRTY" ]; then
     say "ОШИБКА: в $PRODUCT_TREE незакоммиченные правки — выкатывается только закоммиченное, выкат отменён до ворот:"
     printf '%s\n' "$TREE_DIRTY" | head -10 | sed 's/^/    /' | tee -a "$DEPLOY_LOG"
@@ -194,7 +206,7 @@ if [ -n "${STACK_IMAGES:-}" ] && ! docker version >/dev/null 2>&1; then
         say "docker не виден этой сессии, а в группе docker пользователь есть — перезапуск под sg docker"
         export DEPLOY_UNDER_SG=1
         SG_CMD=""
-        for arg in bash "$(readlink -f "$0")" "$@"; do SG_CMD="$SG_CMD$(sh_quote "$arg")"; done
+        for arg in bash "$DEPLOY_SELF" "$@"; do SG_CMD="$SG_CMD$(sh_quote "$arg")"; done
         exec sg docker -c "$SG_CMD"
     fi
     say "ОШИБКА: docker недоступен ($(docker version 2>&1 | tail -1 | cut -c1-160)) — снимка и отката не будет, выкат отменён до ворот; ключи: $*"
@@ -224,7 +236,16 @@ printf '%s\nвыкат deploy.sh, начат %s\n' "$$" "$(date -Is)" > "$DEPLOY
 
 # ── 1б. Ворота: не катить поверх идущей работы ──────────────────────────────
 # 04.08 выкат перезапустил воркер и убил чужую сборку (улика в deploy_guard.py).
-python3 "$SCRIPT_DIR/deploy_guard.py" "$@" || { say "ворота: занято — выкат отменён"; exit 1; }
+GATE_RC=0
+GATE_OUT=$(python3 "$SCRIPT_DIR/deploy_guard.py" $GATE_FORCE 2>&1) || GATE_RC=$?
+printf '%s\n' "$GATE_OUT"
+# Код 2 — ворота не поняли ключи (будущий ключ, не прошедший разбор выше):
+# «занято» тут было бы ложью о причине.
+if [ "$GATE_RC" = 2 ]; then
+    say "ворота отказали: $(printf '%s\n' "$GATE_OUT" | tail -1) — выкат отменён"
+    exit 1
+fi
+[ "$GATE_RC" = 0 ] || { say "ворота: занято — выкат отменён"; exit 1; }
 # Разрешение владельца ИЗРАСХОДОВАНО проходом ворот, а выкат ещё впереди.
 # Упадём дальше — вернём его: иначе владелец тратит «да» на действие, которого
 # не было, и просить приходится второй раз (так публикация уже чинилась

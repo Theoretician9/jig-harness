@@ -835,6 +835,83 @@ def проверить_публикацию_мимо_двери() -> tuple[int, 
     return bad, путей
 
 
+def проверить_гашение_по_выборке() -> tuple[int, int]:
+    """Гашение контейнеров ПО ВЫБОРКЕ с именем продукта — отказ (их ac18dac).
+
+    Улика соседней установки 17.10.2026: исполнитель погасил боевую витрину выборкой
+    `docker ps | grep <продукт> | xargs docker kill`, выкат и откат её не
+    подняли, сайт лежал ~7 минут. Имя продукта — ДАННЫЕ harness.conf
+    (PRODUCT_DIR и PRODUCT_ALIASES), поэтому стенд подаёт свой конфиг.
+
+    Граница имени — `(?![\\w-])`, не `\\b`: их 3.1 — `\\b` стоит и между «a» и
+    «-», и свой стенд `shopfront-ms2` судился как продукт. Отказ обязан назвать
+    имя продукта: код 2 от чужого правила этот случай не закрывает.
+    """
+    bad = 0
+    путей = 0
+    with tempfile.TemporaryDirectory() as tmp:
+        нет_install = str(pathlib.Path(tmp, "нет-такого.conf"))
+
+        def среда(текст: str, имя: str) -> dict:
+            конф = pathlib.Path(tmp, имя)
+            конф.write_text(текст, encoding="utf-8")
+            env = dict(os.environ)
+            env["HARNESS_CONF"] = str(конф)
+            env["HARNESS_INSTALL_CONF"] = нет_install
+            return env
+
+        по_прозвищу = среда('PRODUCT_DIR=""\nPRODUCT_ALIASES="shopfront"\n', "прозвище.conf")
+        по_каталогу = среда('PRODUCT_DIR="shopfront"\nPRODUCT_ALIASES=""\n', "каталог.conf")
+        без_продукта = среда("# продукта нет\n", "пусто.conf")
+        случаи = [
+            # (ждём, имя, команда, среда)
+            (2, "БОЛЬНОЙ ac18dac: docker stop $(docker ps --filter name=<продукт>)",
+             "docker stop $(docker ps -q --filter name=shopfront)", по_прозвищу),
+            (2, "БОЛЬНОЙ ac18dac: docker kill $(docker ps -f name=<продукт>)",
+             "docker kill $(docker ps -q -f name=shopfront)", по_прозвищу),
+            (2, "БОЛЬНОЙ ac18dac: docker rm -f по выборке, фильтр в кавычках",
+             'docker rm -f $(docker ps -aq --filter "name=shopfront")', по_прозвищу),
+            (2, "БОЛЬНОЙ ac18dac: выборка через xargs docker stop",
+             "docker ps -q --filter name=shopfront | xargs docker stop", по_прозвищу),
+            (2, "БОЛЬНОЙ ac18dac: форма аварии — docker ps | grep <продукт> | xargs docker kill",
+             "docker ps | grep shopfront | awk '{print $1}' | xargs docker kill", по_прозвищу),
+            (2, "БОЛЬНОЙ ac18dac: имя продукта из PRODUCT_DIR (так оно задано на боевой)",
+             "docker stop $(docker ps -q --filter name=shopfront)", по_каталогу),
+            (0, "их 3.1: свой стенд <продукт>-ms2 гасится — граница (?![\\w-])",
+             "docker stop $(docker ps -q --filter name=shopfront-ms2)", по_прозвищу),
+            (0, "их 3.1: стенд <продукт>-stand через xargs гасится",
+             "docker ps -q --filter name=shopfront-stand | xargs docker stop", по_прозвищу),
+            (0, "их 3.1: docker compose -p <продукт>-stand down — свой стенд",
+             "docker compose -p shopfront-stand down", по_прозвищу),
+            (0, "подчёркивание — часть имени: shopfront_x не продукт",
+             "docker stop $(docker ps -q --filter name=shopfront_x)", по_прозвищу),
+            (0, "выборка без гашения (docker logs) не задета",
+             "docker logs $(docker ps -q --filter name=shopfront)", по_прозвищу),
+            (0, "чтение списка контейнеров продукта не задето",
+             "docker ps --filter name=shopfront", по_прозвищу),
+            (0, "продукт не объявлен — правило молчит (fail-open)",
+             "docker stop $(docker ps -q --filter name=shopfront)", без_продукта),
+            # Пустой список имён собрал бы шаблон «(?:)», а он совпадает с
+            # пустым местом в любой выборке: гасить ВСЁ стало бы нельзя на
+            # установке без продукта.
+            (0, "продукт не объявлен: docker stop $(docker ps -q ) — правило молчит",
+             "docker stop $(docker ps -q )", без_продукта),
+            (0, "продукт не объявлен: docker ps -aq | xargs docker stop — правило молчит",
+             "docker ps -aq | xargs docker stop", без_продукта),
+        ]
+        for ждём, имя, cmd, env in случаи:
+            путей += 1
+            код, текст = run_вывод(cmd, env=env)
+            верно = код == ждём and (ждём == 0 or "shopfront" in текст)
+            if not верно:
+                print(f"  ПЛОХО {имя}: ждали {ждём}"
+                      f"{' и имя продукта в отказе' if ждём else ''}, вышло {код} — {cmd}")
+                bad += 1
+            else:
+                print(f"  ок    {имя}")
+    return bad, путей
+
+
 def проверить_прогон_в_сессии() -> int:
     """Прогон только фоном (указание владельца 23.08.2026).
 
@@ -1262,6 +1339,9 @@ def main() -> int:
     _плохо, _путей = проверить_публикацию_мимо_двери()
     bad += _плохо
     total += _путей
+    _плохо_г, _путей_г = проверить_гашение_по_выборке()
+    bad += _плохо_г
+    total += _путей_г
     _плохо_д, _путей_д = проверить_дверь_previous()
     _плохо_дан, _путей_дан = проверить_дверь_dannyh()
     bad += _плохо_д
@@ -1426,12 +1506,13 @@ def прогоны_ворот() -> int:
             rc, out = run_dg(env)
             итог("В-7: full — пропуск с честной строкой", rc == 0 and "не проверяется" in out, out,
                  ждёт_свободы=True)
-        # 11. В-7: --силой печатает отсутствие согласия отдельной строкой жертв
+        # 11. В-7: --силой снимает только занятость; без «да» — отказ.
+        # Согласие судится ДО занятости, поэтому путь от машины не зависит.
         with tempfile.TemporaryDirectory() as t:
             env, _ = dg_scenario(t, autonomy="semi")
             rc, out = run_dg(env, "--силой")
-            итог("В-7: --силой называет «нет согласия» жертвой",
-                 rc == 0 and "нет согласия владельца" in out, out, ждёт_свободы=True)
+            итог("В-7: --силой без «да» — отказ, --силой не снимает отсутствие согласия",
+                 rc == 1 and "нет согласия владельца" in out, out)
         # 12-13. Б-1: интерактивный claude в tmux-сессии агента — не занятость
         with tempfile.TemporaryDirectory() as t:
             env, _ = dg_scenario(t, tmux="нет-такой-сессии-731")

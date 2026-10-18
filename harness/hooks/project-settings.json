@@ -24,6 +24,10 @@
             "type": "command",
             "command": "python3 $CLAUDE_PROJECT_DIR/scripts/hooks/guard_bash.py",
             "timeout": 15
+          },
+          {
+            "type": "command",
+            "command": "python3 $CLAUDE_PROJECT_DIR/scripts/hooks/model_guard.py"
           }
         ]
       },
@@ -47,6 +51,10 @@
           {
             "type": "command",
             "command": "python3 $CLAUDE_PROJECT_DIR/scripts/check-cyrillic-in-names.py --hook"
+          },
+          {
+            "type": "command",
+            "command": "python3 $CLAUDE_PROJECT_DIR/scripts/hooks/model_guard.py"
           }
         ]
       },

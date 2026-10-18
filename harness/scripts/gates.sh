@@ -188,7 +188,7 @@ echo "=== ворота харнеса: $(date '+%d.%m %H:%M') ==="
 # висели одиннадцать минут и были сняты вручную, ни одной проверки не показав.
 # Пустой индекс — законный ответ «сверять нечего»: настоящую сверку делает
 # pre-commit, у которого список staged-файлов есть всегда.
-проверка "сверка пакета"  bash -c 'git diff --cached --name-only | python3 scripts/compare-with-package.py'
+проверка "сверка пакета"  bash -c 'git -c core.quotepath=false diff --cached --name-only | python3 scripts/compare-with-package.py'
 # Что обходить не надо — из конфига (GATES_SKIP_PATHS): каталог продукта,
 # вшитый в ворота харнеса, на чужом проекте не исключил бы ничего, зато
 # гейт полез бы в чужие зависимости (разбор кода 11.09.2026).
@@ -347,6 +347,19 @@ done
 проверка "доска"          python3 scripts/test_board.py
 проверка "лимит-журнал"   python3 scripts/limit-in-log.py --selftest
 проверка "лимит-сторож"   bash scripts/test_limit_watch.sh
+проверка "тишина-лимита"  bash scripts/test_limit_silence.sh
+проверка "дверь-сторожа"  bash scripts/test_warden_channel_door.sh
+# Смена сессии без написанной передачи невозможна (владелец 18.10.2026).
+проверка "дверь-ротации"  bash scripts/test_warden_handover_gate.sh
+# Важный шаг делается моделью из таблицы, а не какой случилась (владелец 18.10).
+проверка "модель-шага"    python3 scripts/hooks/test_model_guard.py
+проверка "носитель-хуков" python3 scripts/test_live_check_hook.py
+проверка "носитель-входящих" python3 scripts/test_live_check_inbox.py
+проверка "отправители"    python3 scripts/check-owner-senders.py
+проверка "отправители-сам" python3 scripts/check-owner-senders.py --selftest
+# Остатки в пакете и ключи образца конфига: оба гейта судят дерево, а не пробу.
+проверка "остатки пакета" python3 scripts/check-package-leftovers.py
+проверка "ключи образца"  python3 scripts/check-sample-config-keys.py
 проверка "память-в-гит"   bash scripts/test_memory_commit.sh
 # Диспетчер обязан будить смену, когда работы у неё нет: 28.09.2026
 # задача владельца ждала «рубежа», которого не было.
@@ -369,6 +382,16 @@ done
 # классам. Без вызова из ворот пробы не сторожат ничего.
 проверка "обёртка живой проверки" bash scripts/test_live_check_sh.sh
 проверка "классы живой проверки"  python3 scripts/test_live_check_classes.py
+проверка "след живой проверки"   python3 scripts/test_live_check_trace.py
+проверка "тексты мутаций"        bash scripts/test_probe_mutations.sh
+проверка "больная половина"      python3 scripts/test_live_check_sick.py
+проверка "живая проверка демонов" python3 scripts/test_live_check_daemon.py
+проверка "живая проверка скилов" python3 scripts/test_live_check_skill.py
+проверка "живой вызов C2"        python3 scripts/test_live_check_tool.py
+# Сверка текстов — в ОБЫЧНОМ прогоне, а не за флагом --всё: мутация с
+# отставшим текстом не краснеет и не жалуется, и круг правок оставляет её
+# позади незамеченной (13.10.2026 — десять из 78).
+проверка "мутации стоят"         bash scripts/mutation-probe.sh --сверить-тексты
 # Догоняние публичной ветки: пока тот же общий гит правят две машины владельца,
 # расхождение повторяется, и переносить его правки руками — терять их молча.
 проверка "догоняние публичной" python3 scripts/catch-up-public.py --selftest
@@ -473,6 +496,21 @@ if [ "${1:-}" = "--всё" ]; then
     # Объявленный продукт выкатывается только через deploy.sh: отказ при пустой
     # секции STACK_*, тег и секреты по репозиторию продукта, откат при красном health.
     проверка "выкат продукта"   bash scripts/test_deploy_product.sh
+    # Пробы правок с соседней установки (18.10.2026): каждая судит свой механизм
+    # на стенде, больной случай первым.
+    проверка "дверь-демонов"    bash scripts/test_demon_channel_door.sh
+    проверка "коммит карты"     bash scripts/test_devmap_selfheal.sh
+    проверка "stop-хук"         bash scripts/hooks/test_stop_reminder.sh
+    проверка "вид работы"       bash scripts/test_model_for.sh
+    проверка "имена-задачи"     python3 scripts/test_check_file_names.py
+    проверка "спутник отказов"  python3 scripts/test_inbox_digest.py
+    проверка "остатки-проба"    python3 scripts/test_package_leftovers.py
+    проверка "ключи-проба"      python3 scripts/test_sample_config_keys.py
+    проверка "голосовые"        bash scripts/test_install_voice.sh
+    проверка "вердикт-согласия" python3 scripts/test_patterns_verdict.py
+    проверка "одобрение-спеки"  python3 scripts/test_spec_approval_forms.py
+    проверка "набор-памяти"     python3 scripts/test_memory_to_package.py
+    проверка "отправители-ход"  python3 scripts/test_owner_senders.py
     for f in scripts/work-queue.py scripts/compare-with-package.py \
                 scripts/download_attachment.py scripts/orders.py \
                 scripts/check-cyrillic-in-names.py \

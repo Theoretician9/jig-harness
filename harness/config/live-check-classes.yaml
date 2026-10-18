@@ -1,3 +1,44 @@
+# ПОПРАВКА ТРЕТЬЯ 17.10.2026, одиннадцать механизмов C1 → C2. Признак судьи:
+# механизм СУЩЕСТВУЕТ, чтобы отказывать («судит», «не пропускает», «краснеет» в
+# его роли). У этих одиннадцати роль говорит «отвечает на один вопрос»,
+# «считает», «показывает», «переводит», «запускает чужие проверки», «уносит
+# цитату» — это инструменты, и предикат судьи («больной случай плюс здоровый»)
+# к ним неприменим: ломать в копии дерева нечего, а отказ у них не цель, а край.
+# Носитель класса C2 заведён той же сменой: scripts/live-check-tool.py.
+# ПОПРАВКА КЛАССА 17.10.2026, признак написан, а не подразумевается.
+# В Task 0 класс раздавался по полю «вид» реестра, и «вид: гейт» достался и
+# приборам. Признак судьи (C1): механизм СУЩЕСТВУЕТ, чтобы отказывать —
+# его роль в реестре говорит «судит», «не пропускает», «краснеет». Прибор и
+# сборщик (C2) существуют, чтобы показывать и собирать; предикат судьи
+# («больной случай плюс здоровый») к ним неприменим, и спека §3.1 называет
+# это прямо: среди «158 гейтов» 11 библиотек и 4 сборщика.
+# ПОПРАВКА ВТОРАЯ 17.10.2026, пять механизмов. Живая проверка дошла до хуков и
+# встала: у хука оболочки при РАЗРЕШЕНИИ нет вывода вовсе — он пропускает
+# молча, — и предикат C1 («больной случай краснеет, затем здоровый зеленеет»)
+# доказывался бы моим собственным эхом. Так и вышло в тот же час: запись
+# guard_bash.py была снята, потому что её цитатой служило эхо «[страж] команда
+# разрешена», которого страж не печатал. Хуки оболочки — это класс B1 («совершено
+# перехватываемое действие и увидено решение»), и спека так и говорит.
+# Переведены: guard_bash.py, agent_skill_guard.py, skill_log.sh → B1;
+# map-from-message.py (превращает ВХОДЯЩЕЕ сообщение в карточку) → B2;
+# model-for.sh (отвечает моделью по таблице, отказывать ему нечего) → C2.
+# Остаток той же беды назван карточкой hr.klassy-zhivoj-proverki-razduty: из 62
+# непроверенных C1 роль в реестре называет судьёй 24.
+# Поправлены четыре: осмотр смены (показывает экран), очередь работы (считает
+# и расставляет), прибор одобрения спек (держит развилку владельца), сборщик
+# скилов (собирает из глав). Ни один из них не затем, чтобы отказывать.
+
+причины_непроверяемого:
+  # Механизм судит окружение ПРОДУКТА, а продукт уехал с машины
+  # 15.10.2026 по слову владельца: звать его не на чем.
+  - продукт уехал с машины
+  # Повода нет на ЭТОЙ установке: мобильная сборка без приложения,
+  # внешний пинг без второго сервера.
+  - повода на этой машине нет
+  # Живой вызов необратим на производстве (снос базы, тревога
+  # владельцу): проверяется на стенде, а не живьём.
+  - необратим на производстве
+
 # Класс живой проверки механизма — ДАННЫЕ, не код.
 #
 # Спека docs/specs/2026-10-15-живая-проверка-механизмов.md §3.1: предикат
@@ -43,7 +84,7 @@
 
 классы:
   "harness/BUILD-SKILLS.py":
-    класс: C1
+    класс: C2
   "harness/demons/acceptance-watch.sh":
     класс: A1
   "harness/demons/backup.sh":
@@ -91,7 +132,8 @@
   "harness/demons/update-watch.sh":
     класс: A1
   "harness/panel/client.py":
-    класс: C1
+    класс: C2
+    почему: "мост бота к странице — отдаёт ссылку входа и отзывает её"
   "harness/panel/confirmation.py":
     класс: C1
   "harness/panel/login.py":
@@ -101,9 +143,11 @@
   "harness/panel/server.py":
     класс: A2
   "harness/panel/settings.py":
-    класс: C1
+    класс: C2
+    почему: "один разбор файлов настроек на всю панель — отвечает значениями"
   "harness/panel/state.py":
-    класс: C1
+    класс: C2
+    почему: "витрина состояния — снимает и ПОКАЗЫВАЕТ, какая задача идёт и свежи ли метки сторожей"
   "harness/panel/test_confirmation.py":
     класс: D
   "harness/panel/test_login.py":
@@ -117,7 +161,8 @@
   "harness/panel/test_task_board.py":
     класс: D
   "harness/panel/vid.py":
-    класс: C1
+    класс: C2
+    почему: "облик страницы — собирает разметку, судить ему нечего"
   "harness/skills/android-env/SKILL.md":
     класс: E
   "harness/skills/deploy-and-smoke/SKILL.md":
@@ -163,17 +208,23 @@
   "scripts/acceptance.py":
     класс: C1
   "scripts/agent-level.py":
-    класс: C1
+    класс: C2
+    почему: "отвечает, звать ли помощника на это дело по уровню владельца"
   "scripts/agent-lock-check.py":
     класс: C1
   "scripts/archive-map.py":
     класс: C1
   "scripts/ask-the-model.py":
-    класс: C1
+    класс: C2
   "scripts/attention-word.py":
     класс: B2
+  # Спека §3.1 числит доску в B2 («обработчик входящих»), но входящих она не
+  # разбирает вовсе: её вход по замыслу — слова СМЕНЫ («я пишу факт словами,
+  # код читает и действует»), и ЗАПИСАННОЕ слово владельца ей подать некуда.
+  # Поэтому класс C2 — живой вызов с настоящим входом, где вывод читает ЧУЖОЙ
+  # механизм (осмотр старта сессии), а не сама доска (решение смены 18.10.2026).
   "scripts/board.py":
-    класс: B2
+    класс: C2
   "scripts/bot-commands.py":
     класс: C1
   "scripts/build-board.py":
@@ -191,7 +242,8 @@
   "scripts/capability.sh":
     класс: C1
   "scripts/catch-up-public.py":
-    класс: C1
+    класс: C2
+    почему: "существует, чтобы СЛИВАТЬ чужую публичную ветку и мерить расхождение; отказ при конфликте — исход работы, а не охраняемое правило"
   "scripts/check-channel-messages.py":
     класс: C1
   "scripts/check-commands-in-docs.py":
@@ -268,6 +320,12 @@
     класс: C1
   "scripts/check-seed-templates.py":
     класс: C1
+  "scripts/check-owner-senders.py":
+    класс: C1
+  "scripts/check-package-leftovers.py":
+    класс: C1
+  "scripts/check-sample-config-keys.py":
+    класс: C1
   "scripts/check-signals.py":
     класс: C1
   "scripts/check-skill-usage.py":
@@ -292,7 +350,8 @@
   "scripts/deploy_guard.py":
     класс: C1
   "scripts/download_attachment.py":
-    класс: C1
+    класс: C2
+    почему: "забирает присланный файл из очереди — делает, а не судит"
   "scripts/drop-database.sh":
     класс: C3
     причина: "удаляет базу"
@@ -302,34 +361,37 @@
   "scripts/export-map-to-product.py":
     класс: C1
   "scripts/extensions.py":
-    класс: C1
+    класс: C2
+    почему: "единственная точка установки плагинов и MCP — ставит и показывает состояние, а условия держат данные extensions.yaml"
   "scripts/firewall-docker-ports.sh":
     класс: C1
   "scripts/fix-claude-mem-project.py":
-    класс: C1
+    класс: C2
+    почему: "правит подпись проекта в базе автопамяти — делает, а не судит"
   "scripts/gates.sh":
     класс: C3
     причина: "полный прогон 20-40 минут, пишет владельцу о красном"
   "scripts/handover-check.sh":
     класс: C1
   "scripts/hooks/agent_skill_guard.py":
-    класс: C1
+    класс: B1
   "scripts/hooks/guard_bash.py":
-    класс: C1
+    класс: B1
   "scripts/hooks/pause_guard.py":
     класс: B1
   "scripts/hooks/pre_compact_handover.sh":
     класс: B1
   "scripts/hooks/session_state.sh":
-    класс: C1
+    класс: C2
   "scripts/hooks/skill_log.sh":
-    класс: C1
+    класс: B1
   "scripts/hooks/stop_reminder.sh":
     класс: B1
   "scripts/hooks/test_guard_bash.py":
     класс: D
   "scripts/import-product-trace.py":
-    класс: C1
+    класс: C2
+    почему: "ввозит след карты продукта — отвечает числами переноса"
   "scripts/inbox-digest.py":
     класс: B2
   "scripts/install-docker.sh":
@@ -342,7 +404,7 @@
   "scripts/invariant-coverage.py":
     класс: C1
   "scripts/language-level.py":
-    класс: C1
+    класс: C2
   "scripts/lib/cards.py":
     класс: C2
   "scripts/lib/channel_queue.py":
@@ -361,6 +423,8 @@
     класс: C2
   "scripts/lib/panel_writer.py":
     класс: C2
+  "scripts/lib/pane.sh":
+    класс: C2
   "scripts/lib/patterns.py":
     класс: C2
   "scripts/lib/selftest_cases.py":
@@ -368,21 +432,24 @@
   "scripts/lib/selftest_cases.sh":
     класс: C2
   "scripts/limit-in-log.py":
-    класс: C1
+    класс: C2
   "scripts/limit_mark.py":
-    класс: C1
+    класс: C2
+    почему: "формат метки «работа встала» — один писатель и один читатель"
   "scripts/map-from-message.py":
-    класс: C1
+    класс: B2
   "scripts/memory-to-package.py":
-    класс: C1
+    класс: C2
+    почему: "решает, какие записи памяти уедут в стартовый набор — отвечает списком"
   "scripts/miss.py":
-    класс: C1
+    класс: C2
+    почему: "журнал известных пропусков — пишет и показывает записи"
   "scripts/model-for.sh":
-    класс: C1
+    класс: C2
   "scripts/model-steps.py":
     класс: C1
   "scripts/model.sh":
-    класс: C1
+    класс: C2
   "scripts/mutation-probe.sh":
     класс: D
   "scripts/nginx-panel.sh":
@@ -394,9 +461,10 @@
   "scripts/panel-unit.sh":
     класс: C1
   "scripts/pause.py":
-    класс: C1
+    класс: C2
+    почему: "переключатель паузы — пишет и читает метку, отказывать ему нечему"
   "scripts/pipeline.py":
-    класс: C1
+    класс: C2
   "scripts/pre-commit-gate.sh":
     класс: C1
   "scripts/probe-login-without-failure.sh":
@@ -411,21 +479,28 @@
     класс: C3
     причина: "публикует сборку в общий гит — наружу и навсегда"
   "scripts/quiet-window.py":
-    класс: C1
+    класс: C2
+    почему: "отвечает, открыто ли окно тишины; код 1 — это ОТВЕТ, а не отказ"
   "scripts/rename-to-latin.py":
-    класс: C1
+    класс: C2
+    почему: "переводит имена и правит ссылки — отвечает планом замен, а не отказом; имена сторожит гейт check-file-names.py"
   "scripts/restore-probe.sh":
     класс: D
   "scripts/revision-batches.py":
-    класс: C1
+    класс: C2
+    почему: "отвечает, что читать сейчас — порядок областей ревизии"
   "scripts/revision-findings.py":
-    класс: C1
+    класс: C2
   "scripts/secret-intake.py":
     класс: B2
   "scripts/spec_approval.py":
-    класс: C1
+    класс: C2
+  # Своего текста прибор не печатает — только число минут, и цитировать
+  # его нечего. Зато его зовёт ДРУГОЙ живой механизм (сторож лимита,
+  # ежеминутно) и печатает ЕГО число в своей строке: это предикат A2
+  # «зовущий», тот же, которым доказана проверка гигиены сервера.
   "scripts/stall-in-log.py":
-    класс: C1
+    класс: A2
   "scripts/start-agent.sh":
     класс: C3
     причина: "поднимает смену и может убить идущую"
@@ -469,7 +544,47 @@
     класс: D
   "scripts/test_late_exit_watch.sh":
     класс: D
+  "scripts/test_limit_silence.sh":
+    класс: D
   "scripts/test_limit_watch.sh":
+    класс: D
+  "scripts/live-check-hook.py":
+    класс: C2
+  "scripts/test_live_check_hook.py":
+    класс: D
+  "scripts/live-check-inbox.py":
+    класс: C2
+  "scripts/test_live_check_inbox.py":
+    класс: D
+  "scripts/test_warden_channel_door.sh":
+    класс: D
+  "scripts/test_demon_channel_door.sh":
+    класс: D
+  "scripts/test_devmap_selfheal.sh":
+    класс: D
+  "scripts/hooks/test_stop_reminder.sh":
+    класс: D
+  "scripts/test_model_for.sh":
+    класс: D
+  "scripts/test_check_file_names.py":
+    класс: D
+  "scripts/test_inbox_digest.py":
+    класс: D
+  "scripts/test_package_leftovers.py":
+    класс: D
+  "scripts/test_sample_config_keys.py":
+    класс: D
+  "scripts/test_install_voice.sh":
+    класс: D
+  "scripts/test_patterns_verdict.py":
+    класс: D
+  "scripts/test_spec_approval_forms.py":
+    класс: D
+  "scripts/test_memory_to_package.py":
+    класс: D
+  "scripts/test_owner_senders.py":
+    класс: D
+  "scripts/test_warden_handover_gate.sh":
     класс: D
   "scripts/test_memory_commit.sh":
     класс: D
@@ -518,29 +633,33 @@
   "scripts/tg_send.sh":
     класс: C1
   "scripts/tone-measurement.py":
-    класс: C1
+    класс: C2
+    почему: "превращает архив канала в числа и образцы речи владельца"
   "scripts/transcribe_voice.py":
-    класс: C1
+    класс: C2
+    почему: "переводит голосовое владельца в текст — отвечает текстом"
   "scripts/transliterate.py":
-    класс: C1
+    класс: C2
   "scripts/update.py":
     класс: A2
   "scripts/urgency.py":
     класс: B2
   "scripts/verify-mechanisms.py":
-    класс: C1
+    класс: C2
   "scripts/version.py":
-    класс: C1
+    класс: C2
   "scripts/vitrina_status.py":
-    класс: C1
+    класс: C2
+    почему: "разбор для замка публикации — отвечает СПИСКОМ незакрытых задач, а отказывает замок scripts/publish.sh"
   "scripts/weed-the-map.py":
     класс: C1
   "scripts/weed-the-orders.py":
-    класс: C1
+    класс: C2
   "scripts/who-is-on-port.py":
-    класс: C1
+    класс: C2
+    почему: "называет хозяина порта — отвечает, а не отказывает"
   "scripts/work-queue.py":
-    класс: C1
+    класс: C2
   "scripts/write-key.py":
     класс: C1
   "scripts/write-memory.py":
@@ -555,4 +674,26 @@
   "scripts/test_live_check_sh.sh":
     класс: D
   "scripts/test_live_check_classes.py":
+    класс: D
+  "scripts/live-check-daemon.py":
+    класс: C2
+    почему: "прибор живой проверки сторожей — читает журнал их запуска и отвечает, доказан прогон или нет"
+  "scripts/test_live_check_daemon.py":
+    класс: D
+  "scripts/live-check-skill.py":
+    класс: C2
+    почему: "прибор живой проверки правил работы — читает журнал вызовов и отвечает, доказан вызов в этой задаче или нет"
+  "scripts/test_live_check_skill.py":
+    класс: D
+  "scripts/live-check-tool.py":
+    класс: C2
+  "scripts/test_live_check_tool.py":
+    класс: D
+  "scripts/live-check-sick.py":
+    класс: C2
+  "scripts/test_live_check_sick.py":
+    класс: D
+  "scripts/test_probe_mutations.sh":
+    класс: D
+  "scripts/test_live_check_trace.py":
     класс: D

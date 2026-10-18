@@ -42,8 +42,20 @@ flock -n 9 || { say "прогон уже идёт (лок $LOCK_FILE) — вых
 tg_send() {  # успех только при ok:true (норма 01-SPEC §7)
     local text="$1"
     if [ -x "$PROJECT_DIR/scripts/tg_send.sh" ]; then
-        if "$PROJECT_DIR/scripts/tg_send.sh" "$text"; then return 0; fi
-        say "tg_send.sh отказал — пробую прямой curl"
+        # Дверь зовётся БЕЗ ключей: при лимите она кладёт весть в очередь
+        # досыла и отвечает нулём — нарушения гигиены (И-3) обязаны дойти,
+        # пусть и после обновления.
+        # Отказ двери тексту (потолок длины сторожа канала) — не повод её
+        # обойти: отчёт — документ, он уходит вложением через ту же дверь.
+        # Прямой путь ниже — только когда двери нет вовсе.
+        "$PROJECT_DIR/scripts/tg_send.sh" "$text" && return 0
+        local doc="$LOG_DIR/гигиена-$(date +%F).md"
+        printf '%s\n' "$text" > "$doc"
+        say "текстом не прошло — шлю вложением $doc"
+        "$PROJECT_DIR/scripts/tg_send.sh" --file "$doc" \
+            --caption "Гигиена сервера: отчёт во вложении" && return 0
+        say "tg_send.sh отказал — сообщение не доставлено"
+        return 1
     fi
     if [ -z "${TG_CHAT_ID:-}" ] || [ ! -s "${TG_TOKEN_FILE:-/nonexistent}" ]; then
         say "КАНАЛ НЕ НАСТРОЕН — нарушения гигиены владельцу НЕ ушли"

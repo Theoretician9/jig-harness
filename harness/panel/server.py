@@ -250,8 +250,11 @@ def сказать_владельцу(текст: str) -> None:
     ушло = False
     if отправка.exists():
         try:
-            ушло = subprocess.run(["bash", str(отправка), текст], timeout=30,
-                                  capture_output=True).returncode == 0
+            # «--несмотря-на-лимит»: панель говорит о ДЕЙСТВИИ владельца —
+            # вход запасным кодом, промахи входа. Такое сообщение обязано дойти
+            # сразу: придержанное до обновления лимита, оно опоздает на часы.
+            ушло = subprocess.run(["bash", str(отправка), "--несмотря-на-лимит", текст],
+                                  timeout=30, capture_output=True).returncode == 0
         except (OSError, subprocess.SubprocessError):
             ушло = False
     if ушло:

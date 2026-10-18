@@ -252,5 +252,134 @@ itog "0" "$RC" "выкат с живой ручкой выходит нулём"
 itog "да" "$(has "$VYVOD" "deploy ok")" "успех объявлен"
 itog "нет" "$(retagged)" "отката не было"
 
+echo "── 9. БОЛЬНОЙ СЛУЧАЙ: запуск ОТНОСИТЕЛЬНЫМ путём — sg получает путь к самому deploy.sh ──"
+# Перезапуск под sg docker зовёт скрипт заново по его пути. Путь брался
+# `readlink -f "$0"` ПОСЛЕ `cd "$PRODUCT_TREE"`, и относительный «./scripts/
+# deploy.sh» разрешался внутри дерева ПРОДУКТА: файла там нет, перезапуск шёл
+# в пустоту. Свои sg и getent в отдельном PATH: случай 3 судит настоящий sg.
+SGBIN=$(mktemp -d -p "$STAND")
+cp "$FAKEBIN/docker" "$SGBIN/docker"
+cat > "$SGBIN/sg" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$3" > "$SG_JOURNAL"
+exit 0
+SH
+cat > "$SGBIN/getent" <<'SH'
+#!/usr/bin/env bash
+printf 'docker:x:999:%s\n' "$(id -un)"
+SH
+chmod +x "$SGBIN/sg" "$SGBIN/getent"
+conf "STACK_BUILD_CMD=\"echo sborka\"
+STACK_IMAGES=\"proba-api\"
+STACK_HEALTH_URL=\"$DEAD_URL\""
+svezhee_da
+# Каталог скриптов есть и в продукте (пустой, гит его не видит): так
+# ошибочный путь разрешается в ЧУЖОЕ дерево, а не в пустоту, и это видно.
+mkdir -p "$PRODUCT/$(basename "$HERE")"
+SAM="$(readlink -f "$HERE/deploy.sh")"
+VYVOD=$(cd "$(dirname "$HERE")" && env -i PATH="$SGBIN:$FAKEBIN:/usr/bin:/bin" HOME="$STAND" \
+        DOCKER_DEAD=1 SG_JOURNAL="$STAND/sg.log" \
+        HARNESS_INSTALL_CONF="$STAND/install.conf" HARNESS_CONF="$STAND/harness.conf" \
+        timeout 120 bash "./$(basename "$HERE")/deploy.sh" --силой 2>&1)
+RC=$?
+printf '%s\n' "$VYVOD" | sed 's/^/      /' | tail -3
+itog "да" "$(has "$VYVOD" "перезапуск под sg docker")" "ветка sg достигнута"
+SG_STROKA="$(cat "$STAND/sg.log" 2>/dev/null || true)"
+printf '      строка sg: %s\n' "$SG_STROKA"
+itog "да" "$(has "$SG_STROKA" "'$SAM'")" "sg зовёт сам deploy.sh ($SAM), а не путь в дереве продукта"
+itog "нет" "$(has "$SG_STROKA" "$PRODUCT/")" "в строке sg нет пути внутри продукта"
+itog "да" "$(has "$SG_STROKA" "'--силой'")" "ключ выката доехал до перезапуска"
+
+run_copy() {  # $1 — каталог копии скриптов, дальше ключи deploy.sh; код — в RC
+    local kopiya="$1"
+    shift
+    VYVOD=$(PATH="$FAKEBIN:$PATH" DOCKER_JOURNAL="$STAND/docker.log" \
+            HARNESS_INSTALL_CONF="$STAND/install.conf" HARNESS_CONF="$STAND/harness.conf" \
+            timeout 300 bash "$kopiya/deploy.sh" "$@" 2>&1)
+    RC=$?
+    printf '%s\n' "$VYVOD" | sed 's/^/      /' | tail -3
+}
+sborok() { grep -c '^sborka$' "$STAND/poryadok" 2>/dev/null || true; }
+soglasie_zhivo() {  # спросить ворота стенда, не тратя: дожило ли «да»
+    PATH="$FAKEBIN:$PATH" HARNESS_INSTALL_CONF="$STAND/install.conf" HARNESS_CONF="$STAND/harness.conf" \
+        timeout 60 python3 "$SCRIPTS_COPY/deploy_guard.py" --только-согласие --не-тратить 2>&1 \
+        | grep -q "согласие владельца есть" && echo да || echo нет
+}
+
+# Окно «той же попытки» закрыто (-1): иначе второй выкат шёл бы законно как
+# продолжение первого, и расход «да» прятался бы за повтором.
+ODNO_DA_CONF="$ORDER_CONF
+STACK_MIGRATE_CMD=\"echo migracii >> $STAND/poryadok\"
+STACK_RELEASE_CMD=\"echo peresozdanie >> $STAND/poryadok\"
+STACK_HEALTH_CMD=\"true\"
+DEVMAP_AUDIT_DAYS=0
+CONFIRM_RETRY_SEC=-1"
+
+echo "── 10. БОЛЬНОЙ СЛУЧАЙ: одно «да» — один выкат; ключи ворот deploy.sh дальше не пропускает ──"
+# Ворота знают служебные ключи --вернуть-согласие, --только-согласие и
+# --не-тратить: ими зовут их другие двери. Пропусти deploy.sh их воротам, и
+# выкат идёт, а «да» остаётся целым или возвращается — выкатов сколько угодно.
+conf "$ODNO_DA_CONF"
+: > "$STAND/docker.log"; : > "$STAND/poryadok"
+svezhee_da
+sleep 1
+run_copy "$SCRIPTS_COPY"
+itog "0" "$RC" "первый выкат на свежем «да» выходит нулём"
+itog "1" "$(sborok)" "первый выкат собрал образ"
+for kluchi in "--вернуть-согласие" "--только-согласие --не-тратить" "--не-тратить"; do
+    sleep 1
+    # shellcheck disable=SC2086
+    run_copy "$SCRIPTS_COPY" $kluchi
+    pervyj="${kluchi%% *}"
+    itog "да" "$([ "$RC" != 0 ] && echo да || echo нет)" "deploy.sh $kluchi отказан (код $RC)"
+    itog "да" "$(has "$VYVOD" "незнакомый ключ $pervyj")" "deploy.sh $kluchi: отказ называет «незнакомый ключ $pervyj»"
+done
+itog "1" "$(sborok)" "служебные ключи ворот не дали ни одной сборки сверх первой"
+itog "нет" "$(soglasie_zhivo)" "«да» после выката потрачено, а не возвращено"
+sleep 1
+run_copy "$SCRIPTS_COPY"
+itog "1" "$RC" "второй выкат на том же «да» отказан"
+itog "да" "$(has "$VYVOD" "нет согласия")" "второй выкат отказан словами «нет согласия»"
+itog "1" "$(sborok)" "за всю серию на одном «да» — одна сборка"
+
+echo "── 10б. контроль: незнакомый ключ назван по имени, а не «занято» ──"
+sleep 1
+svezhee_da
+run_copy "$SCRIPTS_COPY" --help
+itog "1" "$RC" "deploy.sh --help — код 1"
+itog "да" "$(has "$VYVOD" "незнакомый ключ --help")" "отказ называет «незнакомый ключ --help»"
+itog "нет" "$(has "$VYVOD" "занято")" "отказ не называет причиной «занято»"
+itog "да" "$(soglasie_zhivo)" "отказ по ключу «да» не сжёг"
+
+echo "── 10в. БОЛЬНОЙ СЛУЧАЙ: --силой без «да» — отказ «нет согласия», --силой снимает только занятость ──"
+conf "$ODNO_DA_CONF"
+: > "$STAND/poryadok"
+rm -f "$STAND/zhurnal/confirmations.jsonl" "$STAND/zhurnal/согласие.json"
+sleep 1
+run_copy "$SCRIPTS_COPY" --силой
+itog "1" "$RC" "deploy.sh --силой без «да» — код 1"
+itog "да" "$(has "$VYVOD" "нет согласия")" "отказ называет «нет согласия»"
+itog "нет" "$(has "$VYVOD" "пойдёт по живому")" "отсутствие согласия не числится занятостью, которую снимает --силой"
+itog "0" "$(sborok)" "без «да» ни одной сборки"
+
+echo "── 11. ворота отказали разбором ключей (код 2) — причина их словами, не «занято» ──"
+# Ворота-заглушка с кодом 2: ветку судит её собственный вход, каким бы ключом
+# deploy.sh ни звал ворота.
+KOPIYA_KOD2="$STAND/scripts-kod2"
+mkdir -p "$KOPIYA_KOD2"
+cp "$HERE/deploy.sh" "$HERE/check-secrets.sh" "$KOPIYA_KOD2/"
+cp -r "$HERE/lib" "$KOPIYA_KOD2/"
+printf 'print("незнакомый ключ --proba-zaglushki; известны: --силой")\nraise SystemExit(2)\n' \
+    > "$KOPIYA_KOD2/deploy_guard.py"
+conf "$ODNO_DA_CONF"
+: > "$STAND/poryadok"
+svezhee_da
+sleep 1
+run_copy "$KOPIYA_KOD2"
+itog "1" "$RC" "код 2 ворот — выкат отменён кодом 1"
+itog "да" "$(has "$VYVOD" "ворота отказали: незнакомый ключ --proba-zaglushki")" "причина названа словами ворот"
+itog "нет" "$(has "$VYVOD" "ворота: занято")" "отказ разбора не выдан за «занято»"
+itog "0" "$(sborok)" "после отказа ворот ни одной сборки"
+
 printf '\nВЫКАТ-ПРОДУКТА: путей %d, неудач %d\n' "$paths" "$fails"
 [ "$fails" -eq 0 ]

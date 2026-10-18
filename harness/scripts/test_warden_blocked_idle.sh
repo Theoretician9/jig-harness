@@ -30,9 +30,16 @@ for f in work-queue.py limit_mark.py limit-in-log.py stall-in-log.py; do
     cp "$HERE/$f" "$T/project/scripts/"
 done
 cp "$HERE"/lib/*.py "$HERE/lib/config.sh" "$T/project/scripts/lib/"
+# Подставной канал повторяет разбор доводов БОЕВОЙ двери: ключи исхода при
+# лимите («--несмотря-на-лимит», «--не-досылать») идут ПЕРЕД текстом, и
+# редакция, писавшая «$1», стала записывать в канал сам ключ.
 cat > "$T/project/scripts/tg_send.sh" <<KANAL
 #!/usr/bin/env bash
-printf '%s\n' "\$1" >> "$T/kanal.txt"
+for A in "\$@"; do
+    case "\$A" in --*) continue ;; esac
+    printf '%s\n' "\$A" >> "$T/kanal.txt"
+    break
+done
 KANAL
 chmod +x "$T/project/scripts/tg_send.sh"
 TR_DIR="$T/projects/${T//\//-}-project"

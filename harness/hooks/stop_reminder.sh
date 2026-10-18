@@ -133,7 +133,29 @@ PYEOF
     fi
 fi
 
-dirty=$(git status --porcelain 2>/dev/null | grep -vc '^??' || true)
+# Файлы, которые пишет демон, — не работа смены: список путей — данные
+# (DAEMON_OWNED_PATHS в harness.conf, «/» на конце — каталог целиком). Ключа
+# нет — список пуст, и считается всё.
+dirty=$(git status --porcelain -z 2>/dev/null \
+  | python3 -c '
+import sys
+владеет = sys.argv[1].split()
+записи = sys.stdin.buffer.read().decode("utf-8", "replace").split("\0")
+счёт, i = 0, 0
+while i < len(записи):
+    запись = записи[i]
+    i += 1
+    if len(запись) < 4:
+        continue
+    if запись[0] in "RC":
+        i += 1
+    путь = запись[3:]
+    if запись.startswith("??"):
+        continue
+    if any(путь.startswith(в) if в.endswith("/") else путь == в for в in владеет):
+        continue
+    счёт += 1
+print(счёт)' "${DAEMON_OWNED_PATHS:-}" 2>/dev/null || echo 0)
 [ "${dirty:-0}" -gt 0 ] && msgs+=("изменённых файлов без коммита: $dirty")
 
 # Протухшая передача: вердикт даёт scripts/handover-check.sh — ЕДИНЫЙ источник

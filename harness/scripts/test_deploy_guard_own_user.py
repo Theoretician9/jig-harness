@@ -40,13 +40,30 @@ def судить(зачем: str, вышло, ждём) -> None:
         print(f"  ПЛОХО {зачем}: вышло {вышло!r}, ждали {ждём!r}")
 
 
-def ворота(двор: pathlib.Path, свой_uid: str | None = None) -> str:
-    среда = dict(os.environ, HARNESS_LOG_DIR=str(двор), DEPLOY_BUSY_MIN_SEC="0")
+def стендовый_конфиг(двор: pathlib.Path) -> pathlib.Path:
+    """Живой harness.conf плюс PUSH_NEEDS_OWNER=0 последней строкой (последняя
+    побеждает): ответ ворот «можно» иначе зависит от ручки согласия машины, и
+    проба на установке с PUSH_NEEDS_OWNER=1 краснела бы не от своего правила."""
+    sys.path.insert(0, str(КОРЕНЬ / "scripts" / "lib"))
+    import config as конф
+    живой = pathlib.Path(конф.путь_harness_conf())
+    текст = живой.read_text(encoding="utf-8") if живой.is_file() else ""
+    свой = двор / "harness.conf"
+    свой.write_text(текст + "\nPUSH_NEEDS_OWNER=0\n", encoding="utf-8")
+    return свой
+
+
+def ворота(двор: pathlib.Path, свой_uid: str | None = None) -> tuple[int, str]:
+    """(код, ответ) ворот. Код судится вместе со словом: незнакомый ключ
+    отвечает rc 2 без слова «занято», и случай «чужой не держит» зеленел на
+    отказе разбора."""
+    среда = dict(os.environ, HARNESS_LOG_DIR=str(двор), DEPLOY_BUSY_MIN_SEC="0",
+                 HARNESS_CONF=str(стендовый_конфиг(двор)))
     if свой_uid is not None:
         среда["HARNESS_OWN_UID"] = свой_uid
-    готово = subprocess.run([sys.executable, str(ПРИБОР), "push"],
+    готово = subprocess.run([sys.executable, str(ПРИБОР), "--действие", "push"],
                             capture_output=True, text=True, env=среда, check=False)
-    return готово.stdout + готово.stderr
+    return готово.returncode, готово.stdout + готово.stderr
 
 
 with tempfile.TemporaryDirectory() as врем:
@@ -72,15 +89,15 @@ with tempfile.TemporaryDirectory() as врем:
     # Без этого зелень второго случая не стоит ничего: ворота могли не увидеть
     # процесс вовсе (не то имя, не тот порог), и «чужой не мешает» вышло бы
     # само собой.
-    свой = ворота(двор)
-    судить("БОЛЬНОЙ СЛУЧАЙ: своя долгая работа claude — это занятость",
-           f"процесс {чужой.pid}" in свой, True)
+    код, свой = ворота(двор)
+    судить("БОЛЬНОЙ СЛУЧАЙ: своя долгая работа claude — это занятость (rc 1)",
+           (код, f"занято: процесс {чужой.pid}" in свой), (1, True))
 
     # Тот же живой процесс, но ворота считают своим ДРУГОГО владельца — значит
     # этот процесс для них чужой, как агент второй установки.
-    чужому = ворота(двор, свой_uid=str(os.getuid() + 1))
-    судить("чужой пользователь не держит наши ворота",
-           f"процесс {чужой.pid}" in чужому, False)
+    код, чужому = ворота(двор, свой_uid=str(os.getuid() + 1))
+    судить("чужой пользователь не держит наши ворота (rc 0, «идущих работ нет»)",
+           (код, f"процесс {чужой.pid}" in чужому, "идущих работ нет" in чужому), (0, False, True))
 
     # ВТОРОЙ ПРИЗНАК своим случаем: работа чужого ПОЛЬЗОВАТЕЛЯ, но в НАШЕМ
     # дереве — занятость. Иначе прогон и сборка в контейнере (uid 0/70/999) и
@@ -89,9 +106,9 @@ with tempfile.TemporaryDirectory() as врем:
     в_дереве = subprocess.Popen(["setsid", str(самозванец), "60"], cwd=КОРЕНЬ,
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     time.sleep(0.4)
-    ответ = ворота(двор, свой_uid=str(os.getuid() + 1))
-    судить("чужой пользователь, но работа в НАШЕМ дереве — занятость",
-           f"процесс {в_дереве.pid}" in ответ, True)
+    код, ответ = ворота(двор, свой_uid=str(os.getuid() + 1))
+    судить("чужой пользователь, но работа в НАШЕМ дереве — занятость (rc 1)",
+           (код, f"занято: процесс {в_дереве.pid}" in ответ), (1, True))
     в_дереве.terminate()
     в_дереве.wait(timeout=5)
 
