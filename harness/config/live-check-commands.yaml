@@ -30,7 +30,7 @@
   harness/vozmozhnosti/mobilnaya-razrabotka/build-config.py: tmp=$(mktemp -d) && cp ~/.config/harness-mobile.conf "$tmp/harness-mobile.conf" && source harness/vozmozhnosti/mobilnaya-razrabotka/МАНИФЕСТ.conf && source scripts/lib/config.sh && konf_zagruzit && python3 harness/vozmozhnosti/mobilnaya-razrabotka/build-config.py "$tmp/harness-mobile.conf" "$HOME/$ANDROID_HOME_REL" "$AVD_NAME" "$EMULATOR_MEM_MB" "$GRADLE_MAX_MEM" "$FTL_TIMEOUT" "$FTL_DEVICES" "$LOG_DIR" "$SECRETS_DIR" "$SERVICE_LOCK" "$LOOP_MAX_AGE_MIN"
   scripts/board.py: 'python3 scripts/board.py --сказать живая-проверка "остаток живой проверки — 46 механизмов" --на 60 >/dev/null && bash scripts/hooks/session_state.sh 2>/dev/null | grep -A2 "НА ДОСКЕ"'
   scripts/build-public.py: source scripts/lib/config.sh && out=$(mktemp -d) && python3 scripts/build-public.py --пакет "/home/$(konf_iz_fajla AGENT_USER)/starter/STARTER-PACKAGE" --куда "$out"
-  scripts/download_attachment.py: source scripts/lib/config.sh && konf_zagruzit LOG_DIR && soobshchenie=$(grep -rl '"photo"' "$LOG_DIR/inbox/обработано" | head -1) && python3 scripts/download_attachment.py "$soobshchenie"
+  scripts/download_attachment.py: source scripts/lib/config.sh && konf_zagruzit LOG_DIR && soobshchenie=$(set +o pipefail; grep -rl '"photo"' "$LOG_DIR/inbox/обработано" | head -1) && python3 scripts/download_attachment.py "$soobshchenie"
   scripts/language-level.py: python3 scripts/language-level.py --пересчитать
   scripts/lib/owner_word.py: |-
     export T=$(mktemp -d) && cp "$(python3 -c 'import sys;sys.path.insert(0,"scripts/lib");import config;print(config.log_dir())')/inbox.jsonl" "$T/" && HARNESS_OWNER_WORD_STEND=1 python3 -c 'import sys,os,pathlib;sys.path.insert(0,"scripts/lib");import owner_word as s;z=s.разрешение(60*24*40, pathlib.Path(os.environ["T"]));print("разрешение владельца:", z["текст"][:60], "| message_id:", z["message_id"]) if z else print("разрешения в окне нет")'; rm -rf "$T"
@@ -48,7 +48,7 @@
   scripts/live-check-skill.py: python3 scripts/live-check-skill.py harness/skills/spec-review/SKILL.md --задача hr.zhivaya-proverka-vseh-mehanizmov
   scripts/model-for.sh: bash scripts/model-for.sh --таблица
   scripts/pipeline.py: python3 scripts/pipeline.py --подсказать hr.zhivaya-proverka-vseh-mehanizmov
-  scripts/revision-findings.py: python3 scripts/revision-findings.py --до <(git show HEAD~1:dev-map.yaml) --после dev-map.yaml --максимум 12 --максимум-знаков 1500
+  scripts/revision-findings.py: python3 scripts/revision-findings.py --до <(git show HEAD~1:dev-map.yaml) --после dev-map.yaml --максимум 12 --максимум-знаков 1500 || [ $? -eq 3 ]
   scripts/transliterate.py: python3 scripts/transliterate.py 'живая-проверка-механизмов.md'
   scripts/version.py: source scripts/lib/config.sh && konf_zagruzit && python3 scripts/version.py --следующая --пакет "/home/$(konf_iz_fajla AGENT_USER)/starter/STARTER-PACKAGE" --сборка "$PUBLIC_BUILD_DIR"
   harness/panel/settings.py: python3 harness/panel/state.py
@@ -58,7 +58,7 @@
   scripts/lib/git_probe.py: python3 scripts/check-cyrillic-in-names.py --selftest | grep 'git не ответил'
   scripts/lib/neighbor.py: source scripts/lib/config.sh; konf_zagruzit; python3 scripts/urgency.py --замер "$LOG_DIR/inbox/обработано"
   scripts/lib/selftest_cases.py: python3 scripts/lib/patterns.py --selftest | grep '^  ок    '
-  scripts/limit-in-log.py: python3 scripts/limit-in-log.py --сброс "$(ls -t "$HOME/.claude/projects/$(pwd | tr / -)"/*.jsonl | head -1)"
+  scripts/limit-in-log.py: python3 scripts/limit-in-log.py --сброс "$(set +o pipefail; grep -l '"apiErrorStatus":429' "$HOME/.claude/projects/$(pwd | tr / -)"/*.jsonl | head -1)"
   scripts/live-check-sick.py: python3 scripts/live-check-sick.py scripts/check-file-names.py
   scripts/live-check-tool.py: python3 scripts/live-check-tool.py scripts/weed-the-orders.py
   scripts/model.sh: bash scripts/model.sh --help
@@ -72,3 +72,36 @@
 # правки боевых данных не бывает), quiet-window.py (отвечает только кодом,
 # своего текста не печатает, и окно тишины приёмника продукта на машине
 # больше нет), stall-in-log.py (печатает одно число короче порога цитаты).
+  scripts/disk-report.py: python3 scripts/disk-report.py --опись
+  scripts/stack_freshness.py: python3 scripts/stack_freshness.py --печать
+  scripts/alert-task.py: python3 scripts/alert-task.py --open
+  scripts/lib/release_notes.py: python3 -B -c "import sys; sys.path.insert(0,'scripts/lib'); import release_notes as n; t=open('/home/user/starter/STARTER-PACKAGE/ЧТО-НОВОГО.md',encoding='utf-8').read(); print('отказы выпуска:', n.отказы(t,set())); print(n.кратко(t))"
+  scripts/lib/layout_manifest.py: python3 -B -c "import sys; sys.path.insert(0,'scripts/lib'); import layout_manifest as m; r=m.parse_bytes(open('.layout-manifest','rb').read()); print(type(r).__name__, 'пакет', r.package); print('Опись проекта разобрана, строк тела:', len(r.body))"
+  scripts/lib/layout_lock.py: python3 -B scripts/lib/layout_lock.py --who-holds "$(python3 -c 'import sys; sys.path.insert(0,"scripts/lib"); import config; print(config.log_dir())' 2>/dev/null || echo /var/log/harness)/locks/layout.lock"
+  scripts/lib/layout_history.py: python3 -B -c "import sys; sys.path.insert(0,'scripts/lib'); import layout_history as h; r=h.load_rules('harness/config/layout-history-paths.yaml'); x=h.read_history('/home/user/starter/STARTER-PACKAGE',r); print('История живого пакета разобрана:', type(x).__name__, 'путей', len(x.blobs), 'коммитов', x.commits)"
+  scripts/layout-door.py: |
+    T=$(mktemp -d) && mkdir -p $T/proj $T/bk && cp "$(python3 -c 'import sys;sys.path.insert(0,"scripts/lib");import config;print(config.путь_harness_conf())')" $T/h.conf && sed -i '/^BACKUP_DIR=/d' $T/h.conf && echo "BACKUP_DIR=$T/bk" >> $T/h.conf && printf 'settings\t%s\t.claude/settings.json\0unified\t%s\tUNIFIED/00-О-ХАРНЕСЕ.md\0' "$PWD/.claude/settings.json" "$PWD/UNIFIED/00-О-ХАРНЕСЕ.md" > $T/plan && HARNESS_CONF=$T/h.conf python3 -B scripts/layout-door.py --plan $T/plan --project $T/proj --package-commit - --package-root - 2>&1 | tail -5; rm -rf $T
+  scripts/lib/layout_journal.py: |
+    T=$(mktemp -d) && mkdir -p $T/proj/.claude $T/bk && echo old > $T/proj/.claude/settings.json && cp "$(python3 -c 'import sys;sys.path.insert(0,"scripts/lib");import config;print(config.путь_harness_conf())')" $T/h.conf && sed -i '/^BACKUP_DIR=/d' $T/h.conf && echo "BACKUP_DIR=$T/bk" >> $T/h.conf && printf 'settings\t%s\t.claude/settings.json\0' "$PWD/.claude/settings.json" > $T/plan && HARNESS_CONF=$T/h.conf python3 -B scripts/layout-door.py --plan $T/plan --project $T/proj --package-commit - --package-root - >/dev/null 2>&1; J=$(ls $T/bk/раскладка/*/journal.tsv | head -1) && python3 -B -c "import sys; sys.path.insert(0,'scripts/lib'); import layout_journal as j; x=j.parse_journal(open('$J',encoding='utf-8').read()); print('Журнал укладки разобран, действий:', len(x.actions))"; rc=$?; rm -rf $T; exit $rc
+  # Запрос агента к журналам: сводка по ЖИВЫМ журналам этой машины за сутки.
+  scripts/events.py: python3 -B scripts/events.py status
+  # Кто какой файл занял: чтение ЖИВОГО журнала заявок, ничего не пишет.
+  scripts/who-writes.py: python3 -B scripts/who-writes.py
+  # Библиотека событий: чтение ЖИВОГО журнала «доставка» (его пишут диспетчер и
+  # дверь pane.sh) и определение текущей задачи по живой истории.
+  scripts/lib/events.py: |
+    python3 -B -c "import sys,datetime as d; sys.path.insert(0,'scripts/lib'); import events as e; n=d.datetime.now().astimezone(); r=list(e.read(n-d.timedelta(hours=24), n, journals=['доставка'])); print('журнал доставка за 24 ч, событий:', len(r)); print('последнее событие:', r[-1].src, r[-1].event, r[-1].outcome) if r else None; print('текущая задача:', e.current_task())"
+  # Дверь bash: тот же зов, что делает живой диспетчер (delivery.received), но
+  # каталог журналов уведён во временный — боевой журнал доставки не пачкается
+  # ложной меткой. Вывод — строка, которую записала дверь.
+  scripts/lib/events.sh: |
+    T=$(mktemp -d) && bash -c 'source scripts/lib/events.sh && HARNESS_LOG_DIR="$1" harness_event доставка scripts/tg-dispatcher.sh delivery.received ok ts=живая-проверка && cat "$1/доставка.jsonl"' _ "$T"; rc=$?; rm -rf "$T"; exit $rc
+  # Оценка токенов на живом файле, у которого потолок в токенах.
+  scripts/lib/token_estimate.py: |
+    python3 -B -c "import sys; sys.path.insert(0,'scripts/lib'); import token_estimate as t; s=open('STATE.md',encoding='utf-8').read(); print('STATE.md: знаков', len(s), ', токенов по оценке', t.tokens(s))"
+  # Прибор задержки доставки на живых метках за сегодня.
+  scripts/delivery-latency.py: |
+    python3 -B scripts/delivery-latency.py --окно "$(date '+%Y-%m-%d') 00:00" "$(date '+%Y-%m-%d %H:%M')"
+  # Покрытие проб мутациями — на живых данных обоих носителей.
+  scripts/lib/probe_coverage.py: |
+    python3 -B -c "import sys,pathlib as P; sys.path.insert(0,'scripts/lib'); import probe_coverage as p; s=p.covered_probes(P.Path('harness/config/probe-mutations.yaml'), P.Path('harness/config/invariants.yaml')); print('проб с названной мутацией:', len(s)); print('исключений объявлено:', len(p.declared_exceptions(P.Path('harness/config/probe-mutations.yaml'))))"

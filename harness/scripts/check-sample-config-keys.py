@@ -73,8 +73,14 @@ def main() -> int:
               for key in sorted(set(jobs.get("ключи") or {}) - active)]
     found += [f"{key}: снят («снять_ключи:»), а образец его раздаёт"
               for key in sorted(set(jobs.get("снять_ключи") or []) & active)]
+    if not found:
+        # Число судимого в приговоре отличает «проверено» от «ничего не судили».
+        print(f"чисто: ключей живого конфига {len(live)}, "
+              f"ключей доустановки {len(set(jobs.get('ключи') or {}))}, "
+              f"снятых ключей {len(set(jobs.get('снять_ключи') or []))}")
+        return 0
     print("\n".join(found))
-    return 1 if found else 0
+    return 1
 
 
 if __name__ == "__main__":

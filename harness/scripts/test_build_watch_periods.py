@@ -524,6 +524,39 @@ rc_ж, вывод_ж = прогон(("--проверить",))
       rc_ж == 0 and НЕТ_В_РЕЕСТРЕ not in вывод_ж,
       f"rc={rc_ж}, вывод: {вывод_ж[:400]!r}")
 
+print("── задание, выключенное пустым ключом (если_задан) ──")
+# Замер О7 28.10.2026: сторож продукта без продукта — 2 016 пустых запусков в
+# неделю. Выключенное задание не стоит в кроне и не имеет срока: его метку
+# сверка не требует, а включённое (ключ задан) — требует, как прежде.
+def switch_stand(value: str, period_in_conf: bool):
+    stand = двор([паспорт("harness/demons/probe-product.sh", "Сторож продукта",
+                          повод("крон", "*/5 * * * *", метка("probe-product", 5)))],
+                 {"probe-product": 5} if period_in_conf else {})
+    with open(stand[РУЧКА_КОНФИГ], "a", encoding="utf-8") as conf:
+        conf.write(f'PROBE_URL="{value}"\n')
+    jobs = stand["каталог"] / "system-jobs.yaml"
+    jobs.write_text(yaml.safe_dump({"задания": [{
+        "имя": "probe-product", "расписание": "*/5 * * * *",
+        "команда": "harness/demons/probe-product.sh", "журнал": "p.log",
+        "если_задан": "PROBE_URL"}]}, allow_unicode=True), encoding="utf-8")
+    try:
+        return прогон(("--проверить",), ручки={
+            РУЧКА_РЕЕСТР: stand[РУЧКА_РЕЕСТР], РУЧКА_КОНФИГ: stand[РУЧКА_КОНФИГ],
+            "HARNESS_SYSTEM_JOBS": jobs})
+    finally:
+        shutil.rmtree(stand["каталог"], ignore_errors=True)
+
+
+rc_sw, out_sw = switch_stand("", period_in_conf=False)
+сошлось("БОЛЬНОЙ СЛУЧАЙ О7: ключ пуст — метку выключенного сверка не требует",
+        rc_sw, out_sw, СОШЛОСЬ)
+rc_sw, out_sw = switch_stand("http://127.0.0.1:1/health", period_in_conf=False)
+красный_с_причиной("ключ задан, срока нет — сверка требует метку, как прежде",
+                   rc_sw, out_sw, НЕТ_В_КОНФИГЕ, "probe-product")
+rc_sw, out_sw = switch_stand("", period_in_conf=True)
+красный_с_причиной("ключ пуст, а срок стоит — сторож меток звал бы его мёртвым",
+                   rc_sw, out_sw, НЕТ_В_РЕЕСТРЕ, "probe-product")
+
 print("── боевые файлы не тронуты ──")
 # Слепок снят до первой пробы, сверяется после всех прогонов, включая живой
 # ([[the-probe-played-on-production]]). /etc/harness/harness.conf здесь главный: его

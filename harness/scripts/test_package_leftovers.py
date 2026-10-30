@@ -23,6 +23,7 @@
 """
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -105,6 +106,11 @@ def stand_cases() -> None:
         check("здоровый стенд — rc 0", rc == 0, f"rc {rc}: {out.strip()[:300]}")
         check("здоровый: файл пакета, который код зовёт по имени, не мёртвый",
               "rotate-conf" not in out, out.strip()[:300])
+        # Пустая строка на зелёном неотличима от «судить было нечем»: в прогоне
+        # ворот она стояла без приговора. Числа — из стенда: три записи памяти,
+        # один файл конфига.
+        check("здоровый: приговор называет число судимого",
+              out.strip() == "чисто: записей памяти 3, файлов конфига 1", repr(out.strip()[:300]))
 
     # БОЛЬНОЙ 3.11: заглушка вместо полной записи (живой текст заглушек 14.10).
     with tempfile.TemporaryDirectory() as tmp:
@@ -221,6 +227,16 @@ def index_and_missing_package_cases() -> None:
         check("БОЛЬНОЙ VG-09: пакета нет — отказ без трассировки, путь назван, rc не 0",
               rc != 0 and "Traceback" not in out and str(absent) in out,
               f"rc {rc}: {out.strip()[-300:]}")
+
+    for missing in ("harness/config", "harness/память"):
+        with tempfile.TemporaryDirectory() as tmp:
+            pkg, prj = healthy_stand(Path(tmp))
+            shutil.rmtree(pkg / missing)
+            rc, out = run_gate(pkg, prj)
+            check(f"БОЛЬНОЙ VG-10: в пакете нет {missing} — rc 2, «пакет не прочитан», "
+                  "каталог назван, без трассировки",
+                  rc == 2 and "пакет не прочитан" in out and missing in out
+                  and "Traceback" not in out, f"rc {rc}: {out.strip()[-300:]}")
 
 
 def live_cases() -> None:

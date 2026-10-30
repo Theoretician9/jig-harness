@@ -74,9 +74,20 @@ CHANGED=$(( ${PUT:-0} + ${REMOVED:-0} ))
 # Доклад владельцу только при изменении или отказе: набор на месте — молчим.
 if [ "$CHANGED" -gt 0 ] || [ "$RC" -ne 0 ]; then
     MSG="Набор расширений: поставлено ${PUT:-0}, снято ${REMOVED:-0}."
-    [ "$RC" -ne 0 ] && MSG="$MSG Есть отказ, смотрю: $(printf '%s' "$RESULT" | tail -1)"
-    bash "$PROJECT_DIR/scripts/tg_send.sh" "$MSG" >/dev/null 2>&1 || \
+    DOOR_ARGS=()
+    # Задача модели нужна только отказу: «поставлено N» — сведения, работы нет.
+    if [ "$RC" -ne 0 ]; then
+        MSG="$MSG Есть отказ, смотрю: $(printf '%s' "$RESULT" | tail -1)"
+        DOOR_ARGS=(--task extensions-watch:failed)
+    fi
+    bash "$PROJECT_DIR/scripts/tg_send.sh" "$MSG" "${DOOR_ARGS[@]}" >/dev/null 2>&1 || \
         say "доклад в канал не ушёл — смотри $LOG_DIR/tg_send.log"
+fi
+
+# Зелёное гасит задачу модели. Писателя может не быть (раскладка неполна) —
+# сторож от этого не падает.
+if [ "$RC" -eq 0 ] && [ -f "$PROJECT_DIR/scripts/alert-task.py" ]; then
+    python3 "$PROJECT_DIR/scripts/alert-task.py" --resolve extensions-watch:failed </dev/null >/dev/null 2>&1 || true
 fi
 
 touch "$HEARTBEAT_DIR/extensions-watch"

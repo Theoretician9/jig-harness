@@ -26,7 +26,7 @@ from pathlib import Path
 import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
-from config import корень_дерева, путь_harness_conf  # noqa: E402
+from config import switched_off_marks, из_файла, корень_дерева, путь_harness_conf  # noqa: E402
 
 КОРЕНЬ = корень_дерева(__file__)
 РЕЕСТР = "harness/config/mechanisms.yaml"
@@ -139,10 +139,25 @@ def метки_без_срока(каталог: Path, конфиг: dict) -> li
             f"не сторожит никто" for и in чужие]
 
 
+def switched_off(conf_path: Path) -> set:
+    """Метки заданий, выключенных пустым ключом этого конфига: их нет в
+    расписании, срок для них — ложное «МЁРТВ», а старый файл метки — не сирота."""
+    jobs_path = Path(os.environ.get("HARNESS_SYSTEM_JOBS")
+                     or КОРЕНЬ / "harness" / "config" / "system-jobs.yaml")
+    jobs = (yaml.safe_load(jobs_path.read_text(encoding="utf-8")) or {}).get("задания") or []
+    return switched_off_marks(jobs, из_файла(str(conf_path)))
+
+
+def without(registry: dict, names: set) -> dict:
+    return {name: period for name, period in registry.items() if name not in names}
+
+
 def главная() -> int:
     реестр, безнадзорные = сроки_реестра(путь_реестра())
     конфиг = сроки_конфига(путь_конфига())
-    беды = расхождения(реестр, конфиг)
+    off = switched_off(путь_конфига())
+    active = without(реестр, off)
+    беды = расхождения(active, конфиг)
     sys.path.insert(0, str(КОРЕНЬ / "scripts" / "lib"))
     import config as конф_модуль
     # Стенд пробы подменяет реестр и конфиг, но каталог меток — ОБЩИЙ с боевой
@@ -152,7 +167,7 @@ def главная() -> int:
     свой_каталог_меток = os.environ.get("HEARTBEAT_DIR")
     if свой_каталог_меток or not свой_стенд:
         беды += метки_без_срока(
-            Path(свой_каталог_меток or конф_модуль.heartbeat_dir()), конфиг)
+            Path(свой_каталог_меток or конф_модуль.heartbeat_dir()), {**конфиг, **dict.fromkeys(off, 0)})
     for файл, имя in безнадзорные:
         беды.append(f"с расписанием, но без присмотра: {файл} ({имя})")
 
@@ -168,7 +183,8 @@ def главная() -> int:
     # и красил бы чужой стенд — так самотест и покраснел при первой правке.
     if образец.exists() and not свой_стенд:
         в_образце = сроки_конфига(образец)
-        беды += [f"ОБРАЗЕЦ ПАКЕТА: {б}" for б in расхождения(реестр, в_образце)]
+        беды += [f"ОБРАЗЕЦ ПАКЕТА: {б}"
+                 for б in расхождения(without(реестр, switched_off(образец)), в_образце)]
 
     if беды:
         print("сроки присмотра: РАЗОШЛИСЬ")
@@ -176,9 +192,9 @@ def главная() -> int:
         # ищет её по маркеру («в реестре есть, в конфиге нет:»), а не по месту.
         for строка in беды:
             print(f"  {строка}")
-        print(f"\nимён в реестре {len(реестр)}, в конфиге {len(конфиг)}")
+        print(f"\nимён в реестре {len(active)}, в конфиге {len(конфиг)}")
         return 1
-    print(f"сроки присмотра: сошлось — имён {len(реестр)}")
+    print(f"сроки присмотра: сошлось — имён {len(active)}")
     return 0
 
 

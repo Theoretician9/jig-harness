@@ -80,7 +80,12 @@ def yard_with(base: pathlib.Path) -> pathlib.Path:
     return base
 
 
-HEALTHY = ("pryamoj_api:\n  scripts/tg_send.sh: дверь\n"
+# Раздел model_task (что за вестью каждого отправителя) гейт судит с 26.10:
+# здоровый стенд обязан его нести, иначе красен по чужому правилу. Стоит
+# ПЕРВЫМ: случаи ниже дописывают строки в хвост последнего раздела.
+HEALTHY = ("model_task:\n  scripts/tiho.sh:\n    - {kind: owner-only, why: стенд}\n"
+           "debt_max: 0\n"
+           "pryamoj_api:\n  scripts/tg_send.sh: дверь\n"
            "nesmotrya_na_limit:\n  scripts/tg_send.sh: дверь\n")
 
 

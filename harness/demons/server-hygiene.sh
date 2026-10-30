@@ -39,8 +39,14 @@ mkdir -p "$(dirname "$LOCK_FILE")"
 exec 9>>"$LOCK_FILE"
 flock -n 9 || { say "прогон уже идёт (лок $LOCK_FILE) — выхожу"; exit 0; }
 
-tg_send() {  # успех только при ok:true (норма 01-SPEC §7)
-    local text="$1"
+# Зелёное гасит задачу модели; нет писателя — сторож не падает.
+alert_task() {  # $@ = доводы писателя: --resolve <ключ>
+    [ -f "$PROJECT_DIR/scripts/alert-task.py" ] || return 0
+    python3 "$PROJECT_DIR/scripts/alert-task.py" "$@" </dev/null >/dev/null 2>&1 || true
+}
+
+tg_send() {  # $1 = текст, $2 $3 = --task <ключ задачи модели>; успех только при ok:true (норма 01-SPEC §7)
+    local text="$1"; shift
     if [ -x "$PROJECT_DIR/scripts/tg_send.sh" ]; then
         # Дверь зовётся БЕЗ ключей: при лимите она кладёт весть в очередь
         # досыла и отвечает нулём — нарушения гигиены (И-3) обязаны дойти,
@@ -48,7 +54,8 @@ tg_send() {  # успех только при ok:true (норма 01-SPEC §7)
         # Отказ двери тексту (потолок длины сторожа канала) — не повод её
         # обойти: отчёт — документ, он уходит вложением через ту же дверь.
         # Прямой путь ниже — только когда двери нет вовсе.
-        "$PROJECT_DIR/scripts/tg_send.sh" "$text" && return 0
+        # Ключ задачи идёт ДО текста: дверь судит длину по последнему доводу.
+        "$PROJECT_DIR/scripts/tg_send.sh" "$@" "$text" && return 0
         local doc="$LOG_DIR/гигиена-$(date +%F).md"
         printf '%s\n' "$text" > "$doc"
         say "текстом не прошло — шлю вложением $doc"
@@ -88,11 +95,13 @@ case "$RC" in
     0)
         say "гигиена чиста"
         touch "$HEARTBEAT_DIR/server-hygiene"
+        alert_task --resolve server-hygiene:violations
+        alert_task --resolve server-hygiene:check-broken
         ;;
     1)
         say "нарушения найдены — шлю владельцу"
         if tg_send "Гигиена сервера: есть нарушения.
-$REPORT"; then
+$REPORT" --task server-hygiene:violations; then
             say "доставлено (ok:true)"
         else
             # Д-2: без этой строки утренняя сводка назвала бы демона мёртвым,
@@ -111,7 +120,7 @@ $REPORT"; then
         # пока проверка лежит, нарушения гигиены не ловит никто.
         say "проверка сама сломана (код $RC) — метку не ставлю, зову владельца"
         if tg_send "Гигиена сервера: проверка СЛОМАНА (код $RC), нарушения сейчас никто не ловит.
-Traceback — в $LOG_DIR/server-hygiene.log; чинить: harness/demons/server_hygiene_check.py"; then
+Traceback — в $LOG_DIR/server-hygiene.log; чинить: harness/demons/server_hygiene_check.py" --task server-hygiene:check-broken; then
             say "сигнал о поломке доставлен (ok:true)"
         else
             say "сигнал о поломке НЕ доставлен — виден только в логе"

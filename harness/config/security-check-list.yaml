@@ -1,0 +1,196 @@
+# Source: github.com/mukul975/Anthropic-Cybersecurity-Skills
+# @54a798831d2266a3ca61ce68a7acb80b81160d57, Apache-2.0
+# (copy: harness/config/licenses/Apache-2.0-cybersecurity-skills.txt).
+# Changes: shortened, rewritten as diff-review questions; attack steps,
+# tools and MITRE mappings removed. Upstream has no NOTICE file at this commit.
+#
+# Read by scripts/check-security.py (triggers, paths, excluded_paths) and by the
+# reviewing helper (questions). English on purpose: the reader is a model.
+max_runs_per_task: 3          # helper runs per task, then a question to the owner
+
+# Not judged by any rule: docs, memory, the task folder, the map, tests (they
+# never ship to runtime). A trailing slash means a directory prefix, anything
+# else is an fnmatch mask against the basename and the full path.
+excluded_paths:
+  - "docs/"
+  - "память/"
+  - ".tasks/"
+  - "UNIFIED/"
+  - "dev-map.yaml"
+  - "STATE.md"
+  - "*.md"
+  - "test_*"
+  - "*.test.*"
+
+classes:
+  injection:
+    triggers:
+      - 'shell\s*=\s*True'
+      - '\bos\.system\('
+      - '(?<![\w.])eval\('
+      - '(?<![\w.])exec\('
+      - 'child_process'
+      - 'pickle\.loads'
+      - 'yaml\.load\((?!.*Safe)'
+      - '\b(SELECT\b.*\bFROM|INSERT\s+INTO|UPDATE\s+\w+\s+SET|DELETE\s+FROM)\b.*(\{|%s|\$\{|"\s*\+)'
+    paths: []
+    questions:
+      - id: inj-sql
+        question: "Does user input reach SQL by string concatenation or interpolation instead of a bound parameter?"
+        rule_ref: "CWE-89, OWASP A03"
+        source: exploiting-sql-injection-vulnerabilities@54a79883
+        code_rules: [sql-concat]
+      - id: inj-shell
+        question: "Does any external value reach a shell, eval, exec or a process argument list without a fixed allowlist?"
+        rule_ref: "CWE-78, CWE-95, OWASP A03"
+        source: exploiting-api-injection-vulnerabilities@54a79883
+        code_rules: [shell-input]
+      - id: inj-template
+        question: "Is user input placed into a template or markup that is rendered unescaped (XSS, template injection)?"
+        rule_ref: "CWE-79, CWE-1336, OWASP A03"
+        source: testing-for-xss-vulnerabilities@54a79883
+        code_rules: []
+      - id: inj-url
+        question: "Does the server fetch a URL taken from a request without checking host and scheme (SSRF)?"
+        rule_ref: "CWE-918, OWASP A10"
+        source: performing-ssrf-vulnerability-exploitation@54a79883
+        code_rules: []
+      - id: inj-deser
+        question: "Is data from outside loaded by an unsafe deserializer (pickle, yaml.load, unserialize)?"
+        rule_ref: "CWE-502, OWASP A08"
+        source: exploiting-insecure-deserialization@54a79883
+        code_rules: []
+  secrets:
+    triggers:
+      - '\b(password|passwd|api[_-]?key|secret[_-]?key|private[_-]?key|access[_-]?token|bearer)\b'
+    paths: [".env*"]
+    questions:
+      - id: sec-literal
+        question: "Is a key, token or password written into the changed files as a literal value?"
+        rule_ref: "CWE-798, OWASP A07"
+        source: implementing-secret-scanning-with-gitleaks@54a79883
+        code_rules: [secrets]
+      - id: sec-rotate
+        question: "If a secret was ever committed or printed, was it rotated, not only deleted from the file?"
+        rule_ref: "CWE-522"
+        source: implementing-secrets-scanning-in-ci-cd@54a79883
+        code_rules: []
+      - id: sec-log
+        question: "Can the change write a secret, token or a file name acting as a key into a log or a message?"
+        rule_ref: "CWE-532"
+        source: implementing-secrets-scanning-in-ci-cd@54a79883
+        code_rules: []
+  access:
+    triggers:
+      - '\bjwt\b'
+      - 'verify\s*=\s*False'
+      - 'rejectUnauthorized'
+      - 'NODE_TLS_REJECT'
+      - 'chmod\s+(-R\s+)?0?(777|666)'
+      - '\bsudoers\b'
+      - 'Access-Control-Allow'
+      - '\bcors\b'
+      - '\bcsrf\b'
+      - 'Set-Cookie'
+      - 'httponly'
+      - 'samesite'
+    paths: ["sudoers*", "harness/panel/*"]
+    questions:
+      - id: acc-object
+        question: "Does an endpoint return or change an object after checking only that the caller is logged in, not that the object is the caller's?"
+        rule_ref: "CWE-639, OWASP API1"
+        source: testing-api-security-with-owasp-top-10@54a79883
+        code_rules: []
+      - id: acc-role
+        question: "Where is the role or permission checked for every new action, and is the check on the server side?"
+        rule_ref: "CWE-862, OWASP A01"
+        source: testing-api-security-with-owasp-top-10@54a79883
+        code_rules: []
+      - id: acc-jwt
+        question: "Are token algorithm, signature and expiry all verified, and is the 'none' algorithm refused?"
+        rule_ref: "CWE-347"
+        source: testing-jwt-token-security@54a79883
+        code_rules: []
+      - id: acc-cors
+        question: "Does CORS allow a wildcard or a reflected origin together with credentials?"
+        rule_ref: "CWE-942"
+        source: testing-cors-misconfiguration@54a79883
+        code_rules: []
+      - id: acc-csrf
+        question: "Does a state-changing request accept cookie-only authentication without a CSRF token or SameSite?"
+        rule_ref: "CWE-352"
+        source: performing-csrf-attack-simulation@54a79883
+        code_rules: []
+      - id: acc-tls
+        question: "Is certificate verification or file mode hardening switched off or widened anywhere in the change?"
+        rule_ref: "CWE-295, CWE-732"
+        source: testing-api-security-with-owasp-top-10@54a79883
+        code_rules: [tls-off, chmod-wide]
+  deps:
+    triggers: []
+    paths: ["package.json", "package-lock.json", "requirements*.txt", "pyproject.toml"]
+    questions:
+      - id: dep-need
+        question: "Why is the new dependency needed, and does the standard library or an existing dependency already cover it?"
+        rule_ref: "CWE-1104, OWASP A06"
+        source: performing-sca-dependency-scanning-with-snyk@54a79883
+        code_rules: []
+      - id: dep-pin
+        question: "Is the version pinned, and does the package come from the intended registry (no dependency confusion)?"
+        rule_ref: "CWE-829"
+        source: detecting-dependency-confusion@54a79883
+        code_rules: []
+      - id: dep-audit
+        question: "Does the audit of the lock file show a high or critical advisory for the changed set?"
+        rule_ref: "CWE-1395"
+        source: generating-and-analyzing-sboms@54a79883
+        code_rules: [npm-audit]
+  containers:
+    triggers:
+      - 'privileged\s*:\s*true'
+      - 'docker\.sock'
+      - 'network_mode\s*:\s*host'
+      - '\bports\s*:'
+    paths: ["Dockerfile*", "*compose*.y*ml"]
+    questions:
+      - id: con-user
+        question: "Does the container run as a non-root user, with no privileged flag and no docker socket inside?"
+        rule_ref: "CWE-250, CIS Docker 4.1"
+        source: hardening-docker-containers-for-production@54a79883
+        code_rules: [docker-root]
+      - id: con-image
+        question: "Is the base image pinned by version or digest, not by 'latest' or no tag at all?"
+        rule_ref: "CWE-1104"
+        source: performing-container-image-hardening@54a79883
+        code_rules: [docker-root]
+      - id: con-port
+        question: "Is every published port bound to 127.0.0.1 unless the service must face the internet?"
+        rule_ref: "CWE-668"
+        source: hardening-docker-daemon-configuration@54a79883
+        code_rules: [port-published]
+      - id: con-caps
+        question: "Are capabilities dropped (cap_drop) and the root filesystem read-only where the service allows it?"
+        rule_ref: "CWE-250"
+        source: hardening-docker-containers-for-production@54a79883
+        code_rules: []
+  web:
+    triggers:
+      - 'server_tokens'
+      - 'add_header\s+(Strict-Transport|Content-Security|X-Frame|X-Content-Type)'
+    paths: ["nginx*.conf", "*/nginx/*", "*/sites-available/*"]
+    questions:
+      - id: web-headers
+        question: "Does every server block send HSTS, X-Content-Type-Options and frame-ancestors or X-Frame-Options?"
+        rule_ref: "CWE-693, OWASP A05"
+        source: performing-security-headers-audit@54a79883
+        code_rules: [nginx-headers]
+      - id: web-cookie
+        question: "Do session cookies carry Secure, HttpOnly and SameSite?"
+        rule_ref: "CWE-614, CWE-1004"
+        source: performing-security-headers-audit@54a79883
+        code_rules: []
+      - id: web-tls
+        question: "Are only current TLS versions and strong ciphers enabled, and is server_tokens off?"
+        rule_ref: "CWE-326"
+        source: performing-ssl-tls-security-assessment@54a79883
+        code_rules: [nginx-headers]

@@ -415,15 +415,63 @@ BEZ_UCHETA_LIMITA=0
 NE_DOSYLAT=0
 JA_DOSYL=0
 ARGS=()
+TASK_KEY=""
+ZHDU_KLYUCH=0
 for A in "$@"; do
+    if [ "$ZHDU_KLYUCH" = 1 ]; then
+        TASK_KEY="$A"; ZHDU_KLYUCH=0; continue
+    fi
     case "$A" in
         --несмотря-на-лимит) BEZ_UCHETA_LIMITA=1 ;;
         --не-досылать)       NE_DOSYLAT=1 ;;
         --досыл)             JA_DOSYL=1 ;;
+        # Единственный ключ со значением: без флага ожидания ключ задачи ушёл
+        # бы владельцу текстом вести.
+        --task|--задача)     ZHDU_KLYUCH=1 ;;
         *)                   ARGS+=("$A") ;;
     esac
 done
+[ "$ZHDU_KLYUCH" = 0 ] || refuse "ключ --task без значения: нужен <демон>:<ключ>"
 [ ${#ARGS[@]} -gt 0 ] && set -- "${ARGS[@]}" || set --
+
+# Задача модели заводится ДО отправки и независимо от неё: отказ Telegram или
+# придержанная лимитом весть не должны терять работу. Код двери остаётся кодом
+# ДОСТАВКИ, текст вести не меняется ни при каком исходе писателя — дописка могла
+# бы перевалить потолок правил канала, и сторож повторял бы весть залпом.
+if [ -n "$TASK_KEY" ]; then
+    if [ "$(канон_флаг "${1:-}")" = "--file" ] && [ "$(канон_флаг "${3:-}")" = "--caption" ]; then
+        TASK_TEXT="${4:-}"
+    elif [ "$(канон_флаг "${1:-}")" = "--file" ]; then
+        # Вложение без подписи: заголовка нет, а имя файла в карту не берём —
+        # оно бывает ключом доступа. Писатель с «--file» вместо заголовка
+        # ответил бы 2, и дверь назвала бы ложную причину.
+        TASK_TEXT=""
+    else
+        TASK_TEXT="${1:-}"
+    fi
+    TASK_TITLE="${TASK_TEXT%%$'\n'*}"
+    TASK_TITLE="${TASK_TITLE:0:110}"
+    TASK_RC=0
+    if [ -z "$TASK_TEXT" ]; then
+        TASK_RC=99
+        echo "tg_send: --task при вложении без --caption: нужна подпись для заголовка задачи" >&2
+    elif [ ! -f "$PROJECT_DIR/scripts/alert-task.py" ]; then
+        # Нет файла писателя: python3 ответил бы 2, и ниже это прочлось бы как
+        # «кривой ключ» — весть владельцу не ушла бы из-за недоложенного файла.
+        TASK_RC=127
+        echo "tg_send: писателя задач нет ($PROJECT_DIR/scripts/alert-task.py)" >&2
+    else
+        python3 "$PROJECT_DIR/scripts/alert-task.py" --key "$TASK_KEY" \
+            --title="$TASK_TITLE" --text="$TASK_TEXT" </dev/null >&2 || TASK_RC=$?
+    fi
+    # 2 — кривой ключ: дефект звонящего, отказ до отправки. 4 — отложено
+    # писателем, это не беда.
+    case "$TASK_RC" in
+        0|4) ;;
+        2)   refuse "ключ задачи «$TASK_KEY» не по шаблону <демон>:<ключ> (строчные латинские, до 80 знаков)" ;;
+        *)   echo "tg_send: задача НЕ заведена ($TASK_RC)" >&2 ;;
+    esac
+fi
 
 # ОЧЕРЕДЬ ДОСЫЛА — та же, что у панели: её обходит sentinel раз в пять минут и
 # снимает строку ТОЛЬКО при доставке.
@@ -451,8 +499,40 @@ RESEND_QUEUE="$LOG_DIR/панель-недоставленное.jsonl"
 # признака лимита» канал закрывался целиком — а весть о немоте ставит эту метку
 # СТРОКОЙ ВЫШЕ своей отправки, то есть владелец не узнал бы о мёртвой смене
 # никогда. Метка, пережившая смерть смены, закрывала канал навсегда.
-if [ "$BEZ_UCHETA_LIMITA" = 0 ] \
-   && python3 "${PROJECT_DIR:?пуст PROJECT_DIR — не прочитан паспорт установки}/scripts/limit_mark.py" --лимит-держится 2>/dev/null; then
+# Слово смены — доказательство, что лимит кончился, но только вместе с ответом
+# модели НОВЕЕ метки: фоновый прогон, запущенный до лимита, наследует тот же
+# CLAUDE_CODE_SESSION_ID и шлёт отчёт посреди лимита. Тогда метку снимает её
+# судья, а весть о возобновлении и слово смены уходят ОДНИМ сообщением: два
+# сообщения об одном событии владелец уже получал (25.10.2026).
+LIMIT_MARK="python3 ${PROJECT_DIR:?пуст PROJECT_DIR — не прочитан паспорт установки}/scripts/limit_mark.py"
+# Метку снимает ДОСТАВКА, а не решение снять: сбой отправки или отказ правил
+# канала иначе теряют весть навсегда (метки нет, второго сказавшего нет).
+LIFT_AFTER_DELIVERY=0
+if [ "$BEZ_UCHETA_LIMITA" = 0 ] && [ -n "${CLAUDE_CODE_SESSION_ID:-}" ] \
+   && case "${1:-}" in --file|--файл|--вложение) false ;; *) true ;; esac \
+   && $LIMIT_MARK --лимит-держится 2>/dev/null \
+   && $LIMIT_MARK --ответ-после-метки --транскрипт "$CLAUDE_CODE_SESSION_ID" 2>/dev/null; then
+    LIFTED=$($LIMIT_MARK --снять --не-удалять --транскрипт "$CLAUDE_CODE_SESSION_ID" 2>/dev/null) || LIFTED=""
+    LIFTED_VEST=$(printf '%s' "$LIFTED" | cut -f3)
+    LIFT_AFTER_DELIVERY=1
+    if [ -n "$LIFTED_VEST" ]; then
+        # Склейка длиннее текста смены: не прошла сторожа канала — весть уходит
+        # отдельным сообщением, а текст смены обычным путём.
+        if проверить_правила "$LIFTED_VEST
+
+${1:-}" 2>/dev/null; then
+            set -- "$LIFTED_VEST
+
+${1:-}" "${@:2}"
+        else
+            отправить_текст_частями "$LIFTED_VEST"
+            $LIMIT_MARK --снять --транскрипт "$CLAUDE_CODE_SESSION_ID" >/dev/null 2>&1 || true
+            LIFT_AFTER_DELIVERY=0
+        fi
+    fi
+fi
+if [ "$BEZ_UCHETA_LIMITA" = 0 ] && [ "$LIFT_AFTER_DELIVERY" = 0 ] \
+   && $LIMIT_MARK --лимит-держится 2>/dev/null; then
     SBROS_CHAS=$(python3 "$PROJECT_DIR/scripts/limit_mark.py" --час-сброса 2>/dev/null) || SBROS_CHAS=""
     # Подпись к файлу и текст — одно и то же для правила: придерживается ВЕСЬ
     # вызов, иначе документ уехал бы владельцу молча, без слов о себе.
@@ -533,11 +613,20 @@ esac
 # замере 1389, потом коммит 5eb0f79 вместо cb9d430. Владелец видит только
 # канал: неверный номер он проверить не может и поверит. Гейт смотрит лишь на
 # хеши, названные словом «коммит», — остальной hex (uuid, токены) не трогаем.
-if [ -d "${PROJECT_DIR:?пуст PROJECT_DIR — не прочитан паспорт установки}/.git" ]; then
+# Деревьев два: харнес и репозиторий продукта (ключ PRODUCT_REPO) — отчёт о
+# коммите продукта иначе был бы отвергнут как выдуманный.
+TREES=()
+[ -d "${PROJECT_DIR:?пуст PROJECT_DIR — не прочитан паспорт установки}/.git" ] && TREES+=("$PROJECT_DIR")
+[ -n "${PRODUCT_REPO:-}" ] && [ -d "$PRODUCT_REPO/.git" ] && TREES+=("$PRODUCT_REPO")
+if [ "${#TREES[@]}" -gt 0 ]; then
     while read -r HASH; do
         [ -n "$HASH" ] || continue
-        git -C "${PROJECT_DIR:?пуст PROJECT_DIR — не прочитан паспорт установки}" cat-file -e "${HASH}^{commit}" 2>/dev/null \
-            || refuse "в тексте назван коммит $HASH, которого нет в репозитории" \
+        FOUND=0
+        for tree in "${TREES[@]}"; do
+            git -C "$tree" cat-file -e "${HASH}^{commit}" 2>/dev/null && { FOUND=1; break; }
+        done
+        [ "$FOUND" = 1 ] \
+            || refuse "в тексте назван коммит $HASH, которого нет в репозитории (искал в: ${TREES[*]})" \
                       "проверьте git log и вставьте настоящий хеш"
     done < <(printf '%s' "$TEXT" | grep -oiE '(коммит|commit)[^0-9a-f]{0,4}[0-9a-f]{7,40}' \
              | grep -oE '[0-9a-f]{7,40}$')
@@ -547,7 +636,44 @@ fi
 # простынёй, только в нескольких сообщениях.
 проверить_правила "$TEXT" || exit 1
 
+# Метка режима «хакатон» ставится здесь, а не памятью смены. Уровень судит
+# hackathon.is_hackathon — своей копии правил нет. Метка идёт в журнал исходящих
+# вместе с текстом: журнал пишет то, что ушло.
+HACKATHON_MARK="хакатон · работает, не продакшн"
+IS_SHIFT_REPORT=0
+{ [ -n "${HARNESS_REPORT:-}" ] || [ -n "${CLAUDE_CODE_SESSION_ID:-}" ]; } && IS_SHIFT_REPORT=1
+# Выходы блока: 0 — метить, 3 — не метить (ответ), любой другой (traceback даёт 1,
+# нет питона 127) — метку не удалось решить: об этом строка в stderr, отправка идёт.
+MARK_ERR=$(mktemp)
+MARK_RC=0
+python3 - "$PROJECT_DIR" "$IS_SHIFT_REPORT" "$TEXT" <<'PY' 2>"$MARK_ERR" || MARK_RC=$?
+import re, sys
+from pathlib import Path
+root = Path(sys.argv[1])
+sys.path[:0] = [str(root / "scripts"), str(root / "scripts" / "lib")]
+import cards, hackathon, yaml
+text = sys.argv[3]
+data = yaml.safe_load((root / "dev-map.yaml").read_text(encoding="utf-8")) or {}
+tasks = [t for line in data.get("lines") or [] for t in line.get("tasks") or []]
+wip = [t for t in tasks if t.get("status") == "wip"]
+if sys.argv[2] == "1" and len(wip) == 1 and hackathon.is_hackathon(wip[0]):
+    sys.exit(0)
+for t in tasks:
+    if hackathon.is_hackathon(t) and t.get("status") not in cards.CLOSED_STATUSES \
+            and re.search(r"(?<![\w.-])" + re.escape(str(t.get("id"))) + r"(?![\w-]|\.\w)", text):
+        sys.exit(0)
+sys.exit(3)
+PY
+case "$MARK_RC" in
+    0) TEXT="$HACKATHON_MARK
+$TEXT" ;;
+    3) ;;
+    *) echo "tg_send: метка хакатона потеряна (блок метки упал, код $MARK_RC): $(tail -n 1 "$MARK_ERR" | cut -c1-200)" >&2 ;;
+esac
+rm -f "$MARK_ERR"
+
 отправить_текст_частями "$TEXT"
+[ "$LIFT_AFTER_DELIVERY" = 0 ] || $LIMIT_MARK --снять --транскрипт "${CLAUDE_CODE_SESSION_ID:-}" >/dev/null 2>&1 || true
 отметить_отчёт
 zapisat_ishodyashchee "$TEXT"
 echo "tg_send: доставлено (частей: $TOTAL_PARTS, message_id подтверждён)"

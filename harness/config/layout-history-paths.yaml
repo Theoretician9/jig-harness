@@ -1,0 +1,32 @@
+# Куда раскладчик клал файл пакета в проект. Читает scripts/lib/layout_history.py:
+# по этой таблице путь из истории пакета превращается в путь проекта, и только
+# совпадение пути И содержимого называет файл «нашим по истории».
+#
+# Ключ с «/» на конце — префикс каталога, без «/» — один файл. Побеждает самый
+# длинный совпавший ключ среди обеих таблиц вместе, поэтому узкая строка
+# («harness/hooks/project-settings.json») перекрывает широкую («harness/hooks/»).
+# Значение null — раскладчик такой путь в проект не кладёт: судить его по
+# истории нельзя.
+#
+# «перевод» — пути, которые стали путём проекта. «вне_корней» — прежние
+# каталоги пакета, чьи файлы лежали в проекте под тем же именем вне корней
+# укладки: их судят только счётом, снимать их нельзя.
+перевод:
+  "harness/hooks/project-settings.json": ".claude/settings.json"
+  "harness/hooks/": "scripts/hooks/"
+  "harness/agents/": ".claude/agents/"
+  "харнес/hooks/": "scripts/hooks/"
+  "harness/scripts/": "scripts/"
+  "харнес/scripts/": "scripts/"
+  "harness/память/": null
+  "harness/STATE.md": null
+  "harness/dev-map.yaml": null
+  "harness/razlozhit-harnes.sh": null
+  "harness/mechanisms.yaml": null
+  "harness/config/logrotate-harness": null
+  "harness/UNIFIED/": "UNIFIED/"
+  "harness/": "harness/"
+  "UNIFIED/": "UNIFIED/"
+  "sluzhebnoe/UNIFIED/": "UNIFIED/"
+вне_корней:
+  "харнес/": "харнес/"

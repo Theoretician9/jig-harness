@@ -1,0 +1,43 @@
+# Быстрые ворота режима хакатон (gates.sh --хакатон, deploy.sh в режиме).
+#
+# Зачем подмножество: полные ворота идут около получаса, а в хакатоне выкат
+# нужен за минуты. Здесь только то, что не прощается ни при какой спешке:
+# секреты (И-3), сторож опасных команд (И-1/И-2), имена файлов, схема карты и
+# синтаксис изменённого кода. Всё остальное по-прежнему гонят полные ворота
+# ночью — быстрый прогон пишется в ворота-итог.jsonl с режимом «хакатон» и за
+# полный не считается.
+#
+# Форма: checks — список {name, cmd}. cmd идёт из корня дерева через
+# bash -c, в окружении есть $ROOT. Имена не менять без правки пробы
+# scripts/test_hackathon_gates.sh.
+checks:
+  - name: секреты
+    cmd: bash scripts/check-secrets.sh "$ROOT"
+  - name: сторож команд
+    cmd: python3 scripts/hooks/test_guard_bash.py
+  - name: имена файлов
+    # Пустой набор (дерево чистое, как в выкате) — не доказательство: последняя
+    # строка вывода «изменений нет» говорит это вслух, а не молчаливым ок.
+    cmd: >-
+      files=$(git -c core.quotepath=false diff --cached --name-only --diff-filter=AR);
+      if [ -z "$files" ]; then echo "изменений нет"; exit 0; fi;
+      printf '%s\n' "$files" | python3 scripts/check-file-names.py || exit 1;
+      echo "проверено файлов: $(printf '%s\n' "$files" | wc -l)"
+  - name: схема карты
+    cmd: bash scripts/pre-commit-gate.sh --devmap-only "$ROOT/dev-map.yaml"
+  - name: синтаксис
+    # Изменённые против HEAD (индекс и дерево) и новые .py/.sh; без записи
+    # __pycache__ — разбор ast, а не py_compile.
+    # Однострочный cmd (проба разбирает yaml построчно): folded-скаляр.
+    cmd: >-
+      bad=0; n=0;
+      while IFS= read -r f; do
+      [ -f "$f" ] || continue;
+      case "$f" in *.py|*.sh) n=$((n+1)) ;; esac;
+      case "$f" in
+      *.py) python3 -c 'import ast,sys; ast.parse(open(sys.argv[1], encoding="utf-8").read())' "$f" 2>&1 || { echo "битый: $f"; bad=1; } ;;
+      *.sh) bash -n "$f" 2>&1 || { echo "битый: $f"; bad=1; } ;;
+      esac;
+      done < <({ git -c core.quotepath=false diff --name-only --diff-filter=ACMR HEAD; git -c core.quotepath=false ls-files --others --exclude-standard; } | sort -u);
+      [ $bad = 0 ] && { [ $n = 0 ] && echo "изменений нет" || echo "проверено файлов: $n"; };
+      exit $bad

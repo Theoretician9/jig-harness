@@ -1,0 +1,24 @@
+# Файлы, которых хакатон-задача не трогает никогда.
+# Зачем отдельный список, а не одни GUARD_PATHS: сторожа и гейты — это «цена задачи»,
+# а здесь вопрос другой — что задача могла бы изменить, чтобы обойти сам режим:
+# продлить срок (harness.conf), выкинуть шаги (pipeline.yaml), сузить быстрые ворота
+# (gates-hackathon.yaml), переписать правила долга (hackathon.py), снять проверки
+# выката (deploy.sh), отключить хуки (.claude/settings.json, scripts/hooks, scripts/lib).
+# Образец без «*» — префикс каталога или полное имя файла; со «*» — маска пути.
+# Пустой или нечитаемый файл — отказ гейта, а не «можно всё».
+# Модули самого суда (pipeline.py, lib/*, check-pipeline.py, pre-commit-gate.sh…) отсюда
+# не перечисляются: hackathon.judge_dependencies выводит их из текста кода. Здесь — то,
+# что должно оставаться запретным, даже если вывод его потеряет (сменится способ вызова):
+# spec_approval.py держит слово владельца, tg_send.sh ставит метку хакатона И-4.
+paths:
+  - scripts/deploy.sh
+  - harness/config/harness.conf
+  - harness/config/pipeline.yaml
+  - harness/config/gates-hackathon.yaml
+  - harness/config/hackathon-forbidden.yaml
+  - scripts/hackathon.py
+  - .claude/settings.json
+  - scripts/lib/*
+  - scripts/hooks/*
+  - scripts/spec_approval.py
+  - scripts/tg_send.sh

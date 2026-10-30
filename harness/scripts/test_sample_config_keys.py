@@ -25,7 +25,8 @@
     (2) каждый ключ из `ключи:` стоит в образце НЕзакомментированным →
     иначе «нет в образце»; (3) ключ из `снять_ключи:` в образце не стоит →
     иначе «снят».
-Дверь пробы: SAMPLE_KEYS_GATE — путь копии гейта (мутации).
+Дверь пробы: SAMPLE_KEYS_GATE — путь копии гейта (мутации); HARNESS_STARTER —
+каталог пакета, чей образец судят случаи раздела «образец пакета».
 
 Прогон: python3 scripts/test_sample_config_keys.py
 """
@@ -106,6 +107,11 @@ def stand_cases() -> None:
 
     rc, out = case()
     check("здоровый стенд — rc 0", rc == 0, f"rc {rc}: {out.strip()[:300]}")
+    # Пустая строка на зелёном неотличима от «судить было нечем» (без живого
+    # конфига гейт не судит ни одного ключа). Числа — из стенда.
+    check("здоровый: приговор называет число судимого",
+          out.strip() == "чисто: ключей живого конфига 2, ключей доустановки 1, снятых ключей 1",
+          repr(out.strip()[:300]))
 
     # БОЛЬНОЙ 2.2, живой случай: ключ вписан руками в живой конфиг, демон
     # его читает, образец о нём не знает.
@@ -186,11 +192,70 @@ def live_cases() -> None:
               f"rc {rc}:\n{out.strip()[:1500]}")
 
 
+
+# deploy.sh пакета читает три ключа стека, и образец обязан их описывать:
+# потребитель получает образец, а не живой конфиг. Судится образец ПАКЕТА:
+# образцы проекта и пакета у нас совпадают, и проба на проектном зеленела бы
+# там, где они разошлись.
+STACK_KEYS = ("STACK_RELEASE_CMD", "STACK_HEALTH_CMD", "STACK_DB_RESTORE_HINT")
+
+
+def package_root() -> Path:
+    """Пакет-источник (дверь HARNESS_STARTER); в самом пакете это ROOT."""
+    named = config.katalog_paketa()
+    return named if (named / "harness" / "config" / "harness.conf").is_file() else ROOT
+
+
+def package_cases() -> None:
+    pkg = package_root()
+    sample_path = pkg / "harness" / "config" / "harness.conf"
+    deploy = pkg / "harness" / "scripts" / "deploy.sh"
+    check(f"в пакете есть образец и deploy.sh ({pkg})", sample_path.is_file() and deploy.is_file())
+    if not (sample_path.is_file() and deploy.is_file()):
+        return
+    # Без читателя случаи ниже пусты: «ключ читает код» — их предпосылка.
+    code_lines = [l for l in deploy.read_text(encoding="utf-8").splitlines() if not l.lstrip().startswith("#")]
+    unread = [k for k in STACK_KEYS if not any(re.search(rf"(?<![A-Z0-9_]){k}(?![A-Z0-9_])", l) for l in code_lines)]
+    check("deploy.sh пакета читает все три ключа стека (предпосылка)", not unread, " ".join(unread))
+
+    sample = sample_path.read_text(encoding="utf-8")
+    declared = set(config.из_текста(sample)) | set(re.findall(r"^\s*#\s*([A-Z][A-Z0-9_]*)=", sample, re.MULTILINE))
+    missing = [k for k in STACK_KEYS if k not in declared]
+    check("образец пакета описывает каждый ключ стека строкой KEY= или # KEY=",
+          not missing, f"нет в {sample_path}: {' '.join(missing)}")
+
+    if not GATE.is_file():
+        return
+    # Живой конфиг потребителя объявляет ключи стека (там deploy.sh ими
+    # пользуются) — свой файл стенда: живой /etc у нас их не знает, и гейт
+    # с ним молчал бы о любом образце.
+    with tempfile.TemporaryDirectory() as tmp:
+        live = Path(tmp) / "live.conf"
+        write(live, "".join(f'{k}="x"\n' for k in STACK_KEYS))
+        stripped = Path(tmp) / "stripped.conf"
+        write(stripped, "".join(l + "\n" for l in sample.splitlines()
+                                if not any(re.search(rf"^\s*#?\s*{k}=", l) for k in STACK_KEYS)))
+        base = ["--live", str(live), "--jobs", str(pkg / "harness" / "config" / "system-jobs.yaml"),
+                "--code-root", str(pkg)]
+        # Контроль стенда: образец без строк стека гейт обязан назвать — иначе
+        # «не находит» значило бы «не видит deploy.sh», а не «образец полон».
+        rc, out = run_gate(["--sample", str(stripped), *base])
+        blind = [k for k in STACK_KEYS if not finding(out, k, "нет в образце")]
+        check("контроль: образец без ключей стека — гейт называет все три", rc == 1 and not blind,
+              f"rc {rc}, не назвал: {' '.join(blind)}; {out.strip()[:300]}")
+        rc, out = run_gate(["--sample", str(sample_path), *base])
+        named = [k for k in STACK_KEYS if finding(out, k, "нет в образце")]
+        check("гейт на образце ПАКЕТА не называет ключи стека «нет в образце»",
+              rc in (0, 1) and not named, f"rc {rc}, названы: {' '.join(named)}")
+
+
 def main() -> int:
     print("[стенды]")
     stand_cases()
     print("[живые данные]")
     live_cases()
+    print("[образец пакета]")
+    package_cases()
     if failures:
         print(f"SELFTEST: КРАСНЫЙ ({failures} из {paths} путей)")
         return 1

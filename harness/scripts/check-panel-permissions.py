@@ -22,7 +22,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
-from config import из_файла, корень_дерева  # noqa: E402
+from config import из_файла, корень_дерева, путь_install_conf  # noqa: E402
 
 ОТКАЗ_ПРАВ = re.compile(r"Permission denied|Отказано в доступе|\[Errno 13\]")
 
@@ -75,7 +75,9 @@ def selftest() -> int:
 def главная() -> int:
     if "--selftest" in sys.argv[1:]:
         return selftest()
-    корень = корень_дерева(__file__)
+    # Судится живая служба, а она работает на дереве паспорта: в прогоне по
+    # снимку пользователь панели снимок и не читает, и не исполняет.
+    корень = Path(из_файла(путь_install_conf()).get("PROJECT_DIR") or корень_дерева(__file__))
     пользователь = пользователь_службы()
     if not пользователь:
         print("[права панели] служба harness-panel не описана — проверять нечего")

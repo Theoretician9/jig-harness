@@ -32,6 +32,7 @@
 """
 from __future__ import annotations
 
+import datetime
 import fnmatch
 import json
 import re
@@ -45,11 +46,16 @@ import config as конф                                     # noqa: E402
 
 КОРЕНЬ = Path(__file__).resolve().parent.parent.parent
 ТАБЛИЦА = Path(os.environ.get("MODELS_CONF") or (КОРЕНЬ / "harness" / "config" / "models.yaml"))
+АРТЕФАКТЫ = Path(os.environ.get("MODEL_ARTIFACTS_CONF")
+                 or (КОРЕНЬ / "harness" / "config" / "model-artifacts.yaml"))
 ПРИЧИНА_МИН = 20
 
 
 def журнал(запись: dict) -> None:
     try:
+        # Время ставит запись, а не вызывающий: семь веток решения, один формат
+        # (как `date -Is` у guard_bash) и ни одна ветка не забудет поле.
+        запись = {"ts": datetime.datetime.now().astimezone().isoformat(timespec="seconds"), **запись}
         путь = Path(os.environ.get("LOG_DIR") or конф.log_dir()) / "model-guard.jsonl"
         путь.parent.mkdir(parents=True, exist_ok=True)
         with open(путь, "a", encoding="utf-8") as fh:
@@ -64,6 +70,17 @@ def данные() -> dict:
         return yaml.safe_load(ТАБЛИЦА.read_text(encoding="utf-8")) or {}
     except Exception:
         return {}
+
+
+def маски_артефактов() -> dict | None:
+    """Маски «путь → (вид, кто)» из model-artifacts.yaml; None — не прочитан.
+    models.yaml для масок не читается: там они устарели."""
+    try:
+        import yaml
+        карта = (yaml.safe_load(АРТЕФАКТЫ.read_text(encoding="utf-8")) or {}).get("артефакты")
+    except Exception:
+        return None
+    return карта if isinstance(карта, dict) and карта else None
 
 
 def вид_по_пути(путь: str, карта: dict) -> tuple[str, str]:
@@ -82,6 +99,22 @@ def вид_по_пути(путь: str, карта: dict) -> tuple[str, str]:
                 return str(значение.get("вид") or ""), str(значение.get("кто") or "")
             return str(значение), ""
     return "", ""
+
+
+def печать_по_пути(путь: str, карта: dict) -> bool:
+    """True — маска файла просит печать хуком (`печать: true`).
+
+    Отдельная функция, а не третье поле в паре `вид_по_пути`: у пары читателей
+    много, и меняющаяся длина кортежа ломает их молча. Порядок масок тот же —
+    побеждает первая подошедшая."""
+    чистый = путь
+    for префикс in (str(КОРЕНЬ) + "/", "./"):
+        if чистый.startswith(префикс):
+            чистый = чистый[len(префикс):]
+    for маска, значение in (карта or {}).items():
+        if fnmatch.fnmatch(чистый, маска) or fnmatch.fnmatch("/" + чистый, маска):
+            return isinstance(значение, dict) and значение.get("печать") is True
+    return False
 
 
 def род(имя: str) -> str:
@@ -246,7 +279,11 @@ def путь_из_команды(cmd: str, карта: dict) -> str:
 
 def судить(payload: dict) -> int:
     инструмент = payload.get("tool_name")
-    d_карта = (данные().get("артефакты") or {})
+    d_карта = маски_артефактов()
+    if d_карта is None:
+        журнал({"исход": "файл масок не прочитан", "файл": str(АРТЕФАКТЫ),
+                "слово": "model-artifacts"})
+        return 0
     if инструмент == "Bash":
         путь = путь_из_команды(str((payload.get("tool_input") or {}).get("command") or ""),
                                d_карта)
@@ -259,7 +296,7 @@ def судить(payload: dict) -> int:
     if not путь:
         return 0
     d = данные()
-    вид, кто = вид_по_пути(путь, d.get("артефакты") or {})
+    вид, кто = вид_по_пути(путь, d_карта)
     if not вид:
         return 0
     причина = причина_двери()

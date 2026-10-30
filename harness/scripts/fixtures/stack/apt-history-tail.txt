@@ -1,0 +1,19 @@
+Start-Date: 2026-10-22  06:57:42
+Commandline: /usr/bin/unattended-upgrade
+Upgrade: libnss3:amd64 (2:3.98-1ubuntu0.2, 2:3.98-1ubuntu0.3)
+End-Date: 2026-10-22  06:57:42
+
+Start-Date: 2026-10-22  06:57:48
+Commandline: /usr/bin/unattended-upgrade
+Upgrade: poppler-utils:amd64 (24.02.0-1ubuntu9.10, 24.02.0-1ubuntu9.11), libpoppler134:amd64 (24.02.0-1ubuntu9.10, 24.02.0-1ubuntu9.11)
+End-Date: 2026-10-22  06:57:50
+
+Start-Date: 2026-10-22  06:57:54
+Commandline: /usr/bin/unattended-upgrade
+Upgrade: libunbound8:amd64 (1.19.2-1ubuntu3.10, 1.19.2-1ubuntu3.12)
+End-Date: 2026-10-22  06:57:54
+
+Start-Date: 2026-10-24  06:25:51
+Commandline: /usr/bin/unattended-upgrade
+Upgrade: zlib1g-dev:amd64 (1:1.3.dfsg-3.1ubuntu2.2, 1:1.3.dfsg-3.1ubuntu2.3), zlib1g:amd64 (1:1.3.dfsg-3.1ubuntu2.2, 1:1.3.dfsg-3.1ubuntu2.3)
+End-Date: 2026-10-24  06:25:55

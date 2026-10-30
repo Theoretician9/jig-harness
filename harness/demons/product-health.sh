@@ -268,7 +268,17 @@ if [ "${PRODUCT_HEALTH_DRY_SEND:-0}" = 1 ]; then
     exit 0
 fi
 
-if [ -x "$PROJECT_DIR/scripts/tg_send.sh" ] && "$PROJECT_DIR/scripts/tg_send.sh" "$MESSAGE"; then
+# Беда продукта — работа модели (ключ — причина, а не текст); «снова отвечает»
+# гасит задачу. Писателя может не быть (раскладка неполна) — сторож от этого не
+# падает.
+DOOR_ARGS=()
+if [ "$NOW_STATE" != "ok" ]; then
+    DOOR_ARGS=(--task product-health:trouble)
+elif [ -f "$PROJECT_DIR/scripts/alert-task.py" ]; then
+    python3 "$PROJECT_DIR/scripts/alert-task.py" --resolve product-health:trouble </dev/null >/dev/null 2>&1 || true
+fi
+
+if [ -x "$PROJECT_DIR/scripts/tg_send.sh" ] && "$PROJECT_DIR/scripts/tg_send.sh" "$MESSAGE" "${DOOR_ARGS[@]}"; then
     say "сообщение доставлено"
     # Состояние запоминается ТОЛЬКО после удачной отправки: иначе первая же
     # недоставка съедает сигнал навсегда — следующий опрос увидит «состояние то

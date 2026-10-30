@@ -39,9 +39,13 @@
 # и его отказ оставляет строку в логе, а не роняет уборку молча.
 set -euo pipefail
 
+# По самому скрипту, а не по PROJECT_DIR: стенд проб подменяет PROJECT_DIR.
+HERE="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
+REPORT="$HERE/../../scripts/disk-report.py"
+
 # ── конфиги ─────────────────────────────────────────────────────────────────
 # shellcheck disable=SC1091
-source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../../scripts/lib/config.sh"
+source "$HERE/../../scripts/lib/config.sh"
 INSTALL_CONF="${HARNESS_INSTALL_CONF:-${INSTALL_CONF:-$(konf_koren)/install.conf}}"
 HARNESS_CONF="${HARNESS_CONF:-$(konf_koren)/harness.conf}"
 [ -r "$INSTALL_CONF" ] || { echo "disk-cleanup: нет $INSTALL_CONF — установка не завершена (01-SPEC §0)"; exit 1; }
@@ -75,6 +79,20 @@ DISK_MAX_PCT="${DISK_MAX_PCT:-85}"
 # Порог ПОЧАСОВОЙ уборки по давлению (ключ --по-давлению). Ниже него почасовой
 # прогон уходит одной строкой: ночной уборки хватает.
 DISK_TRIGGER_PCT="${DISK_TRIGGER_PCT:-80}"
+# Удаление в /tmp включается только данными: умолчание в коде тоже 0.
+TMP_SWEEP_ENABLED="${TMP_SWEEP_ENABLED:-0}"
+# Удаление в docker (scripts/docker-sweep.py) включается только данными: умолчание в коде тоже 0.
+# Тома — отдельный выключатель: том может хранить данные, образ и кэш пересобираются.
+DOCKER_SWEEP_ENABLED="${DOCKER_SWEEP_ENABLED:-0}"
+DOCKER_SWEEP_VOLUMES="${DOCKER_SWEEP_VOLUMES:-0}"
+DOCKER_SWEEP_PROTECT="${DOCKER_SWEEP_PROTECT:-}"
+# Список СВОИХ (регулярка по compose-проекту или имени): пустой — боевой ход отказывает.
+DOCKER_SWEEP_OWN="${DOCKER_SWEEP_OWN:-}"
+DOCKER_IMAGE_KEEP_H="${DOCKER_IMAGE_KEEP_H:-168}"
+DOCKER_IMAGE_PRESSURE_H="${DOCKER_IMAGE_PRESSURE_H:-48}"
+DOCKER_STOPPED_KEEP_H="${DOCKER_STOPPED_KEEP_H:-24}"
+DOCKER_CACHE_KEEP_GB="${DOCKER_CACHE_KEEP_GB:-2}"
+DOCKER_VOLUME_KEEP_DAYS="${DOCKER_VOLUME_KEEP_DAYS:-14}"
 
 DRY_RUN=0
 # Уборка ПО ДАВЛЕНИЮ: тот же код, но прогон молчит, пока диску не тесно. Нужна
@@ -85,12 +103,13 @@ BY_PRESSURE=0
 case "${1:-}" in
     --dry-run)      DRY_RUN=1 ;;
     --по-давлению)  BY_PRESSURE=1 ;;
+    --опись)        exec python3 "$REPORT" --опись ;;    # только чтение
     "")             : ;;    # обычный ночной прогон
     # Незнакомый ключ ПРОВАЛИВАЛСЯ в настоящую уборку: реестр обещал
     # «--selftest», которого здесь нет, и команда проверки демона чистила диск
     # и трогала метку свежести (ревью кода 13.10.2026, критическое). Отказ
     # называет законные ключи — иначе опечатка стоит настоящей уборки.
-    *)              printf 'незнакомый ключ «%s». Законные: --dry-run (показать, ничего не удаляя), --по-давлению (убрать, если диску тесно), без ключа — обычный прогон\n' "$1" >&2
+    *)              printf 'незнакомый ключ «%s». Законные: --dry-run (показать, ничего не удаляя), --по-давлению (убрать, если диску тесно), --опись (где лежит место), без ключа — обычный прогон\n' "$1" >&2
                     exit 2 ;;
 esac
 
@@ -98,7 +117,8 @@ esac
 # строка выходила дважды, и лог выглядел так, будто уборка запускалась дважды.
 # Пишем только в поток: крон сам направит его в лог, а при ручном запуске видно
 # на экране.
-say() { printf '%s  %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"; }
+# `|| true`: поток журнала может быть закрыт (диск полон) — уборка не должна умирать на строке.
+say() { printf '%s  %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" || true; }
 run() {
     if [ "$DRY_RUN" = 1 ]; then
         say "  [пробный запуск] $*"
@@ -118,6 +138,12 @@ flock -n 9 || { say "прогон уже идёт (лок $LOCK_FILE) — вых
 used_kb() { df --output=used / | tail -1 | tr -d ' '; }
 pct()     { df --output=pcent / | tail -1 | tr -d ' %'; }
 
+# Перевзвод тревоги гасит задачу модели; нет писателя — уборка не падает.
+pogasit_disk() {
+    [ -f "${PROJECT_DIR:-/nonexistent}/scripts/alert-task.py" ] || return 0
+    python3 "$PROJECT_DIR/scripts/alert-task.py" --resolve disk-cleanup:full </dev/null >/dev/null 2>&1 || true
+}
+
 # Метка почасового прогона СВОЯ и ставится ВСЕГДА, даже когда убирать нечего:
 # иначе deadman решит, что прогон умер, ровно в самые здоровые дни. Метку
 # ночной уборки почасовой прогон не трогает — у них разные обещания.
@@ -125,6 +151,14 @@ if [ "$BY_PRESSURE" = 1 ]; then
     touch "$HEARTBEAT_DIR/disk-pressure"
     NOW_PCT=$(pct)
     if [ "$NOW_PCT" -lt "$DISK_TRIGGER_PCT" ]; then
+        # Перевзвод тревоги — ДО раннего выхода: почасовой прогон видит спад первым.
+        if [ -e "$HEARTBEAT_DIR/disk-alert" ]; then
+            rearmed=$(python3 "$REPORT" --тревога --занято "$NOW_PCT" --освобождено 0 2>&1 | head -1) || true
+            case "$rearmed" in перевзвод*) say "диск ниже порога, тревога перевзведена" ;; esac
+        fi
+        # Карточку завела и запасная/недоставленная весть — метки тогда нет;
+        # диск в норме гасит её в любом случае (гашение идемпотентно).
+        pogasit_disk
         say "по давлению: занято ${NOW_PCT}% (порог ${DISK_TRIGGER_PCT}%) — убирать нечего"
         exit 0
     fi
@@ -239,10 +273,12 @@ say "5. кеши npm / pip / uv вычищены (какие есть)"
 # строки, а не eval: данные из файла оболочка не исполняет.
 CAPS_DIR="${PROJECT_DIR:-}/harness/vozmozhnosti"
 caps_cleaned=0
+caps_found=0
 if [ -n "${PROJECT_DIR:-}" ] && [ -d "$CAPS_DIR" ]; then
     for pack in "$CAPS_DIR"/*/; do
         [ -f "${pack}.установлено" ] || continue
         [ -f "${pack}уборка.list" ] || continue
+        caps_found=$((caps_found + 1))
         pack_name=$(basename "$pack")
         while IFS=$'\t' read -r target days; do
             case "$target" in ''|\#*) continue ;; esac
@@ -267,7 +303,9 @@ if [ -n "${PROJECT_DIR:-}" ] && [ -d "$CAPS_DIR" ]; then
         done < "${pack}уборка.list"
     done
 fi
-[ "$caps_cleaned" = 0 ] && say "5-а. установленных возможностей со своей уборкой нет"
+if [ "$caps_found" = 0 ]; then
+    say "5-а. установленных возможностей со своей уборкой нет"
+fi
 
 # --- 6. Осиротевшие процессы инструментария -----------------------------------
 # 08.08: своп забился на 91%, и крупнейшим держателем оказался НЕ сервис, а
@@ -442,6 +480,44 @@ else
     say "9. срок хранения секретов из канала не прочитался из $RETENTION — шаг пропущен"
 fi
 
+# ── 10. Уборка /tmp ─────────────────────────────────────────────────────────
+# Отдельный ход со своим журналом и карантином (scripts/tmp-sweep.py): правила и
+# защита — в его данных. Отказ уборки /tmp не останавливает остальную уборку.
+# Дверь для стенда проб: без неё проба тревоги гнала бы боевую уборку по боевому /tmp.
+if [ "$TMP_SWEEP_ENABLED" = 1 ]; then
+    TMP_SWEEP="${TMP_SWEEP_SCRIPT:-$HERE/../../scripts/tmp-sweep.py}"
+    TMP_MODE="--ночь"
+    [ "$BY_PRESSURE" = 1 ] && TMP_MODE="--давление"
+    TMP_ARGS=("$TMP_MODE")
+    [ "$DRY_RUN" = 1 ] && TMP_ARGS+=(--dry-run)
+    python3 "$TMP_SWEEP" "${TMP_ARGS[@]}" || say "10. уборка /tmp отказала (код $?)"
+else
+    say "10. уборка /tmp выключена (TMP_SWEEP_ENABLED=0)"
+fi
+
+# ── 10б. Уборка docker ──────────────────────────────────────────────────────
+# Свой ход со своим журналом (scripts/docker-sweep.py). Дверь DOCKER_SWEEP_SCRIPT — для
+# стенда проб: без неё проба гнала бы боевую уборку по боевому docker. Под выключателем 0
+# ход не зовётся вовсе, а --dry-run демона даёт сухой ход без права удалять.
+if [ "$DOCKER_SWEEP_ENABLED" = 1 ] || [ "$DRY_RUN" = 1 ]; then
+    if [ "$DOCKER_SWEEP_ENABLED" = 1 ] || command -v docker >/dev/null 2>&1; then
+        DOCKER_SWEEP="${DOCKER_SWEEP_SCRIPT:-$HERE/../../scripts/docker-sweep.py}"
+        DOCKER_MODE="--ночь"
+        [ "$BY_PRESSURE" = 1 ] && DOCKER_MODE="--давление"
+        DOCKER_ARGS=("$DOCKER_MODE" --образы-ч "$DOCKER_IMAGE_KEEP_H"
+                     --образы-давление-ч "$DOCKER_IMAGE_PRESSURE_H"
+                     --контейнеры-ч "$DOCKER_STOPPED_KEEP_H" --кэш-гб "$DOCKER_CACHE_KEEP_GB"
+                     --тома-дней "$DOCKER_VOLUME_KEEP_DAYS" --свои "$DOCKER_SWEEP_OWN"
+                     --журнал "$LOG_DIR/уборка-docker.jsonl" --метки "$LOG_DIR/уборка-docker-метки.json")
+        [ -n "$DOCKER_SWEEP_PROTECT" ] && DOCKER_ARGS+=(--защита "$DOCKER_SWEEP_PROTECT")
+        [ "$DOCKER_SWEEP_VOLUMES" = 1 ] && DOCKER_ARGS+=(--тома)
+        if [ "$DRY_RUN" = 1 ]; then DOCKER_ARGS+=(--dry-run); else DOCKER_ARGS+=(--разрешено); fi
+        python3 "$DOCKER_SWEEP" "${DOCKER_ARGS[@]}" || say "10б. уборка docker отказала (код $?)"
+    fi
+else
+    say "10б. уборка docker выключена (DOCKER_SWEEP_ENABLED=0)"
+fi
+
 # --- итог ---------------------------------------------------------------------
 AFTER_KB=$(used_kb)
 FREED_MB=$(( (BEFORE_KB - AFTER_KB) / 1024 ))
@@ -453,7 +529,7 @@ say "=== уборка завершена: освобождено ${FREED_MB} М�
 tg_send() {
     local text="$1"
     if [ -x "${PROJECT_DIR:-/nonexistent}/scripts/tg_send.sh" ]; then
-        "$PROJECT_DIR/scripts/tg_send.sh" "$text" >/dev/null && return 0
+        "$PROJECT_DIR/scripts/tg_send.sh" "$text" --task disk-cleanup:full >/dev/null && return 0
         say "tg_send.sh отказал — оповещение не доставлено"
         return 1
     fi
@@ -476,21 +552,34 @@ tg_send() {
         --data-urlencode "text=$text" | jq -e '.ok == true' >/dev/null
 }
 
-# Если после уборки всё равно тесно — молчать нельзя. Оповещение идёт тем же
-# каналом, что и остальные сигналы харнеса, чтобы всё приходило в одно место.
+# Решение тревоги — у disk-report.py: одна весть на пересечение порога, повтор по
+# метке, перевзвод при спаде. Метка пишется только после того, как канал принял
+# весть: недоставленная обязана повториться.
 NOW_PCT=$(pct)
-if [ "$DRY_RUN" = 0 ] && [ "$NOW_PCT" -ge "$DISK_MAX_PCT" ]; then
-    say "ВНИМАНИЕ: после уборки занято ${NOW_PCT}% (порог ${DISK_MAX_PCT}%) — шлю оповещение"
-    TOP=$( (docker system df 2>/dev/null || du -xsh /var/log /home 2>/dev/null) | tail -n +1 | tr '\n' ' ')
-    ALERT="Автоуборка отработала, но диск всё ещё занят на ${NOW_PCT}%.
-Освободить удалось ${FREED_MB} МБ — этого мало, нужен разбор вручную.
-Крупное: ${TOP}"
-    if tg_send "$ALERT"; then
-        say "оповещение доставлено (ok:true)"
-    else
-        say "оповещение НЕ доставлено"
-        exit 1
-    fi
+if [ "$DRY_RUN" = 0 ]; then
+    rc=0
+    DECISION=$(python3 "$REPORT" --тревога --занято "$NOW_PCT" --освобождено "$FREED_MB" 2>&1) || rc=$?
+    first=${DECISION%%$'\n'*}
+    case "$rc:$first" in
+        0:весть*)
+            say "ВНИМАНИЕ: после уборки занято ${NOW_PCT}% (порог ${DISK_MAX_PCT}%) — шлю оповещение (${first})"
+            if tg_send "${DECISION#*$'\n'}"; then
+                python3 "$REPORT" --отправлено --занято "$NOW_PCT" >/dev/null 2>&1 || say "метка тревоги не записалась"
+                say "оповещение доставлено (ok:true)"
+            else
+                say "оповещение НЕ доставлено — весть отложена до следующего прогона"
+                exit 1
+            fi ;;
+        3:молчу*)     say "${first#молчу: }" ;;
+        3:перевзвод*) say "диск ниже порога, тревога перевзведена"; pogasit_disk ;;
+        3:*)          [ "$NOW_PCT" -ge "$DISK_MAX_PCT" ] || pogasit_disk ;;
+        *)
+            # Молчание при поломке хуже шума: прежняя весть, но только если диску правда тесно.
+            say "решение тревоги сломано — шлю прежнюю весть: ${first}"
+            if [ "$NOW_PCT" -ge "$DISK_MAX_PCT" ]; then
+                tg_send "Автоуборка отработала, но диск всё ещё занят на ${NOW_PCT}%. Освободить удалось ${FREED_MB} МБ — нужен разбор вручную." || exit 1
+            fi ;;
+    esac
 fi
 
 # Метка heartbeat — только при успешном завершении (пробный запуск не в счёт:

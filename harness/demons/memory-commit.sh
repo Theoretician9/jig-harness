@@ -106,6 +106,10 @@ CHANGED="$(git -c core.quotepath=false status --porcelain -- "$MEMORY_SUBDIR" 2>
 if [ -z "$CHANGED" ]; then
     say "правок памяти нет"
     zabyt_neudachi        # не отказ гейта — счёт начинается заново (M-02)
+    # Память закоммитила смена или файл вернули: беды нет, карточка не нужна.
+    if [ -f "$PROJECT_DIR/scripts/alert-task.py" ]; then
+        python3 "$PROJECT_DIR/scripts/alert-task.py" --resolve memory-commit:blocked </dev/null >/dev/null 2>&1 || true
+    fi
     mkdir -p "$HEARTBEAT_DIR"
     : > "$HEARTBEAT_DIR/memory-commit"
     exit 0
@@ -177,6 +181,11 @@ if git commit -o "$MEMORY_SUBDIR" -m "$MSG" >"$VYVOD" 2>&1; then
     # пульса называл живого мёртвым.
     zabyt_neudachi
     python3 "$PROJECT_DIR/scripts/board.py" --снять память-не-коммитится >/dev/null 2>&1 || true
+    # Карточка о той же беде гаснет там же, где снят долг с доски; нет писателя —
+    # сторож не падает.
+    if [ -f "$PROJECT_DIR/scripts/alert-task.py" ]; then
+        python3 "$PROJECT_DIR/scripts/alert-task.py" --resolve memory-commit:blocked </dev/null >/dev/null 2>&1 || true
+    fi
 else
     # «Коммитить нечего» и «гейты покраснели» — РАЗНЫЕ вещи, и владельцу их
     # нельзя называть одинаково. Живой случай 13.09.2026 в 00:20: демон увидел
@@ -230,7 +239,7 @@ else
 
     if [ "$FAILS_ROW" = 1 ] && [ -x "$PROJECT_DIR/scripts/tg_send.sh" ]; then
         bash "$PROJECT_DIR/scripts/tg_send.sh" \
-            "Правку памяти с панели пока не сохранил в хранилище кода: красный гейт${GATE_NAME:+ «$GATE_NAME»}. Файл цел, повторю сам на следующем обходе — делать ничего не нужно." >/dev/null 2>&1 || true
+            "Правку памяти с панели пока не сохранил в хранилище кода: красный гейт${GATE_NAME:+ «$GATE_NAME»}. Файл цел, повторю сам на следующем обходе — делать ничего не нужно." --task memory-commit:blocked >/dev/null 2>&1 || true
     fi
 
     if [ "$FAILS_ROW" -ge "$FAILS_MAX" ]; then

@@ -124,8 +124,23 @@ konf_iz_fajla() {  # $1 = ключ; печатает значение или п�
 # живёт в коде; тот же носитель судит scripts/check-login-expiry.py.
 NOSITEL_CHUZHOGO_VHODA="CLAUDE_CODE_OAUTH_TOKEN"
 
+# Модель смены ставится ЗДЕСЬ, у единственной двери обоих путей подъёма: без
+# --model claude берёт модель из ~/.claude/settings.json, а у замысла «смена —
+# sonnet» (models.yaml) туда носителя не было. --model владельца в команде
+# старше таблицы; нечитаемая таблица команду не меняет — model-for дал бы haiku.
 komanda_agenta() {  # $1 = AGENT_START_CMD; печатает её же, без носителя входа
-    printf 'env -u %s %s' "$NOSITEL_CHUZHOGO_VHODA" "$1"
+    local cmd="$1" first rest here table model
+    first="${cmd%% *}"
+    rest="${cmd#"$first"}"
+    if { [ "$first" = "claude" ] || [[ "$first" == */claude ]]; } \
+        && [[ "$cmd" != *" --model "* && "$cmd" != *" --model="* ]]; then
+        here="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.."
+        table="${MODELS_CONF:-${PROJECT_DIR:-$here/..}/harness/config/models.yaml}"
+        if [ -r "$table" ] && model=$(MODELS_CONF="$table" bash "$here/model-for.sh" смена) && [ -n "$model" ]; then
+            cmd="$first --model $model$rest"
+        fi
+    fi
+    printf 'env -u %s %s' "$NOSITEL_CHUZHOGO_VHODA" "$cmd"
 }
 
 # Самотест: обе функции без него не проверял никто, а konf_iz_fajla — вход

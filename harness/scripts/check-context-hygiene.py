@@ -86,6 +86,7 @@ def read_conf(path: str, conf: dict) -> None:
 CONF: dict = {}
 sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
 from config import путь_harness_conf, путь_install_conf  # noqa: E402
+from token_estimate import tokens as токенов  # noqa: E402 — имя оставлено читателям модуля
 
 read_conf(путь_install_conf(), CONF)
 read_conf(путь_harness_conf(), CONF)
@@ -105,21 +106,6 @@ class Report:
 
 def chars(path: Path) -> int:
     return len(path.read_text(encoding="utf-8"))
-
-
-# Замер 21.09.2026 на шести живых файлах (tiktoken cl100k): доля кириллицы 63–69 %
-# даёт 2,05–2,10 знака на токен, доля 2–9 % даёт 3,47–3,72. Прямая через эти две
-# точки: знаков_на_токен = 3.8 − 2.55 × доля. Наибольшее расхождение с
-# tiktoken на замеренных файлах — 4 %, и оно в сторону завышения цены.
-# Почему оценка, а не токенизатор: гейт живёт в pre-commit и в воротах, и
-# зависимость ради одного числа он бы не пережил (её нет ни в одном окружении
-# установки). Ошибка в 4 % не меняет ни одного вердикта: потолки не впритык.
-def токенов(текст: str) -> int:
-    if not текст:
-        return 0
-    кириллицы = sum(1 for з in текст if "а" <= з.lower() <= "я" or з.lower() == "ё")
-    знаков_на_токен = 3.8 - 2.55 * (кириллицы / len(текст))
-    return round(len(текст) / знаков_на_токен)
 
 
 def цена(path: Path) -> int:

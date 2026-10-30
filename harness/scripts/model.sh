@@ -34,6 +34,10 @@ HARNESS_CONF="${HARNESS_CONF:-$(konf_koren)/harness.conf}"
 konf_zagruzit
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Нажатия в панель агента — только общей дверью и под её локом: диспетчер в тот
+# же миг может толкать сообщение владельца, и тексты склеились бы.
+# shellcheck disable=SC1091
+source "$HERE/lib/pane.sh"
 
 # Алиасы CLI: claude --model понимает и их, и полное имя. Список короткий
 # намеренно — это то, чем пользуется владелец; полное имя тоже разрешено, но
@@ -138,13 +142,12 @@ ALIASES="${MODEL_ALIASES:-fable opus sonnet haiku}"
         *) echo "модель записана, но в панели «$session» не агент — команду не шлю, применится при запуске."; return 0 ;;
     esac
     echo "подаю «/model $name» в панель — сессия не перезапускается."
-    tmux send-keys -t "$session" -l -- "/model $name"
-    sleep 1
-    tmux send-keys -t "$session" Enter
+    TMUX_SESSION="$session"
+    pane_command text "/model $name" || { echo "команда в панель не ушла: ${PANE_REFUSAL:-причина не названа}"; return 1; }
     # «/model» переспрашивает: «Switch model?» с подсвеченным пунктом «Yes».
     # Замер 11.09.2026 — без ответа диалог висит и модель не меняется.
     sleep 3
-    tmux send-keys -t "$session" Enter
+    pane_command keys Enter || { echo "подтверждение в панель не ушло: ${PANE_REFUSAL:-причина не названа}"; return 1; }
     echo "команда подана; модель сменится со следующего ответа агента."
 }
 
@@ -240,6 +243,19 @@ selftest() {
     echo "SELFTEST: КРАСНЫЙ"; return 1
 }
 
+# Весь ввод /model под одним локом двери: между текстом и Enter диалога не
+# должен встать чужой толчок. Диалог ждём по факту на экране, до 10 с.
+model_seq_locked() {
+    pane_command_locked text "/model $1" || return 1
+    local i=0
+    while [ "$i" -lt 20 ]; do
+        if tmux capture-pane -p -t "$2" 2>/dev/null | grep -qi "switch model"; then
+            pane_command_locked keys Enter || return 1; break
+        fi
+        sleep 0.5; i=$((i + 1))
+    done
+}
+
 # Шаговое переключение (хук вызова скила) меняет модель ТОЛЬКО В СЕССИИ и не
 # трогает AGENT_START_CMD: запись в конфиг — это выбор владельца на все будущие
 # перезапуски, и затирать его шагом работы нельзя (находка ревью кода
@@ -253,21 +269,8 @@ selftest() {
         claude|node) ;;
         *) echo "в панели «$session» не агент — команду не шлю"; return 0 ;;
     esac
-    tmux send-keys -t "$session" -l -- "/model $name"
-    sleep 1
-    tmux send-keys -t "$session" Enter
-    # Второй Enter — ПО ФАКТУ появления диалога «Switch model?», а не вслепую
-    # по таймеру: если к этому моменту на экране другой диалог, слепой Enter
-    # подтвердит его (находка ревью кода 12.09.2026). Ждём до 10 секунд.
-    local i=0
-    while [ "$i" -lt 20 ]; do
-        if tmux capture-pane -p -t "$session" 2>/dev/null | grep -qi "switch model"; then
-            tmux send-keys -t "$session" Enter
-            break
-        fi
-        sleep 0.5
-        i=$((i + 1))
-    done
+    TMUX_SESSION="$session"
+    pane_lock_run model_seq_locked "$name" "$session" || { echo "команда в панель не ушла: ${PANE_REFUSAL:-причина не названа}"; return 1; }
     echo "{\"ts\":\"$(date -Is)\",\"стало\":\"$name\",\"только_сессия\":true}" \
         >> "$LOG_DIR/model-switch.jsonl" 2>/dev/null || true
     echo "модель сессии: $name (конфиг не тронут)"

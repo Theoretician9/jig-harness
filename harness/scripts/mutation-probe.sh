@@ -23,6 +23,19 @@
 #         стоят в коде? Прогонять после каждого круга правок на ЧИСТОМ дереве.
 set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
+# Защита от вложенности стоит ВЫШЕ загрузки конфига и журнала: отказ не должен
+# ни читать боевую таблицу, ни писать в боевой мутации.log. Прибор сам ставит
+# детям глубину+1 (см. `прогнать`): запись таблицы о самом приборе иначе плодила
+# копию за копией (ночь 27.10: 38 уровней). Дверь HARNESS_MUTPROBE_SELFTEST_INNER
+# ставит только самотест; --selftest на глубине ≥1 она всё равно не открывает,
+# потому что именно этот путь и был рекурсией.
+MUTPROBE_DEPTH="${HARNESS_MUTPROBE_DEPTH:-0}"
+if [ "$MUTPROBE_DEPTH" -ge 2 ] 2>/dev/null \
+   || { [ "$MUTPROBE_DEPTH" -ge 1 ] 2>/dev/null \
+        && { [ "${HARNESS_MUTPROBE_SELFTEST_INNER:-}" != 1 ] || [ "${1:-}" = "--selftest" ]; }; }; then
+    echo "mutation-probe: отказ — вложенный запуск прибора (HARNESS_MUTPROBE_DEPTH=$MUTPROBE_DEPTH)" >&2
+    exit 2
+fi
 # След прогона — в СВОЙ журнал, а не только в вывод вызывающего: покрытие
 # инвариантов ищет признак в мутации.log, и 28.09.2026 инвариант
 # «проверки-ловят» стоял «БЕЗ СЛЕДА 18 дн», хотя проба гонялась воротами.
@@ -32,7 +45,14 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
 konf_zagruzit
 MUT_LOG="$LOG_DIR/мутации.log"
 TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
+# mktemp даёт 0700: проба, зовущая копию от второго пользователя группы, иначе её не откроет.
+chmod 0755 "$TMP"
 OK=0; BAD=0
+# Кэш включает только полный путь ниже разбора ключей: самотест и сверка
+# текстов гоняют пробы по-настоящему. Флаг ставится здесь, а не берётся из
+# среды, чтобы чужое окружение не включило кэш самотесту.
+CACHE_ON=0; CACHE_HITS=0
+declare -A CACHE_WHEN=()
 
 # Копия механизма проверяется ЕГО ЖЕ доказательством из инвариантов.yaml: путь
 # оригинала в команде подменяется путём копии. Где тест берёт файл не из
@@ -53,9 +73,9 @@ OK=0; BAD=0
     # PYTHONDONTWRITEBYTECODE: свежий .pyc, написанный ЧИСТЫМ прогоном, гасит
     # мутацию той же байтовой длины (см. `корень_в_копию`).
     if [ -n "$subst" ]; then
-        env PYTHONDONTWRITEBYTECODE=1 "$subst=$3" "${words[@]}" >/dev/null 2>&1
+        env PYTHONDONTWRITEBYTECODE=1 HARNESS_MUTPROBE_DEPTH=$((MUTPROBE_DEPTH+1)) "$subst=$3" "${words[@]}" >/dev/null 2>&1
     else
-        env PYTHONDONTWRITEBYTECODE=1 "${words[@]}" >/dev/null 2>&1
+        env PYTHONDONTWRITEBYTECODE=1 HARNESS_MUTPROBE_DEPTH=$((MUTPROBE_DEPTH+1)) "${words[@]}" >/dev/null 2>&1
     fi
 }
 
@@ -103,14 +123,51 @@ restore_mutated() {
     MUTATED=()
 }
 
+# ── Кэш зелёных мутаций ────────────────────────────────────────────────────
+# Ночной полный набор (~1520 мутаций × ~37 с) не укладывается в ночь, а почти
+# все механизмы за сутки не меняются. Мутация пропускается, если ключ совпал с
+# зелёным прогоном не старше MUT_CACHE_DAYS суток. Ключ — хеши файла механизма,
+# каждого файла из команды доказательства (там проба), файла пробы класса D и
+# самого прибора плюс текст мутации, команда и подмена: смена ЛЮБОГО из них —
+# другой ключ. Соседи вне ключа (общие библиотеки, конфиги) ловятся сроком:
+# каждая мутация раз в N суток гоняется по-настоящему. Дыры не кэшируются.
+cache_key() { # $1=файл $2=выражение $3=доказательство $4=подмена $5=путь пробы
+    local -a files=("$1") words; local w hashes
+    read -ra words <<< "$3"
+    for w in "${words[@]}"; do [ -f "$w" ] && files+=("$w"); done
+    [ -n "$5" ] && [ "$5" != "-" ] && files+=("$5")
+    # Нечитаемый файл — нет ключа, а не ключ без него: иначе кэш врёт.
+    hashes=$(sha256sum -- "${files[@]}" 2>/dev/null) || return 1
+    printf '%s\n' "$SELF_SHA" "$2" "$3" "$4" "$5" "$hashes" | sha256sum | cut -c1-64
+}
+
+cache_put() { # $1=ключ $2=имя случая
+    printf '%s\t%s\t%s\n' "$1" "$NOW" "${2//$'\t'/ }" >> "$CACHE_FILE" \
+        || echo "mutation-probe: кэш не записан: $CACHE_FILE" >&2
+}
+
 проба() { # $1=файл $2=выражение $3=доказательство $4=подмена $5=имя $6=путь пробы
     local src="$1" expr="$2" proof="$3" subst="$4" name="$5" probe="${6:-}"
     # Чужие мутации снимаются ДО своей: иначе «чистая копия» чистая только на
     # словах, и красный ответ ничего не доказывает.
     restore_mutated
+    local key=""
+    if [ "$CACHE_ON" = 1 ]; then
+        key=$(cache_key "$src" "$expr" "$proof" "$subst" "$probe") || key=""
+        if [ -n "$key" ] && [ -n "${CACHE_WHEN[$key]:-}" ]; then
+            printf '  ок    из кэша (те же файлы и мутация, зелёный прогон %s): %s\n' \
+                "$(date -d "@${CACHE_WHEN[$key]}" '+%d.%m %H:%M')" "$name"
+            OK=$((OK+1)); CACHE_HITS=$((CACHE_HITS+1)); return
+        fi
+    fi
     local copy
     case "$src" in
-        /*) copy="$TMP/$(basename "$src")" ;;   # одинокий файл стенда
+        /*) copy="$TMP/$(basename "$src")"   # одинокий файл стенда
+            # Установщик пакета отказывает без harness/ рядом с собой: соседние
+            # каталоги оригинала кладутся ссылками, мутируется только копия файла.
+            for sibling in "$(dirname "$src")"/*/; do
+                [ -d "$sibling" ] && ln -sfn "${sibling%/}" "$TMP/$(basename "$sibling")"
+            done ;;
         *)  корень_в_копию "${src%%/*}" || { printf '  ПЛОХО не скопировать окружение: %s\n' "$name"; BAD=$((BAD+1)); return; }
             copy="$TMP/дерево/$src" ;;
     esac
@@ -149,6 +206,7 @@ restore_mutated() {
         printf '  ПЛОХО самотест ЗЕЛЁН на испорченном коде: %s\n' "$name"; BAD=$((BAD+1))
     else
         printf '  ок    чистая копия зелёная, мутация поймана: %s\n' "$name"; OK=$((OK+1))
+        [ -n "$key" ] && cache_put "$key" "$name"
     fi
 }
 
@@ -481,16 +539,324 @@ echo "КРАСНЫЙ"; exit 1
         printf '  ок    неизвестный ключ отказывает, а не гонит всю таблицу\n'
     fi
 
+    # Фильтр --механизм: пустой отбор — отказ (код 2), а не зелёный «0 из 0».
+    # Таблица и журнал СТЕНДА: боевые самотест не читает и не пишет в них.
+    printf 'инварианты: []\n' > "$STAND/пустая.yaml"
+    OUT=$(LOG_DIR="$STAND" HARNESS_INVARIANTS="$STAND/пустая.yaml" HARNESS_PROBE_MUTATIONS="$STAND/нет.yaml" \
+          bash "${BASH_SOURCE[0]}" --механизм scripts/нет-такого-механизма.py 2>&1); RC=$?
+    if [ "$RC" = 2 ] && printf '%s' "$OUT" | grep -q "записей для механизма нет"; then
+        printf '  ок    --механизм без записей — код 2 и своё слово, не зелёный\n'
+    else
+        printf '  ПЛОХО пустой отбор по --механизм: код %s, вывод «%s»\n' "$RC" "$OUT"
+        SELF_BAD=1
+    fi
+    # Отбор ОДНОЙ записи из двух: слепой механизм в таблице есть, но не выбран —
+    # иначе фильтр гонял бы весь набор и дыра слепого красила бы чужой прогон.
+    cat > "$STAND/таблица.yaml" <<ТАБ
+инварианты:
+  - id: отбор-зрячий
+    файл: $seeing
+    доказательство: bash $seeing --selftest
+    мутация: "s/^PRIZNAK=1/ПРИЗНАК=0/"
+    мутация_случай: "зрячий"
+  - id: отбор-слепой
+    файл: $blind
+    доказательство: bash $blind --selftest
+    мутация: "s/^PRIZNAK=1/ПРИЗНАК=0/"
+    мутация_случай: "слепой"
+ТАБ
+    OUT=$(LOG_DIR="$STAND" HARNESS_INVARIANTS="$STAND/таблица.yaml" HARNESS_PROBE_MUTATIONS="$STAND/нет.yaml" \
+          bash "${BASH_SOURCE[0]}" --механизм "$seeing" 2>&1); RC=$?
+    if [ "$RC" = 0 ] && printf '%s' "$OUT" | grep -q "покраснели как надо 1, дыр 0" \
+       && ! printf '%s' "$OUT" | grep -q "отбор-слепой"; then
+        printf '  ок    --механизм гоняет одну запись из двух\n'
+    else
+        printf '  ПЛОХО отбор одной записи: код %s, вывод «%s»\n' "$RC" "$OUT"
+        SELF_BAD=1
+    fi
+
+    # БОЛЬНОЙ СЛУЧАЙ 27.10.2026: с --механизм в копию попадал один корень
+    # механизма, а проверки читают СОСЕДНИЙ (scripts/ → harness/config,
+    # harness/demons → scripts/lib). Чистая копия краснела, и каждая мутация
+    # записи шла в «дыры»: tmp-sweep 49, heartbeat-watch 14, tg_send 7.
+    # Стенд — своё дерево с двумя корнями и копией прибора: прибор судит дерево,
+    # в котором лежит сам, и иначе судил бы боевое.
+    ROOTS="$STAND/два-корня"
+    mkdir -p "$ROOTS/scripts/lib" "$ROOTS/harness/config" "$ROOTS/harness/demons"
+    cp "${BASH_SOURCE[0]}" "$ROOTS/scripts/mutation-probe.sh"
+    cp "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/lib/config.sh" "$ROOTS/scripts/lib/config.sh"
+    printf 'ZNACH=1\n' > "$ROOTS/harness/config/читатель.conf"
+    printf 'OBSHEE=1\n' > "$ROOTS/scripts/lib/общее.sh"
+    cat > "$ROOTS/scripts/читатель.sh" <<'МЕХ'
+#!/usr/bin/env bash
+. "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../harness/config/читатель.conf"
+PRIZNAK=1
+[ "${1:-}" = "--selftest" ] || exit 0
+[ "$PRIZNAK" = 1 ] && [ "${ZNACH:-}" = 1 ] && { echo "SELFTEST: зелёный"; exit 0; }
+echo "SELFTEST: КРАСНЫЙ"; exit 1
+МЕХ
+    cat > "$ROOTS/scripts/слепой_читатель.sh" <<'МЕХ'
+#!/usr/bin/env bash
+. "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../harness/config/читатель.conf"
+PRIZNAK=1
+[ "${1:-}" = "--selftest" ] || exit 0
+[ "${ZNACH:-}" = 1 ] && { echo "SELFTEST: зелёный"; exit 0; }
+echo "SELFTEST: КРАСНЫЙ"; exit 1
+МЕХ
+    cat > "$ROOTS/harness/demons/демон.sh" <<'МЕХ'
+#!/usr/bin/env bash
+. "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../../scripts/lib/общее.sh"
+PRIZNAK=1
+[ "${1:-}" = "--selftest" ] || exit 0
+[ "$PRIZNAK" = 1 ] && [ "${OBSHEE:-}" = 1 ] && { echo "SELFTEST: зелёный"; exit 0; }
+echo "SELFTEST: КРАСНЫЙ"; exit 1
+МЕХ
+    cat > "$STAND/два-корня.yaml" <<'ТАБ'
+инварианты:
+  - id: корни-читатель
+    файл: scripts/читатель.sh
+    доказательство: bash scripts/читатель.sh --selftest
+    мутация: "s/^PRIZNAK=1/PRIZNAK=0/"
+    мутация_случай: "читает harness/config"
+  - id: корни-демон
+    файл: harness/demons/демон.sh
+    доказательство: bash harness/demons/демон.sh --selftest
+    мутация: "s/^PRIZNAK=1/PRIZNAK=0/"
+    мутация_случай: "читает scripts/lib"
+  - id: корни-слепой
+    файл: scripts/слепой_читатель.sh
+    доказательство: bash scripts/слепой_читатель.sh --selftest
+    мутация: "s/^PRIZNAK=1/PRIZNAK=0/"
+    мутация_случай: "настоящая дыра"
+ТАБ
+    roots_run() { # $@ — ключи прибора; вывод — в файл $STAND/корни-<n>.txt, код — в RC
+        local out="$1"; shift
+        # Кэш выключен: отбор сверяется с полным прогоном по словам вердиктов.
+        MUT_CACHE_DAYS=0 LOG_DIR="$STAND" HARNESS_INVARIANTS="$STAND/два-корня.yaml" HARNESS_PROBE_MUTATIONS="$STAND/нет.yaml" \
+            bash "$ROOTS/scripts/mutation-probe.sh" "$@" > "$out" 2>&1; RC=$?
+    }
+    # Вердикты записей без даты итога: их и сравниваем у полного и отборного.
+    verdicts() { grep -hE '^  (ок|ПЛОХО) ' "$@" | sort; }
+    for pair in "scripts/читатель.sh|читатель" "harness/demons/демон.sh|демон"; do
+        mech="${pair%%|*}"; tag="${pair##*|}"
+        roots_run "$STAND/корни-$tag.txt" --механизм "$mech"
+        if [ "$RC" = 0 ] && grep -q "покраснели как надо 1, дыр 0" "$STAND/корни-$tag.txt" \
+           && ! grep -q "чистая копия уже красная" "$STAND/корни-$tag.txt"; then
+            printf '  ок    --механизм %s: чистая копия зелёная, мутация поймана (оба корня в копии)\n' "$mech"
+        else
+            printf '  ПЛОХО --механизм %s читает соседний корень: код %s, вывод «%s»\n' \
+                "$mech" "$RC" "$(cat "$STAND/корни-$tag.txt")"
+            SELF_BAD=1
+        fi
+    done
+    # Обратный случай: починка корней не должна прятать НАСТОЯЩУЮ дыру — и дыра
+    # судится своим словом, а не «чистая копия уже красная».
+    roots_run "$STAND/корни-слепой.txt" --механизм scripts/слепой_читатель.sh
+    if [ "$RC" = 1 ] && grep -q "покраснели как надо 0, дыр 1" "$STAND/корни-слепой.txt" \
+       && grep -q "ЗЕЛЁН на испорченном коде" "$STAND/корни-слепой.txt" \
+       && ! grep -q "чистая копия уже красная" "$STAND/корни-слепой.txt"; then
+        printf '  ок    --механизм со слепым самотестом: настоящая дыра названа дырой\n'
+    else
+        printf '  ПЛОХО --механизм слепого: код %s, вывод «%s»\n' "$RC" "$(cat "$STAND/корни-слепой.txt")"
+        SELF_BAD=1
+    fi
+    # Отбор обязан отвечать как полный прогон: те же вердикты по записям и те же
+    # числа. Полный прогон — эталон, у него корни всех записей.
+    roots_run "$STAND/корни-полный.txt"
+    FULL_RC=$RC
+    if [ "$FULL_RC" = 1 ] && grep -q "покраснели как надо 2, дыр 1" "$STAND/корни-полный.txt" \
+       && [ "$(verdicts "$STAND/корни-полный.txt")" = \
+            "$(verdicts "$STAND/корни-читатель.txt" "$STAND/корни-демон.txt" "$STAND/корни-слепой.txt")" ]; then
+        printf '  ок    --механизм по трём записям = полный прогон (ок 2, дыр 1, вердикты те же)\n'
+    else
+        printf '  ПЛОХО --механизм расходится с полным прогоном: полный код %s\n  полный:\n%s\n  отбор:\n%s\n' \
+            "$FULL_RC" "$(verdicts "$STAND/корни-полный.txt")" \
+            "$(verdicts "$STAND/корни-читатель.txt" "$STAND/корни-демон.txt" "$STAND/корни-слепой.txt")"
+        SELF_BAD=1
+    fi
+
+    # БОЛЬНОЙ СЛУЧАЙ 27.10.2026: мутация записи самого прибора сняла отказ
+    # пустого отбора, --selftest копии погнал таблицу, в которой есть запись о
+    # самом приборе, — новая копия, новый уровень каждые ~5 минут, 38 уровней за
+    # 2 ч 25 мин ночного прогона. Защита — глубина вложенности в среде
+    # (HARNESS_MUTPROBE_DEPTH); её имя и есть слово отказа.
+    selftest_nesting() {
+        local bad=0 self nest trace pid rc waited launches out
+        self="$(readlink -f "${BASH_SOURCE[0]}")"
+        # Все потомки стенда несут путь $STAND в командной строке или живут в
+        # сессии setsid: убиваем по обоим признакам, иначе текущий код оставит
+        # рекурсию жить после самотеста.
+        kill_stand() { # $1 = pid лидера сессии
+            pkill -KILL -s "$1" 2>/dev/null
+            pkill -KILL -f -- "$STAND/" 2>/dev/null
+            wait "$1" 2>/dev/null
+            return 0
+        }
+
+        # (1) Копия с отключённым отказом пустого отбора, глубина 1, --selftest.
+        nest="$STAND/вложенный"
+        mkdir -p "$nest/scripts/lib" "$STAND/tmp"
+        cp "$self" "$nest/scripts/mutation-probe.sh"
+        cp "$(dirname "$self")/lib/config.sh" "$nest/scripts/lib/config.sh"
+        sed --sandbox -i 's/^if ФИЛЬТР:/if False:/' "$nest/scripts/mutation-probe.sh"
+        if cmp -s "$self" "$nest/scripts/mutation-probe.sh"; then
+            printf '  ПЛОХО вложенность: мутация «if ФИЛЬТР: → if False:» не встала — стенд не воспроизводит 27.10\n'
+            return 1
+        fi
+        # Каждый запуск копии (и её копий) оставляет строку: детей = строк − 1.
+        trace="$STAND/запуски.txt"; : > "$trace"
+        sed --sandbox -i '1a printf "%s\\n" "$0" >> "${MUTPROBE_TRACE:-/dev/null}"' "$nest/scripts/mutation-probe.sh"
+        # Таблица с записью о САМОМ приборе — форма ночного инцидента.
+        cat > "$STAND/вложенный.yaml" <<'ТАБ'
+инварианты:
+  - id: сам-себя
+    файл: scripts/mutation-probe.sh
+    доказательство: bash scripts/mutation-probe.sh --selftest
+    мутация: "s/^OK=0; BAD=0/OK=0; BAD=1/"
+    мутация_случай: "прибор о самом себе"
+ТАБ
+        mkdir -p "$STAND/журнал-1"
+        MUTPROBE_TRACE="$trace" HARNESS_MUTPROBE_DEPTH=1 HARNESS_MUTPROBE_SELFTEST_INNER=1 \
+            LOG_DIR="$STAND/журнал-1" TMPDIR="$STAND/tmp" \
+            HARNESS_INVARIANTS="$STAND/вложенный.yaml" HARNESS_PROBE_MUTATIONS="$STAND/нет.yaml" \
+            setsid bash "$nest/scripts/mutation-probe.sh" --selftest > "$STAND/вложенный.txt" 2>&1 < /dev/null &
+        pid=$!
+        waited=0
+        while kill -0 "$pid" 2>/dev/null && [ "$waited" -lt 30 ]; do sleep 1; waited=$((waited+1)); done
+        if kill -0 "$pid" 2>/dev/null; then
+            rc="висит >30 с"; kill_stand "$pid"
+        else
+            wait "$pid"; rc=$?; kill_stand "$pid"
+        fi
+        launches=$(grep -c . "$trace")
+        if [ "$rc" = 2 ] && [ "$launches" = 1 ] && grep -q HARNESS_MUTPROBE_DEPTH "$STAND/вложенный.txt"; then
+            printf '  ок    копия без отказа пустого отбора, глубина 1, --selftest: код 2 за %s с, детей 0\n' "$waited"
+        else
+            printf '  ПЛОХО копия с --selftest на глубине 1: код %s, запусков прибора %s (ждали 1), за %s с; вывод «%s»\n' \
+                "$rc" "$launches" "$waited" "$(head -c 600 "$STAND/вложенный.txt")"
+            bad=1
+        fi
+
+        # (1б) Путь ночи целиком: та же копия, запущенная БЕЗ глубины (как её
+        # зовут ворота). Глубину детям обязан передать сам прибор: копия копии
+        # (…/дерево/…) запускается не больше одного раза и отказывает.
+        : > "$trace"
+        env -u HARNESS_MUTPROBE_DEPTH MUTPROBE_TRACE="$trace" HARNESS_MUTPROBE_SELFTEST_INNER=1 \
+            LOG_DIR="$STAND/журнал-1" TMPDIR="$STAND/tmp" \
+            HARNESS_INVARIANTS="$STAND/вложенный.yaml" HARNESS_PROBE_MUTATIONS="$STAND/нет.yaml" \
+            setsid bash "$nest/scripts/mutation-probe.sh" --selftest > "$STAND/вложенный-0.txt" 2>&1 < /dev/null &
+        pid=$!
+        waited=0
+        while kill -0 "$pid" 2>/dev/null && [ "$waited" -lt 60 ]; do sleep 1; waited=$((waited+1)); done
+        if kill -0 "$pid" 2>/dev/null; then
+            rc="висит >60 с"; kill_stand "$pid"
+        else
+            wait "$pid"; rc=$?; kill_stand "$pid"
+        fi
+        launches=$(grep -c '/дерево/' "$trace")
+        if [ "$rc" != "висит >60 с" ] && [ "$launches" -le 1 ]; then
+            printf '  ок    копия без отказа пустого отбора с глубины 0: кончилась за %s с, копий копии %s\n' "$waited" "$launches"
+        else
+            printf '  ПЛОХО рекурсия копий с глубины 0: код %s, копий копии %s (ждали ≤1), за %s с\n' \
+                "$rc" "$launches" "$waited"
+            bad=1
+        fi
+
+        # (2) Самотест не читает боевые таблицы и не пишет в боевой журнал.
+        # «Боевые» здесь — таблицы по умолчанию в дереве копии, закрытые на
+        # чтение: всякое их чтение роняет случай самотеста копии.
+        if [ "$(id -u)" = 0 ]; then
+            printf '  ПЛОХО самотест и боевые данные: под root chmod 000 не закрывает чтение — условие не создать\n'
+            bad=1
+        else
+            local combat="$STAND/боевое"
+            mkdir -p "$combat/scripts/lib" "$combat/harness/config" "$STAND/боевой-журнал"
+            cp "$self" "$combat/scripts/mutation-probe.sh"
+            cp "$(dirname "$self")/lib/config.sh" "$combat/scripts/lib/config.sh"
+            printf 'инварианты: []\n' > "$combat/harness/config/invariants.yaml"
+            printf 'пробы: {}\n' > "$combat/harness/config/probe-mutations.yaml"
+            chmod 000 "$combat/harness/config/invariants.yaml" "$combat/harness/config/probe-mutations.yaml"
+            out=$(env -u HARNESS_INVARIANTS -u HARNESS_PROBE_MUTATIONS -u HARNESS_MUTPROBE_DEPTH \
+                  HARNESS_MUTPROBE_SELFTEST_INNER=1 LOG_DIR="$STAND/боевой-журнал" TMPDIR="$STAND/tmp" \
+                  timeout -k 5 120 bash "$combat/scripts/mutation-probe.sh" --selftest 2>&1); rc=$?
+            chmod 600 "$combat/harness/config/invariants.yaml" "$combat/harness/config/probe-mutations.yaml"
+            if [ "$rc" = 0 ] && [ ! -e "$STAND/боевой-журнал/мутации.log" ] \
+               && ! printf '%s' "$out" | grep -q "Permission denied"; then
+                printf '  ок    самотест не читает боевые таблицы и не пишет в боевой мутации.log\n'
+            else
+                printf '  ПЛОХО самотест тронул боевые данные: код %s, журнал %s; вывод «%s»\n' "$rc" \
+                    "$([ -e "$STAND/боевой-журнал/мутации.log" ] && echo записан || echo чист)" \
+                    "$(printf '%s' "$out" | grep -E 'ПЛОХО|Permission' | head -c 600)"
+                bad=1
+            fi
+        fi
+
+        # (3) Глубина ≥2 отказывает ВСЕГДА — в любом ключе и без ключа.
+        mkdir -p "$STAND/журнал-3"
+        local mode depth
+        for depth in 2 3; do
+            for mode in "" "--механизм $seeing" "--selftest" "--сверить-тексты"; do
+                local -a args=(); read -ra args <<< "$mode"
+                out=$(HARNESS_MUTPROBE_DEPTH=$depth HARNESS_MUTPROBE_SELFTEST_INNER=1 \
+                      LOG_DIR="$STAND/журнал-3" TMPDIR="$STAND/tmp" \
+                      HARNESS_INVARIANTS="$STAND/таблица.yaml" HARNESS_PROBE_MUTATIONS="$STAND/нет.yaml" \
+                      timeout -k 5 120 bash "$self" "${args[@]}" 2>&1); rc=$?
+                if [ "$rc" = 2 ] && printf '%s' "$out" | grep -q HARNESS_MUTPROBE_DEPTH \
+                   && [ ! -e "$STAND/журнал-3/мутации.log" ]; then
+                    printf '  ок    глубина %s, «%s»: отказ кодом 2\n' "$depth" "${mode:-без ключа}"
+                else
+                    printf '  ПЛОХО глубина %s, «%s»: код %s (ждали 2), вывод «%s»\n' \
+                        "$depth" "${mode:-без ключа}" "$rc" "$(printf '%s' "$out" | tail -n 3 | head -c 400)"
+                    bad=1
+                fi
+            done
+        done
+        return "$bad"
+    }
+
+    # Случаи вложенности зовут прибор с --selftest. Без своей двери самотест
+    # потомка снова дошёл бы до них — рекурсия ещё до проверки защиты.
+    # HARNESS_MUTPROBE_SELFTEST_INNER — дверь стенда, а не защита прибора.
+    if [ -z "${HARNESS_MUTPROBE_SELFTEST_INNER:-}" ]; then
+        selftest_nesting || SELF_BAD=1
+    fi
+
     if [ "$SELF_BAD" = 0 ]; then
-        echo "SELFTEST: зелёный (12 случаев, первым — больной «самотест слеп», последним — отказ на неизвестном ключе)"
+        echo "SELFTEST: зелёный (22 случая, первым — больной «самотест слеп», последним — вложенный прогон при глубине ≥2 отказывает)"
         exit 0
     fi
     echo "SELFTEST: КРАСНЫЙ"; exit 1
 fi
 
+# --механизм <путь>: только записи, чей механизм (файл) назван; весь набор
+# тянет двадцать минут. Пустой отбор — отказ ниже, из читателя данных.
+MECH_FILTER=""
+if [ "${1:-}" = "--механизм" ]; then
+    MECH_FILTER="${2:-}"
+    [ -n "$MECH_FILTER" ] || { echo "mutation-probe: --механизм без пути" >&2; exit 2; }
+    shift 2
+fi
 if [ -n "${1:-}" ]; then
-    printf 'mutation-probe: неизвестный ключ «%s». Есть: --selftest, --сверить-тексты, без ключа — полный прогон\n' "$1" >&2
+    printf 'mutation-probe: неизвестный ключ «%s». Есть: --selftest, --сверить-тексты, --механизм <путь>, без ключа — полный прогон\n' "$1" >&2
     exit 2
+fi
+export MECH_FILTER
+
+# Кэш — в LOG_DIR рядом с мутации.log: это состояние прибора, а не код; в
+# дереве его снесла бы уборка и увидел бы git. Строка: ключ, время, имя.
+MUT_CACHE_DAYS="${MUT_CACHE_DAYS:-7}"
+CACHE_FILE="$LOG_DIR/mutations-cache.tsv"
+NOW=$(date +%s)
+SELF_SHA=$(sha256sum < "${BASH_SOURCE[0]}" | cut -c1-64)
+if [ "$MUT_CACHE_DAYS" -gt 0 ] 2>/dev/null; then
+    CACHE_ON=1
+    CACHE_MIN=$((NOW - MUT_CACHE_DAYS * 86400))
+    if [ -r "$CACHE_FILE" ]; then
+        while IFS=$'\t' read -r ckey cwhen _; do
+            [[ "$cwhen" =~ ^[0-9]+$ ]] && [ "$cwhen" -ge "$CACHE_MIN" ] || continue
+            [ "$cwhen" -gt "${CACHE_WHEN[$ckey]:-0}" ] && CACHE_WHEN[$ckey]=$cwhen
+        done < "$CACHE_FILE"
+    fi
 fi
 
 # Таблица мутаций — в harness/config/invariants.yaml рядом с самими правилами
@@ -509,6 +875,10 @@ while IFS=$'\t' read -r src expr proof subst probe name; do
     # должна видеть не только своих соседей, но и чужие каталоги — демон
     # harness/demons/*.sh сорсит ../../scripts/lib/config.sh, и без второго
     # корня копия падает на строке source (12.09.2026).
+    if [ "$src" = "#ПУСТО" ]; then
+        echo "mutation-probe: записей для механизма нет: $expr" >&2
+        exit 2
+    fi
     if [ "$src" = "#КОРНИ" ]; then
         for koren in $expr; do корень_в_копию "$koren"; done
         continue
@@ -522,10 +892,14 @@ import io, os, sys, yaml
 ИНВАРИАНТЫ = os.environ.get("HARNESS_INVARIANTS") or "harness/config/invariants.yaml"
 ПРОБЫ = os.environ.get("HARNESS_PROBE_MUTATIONS") or "harness/config/probe-mutations.yaml"
 
+ФИЛЬТР = os.environ.get("MECH_FILTER") or ""
 d = yaml.safe_load(io.open(ИНВАРИАНТЫ, encoding="utf-8"))["инварианты"]
 класс_d = {}
 if os.path.exists(ПРОБЫ):
     класс_d = (yaml.safe_load(io.open(ПРОБЫ, encoding="utf-8")) or {}).get("пробы") or {}
+# Корни берутся ДО отбора: проверки механизма читают СОСЕДНИЙ корень
+# (scripts/ → harness/config, harness/ → scripts/lib), и копия, собранная по
+# одному отобранному механизму, краснела бы «чистой копией» без вины механизма.
 корни = {и["файл"].split("/")[0] for и in d if и.get("мутация")}
 корни |= {(з or {}).get("механизм", "").split("/")[0]
           for з in класс_d.values() if (з or {}).get("мутация")}
@@ -533,7 +907,18 @@ if os.path.exists(ПРОБЫ):
 # обязан быть в копии целиком — иначе зов упадёт раньше любой мутации.
 корни |= {проба.split("/")[0] for проба, з in класс_d.items()
           if (з or {}).get("мутация") and (з or {}).get("подмена") == "из-копии"}
+# Проба и механизм из scripts/ читают harness/config, и наоборот: пара корней
+# ходит вместе, иначе выборка записей зависит от порядка в таблице.
+if "scripts" in корни or "harness" in корни:
+    корни |= {"scripts", "harness"}
 корни.discard("")
+if ФИЛЬТР:
+    # Отбор по механизму: пустота называется отдельной строкой, а не «0 из 0».
+    d = [и for и in d if и.get("файл") == ФИЛЬТР]
+    класс_d = {п: з for п, з in класс_d.items() if (з or {}).get("механизм") == ФИЛЬТР}
+    if not any(и.get("мутация") for и in d) and not any((з or {}).get("мутация") for з in класс_d.values()):
+        sys.stdout.write("\t".join(["#ПУСТО", ФИЛЬТР, "-", "-", "-", "-"]) + "\n")
+        sys.exit(0)
 sys.stdout.write("\t".join(["#КОРНИ", " ".join(sorted(корни)), "-", "-", "-", "-"]) + "\n")
 без = []
 def список(значение):
@@ -593,6 +978,14 @@ if [ "$((OK + BAD))" -eq 0 ]; then
     echo "$ITOG"; printf '%s\n' "$ITOG" >> "$MUT_LOG" 2>/dev/null || true
     exit 1
 fi
-ITOG="$(date '+%Y-%m-%d %H:%M:%S')  === мутационная проба: покраснели как надо $OK, дыр $BAD ==="
+ITOG="$(date '+%Y-%m-%d %H:%M:%S')  === мутационная проба: покраснели как надо $OK, дыр $BAD, из кэша $CACHE_HITS ==="
 echo "$ITOG"; printf '%s\n' "$ITOG" >> "$MUT_LOG" 2>/dev/null || true
+# Прополка кэша после полного набора: по ключу — свежайшая строка, просроченные
+# уходят. Файл перечитывается здесь, так что строки параллельного --механизм
+# не теряются.
+if [ "$CACHE_ON" = 1 ] && [ -z "$MECH_FILTER" ] && [ -r "$CACHE_FILE" ]; then
+    awk -F'\t' -v min="$CACHE_MIN" '$2 >= min && $2 > w[$1] { w[$1] = $2; l[$1] = $0 }
+        END { for (k in l) print l[k] }' "$CACHE_FILE" > "$CACHE_FILE.new" \
+        && mv "$CACHE_FILE.new" "$CACHE_FILE"
+fi
 exit "$BAD"

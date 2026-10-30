@@ -90,6 +90,7 @@ def _журнал_пробы(корень):
     # проекта, а раскладка кладёт его лишь на чистую установку. Сверяется
     # доставляемый эталон, а не живой файл.
     "harness/CLAUDE.md": "harness/CLAUDE.md",
+    ".claude/agents/": "harness/agents/",
     ".claude/settings.json": "harness/hooks/project-settings.json",
     "harness/BUILD-SKILLS.py": "harness/BUILD-SKILLS.py",
     "harness/README-ПЛАГИН.md": "harness/README-ПЛАГИН.md",
@@ -197,9 +198,11 @@ def пары_раскладчика(текст: str) -> set[tuple[str, str]]:
         # Раскладчик кладёт файлы двумя способами: cp (источник → назначение) и
         # polozhit_v/polozhit_fajl (назначение первым доводом — запись через
         # временный файл и mv, чтобы не писать в inode работающего процесса).
+        # С Ф-а описи раскладки они и lay_tree только дописывают план двери
+        # укладки; слово группы стоит голым доводом и источником не считается.
         # Проверка обязана понимать оба: 11.09.2026 перевод на mv сделал её
         # слепой к пяти правилам сразу, и самотест честно покраснел.
-        if строка.lstrip().startswith(("polozhit_v", "polozhit_fajl")):
+        if строка.lstrip().startswith(("polozhit_v", "polozhit_fajl", "lay_tree")):
             назначение = re.search(r'"\$PROJECT_DIR/([^"]*)"', строка)
             куски = re.findall(r'"\$HERE"/([^\s"]+)|"\$HERE/([^"]+)"', строка)
             источники = [a or b for a, b in куски] or из_цикла
@@ -210,6 +213,8 @@ def пары_раскладчика(текст: str) -> set[tuple[str, str]]:
                 цель += "/"
             for и in источники:
                 и = re.sub(r"/\*[^/]*$", "/", и)
+                if строка.lstrip().startswith("lay_tree") and not и.endswith("/"):
+                    и += "/"   # lay_tree всегда кладёт каталог
                 конец = цель if и.endswith("/") else назначение.group(1)
                 # Имя файла подставляется переменной («…/config/$name») — это
                 # укладка ЦЕЛОГО каталога, а не одного файла: хвост убираем,
@@ -422,6 +427,35 @@ def селфтест() -> int:
         return 1
     беды = сверить_таблицу_с_раскладчиком(пакет / "harness" / "razlozhit-harnes.sh")
     проба("таблица соответствий сходится с cp-строками раскладчика", [], беды)
+
+    # Ф-а (hr.layout-manifest-removes-stale): раскладчик кладёт каталоги
+    # строкой «lay_tree <группа> <источник> <назначение>». Сверка, не знающая
+    # этой формы, молча теряет правило — повтор слепоты 11.09.
+    проба("lay_tree templates … шаблоны-задач: пара каталогов разобрана", True,
+          ("шаблоны-задач/", "harness/шаблоны-задач/") in пары_раскладчика(
+              'lay_tree templates "$HERE"/шаблоны-задач "$PROJECT_DIR/harness/шаблоны-задач"\n'))
+    # Группа в строке polozhit_fajl/polozhit_v — первым или последним доводом:
+    # слово группы не должно ни сбить разбор, ни стать источником.
+    проба("polozhit_fajl/polozhit_v с группой разбираются, как без неё", True,
+          {("BUILD-SKILLS.py", "harness/BUILD-SKILLS.py"), ("scripts/", "scripts/")}
+          == пары_раскладчика(
+              'polozhit_fajl harness-top "$HERE"/BUILD-SKILLS.py "$PROJECT_DIR/harness/BUILD-SKILLS.py"\n'
+              'polozhit_fajl "$HERE"/BUILD-SKILLS.py "$PROJECT_DIR/harness/BUILD-SKILLS.py" harness-top\n'
+              'polozhit_v scripts "$PROJECT_DIR/scripts" "$HERE"/scripts/*\n'))
+    # БОЛЬНОЙ: из живого раскладчика вырезаны строки lay_tree … skills-src —
+    # сверка обязана назвать именно harness/skills-src/, а не «какую-то беду».
+    живой_текст = (пакет / "harness" / "razlozhit-harnes.sh").read_text(encoding="utf-8")
+    без_skills_src = [с for с in живой_текст.splitlines(keepends=True)
+                      if not re.match(r"\s*lay_tree\b.*skills-src", с)]
+    вырезано = len(живой_текст.splitlines()) - len(без_skills_src)
+    with tempfile.TemporaryDirectory() as врем_каталог:
+        урезанный = Path(врем_каталог) / "razlozhit-harnes.sh"
+        урезанный.write_text("".join(без_skills_src), encoding="utf-8")
+        беды = сверить_таблицу_с_раскладчиком(урезанный)
+    проба(f"БОЛЬНОЙ: без строки lay_tree … skills-src (вырезано строк: {вырезано}) — "
+          "harness/skills-src/ назван «такого не копируют»", True,
+          вырезано > 0 and any("harness/skills-src/" in б and "такого не копируют" in б
+                               for б in беды))
 
     # БОЛЬНОЙ СЛУЧАЙ 17.10.2026: живой файл настроек выпал из LIVE_SETTINGS, и
     # раскладка затёрла бы записи установки. Случай судит СВОЮ причину словом.

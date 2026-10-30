@@ -28,6 +28,16 @@
           {
             "type": "command",
             "command": "python3 $CLAUDE_PROJECT_DIR/scripts/hooks/model_guard.py"
+          },
+          {
+            "type": "command",
+            "command": "python3 $CLAUDE_PROJECT_DIR/scripts/hooks/file_claim_guard.py",
+            "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "python3 $CLAUDE_PROJECT_DIR/scripts/hooks/lead_role_guard.py",
+            "timeout": 5
           }
         ]
       },
@@ -55,6 +65,16 @@
           {
             "type": "command",
             "command": "python3 $CLAUDE_PROJECT_DIR/scripts/hooks/model_guard.py"
+          },
+          {
+            "type": "command",
+            "command": "python3 $CLAUDE_PROJECT_DIR/scripts/hooks/file_claim_guard.py",
+            "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "python3 $CLAUDE_PROJECT_DIR/scripts/hooks/lead_role_guard.py",
+            "timeout": 5
           }
         ]
       },
@@ -64,6 +84,21 @@
           {
             "type": "command",
             "command": "python3 $CLAUDE_PROJECT_DIR/scripts/hooks/agent_skill_guard.py",
+            "timeout": 15
+          },
+          {
+            "type": "command",
+            "command": "python3 $CLAUDE_PROJECT_DIR/scripts/hooks/agent_budget_guard.py",
+            "timeout": 15
+          },
+          {
+            "type": "command",
+            "command": "python3 $CLAUDE_PROJECT_DIR/scripts/hooks/lead_role_guard.py",
+            "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "python3 $CLAUDE_PROJECT_DIR/scripts/hooks/launch_plan_guard.py",
             "timeout": 15
           }
         ]
@@ -92,6 +127,16 @@
       }
     ],
     "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 $CLAUDE_PROJECT_DIR/scripts/hooks/artifact_seal.py",
+            "timeout": 10
+          }
+        ]
+      },
       {
         "matcher": "Skill",
         "hooks": [

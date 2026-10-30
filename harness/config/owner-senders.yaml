@@ -24,6 +24,7 @@ pryamoj_api:
   scripts/check-secret-in-logs.py: ищет секреты В ТЕКСТАХ, адрес API — образец поиска
   scripts/hooks/guard_bash.py: судит команды, адрес API — образец запрета
   scripts/check-owner-senders.py: сам судья — адрес API в нём образец поиска
+  harness/demons/dispatcher-stall-watch.sh: owner-only, тревога о самом приёме канала — прямой запрос, потому что сломан именно тракт, по которому идут вести; работы для модели за ней нет, чинит сторож приёма
 
 # Файлы, которым разрешён ключ «--несмотря-на-лимит»: их весть обязана дойти,
 # пока лимит держится. Владелец разрешил ровно смену сессии («ну кроме там
@@ -37,4 +38,104 @@ nesmotrya_na_limit:
   scripts/test_limit_silence.sh: проба правила зовёт дверь обоими исходами
   scripts/test_limit_watch.sh: стенд пробы повторяет разбор ключей боевой дверью
   scripts/test_warden_blocked_idle.sh: стенд пробы повторяет разбор ключей боевой дверью
+  scripts/test_pane_door_pause.sh: стенд пробы повторяет разбор ключей боевой дверью
+  scripts/test_pane_lock_instant.sh: стенд пробы повторяет разбор ключей боевой дверью
   scripts/check-owner-senders.py: сам судья — ключ в нём образец поиска
+
+# ── Третий вопрос: что за вестью — работа модели или только сведение ────────
+# Владелец 25.10.2026: «сторож гигиены например, шлёт сообщение только мне, и
+# что мне делать с этими сообщениями? нет автоматизации, которая бы создавала
+# задачу для модели <…> мне то они зачем, так чисто показать. работу то должна
+# модель делать». Гейт судит КЛЮЧИ в обе стороны: запись без зова в коде и зов
+# без записи краснят одинаково.
+#
+# Вид записи:
+#   card        весть заводит карточку по ключу (--task) и снимает её на зелёном
+#               (--resolve); без key — карточки заводит свой писатель (own_writer);
+#   kick        весть идёт рядом с пинком живой смене, работа уже будится;
+#   board       весть кладёт факт на доску смены;
+#   owner-only  законно без задачи: ждать нечего, или это ответ на его действие;
+#   debt        работа за вестью ЕСТЬ, а задачи ещё нет; card — карточка долга.
+# Ключ с «*» на конце — префикс динамического ключа. Долг только убывает:
+# debt_max не поднимается выше закоммиченного (проверяет гейт по HEAD).
+probe_mask: '(^|/)test_|selftest'
+
+model_task:
+  harness/demons/acceptance-watch.sh:
+    - {kind: card, key: "acceptance-watch:crash", why: "аварии приёмки (упала, карта не прошла валидатор после архива) — работа модели; волна 3"}
+    - {kind: owner-only, why: "итог приёмки (принято / провал) — смена статусов в карте уже сама работа"}
+  harness/demons/check-builder.sh:
+    - {kind: card, key: "check-builder:map-damaged", why: "порча карты строителем — срочная работа модели; волна 3"}
+  harness/demons/disk-cleanup.sh:
+    - {kind: card, key: "disk-cleanup:full", why: "диск занят после уборки — работа модели; волна 1"}
+  harness/demons/extensions-watch.sh:
+    - {kind: card, key: "extensions-watch:failed", why: "сбой расширения (RC != 0) — фраза «смотрю» обещает работу, которой ни у кого нет; волна 3"}
+  harness/demons/heartbeat-watch.sh:
+    - {kind: card, key: "heartbeat-watch:dead:*", why: "мёртвый демон поимённо — работа модели; волна 1"}
+    - {kind: card, key: "heartbeat-watch:mass", why: "много мёртвых разом — одна причина, одна карточка; волна 1"}
+    - {kind: owner-only, why: "зелёная суточная сводка меток — пульс для сведения"}
+  harness/demons/limit-watch.sh:
+    - {kind: owner-only, why: "о самом лимите подписки: ждать нечего, лечится сама (слово 17.10); при снятии лимита смену будит pane_kick"}
+  harness/demons/memory-commit.sh:
+    - {kind: card, key: "memory-commit:blocked", why: "правка памяти с панели не уходит в гит — работа модели; на 6-м обходе есть доска, но её читают только на старте смены; волна 1"}
+  harness/demons/memory-revision.sh:
+    - {kind: card, key: "memory-revision:findings", why: "находки ежемесячной ревизии памяти должны стать карточками по образцу project-revision; волна 3"}
+  harness/demons/nightly-gates.sh:
+    - {kind: card, key: "nightly-gates:red", why: "красный итог ночных ворот — работа модели; волна 1"}
+    - {kind: card, key: "nightly-gates:broken", why: "обрыв ночного прогона — работа модели; волна 1"}
+  harness/demons/product-health.sh:
+    - {kind: card, key: "product-health:trouble", why: "служба продукта сообщает о беде (линия продукта); волна 3"}
+  harness/demons/project-revision.sh:
+    - {kind: card, own_writer: "модель по промпту ревизии добавляет карточки (источник ревизия:…), до трёх", why: "ЭТАЛОН: находки ревизии проекта становятся карточками"}
+  harness/demons/sentinel.sh:
+    - {kind: card, key: "sentinel:start-red", why: "красная проверка при старте — работа модели; волна 3"}
+    - {kind: owner-only, why: "стартовый доклад «всё поднято» — для сведения"}
+  harness/demons/server-hygiene.sh:
+    - {kind: card, key: "server-hygiene:violations", why: "нарушения потолков машины — пример владельца; волна 1"}
+    - {kind: card, key: "server-hygiene:check-broken", why: "проверка гигиены сломана — работа модели; волна 1"}
+  harness/demons/session-warden.sh:
+    - {kind: kick, why: "agent_prompt рядом с вестью при живом агенте: пульс, простой, inbox, ротация"}
+    - {kind: card, key: "session-warden:no-agent", why: "ветки «агента нет / поднять не удалось / ротация не закрылась / пинок не дошёл» — причину аварии новая смена иначе не узнает; волна 3"}
+    - {kind: card, key: "session-warden:inbox-stuck", why: "сообщение владельца отдано сессии трижды и всё лежит во входящих — сессия его не берёт; работа модели; волна 3"}
+    - {kind: card, key: "session-warden:two-agents", why: "два основных агента сразу, одно и то же устоявшееся время — две смены пишут в одно дерево; работа модели (one-shift.sh); карточка снимается, когда агент один"}
+  harness/demons/stack-watch.sh:
+    - {kind: owner-only, why: "недельная сводка свежести стека — сведение; работу по ней ведёт карточка hr.stack-freshness-monitor"}
+  harness/demons/update-watch.sh:
+    - {kind: owner-only, why: "вопрос «поставить новую версию?»; ответ исполняет код scripts/update.py"}
+  harness/panel/confirmation.py:
+    - {kind: owner-only, why: "ответ на нажатие владельца в панели — код подтверждения и исход переключения"}
+  harness/panel/server.py:
+    - {kind: owner-only, why: "вход запасным кодом и промахи входа — ответ на его действие"}
+  scripts/claude-demon.sh:
+    - {kind: owner-only, why: "«демоны не получают ответ модели» — лимит, лечится сам при снятии лимита, ждать нечего"}
+  scripts/emergency-send.sh:
+    - {kind: owner-only, why: "аварийный канал на случай сломанного харнеса, зовётся руками"}
+  scripts/hooks/pause_guard.py:
+    - {kind: owner-only, why: "ответ «стою» на его же команду паузы"}
+  scripts/protected-delete.py:
+    - {kind: owner-only, why: "вопрос «удалить файл?»; ответ исполняет код scripts/protected-delete.py"}
+  scripts/publish.sh:
+    - {kind: owner-only, why: "информирование о публикации по его слову: задача уже была словом владельца"}
+  scripts/spec_approval.py:
+    - {kind: owner-only, why: "вопрос «спека, жду да»; ответ исполняет код scripts/spec_approval.py"}
+  scripts/tg-dispatcher.sh:
+    - {kind: owner-only, why: "ответы владельцу на его команды и нажатия; сам читатель входящих"}
+  scripts/tg_send.sh:
+    - {kind: owner-only, why: "сама дверь канала: ключ --task зовёт писателя, но весть не от неё"}
+  scripts/update.py:
+    - {kind: owner-only, why: "итог обновления или откат — сведение; вопрос исполняет код этого же файла"}
+
+# Упоминают дверь канала, но владельцу сами не пишут.
+not_senders:
+  scripts/acceptance.py: строка tg_send.sh в списке разрешённых команд приёмки
+  scripts/check-function-before-definition.py: tg_send — имя функции в образцах самотеста
+  scripts/check-owner-senders.py: сам судья — имя двери в его описании и данных
+  scripts/lib/gates_check.sh: tg_send.sh в комментарии о резке строки по букве; пишет только журнал секунд
+  scripts/gates.sh: упоминание двери в комментарии о правилах переписки
+  scripts/install-probe.sh: tg_send в шаблоне поиска утечек стенда установки
+  scripts/mutation-probe.sh: слово tg_send в комментарии о причинах ложных «дыр» прибора
+  scripts/stack_freshness.py: пишет отметки после отправки; сам дверь не зовёт
+  scripts/verify-mechanisms.py: проверяет механизмы, зовёт дверь только в стенде
+
+# Долг только убывает: на включении 15 записей debt, волны 1–3 переведены в card (0 осталось).
+debt_max: 0

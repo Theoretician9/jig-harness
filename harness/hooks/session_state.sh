@@ -330,6 +330,23 @@ if [ -f "$queue_tool" ] && [ -f "$project_dir/dev-map.yaml" ]; then
   printf '%s\n' "$queue_out" | grep -m1 '^сейчас делаем:' || true
 fi
 
+# Заявки помощников на файлы (scripts/hooks/file_claim_guard.py); список — scripts/who-writes.py.
+echo "заняты файлы: $(python3 "$project_dir/scripts/who-writes.py" --count 2>/dev/null || echo '?')"
+
+# «Сделано, но не заявлено»: вся работа карточки plan/wip закрыта, коммиты
+# затихли. Только число — перевести в test решает смена (И-4).
+acceptance_tool="$project_dir/scripts/acceptance.py"
+if [ -f "$acceptance_tool" ] && [ -f "$project_dir/dev-map.yaml" ]; then
+  python3 "$acceptance_tool" --кандидаты 2>/dev/null | tail -1 || true
+fi
+
+# Итог вложенности за сутки: глубина, параллельные, доля тяжёлых. Нет скрипта
+# или он упал — молчим: строка не стоит провала старта сессии.
+nesting_tool="$project_dir/scripts/launch-plan.py"
+if [ -n "$project_dir" ] && [ -f "$nesting_tool" ]; then
+  timeout 5 python3 "$nesting_tool" --метрики --сутки 1 --строка 2>/dev/null | head -1 || true
+fi
+
 # Расход показывается ПОСЛЕДНИМ и целиком: строка «контекст на шаг» — это цена
 # каждого следующего шага, и видеть её полезно именно перед тем, как их делать.
 tokens_summary="$log_dir/tokens-daily.summary"

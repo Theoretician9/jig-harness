@@ -385,3 +385,56 @@
       = {\"вид\": \"выбор\", \"значения\": [{\"значение\": значение}], \"файл\": \"harness.conf\", \"применяется\":
       \"сразу\"}''; io.open(п,''w'',encoding=''utf-8'').write(т.replace(с,н))"'
     ждём_в_отказе: ПЛОХО · ВЫДУМАННЫЙ_КЛЮЧ
+  scripts/check-package-leftovers.py:
+    команда: python3 scripts/check-package-leftovers.py
+    больной_довод: T=$(mktemp -d) && mkdir -p "$T/harness/память" "$T/harness/config" && printf '[[net-takoj-zapisi]]\n' > "$T/harness/память/a.md" && python3 scripts/check-package-leftovers.py --package "$T"
+    ждём_в_отказе: ссылка в пустоту
+  scripts/check-release-notes.py:
+    команда: T=$(mktemp -d) && cp /home/user/starter/STARTER-PACKAGE/ЧТО-НОВОГО.md "$T/" && python3 scripts/check-release-notes.py "$T"
+    больной_довод: T=$(mktemp -d) && printf '## 2026-10-27 — пустая запись\n' > "$T/ЧТО-НОВОГО.md" && python3 scripts/check-release-notes.py "$T"
+    ждём_в_отказе: пуст или его нет
+  scripts/check-sample-config-keys.py:
+    команда: python3 scripts/check-sample-config-keys.py
+    больной_довод: T=$(mktemp -d) && true > "$T/sample.conf" && python3 scripts/check-sample-config-keys.py --sample "$T/sample.conf"
+    ждём_в_отказе: нет в образце
+  scripts/check-stack-registry.py:
+    команда: python3 scripts/check-stack-registry.py
+    больной_довод: T=$(mktemp -d) && printf 'части:\n  []\n' > "$T/r.yaml" && HARNESS_STACK_REGISTRY="$T/r.yaml" python3 scripts/check-stack-registry.py
+    ждём_в_отказе: без решения в реестре
+  scripts/model-guard-door.py:
+    команда: LOG_DIR=$(mktemp -d) python3 scripts/model-guard-door.py --почему 'чиню сторожа модели, помощника звать нечем' --на 1
+    больной_довод: LOG_DIR=$(mktemp -d) python3 scripts/model-guard-door.py --почему 'да'
+    ждём_в_отказе: это отписка
+  harness/panel/confirmation.py:
+    команда: T=$(mktemp -d) && export PANEL_STATE_DIR=$T PANEL_TG_SEND= && K=$(python3 -c "import sys;sys.path.insert(0,'harness/panel');import confirmation as c;print(c.завести('k','v'))") && cat "$T/панель-ожидания.json" && echo && out=$(python3 harness/panel/confirmation.py --ответ "нет $K") && echo "$out" && [ "$out" = "отказ" ]
+    больной_довод: T=$(mktemp -d) && export PANEL_STATE_DIR=$T PANEL_TG_SEND= && out=$(python3 harness/panel/confirmation.py --ответ "да 123456") && echo "$out" && [ "$out" = "применено" ]
+    ждём_в_отказе: не ответ панели
+  scripts/check-security.py:
+    команда: out=$(python3 scripts/check-security.py --staged) && echo "$out" && echo "$out" | grep -q 'находок 0'
+    чем_ломать: printf 'import subprocess\nsubprocess.run(["curl", "-k", "https://example.org"])\nrequests_get = 1\n' > scripts/sick_case_tls.py && printf 'import requests\nrequests.get("https://example.org", verify=False)\n' > scripts/sick_case_tls2.py && git add scripts/sick_case_tls.py scripts/sick_case_tls2.py
+    ждём_в_отказе: tls-off
+  scripts/check-ports-from-outside.py:
+    команда: python3 scripts/check-ports-from-outside.py
+    больной_довод: T=$(mktemp -d) && cp "$(python3 -c 'import sys;sys.path.insert(0,"scripts/lib");import config;print(config.путь_harness_conf())')" "$T/h.conf" && sed -i '/^PORTS_EXPECTED_OPEN=/d' "$T/h.conf" && echo 'PORTS_EXPECTED_OPEN="22,80,443,9"' >> "$T/h.conf" && HARNESS_CONF="$T/h.conf" python3 scripts/check-ports-from-outside.py
+    ждём_в_отказе: объявлен открытым, но снаружи НЕ отвечает
+  harness/panel/login.py:
+    команда: python3 harness/panel/login.py --пути
+    больной_довод: python3 harness/panel/login.py --ссылка 1
+    ждём_в_отказе: вход в панель выдаёт служба
+  harness/vozmozhnosti/mobilnaya-razrabotka/install.sh:
+    команда: HOME=$(mktemp -d) bash harness/vozmozhnosti/mobilnaya-razrabotka/install.sh --dry-run
+    больной_довод: HOME=$(mktemp -d) PACK_DIR=$(mktemp -d) bash harness/vozmozhnosti/mobilnaya-razrabotka/install.sh --dry-run
+    ждём_в_отказе: ставить нечего
+  # Ворота «проба без записи мутаций»: данные мутаций подменены пустыми — каждая
+  # живая проба дерева обязана быть названа поимённо.
+  scripts/check-probe-mutations.py:
+    команда: python3 scripts/check-probe-mutations.py
+    больной_довод: >-
+      T=$(mktemp -d) && printf 'пробы: {}\n' > "$T/m.yaml" && printf 'инварианты: []\n' > "$T/i.yaml" && HARNESS_PROBE_MUTATIONS="$T/m.yaml" HARNESS_INVARIANTS="$T/i.yaml" python3 scripts/check-probe-mutations.py
+    ждём_в_отказе: без записи мутаций
+  # Ворота журналов G1: в копии дерева механизм вне долга дописывает .jsonl
+  # мимо events.emit — ворота обязаны назвать файл и строку.
+  scripts/check-event-writers.py:
+    команда: python3 scripts/check-event-writers.py
+    чем_ломать: printf 'echo x >> "$LOG_DIR/chuzhoj.jsonl"\n' >> scripts/live-check.sh
+    ждём_в_отказе: мимо events.emit

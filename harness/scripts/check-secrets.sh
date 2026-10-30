@@ -61,6 +61,34 @@ MARKER='не-секрет'
 # Отсев узкий: значение целиком — цифры, точки и обычный суффикс версии.
 VERSIYA='(token|secret|passwd|password|api_?key)[A-Za-z0-9_-]*[[:space:]]*[:=][[:space:]]*"?v?[0-9]+(\.[0-9]+)+([-+][0-9A-Za-z.]+)?"?[[:space:]]*$'
 
+# Находка печатается как «СЕКРЕТ? путь:строка: вид [скрыто]» — значение в вывод
+# не идёт: вывод гейта оседает в журналах ворот, в выводе publish.sh и в
+# транскрипте сессии, а напечатанный секрет и есть утечка (И-3). Вид узнаётся
+# по тому же шаблону, что поймал строку; специфичные форматы проверяются
+# раньше общего присвоения, иначе «token = ghp_…» назвался бы присвоением.
+KINDS=(
+    'telegram|[0-9]{8,10}:AA[0-9A-Za-z_-]{33}'
+    'aws|AKIA[0-9A-Z]{16}'
+    'google|AIza[0-9A-Za-z_-]{35}'
+    'github|ghp_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{20,}'
+    'slack|xox[baprs]-[0-9A-Za-z-]{10,}'
+    'pem|-----BEGIN [A-Z ]*PRIVATE KEY-----'
+    'форма-43|=[[:space:]]*["'"'"'][A-Za-z0-9_-]{43}["'"'"']'
+)
+mask_findings() {  # stdin: строки git grep «путь:номер:текст»
+    local row location text kind entry name pattern
+    while IFS= read -r row; do
+        location="${row%%:*}"; text="${row#*:}"      # путь
+        location="$location:${text%%:*}"; text="${text#*:}"  # путь:номер
+        kind="присвоение"
+        for entry in "${KINDS[@]}"; do
+            name="${entry%%|*}"; pattern="${entry#*|}"
+            if [[ "$text" =~ $pattern ]]; then kind="$name"; break; fi
+        done
+        printf 'СЕКРЕТ? %s: %s [скрыто]\n' "$location" "$kind"
+    done
+}
+
 run_scan() {  # $1 = каталог репо, $2 = режим all|staged, $3 = каталог ключей (по умолчанию — из паспорта)
     local repo="$1" mode="$2" fail=0 files hits f
     # «Нечем судить» и «судить есть чем, а git сломался» — РАЗНЫЕ ответы, и
@@ -115,7 +143,7 @@ run_scan() {  # $1 = каталог репо, $2 = режим all|staged, $3 = �
              "${PATTERNS[@]}" "${SCOPE[@]}" 2>/dev/null | grep -v "$MARKER" \
              | grep -vE "$VERSIYA" || true)
     if [ -n "$hits" ]; then
-        printf '%s\n' "$hits" | sed 's|^|СЕКРЕТ? |'
+        mask_findings <<< "$hits"
         fail=1
     fi
     # ВТОРОЙ ВОПРОС ГЕЙТА: не попал ли в коммит НАШ живой ключ. Формой его не
@@ -264,10 +292,12 @@ if [ "${1:-}" = "--selftest" ]; then
         git -C "$T" add pnpm-lock.yaml >/dev/null 2>&1
         local vyvod; vyvod=$(run_scan "$T" all 2>&1 || true)
         rm -f "$T/pnpm-lock.yaml"; git -C "$T" rm -q --cached pnpm-lock.yaml
-        if printf %s "$vyvod" | grep -q "js-tokens"; then
+        # Значение в выводе не печатается, поэтому судим по номеру строки:
+        # версия — строка 1, настоящий токен — строка 2.
+        if printf %s "$vyvod" | grep -q 'pnpm-lock.yaml:1:'; then
             echo "  версия пакета принята за секрет"; return 1
         fi
-        printf %s "$vyvod" | grep -q "a9f3k2x7" \
+        printf %s "$vyvod" | grep -q 'pnpm-lock.yaml:2:' \
             || { echo "  отсев версий проглотил и НАСТОЯЩИЙ секрет"; return 1; }
     }
 

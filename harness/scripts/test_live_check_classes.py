@@ -244,6 +244,27 @@ def main() -> int:
            код == 1 and "…и ещё 2" in вывод and вывод.count("не трогал: m") == 10,
            f"код {код}, названо {вывод.count('не трогал: m')}, вывод {вывод[:300]!r}")
 
+    # ── R1-gen-06 (hr.update-rebuilds-all-derived-docs): каталога документа нет ──
+    # update.py зовёт прибор голым вызовом на каждой установке; сосед
+    # build-registry-doc.py каталог создаёт, этот падал FileNotFoundError.
+    # Дверь — HARNESS_LIVE_CHECK_DOC (прогон() кладёт её в двор); здесь она
+    # переставлена на путь в двух ещё не созданных каталогах.
+    # Поломка, оставляющая зелёным: файл пишется не по двери, а по боевому
+    # пути — тогда в стенде его нет (и md5 боевых ниже покраснеет).
+    д = двор([МЕХАНИЗМ, СОСЕД], {"a.sh": {"класс": "A1"}, "b.sh": {"класс": "A1"}})
+    документ = д / "нет-каталога" / "docs" / "документ.md"
+    готово = subprocess.run(
+        [sys.executable, str(ПРИБОР)], capture_output=True, text=True, timeout=120,
+        env={**os.environ,
+             "HARNESS_MECHANISMS": str(д / "mechanisms.yaml"),
+             "HARNESS_LIVE_CHECK_CLASSES": str(д / "classes.yaml"),
+             "HARNESS_LIVE_CHECK_STATE": str(д / "state.yaml"),
+             "HARNESS_LIVE_CHECK_DOC": str(документ)})
+    вывод = готово.stdout + готово.stderr
+    случай("нет каталога документа: прибор создаёт каталог и пишет файл (код 0)",
+           готово.returncode == 0 and документ.is_file() and документ.stat().st_size > 0,
+           f"код {готово.returncode}, файл {документ.is_file()}, вывод {вывод[-300:]!r}")
+
     стало = {п: hashlib.md5(п.read_bytes()).hexdigest() for п in БОЕВЫЕ if п.exists()}
     случай("боевые файлы не тронуты", было == стало,
            "проба сыграла на производстве")

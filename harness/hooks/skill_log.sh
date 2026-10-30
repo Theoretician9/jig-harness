@@ -4,7 +4,7 @@
 # скилов САМ.
 #
 # Откуда взят. Владелец 11.09.2026: «пайплайн контролируется по концам. Вход и
-# выход. Середина на честном слове <…> Всё, что можно сделать кодом, делается
+# выход. Середина на честном слове <…> всё, что можно поручить коду, поручается коду
 # кодом. Внимание модели — последний носитель правила, а не первый».
 # Замер того же дня: журнал $LOG_DIR/skills.jsonl заполняла САМА МОДЕЛЬ — в
 # шапке каждого SKILL.md стоит «ПЕРВОЙ СТРОКОЙ ДЕЙСТВИЯ записать вызов в
@@ -108,6 +108,7 @@ print(json.dumps({
     **({"проба": True} if os.environ.get("HARNESS_SKILL_PROBE") else {}),
     "успех": bool(ответ.get("success", True)),
     "сессия": полезное.get("session_id") or "",
+    "агент": полезное.get("agent_id") or "",
 }, ensure_ascii=False))
 ' <<< "$1"
 }
@@ -142,6 +143,7 @@ MODEL_SWITCH_STAMP="${MODEL_SWITCH_STAMP:-$LOG_DIR/model-switch.последни
         pretask-contract)      echo "контракт" ;;
         tests-before-code)     echo "тесты" ;;
         harness-code-review)            echo "ревью_кода" ;;
+        security-check)        echo "безопасность" ;;
         incident-analysis|test-failure) echo "разбор_аварии" ;;
         добыча-улик|instrument-building) echo "исследование" ;;
         *)                     echo "" ;;   # шаг не назван — модель не трогаем
@@ -292,6 +294,17 @@ if [ "${1:-}" = "--selftest" ]; then
     else
         echo "  ПЛОХО перевод имени скила в вид работы"; ok=0
     fi
+    if [ "$(вид_работы "security-check")" = "безопасность" ]; then
+        echo "  ок    security-check переводится в вид работы «безопасность»"
+    else
+        echo "  ПЛОХО security-check не переведён в вид работы"; ok=0
+    fi
+    AGENT_LINE=$(HARNESS_TASK="hr.проба" запись '{"tool_name":"Skill","tool_input":{"skill":"security-check"},"tool_response":{"success":true},"agent_id":"a1b2","session_id":"с1"}')
+    if printf '%s' "$AGENT_LINE" | grep -q '"агент": "a1b2"'; then
+        echo "  ок    запись скила помощника несёт поле «агент»"
+    else
+        echo "  ПЛОХО поле «агент» не записано: «$AGENT_LINE»"; ok=0
+    fi
     # БОЛЬНОЙ СЛУЧАЙ (владелец 12.09.2026): устаревшая передача смены обязана
     # ОТЛОЖИТЬ смену модели — «ей надо полноценно передать контекст как при
     # смене сессии». Подставляем проект без передачи, но с коммитом за сегодня.
@@ -337,7 +350,7 @@ if [ "${1:-}" = "--selftest" ]; then
     done
     rm -rf "$TMPD3"
     rm -rf "$TMPD"
-    [ "$ok" = 1 ] && { echo "САМОТЕСТ ПРОЙДЕН: 14 путей, первым — больной случай"; exit 0; }
+    [ "$ok" = 1 ] && { echo "САМОТЕСТ ПРОЙДЕН: 16 путей, первым — больной случай"; exit 0; }
     echo "САМОТЕСТ ПРОВАЛЕН"; exit 1
 fi
 
@@ -348,5 +361,9 @@ mkdir -p "$(dirname "$SKILLS_LOG_PATH")" 2>/dev/null || беда "каталог
 printf '%s\n' "$LINE" >> "$SKILLS_LOG_PATH" 2>/dev/null || беда "в журнал $SKILLS_LOG_PATH не пишется"
 # Модель — ПОСЛЕ записи в журнал: журнал важнее, и своя беда тут не должна
 # отнимать у гейтов пайплайна машинную запись о вызове скила.
-переключить_модель "$(printf '%s' "$PAYLOAD" | python3 -c 'import sys,json;print((json.load(sys.stdin).get("tool_input") or {}).get("skill") or "")' 2>/dev/null)" || true
+# Скил ПОМОЩНИКА модель СМЕНЫ не переключает: помощник работает в своей модели,
+# а переключение подаёт /model в панель оркестратора (agent_id есть только во
+# входе помощника).
+SKILL_OF_SHIFT=$(printf '%s' "$PAYLOAD" | python3 -c 'import sys,json;d=json.load(sys.stdin);print("" if d.get("agent_id") else (d.get("tool_input") or {}).get("skill") or "")' 2>/dev/null) || SKILL_OF_SHIFT=""
+переключить_модель "$SKILL_OF_SHIFT" || true
 exit 0

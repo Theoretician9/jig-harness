@@ -156,9 +156,9 @@ BOOT_WAIT_SEC="${BOOT_WAIT_SEC:-180}"
 SENTINEL_COOLDOWN_MIN="${SENTINEL_COOLDOWN_MIN:-120}"
 UNITS="${SENTINEL_UNITS:-harness-agent harness-dispatcher}"
 
-tg_send() {
+tg_send() {  # $1 = текст владельцу, дальше доводы двери (--task <ключ>)
     if [ -x "$PROJECT_DIR/scripts/tg_send.sh" ]; then
-        "$PROJECT_DIR/scripts/tg_send.sh" "$1" >/dev/null && return 0
+        "$PROJECT_DIR/scripts/tg_send.sh" "$@" >/dev/null && return 0
     fi
     say "сообщение владельцу НЕ ушло: $1"
     return 1
@@ -327,6 +327,15 @@ if [ -s "$QUEUE" ]; then
     [ -s "$QUEUE" ] || rm -f "$QUEUE"
 fi
 
+# ── 3в. Донос отложенных тревог ─────────────────────────────────────────────
+# Сторож, наткнувшийся на занятый лок карты, оставляет намерение в очереди
+# (код 4) и может молчать часами — донос ждал бы его следующего зова. Писатель
+# тревог упасть не вправе тихо и остановить сторожа тоже: код называем, идём дальше.
+if [ -f "$PROJECT_DIR/scripts/alert-task.py" ]; then
+    timeout 120 python3 "$PROJECT_DIR/scripts/alert-task.py" --drain >/dev/null 2>&1 \
+        || say "донос тревог: код $?"
+fi
+
 # ── 4. Обычный прогон на этом заканчивается ─────────────────────────────────
 if [ "${1:-}" != "--boot" ]; then
     touch "$HEARTBEAT_DIR/sentinel"
@@ -418,6 +427,15 @@ done
 метки протухли (возраст больше периода ×2):$STALE"
 
 say "$REPORT"
-tg_send "$REPORT" || RC=1
+# Красное в докладе — работа модели. Проверки считаются в подоболочках, и их
+# RC до сюда не доходит, поэтому красный вердикт ищется и в самом тексте.
+# Писателя может не быть (раскладка неполна) — сторож от этого не падает.
+DOOR_ARGS=()
+if [ "$RC" -ne 0 ] || [[ "$REPORT" == *КРАСНЫЙ* ]]; then
+    DOOR_ARGS=(--task sentinel:start-red)
+elif [ -f "$PROJECT_DIR/scripts/alert-task.py" ]; then
+    python3 "$PROJECT_DIR/scripts/alert-task.py" --resolve sentinel:start-red </dev/null >/dev/null 2>&1 || true
+fi
+tg_send "$REPORT" "${DOOR_ARGS[@]}" || RC=1
 touch "$HEARTBEAT_DIR/sentinel"
 exit "$RC"

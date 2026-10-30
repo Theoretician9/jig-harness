@@ -77,12 +77,20 @@ def main() -> int:
     parser.add_argument("--package", type=Path, default=config.katalog_paketa())
     parser.add_argument("--project", type=Path, default=config.корень_дерева(__file__))
     args = parser.parse_args()
-    if not args.package.is_dir():
-        print(f"пакет не прочитан: {args.package}")
-        return 2
+    # Без harness/память проверка памяти молча находила «ничего» и отвечала кодом 0.
+    for needed in (args.package, args.package / "harness/config", args.package / "harness/память"):
+        if not needed.is_dir():
+            print(f"пакет не прочитан: {needed}")
+            return 2
     found = memory_findings(args.package, args.project) + dead_file_findings(args.package)
+    if not found:
+        # Число судимого в приговоре отличает «проверено» от «ничего не судили».
+        records = len(list((args.package / "harness" / "память").glob("*.md")))
+        files = sum(1 for p in (args.package / "harness" / "config").iterdir() if p.is_file())
+        print(f"чисто: записей памяти {records}, файлов конфига {files}")
+        return 0
     print("\n".join(found))
-    return 1 if found else 0
+    return 1
 
 
 if __name__ == "__main__":

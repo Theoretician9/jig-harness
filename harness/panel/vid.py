@@ -11,6 +11,7 @@
 чужие источники и inline-скрипты), поэтому здесь нет ни одного скрипта:
 переключатели — обычные формы, кольца и полоски — CSS-градиенты.
 """
+import datetime as dt
 import html
 import urllib.parse
 
@@ -233,6 +234,19 @@ def _карта_машины(машина: dict, расход: dict) -> str:
             f'<span>{html.escape(str(машина.get("системные службы", "—")))}</span></div></div>')
 
 
+def _term_state(сейчас: str) -> str:
+    """Слова о режиме с ограниченным сроком: выключен / включён до / срок истёк."""
+    try:
+        end = dt.datetime.fromisoformat(сейчас) if сейчас else None
+    except ValueError:
+        end = None
+    if end is None or end.tzinfo is None:
+        return "выключен"
+    if end <= dt.datetime.now(dt.timezone.utc):
+        return "срок истёк"
+    return f"включён до {end:%d.%m %H:%M}"
+
+
 def _ручка(строка: dict, csrf: str) -> str:
     имя = html.escape(строка["имя"])
     пояснение = html.escape(строка.get("простыми словами", "").strip())
@@ -249,7 +263,13 @@ def _ручка(строка: dict, csrf: str) -> str:
     опасно = ('<div class="подсказка">переключение подтверждается кодом в боте</div>'
               if строка.get("опасный") else
               f'<div class="подсказка">применяется {html.escape(строка["применяется"])}</div>')
-    if строка["вид"] == "выбор":
+    term_state = ""
+    if строка["вид"] == "срок":
+        term_state = f'<div class="подсказка">{html.escape(_term_state(сейчас))}</div>'
+        # В конфиге лежит момент, а не «0»/«72»: «выключен» недоступен только
+        # при пустом значении — истёкший или негодный момент надо уметь стереть.
+        сейчас = "" if сейчас else "0"
+    if строка["вид"] in ("выбор", "срок"):
         кнопки = []
         for значение in строка.get("значения") or []:
             з = str(значение.get("значение"))
@@ -277,7 +297,7 @@ def _ручка(строка: dict, csrf: str) -> str:
              if строка.get("состояние") == "умолчание" else "")
     return (f'<div class="ручка"><div class="имя">{имя}</div>'
             f'<div class="пояснение">{пояснение}</div>'
-            f'<div class="кнопки">{управление}</div>{метка}{опасно}</div>')
+            f'{term_state}<div class="кнопки">{управление}</div>{метка}{опасно}</div>')
 
 
 def _шаги(шаги: dict, csrf: str) -> str:

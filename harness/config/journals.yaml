@@ -1,0 +1,438 @@
+# Реестр журналов харнеса — ДАННЫЕ адаптеров читалки (scripts/lib/events.py read).
+# Читает его только читалка и сводка; писатель `emit` реестр не читает, нужные
+# ему значения стоят короткой таблицей в events.py (равенство судят ворота G2).
+#
+# Поля записи: file (относительно dir), dir (log|panel_state, по умолчанию log),
+# kind (journal|registry|sample), writers (первый — src старых строк),
+# time_field + time_kind (tz|Z|epoch|naive|date|none), event_from (константа
+# или «field:<поле>»), outcome_field + outcome_map (значение поля → один из
+# пяти исходов; чего нет в карте — ok), task_field, task_from_field +
+# task_from_map, session_field, reason_field (поле «почему» для ответа агенту).
+# Ключи конверта признаются только в строке с "v": 1 — у старой строки любое
+# поле принадлежит механизму.
+
+ignore_dirs: [demon-stream, проба-хука, .events]
+name_is_key_dirs: [PANEL_STATE_DIR]
+digest_keys: [sha256, head, commit, ino_from]
+# Долг ворот G1 (scripts/check-event-writers.py): писатели — пары (файл, журнал из
+# journals), демоны — файл. Список только сокращается (сверка с HEAD) и обязан находиться обходом: запись без прямой
+# дозаписи в коде (у демона — без нарушений меток) краснит. Закрывается переводом
+# файла на emit / harness_run целиком (Ф3, Ф6), строка вычёркивается тем же коммитом.
+service_flags: [LATE_WATCH]
+disk_families: ["tokens-[0-9][0-9][0-9][0-9]-[0-9][0-9].jsonl"]
+legacy_writers:
+  - {file: harness/demons/evolution-collector.sh, card: hr.harness-detailed-logging, journals: [evo-summary]}
+  - {file: harness/demons/memory-revision.sh, card: hr.harness-detailed-logging, journals: ["предложения"]}
+  - {file: harness/demons/panel-tunnel.sh, card: hr.harness-detailed-logging, journals: ["панель", "панель-лог"]}
+  - {file: harness/demons/session-warden.sh, card: hr.harness-detailed-logging, journals: [rotation]}
+  - {file: harness/demons/tokens-collector.sh, card: hr.harness-detailed-logging, journals: [tokens-2026-08, tokens-2026-09, tokens-2026-10]}
+  - {file: harness/panel/confirmation.py, card: hr.harness-detailed-logging, journals: ["панель", "панель-лог"]}
+  - {file: harness/panel/login.py, card: hr.harness-detailed-logging, journals: [запасной-вход]}
+  - {file: harness/panel/panel-expose-root.sh, card: hr.harness-detailed-logging, journals: ["панель", "панель-лог"]}
+  - {file: harness/panel/server.py, card: hr.harness-detailed-logging, journals: ["панель", "панель-лог", "панель-недоставленное"]}
+  - {file: scripts/agent-level.py, card: hr.harness-detailed-logging, journals: ["вызовы-агентов"]}
+  - {file: scripts/alert-task.py, card: hr.harness-detailed-logging, journals: ["тревоги-сторожей"]}
+  - {file: scripts/ask-the-model.py, card: hr.harness-detailed-logging, journals: ["модель-вызовы"]}
+  - {file: scripts/capability.sh, card: hr.harness-detailed-logging, journals: ["возможности"]}
+  - {file: scripts/check-login-expiry.py, card: hr.harness-detailed-logging, journals: ["срок-входа"]}
+  - {file: scripts/check-pipeline.py, card: hr.harness-detailed-logging, journals: ["пайплайн-обходы"]}
+  - {file: scripts/claude-demon.sh, card: hr.harness-detailed-logging, journals: [demon-spend]}
+  - {file: scripts/comments-intake.py, card: hr.harness-detailed-logging, journals: [panel-comments-delivered]}
+  - {file: scripts/drop-database.sh, card: hr.harness-detailed-logging, journals: [db-drops]}
+  - {file: scripts/gates.sh, card: hr.harness-detailed-logging, journals: ["ворота-итог"]}
+  - {file: scripts/hooks/artifact_seal.py, card: hr.harness-detailed-logging, journals: [artifact-seals]}
+  - {file: scripts/hooks/guard_bash.py, card: hr.harness-detailed-logging, journals: [guard]}
+  - {file: scripts/hooks/model_guard.py, card: hr.harness-detailed-logging, journals: [model-guard]}
+  - {file: scripts/hooks/pre_compact_handover.sh, card: hr.harness-detailed-logging, journals: [rotation]}
+  - {file: scripts/hooks/skill_log.sh, card: hr.harness-detailed-logging, journals: [model-po-shagu, skills]}
+  - {file: scripts/lib/layout_history.py, card: hr.harness-detailed-logging, journals: ["раскладка-спрошено"]}
+  - {file: scripts/lib/panel_writer.py, card: hr.harness-detailed-logging, journals: ["панель", "панель-лог"]}
+  - {file: scripts/memory-to-package.py, card: hr.harness-detailed-logging, journals: ["панель", "панель-лог"]}
+  - {file: scripts/miss.py, card: hr.harness-detailed-logging, journals: ["пропуски"]}
+  - {file: scripts/model.sh, card: hr.harness-detailed-logging, journals: [model-switch]}
+  - {file: scripts/pre-commit-gate.sh, card: hr.harness-detailed-logging, journals: [gates]}
+  - {file: scripts/protected-delete.py, card: hr.harness-detailed-logging, journals: [inbox, "удаления-секретов", "удаления-спрошено"]}
+  - {file: scripts/spec_approval.py, card: hr.harness-detailed-logging, journals: ["спеки-владельцу"]}
+  - {file: scripts/stack_freshness.py, card: hr.harness-detailed-logging, journals: ["stack-вопросы"]}
+  - {file: scripts/tg-dispatcher.sh, card: hr.harness-detailed-logging, journals: [confirmations, inbox, "внимание"]}
+  - {file: scripts/tg_send.sh, card: hr.harness-detailed-logging, journals: [tg_out, "придержано-лимитом", "панель-недоставленное"]}
+  - {file: scripts/tmp-sweep.py, card: hr.harness-detailed-logging, journals: ["уборка-tmp"]}
+legacy_daemons:
+  - {file: harness/demons/acceptance-watch.sh, card: hr.harness-detailed-logging}
+  - {file: harness/demons/backup.sh, card: hr.harness-detailed-logging}
+  - {file: harness/demons/check-builder.sh, card: hr.harness-detailed-logging}
+  - {file: harness/demons/devmap-selfheal.sh, card: hr.harness-detailed-logging}
+  - {file: harness/demons/disk-cleanup.sh, card: hr.harness-detailed-logging}
+  - {file: harness/demons/dispatcher-stall-watch.sh, card: hr.harness-detailed-logging}
+  - {file: harness/demons/evolution-collector.sh, card: hr.harness-detailed-logging}
+  - {file: harness/demons/extensions-watch.sh, card: hr.harness-detailed-logging}
+  - {file: harness/demons/heartbeat-watch.sh, card: hr.harness-detailed-logging}
+  - {file: harness/demons/limit-watch.sh, card: hr.harness-detailed-logging}
+  - {file: harness/demons/memory-commit.sh, card: hr.harness-detailed-logging}
+  - {file: harness/demons/memory-revision.sh, card: hr.harness-detailed-logging}
+  - {file: harness/demons/nightly-gates.sh, card: hr.harness-detailed-logging}
+  - {file: harness/demons/panel-tunnel.sh, card: hr.harness-detailed-logging}
+  - {file: harness/demons/product-health.sh, card: hr.harness-detailed-logging}
+  - {file: harness/demons/project-revision.sh, card: hr.harness-detailed-logging}
+  - {file: harness/demons/server-hygiene.sh, card: hr.harness-detailed-logging}
+  - {file: harness/demons/session-warden.sh, card: hr.harness-detailed-logging}
+  - {file: harness/demons/stack-watch.sh, card: hr.harness-detailed-logging}
+  - {file: harness/demons/task-closer.sh, card: hr.harness-detailed-logging}
+  - {file: harness/demons/tokens-collector.sh, card: hr.harness-detailed-logging}
+  - {file: harness/demons/ton-watch.sh, card: hr.harness-detailed-logging}
+  - {file: harness/demons/update-watch.sh, card: hr.harness-detailed-logging}
+  - {file: scripts/build-board.py, card: hr.harness-detailed-logging}
+  - {file: scripts/check-login-expiry.py, card: hr.harness-detailed-logging}
+  - {file: scripts/restore-probe.sh, card: hr.harness-detailed-logging}
+
+# Журналы, которые читалке закрыты нарочно (файл 0600 владельца панели): в
+# journals их нет — индексатор открывает каждый журнал реестра, — но писателя и
+# имя ворота G1/G2 знают, чтобы запись в них не выглядела незарегистрированной.
+private_journals:
+  - {name: запасной-вход, file: запасной-вход.jsonl, why: откуда и исход попыток запасного входа в панель; файл 0600 владельца панели}
+
+journals:
+  confirmations:
+    file: confirmations.jsonl
+    writers: [scripts/tg-dispatcher.sh]
+    time_field: ts
+    time_kind: tz
+    event_from: confirmation.recorded
+  db-drops:
+    file: db-drops.jsonl
+    writers: [scripts/drop-database.sh]
+    time_field: ts
+    time_kind: tz
+    event_from: db.dropped
+  demon-spend:
+    file: demon-spend.jsonl
+    writers: [scripts/claude-demon.sh]
+    time_field: "когда"
+    time_kind: tz
+    event_from: demon.spend
+    session_field: session_id
+    reason_field: api_error
+  gates:
+    file: gates.jsonl
+    task_infer: commit
+    commit_field: head
+    writers: [scripts/pre-commit-gate.sh]
+    time_field: ts
+    time_kind: tz
+    event_from: gate.verdict
+    min_daily: 1
+    outcome_field: verdict
+    outcome_map: {pass: ok, fail: refused, yellow: ok}
+    reason_field: failed
+  gates-timing:
+    file: gates-timing.jsonl
+    writers: [scripts/lib/gates_check.sh]
+    time_field: ts
+    time_kind: tz
+    event_from: "field:event"
+  guard:
+    file: guard.jsonl
+    writers: [scripts/hooks/guard_bash.py]
+    time_field: ts
+    time_kind: tz
+    event_from: guard.verdict
+    min_daily: 1
+    outcome_field: verdict
+    outcome_map: {deny: refused, followup: ok}
+    reason_field: rule
+  inbox:
+    file: inbox.jsonl
+    writers: [scripts/tg-dispatcher.sh]
+    time_field: ts
+    time_kind: tz
+    event_from: inbox.received
+  model-guard:
+    file: model-guard.jsonl
+    writers: [scripts/hooks/model_guard.py]
+    time_kind: none
+    event_from: model.guard
+  model-po-shagu:
+    file: model-po-shagu.jsonl
+    writers: [scripts/hooks/skill_log.sh]
+    time_field: ts
+    time_kind: tz
+    event_from: model.step
+  model-switch:
+    file: model-switch.jsonl
+    writers: [scripts/model.sh]
+    time_field: ts
+    time_kind: tz
+    event_from: model.switch
+  rotation:
+    file: rotation.jsonl
+    task_infer: session
+    writers: [harness/demons/session-warden.sh, scripts/hooks/pre_compact_handover.sh]
+    time_field: ts
+    time_kind: tz
+    event_from: "field:event"
+    session_field: session
+    reason_field: detail
+  skills:
+    file: skills.jsonl
+    writers: [scripts/hooks/skill_log.sh]
+    time_field: ts
+    time_kind: Z
+    event_from: skill.called
+    outcome_field: "успех"
+    outcome_map: {"False": error}
+    task_field: task
+    task_from_field: "откуда_задача"
+    task_from_map: {"переменная": env, "карта": map, "история": history, "неизвестно": none}
+    session_field: "сессия"
+  stack-вопросы:
+    file: "stack-вопросы.jsonl"
+    writers: [scripts/stack_freshness.py]
+    time_field: ts
+    time_kind: tz
+    event_from: stack.question
+  stream-json-sample:
+    file: stream-json-sample.jsonl
+    kind: sample
+    writers: none
+    why: образец потока, который кладёт проба test_demon_stream_json.sh; рабочего писателя нет
+    time_kind: none
+    event_from: stream.sample
+  tg_out:
+    file: tg_out.jsonl
+    writers: [scripts/tg_send.sh]
+    time_field: ts
+    time_kind: tz
+    event_from: tg.sent
+    min_daily: 1
+  tmp-sweep-incident-journal:
+    file: tmp-sweep-incident-journal.jsonl
+    writers: none
+    why: старый журнал инцидента уборки tmp, дозаписи в коде больше нет; читается как история
+    time_field: "когда"
+    time_kind: tz
+    event_from: tmp.sweep
+  tokens-2026-08:
+    file: tokens-2026-08.jsonl
+    task_infer: session
+    n_fields: [in, out, cache_w]
+    writers: [harness/demons/tokens-collector.sh]
+    time_field: ts
+    time_kind: Z
+    event_from: tokens.spent
+    session_field: session
+  tokens-2026-09:
+    file: tokens-2026-09.jsonl
+    task_infer: session
+    n_fields: [in, out, cache_w]
+    writers: [harness/demons/tokens-collector.sh]
+    time_field: ts
+    time_kind: Z
+    event_from: tokens.spent
+    session_field: session
+  tokens-2026-10:
+    file: tokens-2026-10.jsonl
+    task_infer: session
+    n_fields: [in, out, cache_w]
+    writers: [harness/demons/tokens-collector.sh]
+    time_field: ts
+    time_kind: Z
+    event_from: tokens.spent
+    session_field: session
+  "внимание":
+    file: "внимание.jsonl"
+    writers: [scripts/tg-dispatcher.sh]
+    time_field: "когда"
+    time_kind: tz
+    event_from: attention.mark
+  "доставка":
+    file: "доставка.jsonl"
+    writers: [scripts/tg-dispatcher.sh, scripts/lib/pane.sh]
+    time_field: ts
+    time_kind: tz
+    event_from: "field:event"
+  "возможности":
+    file: "возможности.jsonl"
+    writers: [scripts/capability.sh]
+    time_field: ts
+    time_kind: Z
+    event_from: capability.event
+  "ворота-итог":
+    file: "ворота-итог.jsonl"
+    writers: [scripts/gates.sh]
+    time_field: ts
+    time_kind: tz
+    event_from: gates.summary
+  "вызовы-агентов":
+    file: "вызовы-агентов.jsonl"
+    writers: [scripts/agent-level.py, scripts/hooks/agent_budget_guard.py]
+    time_field: ts
+    time_kind: tz
+    event_from: agent.called
+    min_daily: 1
+  "вложенность":
+    file: "вложенность.jsonl"
+    writers: [scripts/hooks/launch_plan_guard.py, scripts/launch-plan.py]
+    time_field: ts
+    time_kind: tz
+    event_from: "field:event"
+  "модель-вызовы":
+    file: "модель-вызовы.jsonl"
+    writers: [scripts/ask-the-model.py]
+    time_field: "время"
+    time_kind: epoch
+    event_from: model.called
+    reason_field: "отказ"
+  "пайплайн-обходы":
+    file: "пайплайн-обходы.jsonl"
+    writers: [scripts/check-pipeline.py]
+    time_field: ts
+    time_kind: naive
+    event_from: pipeline.bypass
+    task_field: "задача"
+    reason_field: "почему"
+  "панель":
+    file: "панель.jsonl"
+    dir: panel_state
+    writers: [harness/panel/server.py]
+    time_field: ts
+    time_kind: naive
+    event_from: "field:событие"
+  "панель-лог":
+    file: "панель.jsonl"
+    writers: [harness/panel/server.py]
+    time_field: ts
+    time_kind: naive
+    event_from: panel.action
+  "предложения":
+    file: "предложения.jsonl"
+    kind: registry
+    writers: [harness/demons/memory-revision.sh]
+    time_field: "дата"
+    time_kind: date
+    event_from: proposal.entry
+  "придержано-лимитом":
+    file: "придержано-лимитом.jsonl"
+    writers: [scripts/tg_send.sh]
+    time_field: ts
+    time_kind: tz
+    event_from: tg.held
+    outcome_default: held
+    reason_field: why
+  "пропуски":
+    file: "пропуски.jsonl"
+    kind: registry
+    writers: [scripts/miss.py]
+    time_field: "дата"
+    time_kind: date
+    event_from: miss.entry
+    reason_field: "почему"
+  "раскладка-спрошено":
+    file: "раскладка-спрошено.jsonl"
+    writers: [scripts/lib/layout_history.py]
+    time_field: ts
+    time_kind: tz
+    event_from: layout.asked
+  "спеки-владельцу":
+    file: "спеки-владельцу.jsonl"
+    writers: [scripts/spec_approval.py]
+    time_field: ts
+    time_kind: naive
+    event_from: "field:событие"
+    task_field: "задача"
+  "срок-входа":
+    file: "срок-входа.jsonl"
+    writers: [scripts/check-login-expiry.py]
+    time_field: ts
+    time_kind: naive
+    event_from: login.checked
+  "тревоги-сторожей":
+    file: "тревоги-сторожей.jsonl"
+    writers: [scripts/alert-task.py]
+    own_lock: true
+    time_field: ts
+    time_kind: tz
+    event_from: "field:событие"
+    reason_field: "почему"
+  "уборка-tmp":
+    file: "уборка-tmp.jsonl"
+    writers: [scripts/tmp-sweep.py]
+    time_field: "когда"
+    time_kind: tz
+    event_from: tmp.sweep
+  "удаления-секретов":
+    file: "удаления-секретов.jsonl"
+    writers: [scripts/protected-delete.py]
+    time_field: ts
+    time_kind: tz
+    event_from: secret.deleted
+  "удаления-спрошено":
+    file: "удаления-спрошено.jsonl"
+    writers: [scripts/protected-delete.py]
+    time_field: ts
+    time_kind: epoch
+    event_from: delete.asked
+  evo-summary:
+    file: evo/summary.jsonl
+    writers: [harness/demons/evolution-collector.sh]
+    time_field: ts
+    time_kind: tz
+    event_from: "field:kind"
+  evo-defects:
+    file: "evo/журнал-дефектов.jsonl"
+    writers: none
+    why: коллектор только заводит пустой файл (touch), дозаписи в коде нет; строки кладёт человек или агент по ходу разбора
+    time_kind: none
+    event_from: evo.defect
+  artifact-seals:
+    file: artifact-seals.jsonl
+    writers: [scripts/hooks/artifact_seal.py]
+    time_field: ts
+    time_kind: tz
+    event_from: artifact.sealed
+  "заявки-на-файлы":
+    file: "заявки-на-файлы.jsonl"
+    writers: [scripts/hooks/file_claim_guard.py]
+    time_field: ts
+    time_kind: tz
+    event_from: "field:event"
+  "роли-помощников":
+    file: "роли-помощников.jsonl"
+    writers: [scripts/hooks/lead_role_guard.py]
+    time_field: ts
+    time_kind: tz
+    event_from: "field:event"
+  "уборка-docker":
+    file: "уборка-docker.jsonl"
+    writers: none
+    why: пишет scripts/docker-sweep.py по пути из аргумента --журнал, который передаёт disk-cleanup.sh; путь-параметр обход не видит
+    time_field: ts
+    time_kind: tz
+    event_from: docker.sweep
+  "панель-недоставленное":
+    file: "панель-недоставленное.jsonl"
+    writers: [scripts/tg_send.sh]
+    time_field: ts
+    time_kind: tz
+    event_from: panel.undelivered
+    outcome_default: error
+  panel-comments-delivered:
+    file: panel-comments-delivered.jsonl
+    writers: [scripts/comments-intake.py]
+    time_field: ts
+    time_kind: tz
+    event_from: panel.comment_delivered
+  "тревоги-ждут":
+    file: "тревоги-ждут.jsonl"
+    writers: none
+    why: очередь переписывается целиком (tmp + os.replace) в scripts/alert-task.py, дозаписи нет — обход её не видит
+    time_field: ts
+    time_kind: tz
+    event_from: alert.waiting
+    outcome_default: held
+  env-teardown:
+    file: env-teardown.jsonl
+    writers: none
+    why: пишет teardown.sh проекта вне дерева харнеса (/var/www/<проект>/scripts/); проба test_environment.sh только читает
+    time_field: ts
+    time_kind: tz
+    event_from: env.teardown

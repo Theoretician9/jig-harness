@@ -134,10 +134,10 @@ otdelit_sekret() {  # $1 = метка сообщения; правит WORDS, TE
     WORDS="$chistye"
 }
 
-inbox_zhurnal() {  # $1 = слова владельца (текст сообщения, подпись или расшифровка)
+inbox_zhurnal() {  # $1 = слова владельца (текст сообщения, подпись или расшифровка), $2 = вид (необязательно)
     [ -n "${MSG_ID:-}" ] || { say "входящее без message_id — в $INBOX_LOG не пишу: без признака авторства это не слово владельца"; return 0; }
-    jq -cn --arg ts "$(date -Is)" --arg mid "$MSG_ID" --arg chat "$CHAT" --arg text "${1:-}" \
-        '{ts:$ts, message_id:$mid, chat_id:$chat, text:$text}' >> "$INBOX_LOG" \
+    jq -cn --arg ts "$(date -Is)" --arg mid "$MSG_ID" --arg chat "$CHAT" --arg text "${1:-}" --arg kind "${2:-}" \
+        '{ts:$ts, message_id:$mid, chat_id:$chat, text:$text} + (if $kind == "" then {} else {"вид":$kind} end)' >> "$INBOX_LOG" \
         || say "журнал входящих НЕ записан: $INBOX_LOG (двери необратимого останутся закрытыми)"
 }
 
@@ -228,14 +228,25 @@ zapisat_soglasiya() {  # $1 = вывод согласие_владельца
 # Нажатия в панель — ОБЩЕЙ дверью (scripts/lib/pane.sh): эта копия была
 # побайтово равна копии сторожа сессий, а копии одного признака расходятся молча.
 source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/lib/pane.sh"
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/lib/events.sh"
+
+# Метка этапа доставки (журнал «доставка», спека §4.6). Журнал выбирается по LOG_DIR
+# самого диспетчера, а не по окружению звонящего: самотест и стенд с чужим LOG_DIR
+# не пишут в боевой. Фоном и без дескрипторов лока: потомок с fd 9 держал бы лок
+# диспетчера после его смерти (память lock-leaked-into-a-child). Метка received
+# пишется синхронно и мимо этой функции — на ней стоит сверка потерь.
+delivery_mark() {  # $1=событие, $2=исход, дальше ключ=значение
+    ( exec 3<&- 9>&-; HARNESS_LOG_DIR="$LOG_DIR" harness_event доставка scripts/tg-dispatcher.sh "delivery.$1" "$2" "${@:3}" ) &
+}
 
 # Нажатие кнопки и ответ панели — не задача для смены. Файл очереди пишется
 # раньше разбора нарочно («дубль безопаснее потери»), и снять его обязан тот,
 # кто понял: работы здесь нет. Иначе каждое нажатие приходит агенту входящим со
 # словом «срочно» — пять нажатий владельца 13.09 в 23:45–23:49 дали пять пустых
 # входящих, и одно из них автомат карточек завёл задачей.
-ne_rabota_dlya_smeny() {  # $1=метка сообщения (TS)
+ne_rabota_dlya_smeny() {  # $1=метка сообщения (TS), $2=почему
     rm -f "$INBOX/$1.txt"
+    delivery_mark no_kick skipped "ts=$1" "почему=$2"
 }
 
 # Держит ли пауза это сообщение. 0 — держит (смену не бужу), 1 — работа идёт.
@@ -254,54 +265,90 @@ pauza_derzhit() {  # $1 = имя команды («» — обычное соо�
     [ -z "$1" ]
 }
 
-smena_zanyata() {  # 0 — работа есть, 1 — работы нет (или спросить нечем)
-    # Судья один — прибор очереди: он же отвечает владельцу и хуку старта.
-    # «Спросить нечем» считается ЗАНЯТОСТЬЮ: молчаливый пинок посреди работы
-    # хуже лишнего ожидания, а отказ прибора чинится отдельно.
-    local karta="${PROJECT_DIR:-}/dev-map.yaml" otvet
-    [ -f "$karta" ] || return 0
-    otvet=$(python3 "${HERE:-$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")}/work-queue.py" \
-            "$karta" --работа 2>/dev/null | head -1) || return 0
-    case "$otvet" in
-        "работа: 0") return 1 ;;
-        *) return 0 ;;
-    esac
-}
-
 # Немедленный пинок агенту о новом входящем (К-1в) — только при живом
 # claude/node в панели: в голой оболочке текст исполнился бы как команды.
 # Любой отказ (нет tmux, нет сессии) не роняет цикл — подстрахует
 # inbox-пинок session-warden.
 #
-# kick_agent молчит и оставляет причину отказа в KICK_REFUSAL (пусто — дошёл):
-# приёму комментариев нужно знать исход и говорить о нём один раз, а не на
-# каждом круге. Код возврата всегда 0 — под set -e отказ доставки не вправе
-# ронять цикл. Стоят выше самотеста: он судит их боевыми.
-kick_agent() {  # текст
-    KICK_REFUSAL=""
-    command -v tmux >/dev/null 2>&1 || { KICK_REFUSAL="tmux не установлен"; return 0; }
-    tmux has-session -t "$TMUX_SESSION" 2>/dev/null \
-        || { KICK_REFUSAL="tmux-сессии '$TMUX_SESSION' нет"; return 0; }
-    local cmd
-    cmd=$(tmux display-message -p -t "$TMUX_SESSION" '#{pane_current_command}' 2>/dev/null || echo "?")
-    case "$cmd" in
-        claude|node) send_to_pane "$1" 2>/dev/null || KICK_REFUSAL="send-keys не прошёл" ;;
-        *) KICK_REFUSAL="в панели '$cmd', не claude/node — оболочка исполнила бы текст как команды" ;;
-    esac
+# Толчок идёт ФОНОМ: 25.10.2026 синхронный `tmux send-keys` висел 57 минут, и
+# весь цикл приёма вместе с ним — пять сообщений владельца не дошли. Сообщение к
+# этому моменту уже лежит во входящих и offset сдвинут, так что фон ничего не
+# теряет. Дескриптор 9 (лок диспетчера) потомку закрывается: иначе висящий
+# толчок держал бы лок после смерти диспетчера, и рестарт отвечал бы «УЖЕ
+# РАБОТАЕТ» (память lock-leaked-into-a-child). Очередь нажатий — лок двери
+# (pane.lock в lib/pane.sh), общий со сторожем и limit-watch: два фоновых толчка
+# не наберут «текст1 текст2 Enter Enter», и склейка отдаст их по порядку.
+KICK_STATE_DIR_NAME="kick-state"
+
+# Сказать о ключе, только когда его состояние сменилось, — но память в ФАЙЛЕ:
+# фоновый толчок живёт в своей подоболочке, массив родителя ему не виден.
+say_on_change_file() {  # ключ, текст
+    local f="$LOG_DIR/$KICK_STATE_DIR_NAME/said-$1"
+    [ "$(cat "$f" 2>/dev/null || true)" = "$2" ] && return 0
+    printf '%s' "$2" > "$f"
+    say "$2"
+}
+
+# Заявка панели ещё в доставке? Метку снимает сам толчок; метка старше его
+# предельного срока считается брошенной (толчок убит), иначе заявка не
+# доставилась бы никогда.
+kick_inflight() {  # ts заявки
+    local mark="$LOG_DIR/$KICK_STATE_DIR_NAME/inflight-$1" age
+    [ -e "$mark" ] || return 1
+    age=$(( $(date +%s) - $(stat -c %Y "$mark" 2>/dev/null || echo 0) ))
+    [ "$age" -lt $(( 4 * ${PANE_TMUX_TIMEOUT:-10} + 40 )) ]
+}
+
+kick_async() {  # $1=текст, $2=ts заявки панели (пусто — обычный толчок)
+    local text="$1" ts="${2:-}" dir="$LOG_DIR/$KICK_STATE_DIR_NAME"
+    mkdir -p "$dir"
+    [ -z "$ts" ] || : > "$dir/inflight-$ts"
+    (
+        exec 3<&- 9>&-
+        trap '[ -z "$ts" ] || rm -f "$dir/inflight-$ts"' EXIT
+        # Ключ читается в момент толчка: диспетчер живёт неделями, а «сразу»
+        # в панели обещает действие без перезапуска. Аккорд отдаёт сама дверь,
+        # только после УСПЕШНОГО толчка.
+        PANE_SEND_NOW="$(konf_iz_fajla PANE_SEND_NOW || true)"
+        pane_kick_owner "$text" || true
+        case "$PANE_REFUSAL" in
+            "очередь нажатий занята"*)
+                say "толчок не отдан: очередь толчков занята (подстрахует session-warden)"
+                exit 0 ;;
+        esac
+        [ -z "$PANE_SEND_NOW_RESULT" ] || say "$PANE_SEND_NOW_RESULT"
+        if [ -z "$ts" ]; then
+            [ -z "$PANE_REFUSAL" ] || say "пинок агенту не отдан: $PANE_REFUSAL (подстрахует session-warden)"
+        elif [ -n "$PANE_REFUSAL" ]; then
+            say_on_change_file "$ts" "комментарий $ts не отдан: ${PANE_REFUSAL%%:*}"
+        elif timeout "${COMMENTS_TIMEOUT:-10}" python3 "$COMMENTS_INTAKE" --доставлено "$ts" < /dev/null; then
+            rm -f "$dir/said-$ts"
+            say "комментарий $ts доставлен агенту"
+        else
+            say_on_change_file "$ts" "комментарий $ts доставлен, но отметка не записана — пинок повторится"
+        fi
+    ) &
 }
 
 agent_kick() {  # текст
-    kick_agent "$1"
-    [ -z "$KICK_REFUSAL" ] || say "пинок агенту не отдан: $KICK_REFUSAL (подстрахует session-warden)"
+    kick_async "$1"
+}
+
+# Запуск постановки обновления фоном. Ключ сброса идёт только из команды
+# update_reset: владелец называет его своими словами, а не флагом CLI.
+start_update() {  # $1 = имя команды: update | update_reset
+    local reset_flag=()
+    if [ "$1" = "update_reset" ]; then reset_flag=(--сбросить-свои); fi
+    setsid nohup python3 "$PROJECT_DIR/scripts/update.py" --поставить "${reset_flag[@]}" \
+        >>"$LOG_DIR/update-watch.log" 2>&1 < /dev/null &
 }
 
 # Комментарии владельца из панели (спека hr.kanban §4). Приём печатает
 # `<ts>\t<пинок>` на каждую недоставленную заявку; доставленная отмечается в
 # его журнале, не дошедшая — нет: повторится на следующем круге и видна в
-# session_state.sh. Судьи те же, что у сообщения канала (dostavit_agentu):
-# пауза держит всегда, несрочное в разгар шага ждёт рубежа.
+# session_state.sh. Придерживает комментарий только пауза владельца; остальное
+# (ротацию, лимит) судит дверь толчка.
 COMMENTS_INTAKE="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/comments-intake.py"
-URGENCY_PY="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/urgency.py"
 COMMENTS_TIMEOUT=10
 declare -A COMMENT_SAID=()
 
@@ -313,16 +360,9 @@ say_on_change() {  # ключ, текст
     say "$2"
 }
 
-# Почему комментарий сейчас не отдавать; пусто — отдавать. Текст судится без
-# обёртки пинка: «Комментарий владельца из панели к <id>: <текст> (полностью — …)».
-comment_hold() {  # пинок
-    if pauza_derzhit ""; then echo "стоит пауза владельца"; return 0; fi
-    local body="${1#*: }" urgent
-    body="${body% (полностью — *}"
-    urgent=$(python3 "$URGENCY_PY" "$body" 2>/dev/null || true)
-    if [ -z "$urgent" ] && smena_zanyata; then
-        echo "несрочный, шаг агента не прерываю — ждёт рубежа"
-    fi
+# Почему комментарий сейчас не отдавать; пусто — отдавать.
+comment_hold() {
+    if pauza_derzhit ""; then echo "стоит пауза владельца"; fi
     return 0
 }
 
@@ -338,23 +378,108 @@ deliver_panel_comments() {
     # Своим дескриптором: судьи внутри цикла — процессы, и stdin они бы съели.
     while IFS=$'\t' read -r -u 3 ts kick; do
         [ -n "$ts" ] || continue
-        hold=$(comment_hold "$kick")
+        hold=$(comment_hold)
         if [ -n "$hold" ]; then
             say_on_change "$ts" "комментарий $ts ждёт: $hold"
             continue
         fi
-        kick_agent "$kick"
-        if [ -n "$KICK_REFUSAL" ]; then
-            say_on_change "$ts" "комментарий $ts не отдан: $KICK_REFUSAL"
-            continue
-        fi
-        if timeout "$COMMENTS_TIMEOUT" python3 "$COMMENTS_INTAKE" --доставлено "$ts" < /dev/null; then
-            unset "COMMENT_SAID[$ts]"
-            say "комментарий $ts доставлен агенту"
-        else
-            say_on_change "$ts" "комментарий $ts доставлен, но отметка не записана — пинок повторится"
-        fi
+        # Заявка, чей толчок ещё идёт, второй раз не гонится: круг раз в минуту.
+        if kick_inflight "$ts"; then continue; fi
+        kick_async "$kick" "$ts"
     done 3<<< "$claims"
+}
+
+# ── голос отдельным обработчиком ────────────────────────────────────────────
+# Скачивание и расшифровка идут минуты, и цикл приёма на это время не принимал бы
+# ничего. Приём кладёт сообщение в inbox/вложения/<message_id>.json, обработчик
+# (voice-worker.sh, один на машину) пишет рядом <message_id>.done, а подбор на круге
+# превращает итог во входящее под меткой приёма.
+voice_lock_file() { echo "$LOG_DIR/locks/$SERVICE_LOCKS_SUBDIR/voice-worker.lock"; }
+
+# Расшифровка уже во входящих по этому message_id?
+voice_transcribed() {  # $1 = message_id
+    [ -s "$INBOX_LOG" ] || return 1
+    jq -e --arg mid "$1" 'select((.message_id|tostring) == $mid and (."вид" // "") == "расшифровка")' \
+        "$INBOX_LOG" 2>/dev/null | grep -q .
+}
+
+# Известен ли этот message_id: в работе, ждёт подбора или уже расшифрован.
+voice_known() {  # $1 = message_id
+    local dir="$INBOX/вложения"
+    if [ -e "$dir/$1.json" ] || [ -e "$dir/$1.done" ]; then return 0; fi
+    voice_transcribed "$1"
+}
+
+voice_pending() {
+    [ -n "$(find "$INBOX/вложения" -maxdepth 1 -name '*.json' -print -quit 2>/dev/null)" ]
+}
+
+# Обработчик поднимается, только если есть работа и лок свободен. Дескрипторы 3 и 9
+# потомку закрыты: с fd 9 он держал бы лок диспетчера после его смерти.
+voice_worker_start() {
+    voice_pending || return 0
+    ( flock -n 8 ) 8>> "$(voice_lock_file)" || return 0
+    ( exec 3<&- 9>&-; setsid nohup bash "$HERE/voice-worker.sh" >> "$LOG_DIR/voice-worker.log" 2>&1 < /dev/null & )
+}
+
+voice_pickup() {
+    local dir="$INBOX/вложения" done_file base mid json_file ok stage reason audio tmp when f
+    [ -d "$dir" ] || return 0
+    while IFS= read -r done_file; do
+        [ -n "$done_file" ] || continue
+        base="${done_file%.done}"; mid="${base##*/}"; json_file="$base.json"
+        if [ ! -r "$json_file" ]; then
+            say "голос $mid: итог без исходного сообщения — убираю $done_file"
+            rm -f "$done_file"; continue
+        fi
+        if voice_transcribed "$mid"; then
+            say "голос $mid: дубль — расшифровка уже во входящих, пару убираю"
+            rm -f "$json_file" "$done_file"; continue
+        fi
+        TS=$(jq -r '.inbox_ts' "$json_file")
+        MSG=$(jq -c 'del(.inbox_ts)' "$json_file")
+        MSG_ID="$mid"; CHAT="$TG_CHAT_ID"
+        ok=$(jq -r '.ok' "$done_file"); stage=$(jq -r '."этап" // ""' "$done_file")
+        reason=$(jq -r '."причина" // ""' "$done_file"); audio=$(jq -r '."аудио" // ""' "$done_file")
+        when="$(date +%s.%N)"
+        tmp="$INBOX/$TS.txt.tmp"
+        if [ "$ok" = true ]; then
+            TEXT=$(jq -r '."текст"' "$done_file"); WORDS="$TEXT"
+            otdelit_sekret "$TS"
+            printf '%s\n' "$WORDS" > "$tmp" && mv "$tmp" "$INBOX/$TS.txt"
+            inbox_zhurnal "$WORDS" расшифровка
+            delivery_mark attachment_done ok "message_id=$MSG_ID" "ts=$TS" "когда=$when"
+            delivery_mark queued ok "message_id=$MSG_ID" "ts=$TS" "когда=$when"
+            say "голосовое расшифровано: ${WORDS:0:120}"
+            ack "$CHAT" "расшифровал голосовое: «${WORDS:0:600}»"
+            KICK_TEXT="${WORDS:0:600}"
+            [ ${#WORDS} -gt 600 ] && KICK_TEXT="$KICK_TEXT… (обрезано, полностью — в файле)"
+            KICK="Владелец прислал ГОЛОСОВОЕ, расшифровка: $KICK_TEXT — полная версия в $INBOX/$TS.txt, прочитай и перенеси в $INBOX/обработано/. Аудио: $audio"
+        else
+            WORDS=$(слова_владельца "$MSG")
+            printf '%s\n' "$MSG" > "$tmp" && mv "$tmp" "$INBOX/$TS.txt"
+            inbox_zhurnal "$WORDS" расшифровка
+            delivery_mark attachment_done error "message_id=$MSG_ID" "ts=$TS" "когда=$when" "почему=$stage"
+            delivery_mark queued ok "message_id=$MSG_ID" "ts=$TS" "когда=$when"
+            if [ "$stage" = "расшифровка" ]; then
+                say "голосовое НЕ расшифровано: ${reason:0:200}"
+                ack "$CHAT" "голосовое скачал, но расшифровать не смог: ${reason:0:300}. Продиктуйте текстом или я разберусь с контуром."
+                KICK="Владелец прислал голосовое, но расшифровать не удалось: ${reason:0:300}. Файл: $audio — разберись с контуром голосовых (scripts/transcribe_voice.py --selftest) и ответь владельцу; сопроводительный JSON в $INBOX/$TS.txt, перенеси в $INBOX/обработано/."
+            else
+                say "вложение НЕ скачано: $reason"
+                KICK="Владелец прислал вложение (голосовое)${WORDS:+ с подписью: ${WORDS:0:600}}, но скачать его не удалось: ${reason:0:300}. Координаты в $INBOX/$TS.txt — разберись и перенеси в $INBOX/обработано/."
+                case "$reason" in
+                    *"file is too big"*)
+                        ack "$CHAT" "Файл до меня НЕ дошёл: файл больше 20 МБ — Telegram не отдаёт ботам такие. Пришли ссылку на облако или разбей на части меньше 20 МБ." ;;
+                    *)
+                        ack "$CHAT" "Файл до меня НЕ дошёл: ${reason:0:200}" ;;
+                esac
+            fi
+        fi
+        rm -f "$json_file" "$done_file"
+        say "в очередь: $INBOX/$TS.txt (message_id=$MSG_ID)"
+        dostavit_agentu "$TS" "$WORDS" "$KICK"
+    done < <(find "$dir" -maxdepth 1 -name '*.done' -printf '%T@ %p\n' 2>/dev/null | sort -n | cut -d' ' -f2-)
 }
 
 # ── селфтест доставки: ЖИВОЙ tmux, свои одноразовые сессии ──────────────────
@@ -365,6 +490,8 @@ deliver_panel_comments() {
 if [ "${1:-}" = "--selftest" ]; then
     command -v tmux >/dev/null 2>&1 || { echo "SELFTEST: tmux не установлен — доставку в панель проверить нечем"; exit 1; }
     T=$(mktemp -d); ok_flag=1
+    # Метки доставки самотеста — в его двор, не в боевой журнал.
+    LOG_DIR="$T/log"; mkdir -p "$LOG_DIR"
 
     # ── команды панели понимаются по-русски (случай владельца 13.09.2026) ──
     # Он написал «панель» — ссылку не получил: команда была только «panel».
@@ -605,7 +732,7 @@ PY
     # подменён на временный каталог, боевую очередь проба не трогает.
     INBOX="$T/inbox"; mkdir -p "$INBOX"
     printf '/panel\n' > "$INBOX/1.txt"
-    ne_rabota_dlya_smeny "1"
+    ne_rabota_dlya_smeny "1" "проба"
     итог "снято" "$([ -e "$INBOX/1.txt" ] && echo "осталось" || echo "снято")" \
          "БОЛЬНОЙ СЛУЧАЙ 13.09: команда не оставляет входящего агенту"
     # Обычное сообщение снимать НЕЛЬЗЯ: это и есть работа.
@@ -643,10 +770,10 @@ PY
          "паузы нет — обычное сообщение поднимает смену"
 
     # Ложное условие под set -e не роняет цикл: вызов стоит в `if`, не в `&&`.
-    ALIVE2=$( set -euo pipefail; CMD=""; if [ -n "$CMD" ]; then ne_rabota_dlya_smeny "3"; fi; printf 'жив' )
+    ALIVE2=$( set -euo pipefail; CMD=""; if [ -n "$CMD" ]; then ne_rabota_dlya_smeny "3" "проба"; fi; printf 'жив' )
     итог "жив" "$ALIVE2" "пустая команда не роняет диспетчер под set -e"
 
-    # ── комментарии панели (ревью hr.kanban G-03, G-04, G-09, G-10) ────────
+    # ── комментарии панели (ревью hr.kanban G-03, G-04, G-09) ────────
     # Судится БОЕВАЯ deliver_panel_comments; подменены только края: приём
     # (заглушка-процесс), tmux и send_to_pane, занятость смены. Пауза — боевая
     # pause.py на своём дворе. Каждый случай — два круга: «сказать один раз на
@@ -672,7 +799,7 @@ for ts, word in (("1.1", "один"), ("2.2", "два")):
         print(f"{ts}\tКомментарий владельца из панели к hr.x: почини карту {word} "
               f"(полностью — панель, задача hr.x)")
 STUB
-    comments_rounds() {  # $1=приём: fail|hang|two, $2=send_to_pane: ok|fail, $3=пауза: да|нет, $4=смена: занята|свободна
+    comments_rounds() {  # $1=приём: fail|hang|two, $2=send_to_pane: ok|fail, $3=пауза: да|нет
         (
             set -euo pipefail
             COMMENTS_INTAKE="$T/intake-stub.py"; COMMENTS_TIMEOUT=2; TMUX_SESSION="harness-selftest-comments"
@@ -680,35 +807,39 @@ STUB
             export STUB_MODE="$1" STUB_MARKS="$T/marks" HARNESS_PANEL_STATE="$T/двор-$3"
             mkdir -p "$HARNESS_PANEL_STATE"
             if [ "$3" = да ]; then python3 "$PAUSE_PY" --поставить проба >/dev/null; fi
-            SEND_MODE="$2"; BUSY="$4"
+            SEND_MODE="$2"
+            # Толчок идёт фоном и пишет в журнал и lock под LOG_DIR: свой двор.
+            LOG_DIR="$T/log-$3-$1-$2"; rm -rf "$LOG_DIR"; mkdir -p "$LOG_DIR"
+            SERVICE_LOCKS_SUBDIR=services; PANE_TMUX_TIMEOUT=2; PANE_ENTER_DELAY=0
             # Заглушка tmux — файлом в PATH, а не функцией: функция с именем
             # команды выглядит для гейта «вызов до определения» по всему файлу.
             mkdir -p "$T/bin"
             printf '#!/bin/sh\n[ "$1" = display-message ] && echo claude\nexit 0\n' > "$T/bin/tmux"
             chmod +x "$T/bin/tmux"; PATH="$T/bin:$PATH"
             send_to_pane() { echo "$1" >> "$T/kicks"; [ "$SEND_MODE" = ok ]; }
-            smena_zanyata() { [ "$BUSY" = занята ]; }
+            # wait: круг не ждёт толчка, а проба ждёт — иначе считает до его конца.
             deliver_panel_comments >/dev/null
+            wait
             deliver_panel_comments >/dev/null
+            wait
             printf 'пинков %s, отметок %s, слов %s, жив' "$(wc -l < "$T/kicks")" \
                 "$(wc -l < "$T/marks")" "$(wc -l < "$T/said")"
         ) 2>/dev/null
     }
-    итог "пинков 0, отметок 0, слов 1, жив" "$(comments_rounds fail ok нет свободна)" \
+    итог "пинков 0, отметок 0, слов 1, жив" "$(comments_rounds fail ok нет)" \
          "БОЛЬНОЙ СЛУЧАЙ G-04: приём упал (код 1) — цикл жив, сказано один раз за два круга"
-    итог "пинков 0, отметок 0, слов 1, жив" "$(comments_rounds hang ok нет свободна)" \
+    итог "пинков 0, отметок 0, слов 1, жив" "$(comments_rounds hang ok нет)" \
          "приём завис — timeout, цикл жив, сказано один раз"
-    итог "пинков 2, отметок 2, слов 2, жив" "$(comments_rounds two ok нет свободна)" \
-         "две заявки, смена свободна — два пинка, две отметки, повтора нет"
-    итог "пинков 4, отметок 0, слов 2, жив" "$(comments_rounds two fail нет свободна)" \
+    итог "пинков 2, отметок 2, слов 2, жив" "$(comments_rounds two ok нет)" \
+         "две заявки — два пинка, две отметки, повтора нет"
+    итог "пинков 4, отметок 0, слов 2, жив" "$(comments_rounds two fail нет)" \
          "БОЛЬНОЙ СЛУЧАЙ G-04: send_to_pane отказал — отметки нет, о каждой заявке сказано раз"
-    итог "пинков 0, отметок 0, слов 2, жив" "$(comments_rounds two ok да свободна)" \
+    итог "пинков 0, отметок 0, слов 2, жив" "$(comments_rounds two ok да)" \
          "БОЛЬНОЙ СЛУЧАЙ G-03: пауза владельца держит комментарий — ни пинка, ни отметки"
-    итог "пинков 0, отметок 0, слов 2, жив" "$(comments_rounds two ok нет занята)" \
-         "БОЛЬНОЙ СЛУЧАЙ G-10: несрочный комментарий в разгар шага ждёт рубежа"
 
+    wait   # фоновые метки доставки дописываются до сноса двора
     rm -rf "$T"
-    [ "$ok_flag" = 1 ] && { echo "SELFTEST: зелёный (4 пути доставки + 4 пути разбора слов + 11 путей согласия + 3 пути очереди + 3 пути паузы + 3 пути журнала входящих + 6 путей комментариев панели; больные — «Enter»/«C-c», «да» второй строкой, «да для выката», «По выкату пишу да» два согласия одним сообщением и сообщение без согласия под set -e)"; exit 0; }
+    [ "$ok_flag" = 1 ] && { echo "SELFTEST: зелёный (4 пути доставки + 4 пути разбора слов + 11 путей согласия + 3 пути очереди + 3 пути паузы + 3 пути журнала входящих + 5 путей комментариев панели; больные — «Enter»/«C-c», «да» второй строкой, «да для выката», «По выкату пишу да» два согласия одним сообщением и сообщение без согласия под set -e)"; exit 0; }
     echo "SELFTEST: КРАСНЫЙ"; exit 1
 fi
 
@@ -728,6 +859,8 @@ konf_zagruzit
 # его отсутствие не валит канал — работают дефолты.
 SERVICE_LOCKS_SUBDIR="${SERVICE_LOCKS_SUBDIR:-services}"
 TMUX_SESSION="${TMUX_SESSION:-agent}"
+# Предел вызова tmux — ПОСЛЕ загрузчика: дефолт выше него затёр бы ключ конфига.
+PANE_TMUX_TIMEOUT="${PANE_TMUX_TIMEOUT:-10}"
 : "${TG_CHAT_ID:?в install.conf пуст TG_CHAT_ID}"
 [ -n "${TG_TOKEN_FILE:-}" ] && [ -s "$TG_TOKEN_FILE" ] || { echo "tg-dispatcher: TG_TOKEN_FILE пуст или файла нет"; exit 1; }
 TOKEN=$(tr -d '[:space:]' < "$TG_TOKEN_FILE")
@@ -778,6 +911,10 @@ ack() {  # chat_id, текст
         || say "ack не ушёл (сеть?) — цикл продолжает"
 }
 
+# «Принял» не ждёт ответа Bot API: толчок сообщения идёт следом, а не после curl.
+# Без дескрипторов 3 и 9 потомок не держит лок диспетчера после его смерти.
+ack_async() { ( exec 3<&- 9>&-; ack "$@" ) & }
+
 # Ссылка входа в панель шлётся БЕЗ предпросмотра: Telegram открывает ссылки
 # сам, чтобы нарисовать карточку, и одноразовый вход сгорел бы до владельца
 # (находка C4 ревью спеки панели 11.09.2026).
@@ -795,28 +932,19 @@ ack() {  # chat_id, текст
 # владельца. Никогда не звать до того, как update дописан в очередь.
 persist_offset() { echo "$OFFSET" > "$OFFSET_FILE"; }
 
-# ── что прерывает шаг агента, а что копится до рубежа ───────────────────────
-# Владелец 12.09.2026: «когда идет активная разработка у агента, накидывать ему
-# задач в разных направлениях не самая лучшая идея, это сбивает процесс <…>
-# llm видит мои сообщения как факт входящего и первые слова <…> пока не
-# закончится текущая задача или если её пнёт хук по ключевому слову».
-#
-# Решение принимает ПРИБОР на данных (scripts/urgency.py по ключу
-# «срочность» в harness/config/queue.yaml), а не этот файл и не агент:
-# признак срочности обязан лежать там же, где слова внимания.
-# Сообщение в очередь легло выше по коду в любом случае — откладывается только
-# ПИНОК. Карточку из сообщения заводит код, фоном: разбор смысла зовёт модель и
-# занял бы канал на минуты, а getUpdates ждать не может.
-dostavit_agentu() {  # $1=метка сообщения, $2=слова владельца, $3=пинок, $4=согласие
-    local prichina=""
-    if [ -n "${4:-}" ]; then
-        # Согласие — ответ на МОЙ вопрос: его ждут, и оно доезжает всегда.
-        # Без этой ветки полуавтомат вставал бы: агент спросил про выкат и не
-        # узнал бы «да» до конца хода, которого сам и ждёт.
-        prichina="согласие владельца"
-    else
-        prichina=$(python3 "$HERE/urgency.py" "$2" 2>/dev/null || true)
-    fi
+# Признак живого круга для dispatcher-stall-watch: у цикла, который читает канал,
+# он не старше long-poll (60 с); у зависшего в потомке — стареет.
+ALIVE_FILE="$LOG_DIR/tg-dispatcher.alive"
+mark_alive() { date +%s > "$ALIVE_FILE" || true; }
+
+# ── толчок о каждом сообщении сразу ─────────────────────────────────────────
+# Сообщение не придерживается: владелец 27.10.2026 велел убрать перехват и
+# доставлять мгновенно. Что отдавать и в каком порядке, решает дверь толчка
+# (lib/pane.sh): пауза, ротация и лимит откладывают, лишнее склеивается.
+# Сообщение в очередь легло выше по коду в любом случае. Карточку из сообщения
+# заводит код, фоном: разбор смысла зовёт модель и занял бы канал на минуты, а
+# getUpdates ждать не может.
+dostavit_agentu() {  # $1=метка сообщения, $2=слова владельца, $3=пинок
     if [ -f "${PROJECT_DIR:-}/dev-map.yaml" ]; then
         setsid nohup python3 "$HERE/map-from-message.py" --сообщение "$1" \
             --карта "$PROJECT_DIR/dev-map.yaml" --инбокс "$INBOX" \
@@ -826,19 +954,8 @@ dostavit_agentu() {  # $1=метка сообщения, $2=слова влад�
         # запускать разбор в пустоту: молча снятая работа неотличима от несделанной.
         say "карты ${PROJECT_DIR:-}/dev-map.yaml нет — карточку из сообщения не завожу"
     fi
-    # Беречь шаг агента можно, только если шаг ЕСТЬ. 28.09.2026 в 17:31:49
-    # задача владельца была отложена «до рубежа», а агент стоял без работы с
-    # 14:26 — владелец ждал четыре минуты и переспросил, дошло ли. Занятость
-    # спрашивается у прибора очереди, а не предполагается.
-    if [ -z "$prichina" ] && ! smena_zanyata; then
-        prichina="работы у смены нет — беречь нечего"
-    fi
-    if [ -n "$prichina" ]; then
-        say "срочное ($prichina) — пинок агенту сейчас"
-        agent_kick "$3"
-    else
-        say "несрочное — шаг агента не прерываю; сообщение ждёт рубежа (свод: scripts/inbox-digest.py)"
-    fi
+    say "в панель: толчок"
+    agent_kick "$3"
 }
 
 OFFSET=$(cat "$OFFSET_FILE" 2>/dev/null || echo 0)
@@ -846,12 +963,18 @@ BACKOFF=2
 say "старт: слушаю чат $TG_CHAT_ID, offset=$OFFSET"
 
 while true; do
+    mark_alive
     deliver_panel_comments
+    voice_pickup
+    voice_worker_start
+    # Пока у обработчика есть работа, long-poll короткий: итог подбирается на круге.
+    POLL_TIMEOUT=50
+    if voice_pending; then POLL_TIMEOUT=2; fi
     # URL с токеном — через stdin (curl -K -), не в argv (К-7): long-poll висит
     # до 60 с, и всё это время токен был бы виден любому в ps.
     RESP=$(printf 'url = "%s/getUpdates"\n' "$API" \
         | curl -sS --max-time 60 -K - \
-            --data-urlencode "timeout=50" \
+            --data-urlencode "timeout=$POLL_TIMEOUT" \
             --data-urlencode "offset=$OFFSET" \
             --data-urlencode 'allowed_updates=["message"]' 2>&1) || {
         say "getUpdates упал (сеть?) — пауза ${BACKOFF}с и снова"
@@ -874,6 +997,7 @@ while true; do
         continue
     fi
     BACKOFF=2
+    mark_alive
 
     COUNT=$(printf '%s' "$RESP" | jq '.result | length')
     [ "$COUNT" = "0" ] && continue
@@ -916,6 +1040,9 @@ while true; do
         # Метка сообщения заводится здесь: ею названы и файл очереди, и файл
         # секрета, а ответ владельцу ниже уже обязан нести пометку.
         TS=$(date +%s.%N)
+        HARNESS_LOG_DIR="$LOG_DIR" harness_event доставка scripts/tg-dispatcher.sh delivery.received ok \
+            "update_id=$UPDATE_ID" "message_id=$MSG_ID" "ts=$TS" \
+            "tg_date=$(printf '%s' "$MSG" | jq -r '.date // empty')" "когда=$TS"
         otdelit_sekret "$TS"
         # Владельцу — один раз за окно, а не на каждое сообщение: лежащий судья
         # иначе отвечал бы ему вторым сообщением на каждое слово.
@@ -938,12 +1065,19 @@ while true; do
         if python3 "$PAUSE_PY" --идёт-ли 2>/dev/null; then
             HVOST_PAUZY=" (смена на паузе — увижу, когда снимете)"
         fi
+        # Голос уходит обработчику: скачивание и расшифровка цикл не держат.
+        VOICE_HANDOFF=0
+        if [ -z "$TEXT" ] && [ -n "$MSG_ID" ] && printf '%s' "$MSG" | jq -e '.voice' >/dev/null 2>&1; then
+            VOICE_HANDOFF=1
+        fi
         if [ -n "$TEXT" ]; then
-            ack "$CHAT" "принял: $BRIEF$HVOST_PAUZY"
+            ack_async "$CHAT" "принял: $BRIEF$HVOST_PAUZY"
+        elif [ "$VOICE_HANDOFF" = 1 ]; then
+            ack_async "$CHAT" "принял: голосовое, расшифровываю$HVOST_PAUZY"
         else
             KIND=$(printf '%s' "$MSG" | jq -r 'if .voice then "голосовое" elif .document then "файл" elif .photo then "фото" else "вложение" end')
             # ${WORDS:+…} — подпись показывается, только если она есть.
-            ack "$CHAT" "принял: $KIND${WORDS:+ с подписью «$BRIEF»} (положу в очередь как есть)$HVOST_PAUZY"
+            ack_async "$CHAT" "принял: $KIND${WORDS:+ с подписью «$BRIEF»} (положу в очередь как есть)$HVOST_PAUZY"
         fi
 
         # Уровень языка владельца — по ЕГО же сообщениям: владелец 11.09.2026
@@ -957,11 +1091,24 @@ while true; do
         # Прибор очереди журнал только читает.
             otmetit_vnimanie "$TS" "$WORDS" || true
         # Что уйдёт в машинный журнал: текст сообщения или подпись вложения.
-        # Голосовое ниже перебивает это расшифровкой — иначе слово владельца,
-        # сказанное голосом, в носитель дверей не попадало бы вовсе.
+        # Расшифровку голоса в журнал пишет подбор (voice_pickup), когда она готова:
+        # иначе слово владельца, сказанное голосом, в носитель дверей не попало бы.
         ZHURNAL_TEXT="$WORDS"
         KICK=""
-        if [ -n "$TEXT" ]; then
+        if [ "$VOICE_HANDOFF" = 1 ]; then
+            # Файла в корне входящих нет до итога обработчика: сырой JSON увидели
+            # бы сторож и сессия. Ключ дубля — message_id.
+            if voice_known "$MSG_ID"; then
+                say "повтор голосового $MSG_ID — уже у обработчика или расшифровано"
+                delivery_mark no_kick skipped "ts=$TS" "почему=дубль голосового"
+                VOICE_HANDOFF=2
+            else
+                mkdir -p "$INBOX/вложения"
+                printf '%s' "$MSG" | jq -c --arg ts "$TS" '. + {inbox_ts:$ts}' > "$INBOX/вложения/$MSG_ID.json.tmp" \
+                    && mv "$INBOX/вложения/$MSG_ID.json.tmp" "$INBOX/вложения/$MSG_ID.json"
+                delivery_mark attachment_started ok "message_id=$MSG_ID" "ts=$TS" "когда=$(date +%s.%N)"
+            fi
+        elif [ -n "$TEXT" ]; then
             printf '%s\n' "$TEXT" > "$INBOX/$TS.txt"
             # Пинок несёт САМ ТЕКСТ, а не только путь: агент узнаёт задачу из
             # пинка и берётся за неё, не сходив за файлом. Обрезка — потому что
@@ -982,30 +1129,6 @@ while true; do
             if [ "$DL_RC" = 0 ]; then
                 say "вложение скачано: $DL"
                 KICK="Владелец прислал вложение ($KIND)${WORDS:+ с подписью: ${WORDS:0:600}}, файл скачан: $DL — посмотри его; сопроводительный JSON в $INBOX/$TS.txt, перенеси в $INBOX/обработано/."
-                # Голосовое — РАСШИФРОВАТЬ и положить в очередь текстом: слушать
-                # агент не умеет, а «посмотри файл» на аудио — тупик. Улика
-                # 11.09.2026: голосовое в 79 секунд с заказом работы осталось
-                # непрочитанным. Расшифровка локальная (faster-whisper), замер:
-                # 79 с аудио → 24 с. Потолок 600 с в самом скрипте; ack владельцу
-                # уже ушёл выше, так что эта пауза его не задерживает.
-                if [ "$KIND" = "голосовое" ]; then
-                    VOICE_RC=0
-                    VOICE_TEXT=$(python3 "$HERE/transcribe_voice.py" "$DL" 2>&1) || VOICE_RC=$?
-                    if [ "$VOICE_RC" = 0 ] && [ -n "$VOICE_TEXT" ]; then
-                        printf '%s\n' "$VOICE_TEXT" > "$INBOX/$TS.txt"
-                        ZHURNAL_TEXT="$VOICE_TEXT"
-                        say "голосовое расшифровано: ${VOICE_TEXT:0:120}"
-                        # Владельцу — что услышано: распознано криво, поправит сразу.
-                        ack "$CHAT" "расшифровал голосовое: «${VOICE_TEXT:0:600}»"
-                        KICK_TEXT="${VOICE_TEXT:0:600}"
-                        [ ${#VOICE_TEXT} -gt 600 ] && KICK_TEXT="$KICK_TEXT… (обрезано, полностью — в файле)"
-                        KICK="Владелец прислал ГОЛОСОВОЕ, расшифровка: $KICK_TEXT — полная версия в $INBOX/$TS.txt, прочитай и перенеси в $INBOX/обработано/. Аудио: $DL"
-                    else
-                        say "голосовое НЕ расшифровано (rc=$VOICE_RC): ${VOICE_TEXT:0:200}"
-                        ack "$CHAT" "голосовое скачал, но расшифровать не смог: ${VOICE_TEXT:0:300}. Продиктуйте текстом или я разберусь с контуром."
-                        KICK="Владелец прислал голосовое, но расшифровать не удалось: ${VOICE_TEXT:0:300}. Файл: $DL — разберись с контуром голосовых (scripts/transcribe_voice.py --selftest) и ответь владельцу."
-                    fi
-                fi
             else
                 say "вложение НЕ скачано (rc=$DL_RC): $DL"
                 KICK="Владелец прислал вложение ($KIND)${WORDS:+ с подписью: ${WORDS:0:600}}, но скачать его не удалось: ${DL:0:300}. Координаты в $INBOX/$TS.txt — разберись и перенеси в $INBOX/обработано/."
@@ -1026,7 +1149,12 @@ while true; do
         # СТРОГО здесь: входящее уже на диске в очереди, и по той же причине,
         # что и confirmations, — ДО persist_offset (П-8): смерть в окне «offset
         # сдвинут, строка не записана» теряла бы слово владельца навсегда.
-        inbox_zhurnal "${ZHURNAL_TEXT:-}"
+        if [ "$VOICE_HANDOFF" != 0 ]; then
+            inbox_zhurnal "${ZHURNAL_TEXT:-}" вложение
+        else
+            inbox_zhurnal "${ZHURNAL_TEXT:-}"
+            delivery_mark queued ok "message_id=$MSG_ID" "ts=$TS" "когда=$(date +%s.%N)"
+        fi
 
         # ── подтверждения полуавтомата ──────────────────────────────────────
         # «да/подтверждаю/ротация ок/ок» — ответ на анонс (выкат, ротация,
@@ -1057,7 +1185,7 @@ while true; do
         fi
         if [ "$PANEL_ANSWER" != "не ответ панели" ]; then
             say "ответ веб-панели: $PANEL_ANSWER (владельцу отвечает сама панель)"
-            ne_rabota_dlya_smeny "$TS"
+            ne_rabota_dlya_smeny "$TS" "ответ панели"
             persist_offset "$UPDATE_ID"
             continue
         fi
@@ -1067,7 +1195,7 @@ while true; do
             # такое слово не идёт (F-gen-01).
             ack "$CHAT" "Код не подошёл или устарел — переключение не применено. Открой панель и нажми ещё раз."
             say "ответ с кодом панели не применён (служба молчит или код просрочен) — в согласия не пишем"
-            ne_rabota_dlya_smeny "$TS"
+            ne_rabota_dlya_smeny "$TS" "код панели не применён"
             persist_offset "$UPDATE_ID"
             continue
         fi
@@ -1080,14 +1208,14 @@ while true; do
         # наружу my.example.com»). Форма аргумента живёт в данных команд, и
         # выделять имя хоста здесь второй раз нельзя: два списка форм
         # разъезжаются молча.
-        CMD_OTVET=$(python3 "$PROJECT_DIR/scripts/bot-commands.py" --какая "$NORM" 2>/dev/null || true)
+        CMD_OTVET=$(python3 "$HERE/bot-commands.py" --какая "$NORM" 2>/dev/null || true)
         CMD=$(printf '%s\n' "$CMD_OTVET" | sed -n 1p)
         CMD_ARG=$(printf '%s\n' "$CMD_OTVET" | sed -n 2p)
         # Ветка на команду есть всегда — этого требует проба test_bot_commands.py.
         # if, а не «[ ... ] && ...»: под set -e ложное условие в конце команды
         # роняет весь диспетчер — и уронил бы на первом же обычном сообщении
         # (память: падение-под-set-e-молчит).
-        if [ -n "$CMD" ]; then ne_rabota_dlya_smeny "$TS"; fi
+        if [ -n "$CMD" ]; then ne_rabota_dlya_smeny "$TS" "команда $CMD"; fi
         # Паузу снимает ТОЛЬКО владелец — кнопкой «продолжить» или её словом.
         #
         # До 21.09.2026 её снимало любое сообщение, не распознанное как команда:
@@ -1102,6 +1230,9 @@ while true; do
         # Теперь сообщение на паузе КОПИТСЯ во входящих, но смену не поднимает,
         # и владелец слышит, почему тихо: молчание неотличимо от «игнорирует».
         if pauza_derzhit "$CMD"; then
+            if [ "$VOICE_HANDOFF" = 0 ]; then
+                delivery_mark kick_refused held "ts_список=$TS" "почему=пауза" "когда=$(date +%s.%N)"
+            fi
             say "стоит пауза — сообщение легло во входящие, смену не бужу"
             ack "$CHAT" "Стоит пауза — я стою и работу не начинаю. Сообщение сохранил. Сниму паузу кнопкой «продолжить» в меню или словом «продолжай»."
             persist_offset "$UPDATE_ID"
@@ -1156,13 +1287,16 @@ while true; do
                 fi
                 persist_offset "$UPDATE_ID"
                 continue ;;
-            "update")
+            "update"|"update_reset")
                 # Обновление откатываемое (копия, самопроверка, возврат), но
                 # долгое: запускаем фоном и сразу отвечаем — молчащий бот на
                 # десять минут выглядит как сломанный.
-                ack "$CHAT" "Принял: ставлю обновление харнеса. Сниму копию, проверю себя воротами и, если что-то не так, вернусь на прежнюю версию. Отчитаюсь итогом."
-                setsid nohup python3 "$PROJECT_DIR/scripts/update.py" --поставить \
-                    >>"$LOG_DIR/update-watch.log" 2>&1 < /dev/null &
+                if [ "$CMD" = "update_reset" ]; then
+                    ack "$CHAT" "Принял: ставлю обновление со сбросом. Свои коммиты пакета сберегу в отдельной ветке, сниму копию, проверю себя воротами и, если что-то не так, вернусь на прежнюю версию. Отчитаюсь итогом."
+                else
+                    ack "$CHAT" "Принял: ставлю обновление харнеса. Сниму копию, проверю себя воротами и, если что-то не так, вернусь на прежнюю версию. Отчитаюсь итогом."
+                fi
+                start_update "$CMD"
                 say "владелец попросил обновление — запущено фоном"
                 persist_offset "$UPDATE_ID"
                 continue ;;
@@ -1187,9 +1321,52 @@ while true; do
                 # владельцу дважды (находка ревью Q-08). Второго писателя ответа
                 # нет: формат живёт в приборе.
                 STATUS_TEXT=$(python3 "$PROJECT_DIR/scripts/work-queue.py" \
-                    "$PROJECT_DIR/dev-map.yaml" --владельцу 2>/dev/null)
+                    "$PROJECT_DIR/dev-map.yaml" --владельцу 2>/dev/null) || STATUS_TEXT=""
                 ack "$CHAT" "${STATUS_TEXT:-Очередь пуста: работы в карте нет.}"
                 say "владельцу отдан статус по команде"
+                persist_offset "$UPDATE_ID"
+                continue ;;
+            # Хакатон: ответ владельца словом — это и есть его действие, второго
+            # «да» не просим. Писатель настроек один (write-key.py), судья
+            # «включён ли» тоже один (hackathon.py).
+            "hackathon_on")
+                if HACK_OUT=$(python3 "$HERE/write-key.py" HACKATHON_UNTIL 72 2>&1); then
+                    HACK_UNTIL=$(konf_iz_fajla HACKATHON_UNTIL)
+                    ack "$CHAT" "Хакатон включён на 72 часа, до ${HACK_UNTIL/T/ }."
+                    say "владелец включил хакатон до $HACK_UNTIL"
+                else
+                    # Владельцу — строка отказа писателя («[запись-ключа] …»), иначе последняя непустая.
+                    HACK_LAST=$(grep -m1 '^\[' <<<"$HACK_OUT" || true)
+                    [ -n "$HACK_LAST" ] || HACK_LAST=$(grep -v '^[[:space:]]*$' <<<"$HACK_OUT" | tail -n1 || true)
+                    ack "$CHAT" "Хакатон не включён: писатель настроек отказал — ${HACK_LAST:-без объяснения}"
+                    say "хакатон не включён: ${HACK_OUT:-писатель отказал}"
+                fi
+                persist_offset "$UPDATE_ID"
+                continue ;;
+            "hackathon_off")
+                if HACK_OUT=$(python3 "$HERE/write-key.py" HACKATHON_UNTIL 0 2>&1); then
+                    ack "$CHAT" "Хакатон выключен; открытые долги «довести до продакшна» остаются."
+                    say "владелец выключил хакатон"
+                else
+                    # Владельцу — строка отказа писателя («[запись-ключа] …»), иначе последняя непустая.
+                    HACK_LAST=$(grep -m1 '^\[' <<<"$HACK_OUT" || true)
+                    [ -n "$HACK_LAST" ] || HACK_LAST=$(grep -v '^[[:space:]]*$' <<<"$HACK_OUT" | tail -n1 || true)
+                    ack "$CHAT" "Хакатон не выключен: писатель настроек отказал — ${HACK_LAST:-без объяснения}"
+                    say "хакатон не выключен: ${HACK_OUT:-писатель отказал}"
+                fi
+                persist_offset "$UPDATE_ID"
+                continue ;;
+            "hackathon")
+                # Срок читаем в момент вопроса: переменная, загруженная при
+                # старте, отстала бы от правки через панель.
+                HACK_UNTIL=$(konf_iz_fajla HACKATHON_UNTIL)
+                if python3 "$HERE/hackathon.py" --активен >/dev/null 2>&1; then
+                    ack "$CHAT" "Хакатон включён до ${HACK_UNTIL/T/ }."
+                elif [ -n "$HACK_UNTIL" ]; then
+                    ack "$CHAT" "Хакатон выключен: срок истёк (был до ${HACK_UNTIL/T/ })."
+                else
+                    ack "$CHAT" "Хакатон выключен."
+                fi
                 persist_offset "$UPDATE_ID"
                 continue ;;
             "panel_out")
@@ -1267,7 +1444,12 @@ while true; do
         # двигаем offset (К-1а, П-8): упади мы до этой строки, рестарт
         # перечитает update и положит его заново.
         persist_offset
-        say "в очередь: $INBOX/$TS.txt (message_id=$MSG_ID)"
-        dostavit_agentu "$TS" "$WORDS" "$KICK" "${AGREE:-}"
+        if [ "$VOICE_HANDOFF" != 0 ]; then
+            say "голосовое $MSG_ID — обработчику: $INBOX/вложения/$MSG_ID.json"
+            voice_worker_start
+        else
+            say "в очередь: $INBOX/$TS.txt (message_id=$MSG_ID)"
+            dostavit_agentu "$TS" "$WORDS" "$KICK"
+        fi
     done
 done

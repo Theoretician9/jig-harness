@@ -97,32 +97,51 @@ fi
 # ТЕКСТОМ на экран.
 SUDYA="$PROJECT_DIR/scripts/limit-in-log.py"
 
-DOVODY=("$@")
-case " ${DOVODY[*]:-} " in
-    *" --strict-mcp-config "*) ;;
-    *) DOVODY=(--strict-mcp-config "${DOVODY[@]}") ;;
-esac
+# Формат вывода ставит обёртка, а не демон: в stream-json отказ API назван
+# полями result, и слова ответа модели («429», «rate limit») больше не
+# принимаются за лимит. Переданный демоном --output-format вырезается.
+DOVODY=()
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --output-format) shift; [ $# -gt 0 ] && shift; continue ;;
+        --output-format=*|--verbose) shift; continue ;;
+    esac
+    DOVODY+=("$1"); shift
+done
+DOVODY=(--strict-mcp-config --output-format stream-json --verbose "${DOVODY[@]}")
+
+POTOK_KAT="$LOG_DIR/demon-stream"
+RASHOD="$LOG_DIR/demon-spend.jsonl"
+mkdir -p "$POTOK_KAT"
 
 VYVOD_FAJL="$(mktemp)"
-trap 'rm -f "$VYVOD_FAJL"' EXIT
-# tee, а не перенаправление: демон пишет вывод модели в свой лог ПО ХОДУ, и
-# копить его до конца прогона значит потерять картину зависшего вызова. Код
-# берётся у первого звена конвейера — код tee нам не интересен.
-claude "${DOVODY[@]}" 2>&1 | tee "$VYVOD_FAJL"
+OSHIBKI_FAJL="$(mktemp)"
+SUD_FAJL="$(mktemp)"
+TEKST_FAJL="$(mktemp)"
+trap 'rm -f "$VYVOD_FAJL" "$OSHIBKI_FAJL" "$SUD_FAJL" "$TEKST_FAJL"' EXIT
+# tee: сырой поток ложится в файл демона ПО ХОДУ, байт в байт; stderr отдельно,
+# чтобы его строки не попали в поток. Код берётся у первого звена конвейера.
+claude "${DOVODY[@]}" 2>"$OSHIBKI_FAJL" | tee -a "$POTOK_KAT/$DEMON.jsonl" >"$VYVOD_FAJL"
 KOD=${PIPESTATUS[0]}
 
-SBROS="$(python3 "$SUDYA" --в-тексте "$VYVOD_FAJL" 2>/dev/null)"
-SUD_KOD=$?
+# Сырой поток растёт на каждый вызов (tee -a): сверх потолка из данных остаётся
+# хвост по границе строки — последний вызов цел, начало файла (может быть
+# обрезано посреди строки) выбрасывается до первого перевода строки.
+potok_urezat() {
+    local fajl="$1" potolok=$(( ${DEMON_STREAM_MAX_KB:-4096} * 1024 ))
+    [ "$(stat -c %s "$fajl" 2>/dev/null || echo 0)" -gt "$potolok" ] || return 0
+    tail -c "$potolok" "$fajl" | sed '1d' >"$fajl.urezka" && mv "$fajl.urezka" "$fajl"
+}
+potok_urezat "$POTOK_KAT/$DEMON.jsonl"
 
-if [ "$SUD_KOD" -eq 2 ]; then
-    # «Не смог прочитать» и «не лимит» — разные ответы: молчащий судья снова
-    # сделал бы лимит невидимым ([[unreadable-source-turns-check-green]]).
-    say "$DEMON: судья лимита не ответил ($SUDYA) — отказ разобран как обычный"
-fi
+# Судье — stdout и stderr вместе: при выводе без JSON отказ CLI приходит
+# текстом на stderr, и прежний разбор по тексту обязан его видеть.
+cat "$VYVOD_FAJL" "$OSHIBKI_FAJL" >"$SUD_FAJL"
 
-# Первая НЕПУСТАЯ строка вывода — подпись отказа. Пустая строка подписью быть
-# не может: тогда любые два молчаливых отказа слились бы в один.
-podpis() { grep -m1 -v '^[[:space:]]*$' "$VYVOD_FAJL" 2>/dev/null | cut -c1-200; }
+# Первая НЕПУСТАЯ строка текста — подпись отказа (из result, не из JSON).
+# Пустая строка подписью быть не может: тогда любые два молчаливых отказа
+# слились бы в один.
+podpis() { grep -m1 -v '^[[:space:]]*$' "$TEKST_FAJL" 2>/dev/null | cut -c1-200; }
 
 # Повторяющийся отказ НЕ по лимиту: та же дисциплина, что у лимита — один раз
 # на период, под тем же локом. Первый отказ молчит: обычная неудача задания
@@ -164,7 +183,47 @@ otkaz_proshyol() {
     skazat "Прошло: фоновые демоны снова получают ответ модели (проверено демоном $DEMON)."
 }
 
+SBROS="$(python3 "$SUDYA" --в-потоке "$SUD_FAJL" 2>/dev/null)"
+SUD_KOD=$?
+
+if [ "$SUD_KOD" -eq 2 ]; then
+    # «Не смог прочитать» и «не лимит» — разные ответы: молчащий судья снова
+    # сделал бы лимит невидимым ([[unreadable-source-turns-check-green]]).
+    say "$DEMON: судья лимита не ответил ($SUDYA) — отказ разобран как обычный"
+fi
+
+if [ "$SUD_KOD" -eq 3 ]; then
+    # Поток оборван: ни расхода, ни вердикта — слова в недописанном потоке
+    # судить нельзя, а успехом обрыв быть не может. Подписью отказа служит
+    # наша фраза, не текст модели: иначе её слова ушли бы владельцу.
+    say "$DEMON: поток CLI оборван без итога (код $KOD) — отказ не по лимиту, не судим"
+    echo "без итога: поток CLI оборван (код $KOD)" >&2
+    echo "поток CLI оборван без итога" >"$TEKST_FAJL"
+    [ "$KOD" -eq 0 ] && KOD=1
+    otkaz_povtoryayushchijsya
+    exit "$KOD"
+fi
+
+NET_ITOGA=1
+IS_ERROR=false
+if python3 "$SUDYA" --текст-итога "$SUD_FAJL" >"$TEKST_FAJL" 2>/dev/null \
+   && python3 "$SUDYA" --расход "$SUD_FAJL" "$DEMON" "$(date -Iseconds)" >"$SUD_FAJL.rashod" 2>/dev/null; then
+    NET_ITOGA=0
+    cat "$SUD_FAJL.rashod" >>"$RASHOD"
+    IS_ERROR="$(jq -r '.is_error' "$SUD_FAJL.rashod" 2>/dev/null || echo false)"
+fi
+rm -f "$SUD_FAJL.rashod"
+# Демону — только ответ модели. Вывод без JSON отдаётся целиком, как раньше.
+if [ "$NET_ITOGA" -eq 0 ]; then
+    cat "$TEKST_FAJL"
+else
+    cat "$SUD_FAJL" >"$TEKST_FAJL"
+    cat "$TEKST_FAJL"
+fi
+
 if [ "$SUD_KOD" -ne 0 ]; then
+    # Отказ API при коде CLI 0 успехом не считается (код при отказе не замерен).
+    if [ "$IS_ERROR" = true ] && [ "$KOD" -eq 0 ]; then KOD=1; fi
     if [ "$KOD" -eq 0 ]; then
         if [ -f "$SOSTOYANIE" ]; then
             rm -f "$SOSTOYANIE"

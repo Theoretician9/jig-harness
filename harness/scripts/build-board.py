@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import functools
+import hashlib
 import importlib.util
 import json
 import os
@@ -25,7 +26,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
 import config  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
-BOARD_DATA = HERE.parent / "harness" / "config" / "board.yaml"
+BOARD_DATA = Path(os.environ.get("HARNESS_BOARD_DATA")
+                  or HERE.parent / "harness" / "config" / "board.yaml")
 TEXT_LIMIT = 4000
 SKILLS_TAIL = 2000
 COMMITS_LIMIT = 20
@@ -84,10 +86,15 @@ def code_step(features) -> dict:
 def step_list(card: dict, judge, root, settings, features) -> list:
     """Шаги и код — в порядке колонок, с отметкой: есть / нет / машиной не
     судится. Список требуемых — тот, по которому гейт судит ЗАКРЫТИЕ
-    (`шаги_под_состояние` при status=test), а не объявленный уровень: иначе
+    (`шаги_под_состояние` при status=test, плюс шаги приёмки вне wip), а не
+    объявленный уровень: иначе
     доска говорит «бумаги собраны», а закрывающий коммит красный. Отметку и
     путь бумаги даёт гейт (`беды_в_двух_корнях`, `путь_бумаги`), не доска."""
     required = judge.шаги_под_состояние(settings, {**card, "status": "test"})
+    if card.get("status") != "wip":
+        # Мутации отложены до приёмки: пока задача в работе их не просят, но
+        # после test они положены, и доска не должна называть их «не положен».
+        required = required + (judge.шаги_приёмки_задачи(card, root) or [])
     steps = [code_step(features)]
     for step in judge.шаги_уровня(settings, "крупная"):
         if step not in required:
@@ -196,7 +203,7 @@ def column(card: dict, judge) -> tuple:
             pills = [card.get("чем_подтверждено") or "нечем подтверждено"]
         elif status in STATUS_PILLS:
             pills = [STATUS_PILLS[status]]
-        if steps and status_stage(status) != order[0]:   # в очереди недостача — норма
+        if steps and status_stage(status) not in (order[0], status_stage("беклог")):   # в очереди и беклоге недостача — норма
             steps, verdict = closed_steps(card, judge, price, settings, steps)
             pills = pills + verdict
     else:
@@ -337,15 +344,76 @@ def write_atomic(target: Path, board: dict) -> None:
         raise
 
 
+def inputs_fingerprint(repo: Path, now: datetime) -> str:
+    """Отпечаток всего, из чего собирается снимок.
+
+    Закоммиченное — HEAD (код, карта, бумаги), незакоммиченное — статус дерева
+    и размер со временем каждого грязного файла, вне дерева — журналы и доска
+    состояния, которые читают гейт и доска. Час входит нарочно: что отпечаток
+    не видит, застынет не дольше чем на час, а не навсегда.
+    """
+    def git(*args: str) -> bytes:
+        try:
+            return subprocess.run(["git", "-C", str(repo), *args],
+                                  capture_output=True, timeout=20).stdout
+        except (OSError, subprocess.TimeoutExpired):
+            return b""
+
+    status = git("status", "--porcelain", "-z", "--untracked-files=all")
+    dirty, tokens = [], iter(status.split(b"\0"))
+    for token in tokens:
+        if len(token) > 3:
+            dirty.append(repo / os.fsdecode(token[3:]))
+            if token[:1] in (b"R", b"C"):
+                next(tokens, None)   # у переименования следом идёт прежнее имя
+    log = Path(config.log_dir())
+    outside = [log / "skills.jsonl", log / "пайплайн-обходы.jsonl",
+               Path(os.environ.get("HARNESS_DOSKA") or log / "доска.json"),
+               log / "inbox", log / "inbox" / "обработано",
+               Path(config.путь_harness_conf()), BOARD_DATA]
+    digest = hashlib.sha256(git("rev-parse", "HEAD") + status
+                            + now.strftime("%Y-%m-%d %H").encode())
+    for path in dirty + outside:
+        try:
+            info = path.stat()
+            digest.update(f"{path}\t{info.st_mtime_ns}\t{info.st_size}\n".encode())
+        except OSError:
+            digest.update(f"{path}\tнет\n".encode())
+    return digest.hexdigest()
+
+
+def unchanged_board(target: Path, stamp: Path, fingerprint: str) -> dict | None:
+    """Прежний снимок, если входы с его сборки не менялись; иначе None."""
+    try:
+        if stamp.read_text(encoding="utf-8") != fingerprint:
+            return None
+        board = json.loads(target.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return board if isinstance(board, dict) else None
+
+
 def main() -> int:
     judge = load_gate()
     now = datetime.now()
-    board = build(judge.КОРЕНЬ / "dev-map.yaml", judge, now)
-    write_atomic(Path(config.panel_state_dir()) / "board.json", board)
+    target = Path(config.panel_state_dir()) / "board.json"
     # Метка пульса: молчащий снимок — устаревшая доска, и сторож меток обязан
     # назвать это владельцу, а не ждать, пока он сам заметит старое время.
     marks = Path(config.heartbeat_dir())
     marks.mkdir(parents=True, exist_ok=True)
+    # Точка в начале — служебный файл, не метка: сверка сроков его не судит.
+    stamp = marks / ".build-board.fingerprint"
+    fingerprint = inputs_fingerprint(judge.КОРЕНЬ, now)
+    previous = unchanged_board(target, stamp, fingerprint)
+    if previous is not None:
+        # «Снято» — когда снимок сверен с входами: по нему панель судит, жив ли демон.
+        write_atomic(target, dict(previous, снято=now.isoformat(timespec="seconds")))
+        (marks / "build-board").touch()
+        print(f"доска: входы без изменений, задач {len(previous.get('задачи') or [])}, снято {now:%H:%M}")
+        return 0
+    board = build(judge.КОРЕНЬ / "dev-map.yaml", judge, now)
+    write_atomic(target, board)
+    stamp.write_text(fingerprint, encoding="utf-8")
     (marks / "build-board").touch()
     print(f"доска: задач {len(board.get('задачи') or [])}, снято {now:%H:%M}"
           + (f" — беда: {board['беда']}" if board.get("беда") else ""))

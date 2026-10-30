@@ -187,6 +187,118 @@ def _resets_at(узел) -> int | None:
     return None
 
 
+# Поток `--output-format stream-json --verbose`: отказ называют ПОЛЯ события
+# result, а не слова. Слова судили бы и ответ модели — check-builder пишет
+# пробы про лимиты, и «429» в его ответе объявлялся лимитом подписки.
+def события_потока(текст: str) -> list[dict]:
+    """JSON-события вывода; строки не-JSON (stderr, шум) пропускаются."""
+    найдено = []
+    for строка in текст.splitlines():
+        if not строка.startswith("{"):
+            continue
+        try:
+            событие = json.loads(строка)
+        except ValueError:
+            continue
+        if isinstance(событие, dict) and "type" in событие:
+            найдено.append(событие)
+    return найдено
+
+
+def итог_потока(события: list[dict]) -> dict | None:
+    итоги = [e for e in события if e["type"] == "result"]
+    return итоги[-1] if итоги else None
+
+
+def _сброс_отказа(события: list[dict]) -> int | None:
+    """resetsAt отказа: ПОСЛЕДНИЙ из assistant.api_error_params и rejected.
+
+    allowed_warning — предупреждение о другом окне, его час не срок отказа.
+    """
+    метка = None
+    for e in события:
+        if e["type"] == "assistant":
+            инфо = (e.get("api_error_params") or {}).get("rate_limit_info")
+        elif e["type"] == "rate_limit_event":
+            инфо = e.get("rate_limit_info")
+            if (инфо or {}).get("status") != "rejected":
+                инфо = None
+        else:
+            continue
+        число = (инфо or {}).get("resetsAt")
+        if isinstance(число, (int, float)):
+            метка = int(число)
+    return метка
+
+
+def лимит_в_итоге(события: list[dict], итог: dict) -> str | None:
+    """Строка сброса, если result — отказ по лимиту; None — не лимит."""
+    if итог.get("is_error") is not True:
+        return None
+    по_полям = (итог.get("api_error") == "usage_limit_reached"
+                or итог.get("api_error_status") == 429)
+    текст = лимит_в_тексте(str(итог.get("result", "")))
+    # Неизвестный вид отказа считается отсутствующим: CLI переименует вид, а
+    # лимит должен остаться лимитом. Но текст судится ТОЛЬКО при is_error.
+    if not по_полям and текст is None:
+        return None
+    число = _сброс_отказа(события)
+    if число:
+        return "обновится в " + datetime.datetime.fromtimestamp(число).strftime("%H:%M")
+    return текст or "срок сброса CLI не назвал"
+
+
+def строка_расхода(события: list[dict], итог: dict, демон: str, когда: str) -> dict:
+    """Расход берётся из result.usage: у assistant счётчик промежуточный."""
+    расход = итог.get("usage") or {}
+    начало = next((e for e in события if e["type"] == "system"), {})
+    return {"когда": когда, "демон": демон, "модель": начало.get("model"),
+            "session_id": итог.get("session_id"),
+            "total_cost_usd": итог.get("total_cost_usd"),
+            "input_tokens": расход.get("input_tokens"),
+            "output_tokens": расход.get("output_tokens"),
+            "cache_creation_input_tokens": расход.get("cache_creation_input_tokens"),
+            "cache_read_input_tokens": расход.get("cache_read_input_tokens"),
+            "num_turns": итог.get("num_turns"), "duration_ms": итог.get("duration_ms"),
+            "is_error": итог.get("is_error"), "api_error": итог.get("api_error")}
+
+
+def в_потоке(путь: str, режим: str = "суд", демон: str = "", когда: str = "") -> int:
+    """Судья потока. Коды: 0 лимит, 1 нет, 2 файл не прочитан, 3 нет result."""
+    try:
+        текст = Path(путь).read_text(encoding="utf-8", errors="replace")
+    except OSError as беда:
+        print(f"вывод не прочитан: {беда}", file=sys.stderr)
+        return 2
+    события = события_потока(текст)
+    if not события:
+        # Вывод без единого события (CLI упал до потока): прежний разбор слов.
+        сброс = лимит_в_тексте(текст)
+        if режим == "текст":
+            print(текст, end="")
+            return 0
+        if режим == "расход":
+            return 1
+        if сброс is None:
+            return 1
+        print(сброс)
+        return 0
+    итог = итог_потока(события)
+    if итог is None:
+        return 3
+    if режим == "текст":
+        print(итог.get("result", ""))
+        return 0
+    if режим == "расход":
+        print(json.dumps(строка_расхода(события, итог, демон, когда), ensure_ascii=False))
+        return 0
+    сброс = лимит_в_итоге(события, итог)
+    if сброс is None:
+        return 1
+    print(сброс)
+    return 0
+
+
 def _пробы_сброса(проба) -> None:
     """Пробы на `сброс_из_журнала`. Больные случаи — из ревью 27.09.2026.
 
@@ -307,9 +419,22 @@ def _selftest() -> int:
 
         проба("файла нет — не отказ, а пусто", минут_с_отказа(путь + ".нет") is None)
 
+
+    # Поток: отказ называют поля result, слова в ответе модели — нет.
+    успех = [{"type": "result", "is_error": False, "result": "проба: код 429, rate limit"}]
+    отказ = [{"type": "result", "is_error": True, "api_error_status": 429,
+              "result": "You've hit your usage limit"}]
+    проба("поток: «429» в ответе модели при is_error false — не лимит",
+          лимит_в_итоге(успех, успех[0]) is None)
+    проба("поток: is_error и api_error_status 429 — лимит",
+          лимит_в_итоге(отказ, отказ[0]) == "срок сброса CLI не назвал")
+    проба("поток: час сброса числом из rejected, а не из allowed_warning",
+          _сброс_отказа([{"type": "rate_limit_event", "rate_limit_info": {"status": "allowed_warning", "resetsAt": 1}},
+                         {"type": "rate_limit_event", "rate_limit_info": {"status": "rejected", "resetsAt": 2}}]) == 2)
+
     _пробы_сброса(проба)
 
-    print("САМОТЕСТ %s: 12 путей, первым — больной случай"
+    print("САМОТЕСТ %s: 15 путей, первым — больной случай"
           % ("ПРОВАЛЕН" if плохо else "ПРОЙДЕН"))
     return 1 if плохо else 0
 
@@ -328,6 +453,12 @@ def main(argv) -> int:
             return 1
         print(сброс)
         return 0
+    for флаг, режим in (("--в-потоке", "суд"), ("--текст-итога", "текст"), ("--расход", "расход")):
+        if флаг in argv:
+            # Зовёт обёртка: --расход <файл> <демон> <когда> печатает строку расхода.
+            место = argv.index(флаг)
+            хвост = argv[место + 1:]
+            return в_потоке(хвост[0], режим, *хвост[1:3])
     if "--сброс" in argv:
         # Зовёт сторож сессий, и ТОЛЬКО при доказанном свежем отказе.
         # Печатает «<минут>\t<в HH:MM, через N мин>»: решение принимается ЧИСЛОМ,

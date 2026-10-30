@@ -344,12 +344,25 @@ fi
 # получил «карта не читается, нужна отмашка на откат», а карта была цела:
 # один уровень глубины не из списка. Отмашку на откат просят фактом, а не
 # страхом; и виноват не всегда тот, кто заметил.
+# Писатель задач при битой карте или занятом локе откладывает карточку, а смене
+# причина нужна сразу, поэтому факт ещё и кладётся на доску. Писателя может не
+# быть (раскладка неполна) — сторож от этого не падает.
+alert_task() {  # $@ = доводы писателя: --resolve <ключ>
+    [ -f "$PROJECT_DIR/scripts/alert-task.py" ] || return 0
+    python3 "$PROJECT_DIR/scripts/alert-task.py" "$@" </dev/null >/dev/null 2>&1 || true
+}
+map_damaged() {  # $1 = что случилось с картой
+    python3 "$PROJECT_DIR/scripts/board.py" --сказать check-builder-map-damaged \
+        "Строитель проверок остановлен: $1. Разбор — карточка check-builder:map-damaged." --на 180 \
+        >/dev/null 2>&1 || true
+}
 PRICHINA=$(bash "$PROJECT_DIR/scripts/pre-commit-gate.sh" --devmap-only "$DEVMAP" 2>&1)
 if [ -n "$(printf '%s' "$PRICHINA" | grep -F '✗' || true)" ]; then
     say "ОТКАЗ: карта не прошла валидатор: $(printf '%s' "$PRICHINA" | grep -F '✗' | head -1)"
     bash "$PROJECT_DIR/scripts/tg_send.sh" \
         "Карта разработки не прошла проверку, работа строителя остановлена. Причина: $(printf '%s' "$PRICHINA" | grep -F '✗' | head -1 | cut -c1-300). Данные целы, это ошибка в одной карточке — чиню сам, откат не нужен." \
-        >/dev/null 2>&1 || true
+        --task check-builder:map-damaged >/dev/null 2>&1 || true
+    map_damaged "карта не прошла валидатор"
     exit 1
 fi
 
@@ -358,7 +371,8 @@ if [ "$ZADACH_POSLE" -lt "$ZADACH_DO" ]; then
     say "ТРЕВОГА: задач в карте было $ZADACH_DO, стало $ZADACH_POSLE — агент их удалил"
     bash "$PROJECT_DIR/scripts/tg_send.sh" \
         "Строитель проверок удалил задачи из карты: было $ZADACH_DO, стало $ZADACH_POSLE. Работа остановлена, карту надо вернуть из гита." \
-        >/dev/null 2>&1 || true
+        --task check-builder:map-damaged >/dev/null 2>&1 || true
+    map_damaged "агент удалил задачи из карты"
     exit 1
 fi
 
@@ -396,5 +410,7 @@ if [ "$AGENT_RC" != 0 ]; then
 fi
 
 say "готово: задач без способа проверки осталось $OSTALOS"
+alert_task --resolve check-builder:map-damaged
+python3 "$PROJECT_DIR/scripts/board.py" --снять check-builder-map-damaged >/dev/null 2>&1 || true
 date -Is > "$HEARTBEAT_DIR/check-builder"
 exit 0

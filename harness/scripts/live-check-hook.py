@@ -88,7 +88,8 @@ def позвать(механизм: str, событие: str) -> subprocess.Com
                else [sys.executable, str(файл)])
     return subprocess.run(команда, input=событие, capture_output=True,
                           text=True, timeout=ПРЕДЕЛ_СЕК, cwd=str(КОРЕНЬ),
-                          env=dict(os.environ, CLAUDE_PROJECT_DIR=str(КОРЕНЬ)))
+                          env=dict(os.environ, CLAUDE_PROJECT_DIR=str(КОРЕНЬ),
+                                    LOG_DIR=log_dir()))
 
 
 def судить(механизм: str, запись: dict) -> tuple[bool, str, dict]:

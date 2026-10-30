@@ -103,7 +103,11 @@ with tempfile.TemporaryDirectory() as врем:
     # дереве — занятость. Иначе прогон и сборка в контейнере (uid 0/70/999) и
     # работа под sudo воротам не видны, и выкат пойдёт поверх идущей работы
     # (ревью безопасности 15.10.2026, major).
-    в_дереве = subprocess.Popen(["setsid", str(самозванец), "60"], cwd=КОРЕНЬ,
+    # «Наше дерево» — то, что судят ворота (PROJECT_DIR установки), а не место
+    # пробы: из копии дерева мутационного прогона КОРЕНЬ лежит в /tmp.
+    import config as конф
+    наше_дерево = конф.из_файла(конф.путь_install_conf()).get("PROJECT_DIR") or КОРЕНЬ
+    в_дереве = subprocess.Popen(["setsid", str(самозванец), "60"], cwd=наше_дерево,
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     time.sleep(0.4)
     код, ответ = ворота(двор, свой_uid=str(os.getuid() + 1))

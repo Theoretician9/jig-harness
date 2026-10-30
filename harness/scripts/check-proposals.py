@@ -25,7 +25,7 @@ import subprocess
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib"))
-from config import log_dir, конфиг, путь_harness_conf  # noqa: E402 — один парсер конфига на все гейты
+from config import log_dir, конфиг, корень_дерева, путь_harness_conf  # noqa: E402 — один парсер конфига на все гейты
 
 СРОК = 14
 
@@ -227,7 +227,9 @@ def гейт(строки: list) -> int:
     принуждение превращается в шум, который нечем погасить. Числа говорятся
     вслух — молча закрытое предложение не отличить от невыполненного.
     """
-    корень = pathlib.Path(конфиг().get("PROJECT_DIR") or os.getcwd())
+    # Корень — от своего файла, а не PROJECT_DIR: в прогоне по снимку гейт
+    # судит снимок.
+    корень = корень_дерева(__file__)
     ушли = ушедшие(строки, корень)
     if ушли:
         from collections import Counter
@@ -272,13 +274,13 @@ def main() -> int:
     if a.selftest:
         return самотест()
     if a.сироты:
-        корень = pathlib.Path(конфиг().get("PROJECT_DIR") or os.getcwd())
+        корень = корень_дерева(__file__)
         for имя in сироты(корень):
             print(имя)
         return 0
     строки = читать()
     if a.закрыть_исчезнувшие:
-        корень = pathlib.Path(конфиг().get("PROJECT_DIR") or os.getcwd())
+        корень = корень_дерева(__file__)
         пропали = исчезнувшие(строки, корень)
         for d in пропали:
             d["статус"] = "закрыто"

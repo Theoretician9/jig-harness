@@ -112,6 +112,10 @@ touched() { touch -d "@$(ago "$1")" "$TRANSCRIPT"; }        # mtime транск
 report() { ago "$1" > "$T/log/last_report"; touch -d "@$(ago "$1")" "$T/log/last_report"; }
 turn_end() { echo $(( $(ago "$1") + ${2:-0} )) > "$T/log/turn-end.stamp"; }
 owner_said() { echo "слово" > "$T/log/inbox/обработано/$1.txt"; touch -d "@$(ago "$1")" "$T/log/inbox/обработано/$1.txt"; }
+# Второй обход немоты: пинок стоит дольше KICK_ANSWER_WAIT_MIN, ответа не было.
+# Объявление «Работа встала» идёт только после него — в том же обходе, что и
+# первый пинок, смена не успевает ответить.
+stall_kick() { echo $(( NOW - $1 * 60 )) > "$T/log/stall.kick"; touch -d "@$(( NOW - $1 * 60 ))" "$T/log/stall.kick"; }
 mark() { printf '%s %s\n' "$(ago "$2")" "$1" > "$T/log/лимит-подписки.состояние"; }
 
 run() {
@@ -164,15 +168,15 @@ check blocked "$(cut -d' ' -f2 "$T/log/лимит-подписки.состоя�
     "и метка остановки записала повод «blocked»"
 
 # Зависание посреди хода: ход не закончен — тревога как прежде.
-stand blocked; answer 29; turn_end 31; touched 29; report 29; owner_said 120; run
+stand blocked; answer 29; turn_end 31; touched 29; report 29; owner_said 120; stall_kick 6; run
 check 1 "$(said 'Работа встала')" "ход не закончен, смена молчит — «Работа встала», как прежде"
 
-stand work; answer 29; turn_end 29 3; touched 29; report 29; owner_said 120; run
+stand work; answer 29; turn_end 29 3; touched 29; report 29; owner_said 120; stall_kick 6; run
 check 1 "$(said 'Работа встала')" "немота при незаблокированной работе — владельцу сказано, как прежде"
 
 # Блокировка кончилась (появилась работа), метка «blocked» стоит, смена молчит:
 # метка снимается молча, и о немоте сказано.
-stand work; answer 29; turn_end 29 3; touched 29; report 29; owner_said 120; mark blocked 15; run
+stand work; answer 29; turn_end 29 3; touched 29; report 29; owner_said 120; mark blocked 15; stall_kick 6; run
 check 1 "$(said 'Работа встала')" "метка «blocked» после конца блокировки не глушит тревогу о немоте"
 
 # ── лимит поверх метки «blocked» ───────────────────────────────────────────

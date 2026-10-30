@@ -23,6 +23,16 @@
 #     то есть остановить работу ради проверки.
 #   * scripts/hooks/pre_compact_handover.sh — пишет передачу смены; живой зов
 #     оставил бы в передаче запись о событии, которого не было.
+#   * scripts/hooks/agent_budget_guard.py — каждый пропущенный запуск пишет в
+#     вызовы-агентов.jsonl строку, по которой считается потолок НАСТОЯЩЕЙ задачи
+#     в работе: живой зов съел бы её потолок запуском, которого не было, а отказ
+#     увидеть можно только на исчерпанном потолке. Решения судит проба на стенде
+#     (scripts/hooks/test_agent_budget_guard.py), живьём — настоящие запуски.
+#   * scripts/hooks/file_claim_guard.py — его решение ЗАПИСЬ заявки в боевой журнал
+#     заявки-на-файлы.jsonl: живой зов с выдуманным помощником держал бы путь за
+#     несуществующим агентом FILE_CLAIM_MIN минут, и настоящие помощники получали бы
+#     предупреждение о нём. Решения судит проба на стенде
+#     (scripts/hooks/test_file_claim_guard.py), живьём — записи настоящих помощников.
 
 хуки:
   scripts/hooks/guard_bash.py:
@@ -38,3 +48,7 @@
   scripts/hooks/agent_skill_guard.py:
     событие: '{"tool_name":"Agent","session_id":"smena-bez-skila","tool_input":{"subagent_type":"general-purpose","prompt":"разбери код"}}'
     ждём_в_решении: без скила «subagent-work»
+  scripts/hooks/model_guard.py:
+    событие: '{"tool_name":"Write","session_id":"smena-prover","tool_input":{"file_path":"/var/www/project/docs/specs/zhivaya-proverka-sluchaj.md","content":"x"}}'
+    ждём_в_решении: шаг «спека» делает ПОМОЩНИК
+    журнал: model-guard.jsonl

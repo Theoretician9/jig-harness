@@ -343,6 +343,7 @@ mkdir -p "$HEARTBEAT_DIR"
 STAMP_AGE_MIN=$(( (NOW - $(stat -c '%Y' "$INSTALL_STAMP")) / 60 ))
 
 DEAD=""; FRESH=""; ALIVE_N=0; DEAD_N=0; FRESH_N=0
+ALIVE_NAMES=(); DEAD_NAMES=(); DEAD_LINES=()
 
 # Таблица: "имя:период-в-минутах …". Порог тревоги = период ×2 — один
 # пропущенный прогон прощается (машина могла перезагружаться), два — нет.
@@ -358,6 +359,7 @@ for entry in $HEARTBEAT_PERIODS; do
             DEAD="${DEAD}
 • $name — МЁРТВ: метки нет вообще (ни одного успешного прогона за период ×2)"
             DEAD_N=$((DEAD_N + 1))
+            DEAD_NAMES+=("$name"); DEAD_LINES+=("$name — МЁРТВ: метки нет вообще (ни одного успешного прогона за период ×2)")
         fi
         continue
     fi
@@ -366,8 +368,10 @@ for entry in $HEARTBEAT_PERIODS; do
         DEAD="${DEAD}
 • $name — МЁРТВ: метка ${age_min} мин при периоде ${period_min} (порог ×2)"
         DEAD_N=$((DEAD_N + 1))
+        DEAD_NAMES+=("$name"); DEAD_LINES+=("$name — МЁРТВ: метка ${age_min} мин при периоде ${period_min} (порог ×2)")
     else
         ALIVE_N=$((ALIVE_N + 1))
+        ALIVE_NAMES+=("$name")
     fi
 done
 
@@ -588,6 +592,44 @@ if [ "${HEARTBEAT_DRY_SEND:-0}" = 1 ]; then
     remember_guard_size
     exit 0
 fi
+
+# ── задачи модели: мёртвый демон — карточка, живой гасит свою ───────────────
+# Сводка у владельца одна, а ключей несколько, поэтому писатель зовётся прямо:
+# дверь берёт один --task на весть. При массовом падении (≥ ALERT_MASS_MIN)
+# карточка одна на всех — 27 карточек про одно событие заглушили бы очередь.
+# Писателя нет — сторож не падает, сводка владельцу идёт как шла.
+alert_task() {  # $@ = доводы писателя
+    [ -f "$PROJECT_DIR/scripts/alert-task.py" ] || return 0
+    python3 "$PROJECT_DIR/scripts/alert-task.py" "$@" </dev/null >/dev/null 2>&1 || true
+}
+# Писатель принимает ключ только [a-z0-9][a-z0-9:._-]: имя демона вне формы
+# (кириллица в «session-warden.запуск») получает латинский хвост + хэш имени,
+# чтобы ключ был детерминирован, различал разные имена и годился для гашения.
+dead_slug() {
+    local name="$1" ascii
+    if [[ "$name" =~ ^[a-z0-9][a-z0-9._-]{0,50}$ ]]; then
+        printf '%s' "$name"
+        return
+    fi
+    ascii=$(printf '%s' "$name" | LC_ALL=C tr -c 'a-z0-9._-' '-' | sed 's/^[^a-z0-9]*//' | cut -c1-40)
+    printf '%s-%s' "${ascii:-d}" "$(printf '%s' "$name" | sha1sum | cut -c1-8)"
+}
+sync_tasks() {
+    local i name mass_min="${ALERT_MASS_MIN:-3}"
+    if [ "$DEAD_N" -ge "$mass_min" ]; then
+        alert_task --key heartbeat-watch:mass --title "${SUMMARY%%$'\n'*}" --text "$SUMMARY"
+    else
+        alert_task --resolve heartbeat-watch:mass
+        for i in "${!DEAD_NAMES[@]}"; do
+            alert_task --key "heartbeat-watch:dead:$(dead_slug "${DEAD_NAMES[$i]}")" \
+                --title "Демон ${DEAD_NAMES[$i]} мёртв" --text "${DEAD_LINES[$i]}"
+        done
+    fi
+    for name in "${ALIVE_NAMES[@]}"; do
+        alert_task --resolve "heartbeat-watch:dead:$(dead_slug "$name")"
+    done
+}
+sync_tasks
 
 # ── отправка: ВСЕГДА, успех только при ok:true ──────────────────────────────
 tg_deliver() {

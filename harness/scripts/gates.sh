@@ -17,6 +17,7 @@
 #   gates.sh            # гейты: секреты, гигиена, сторож команд, пакет, карта
 #   gates.sh --всё      # то же + самотесты демонов и скриптов (долго)
 #   gates.sh --selftest # проверка самих ворот на больном случае
+#   gates.sh --хакатон  # только быстрое подмножество из harness/config/gates-hackathon.yaml
 #
 # Код выхода = число красных проверок (0 = чисто).
 set -uo pipefail
@@ -31,47 +32,9 @@ konf_zagruzit
 ITOG_LOG="$LOG_DIR/ворота-итог.jsonl"
 REZHIM="обычный"   # «всё» ставится ниже, у флага --всё
 
-GREEN=0
-RED=0
-YELLOW=0
-
-# Третье состояние гейта — ЖЁЛТОЕ: находки есть, но гейт ещё обкатывается и
-# коммит не валит. Носитель состояния — код возврата 77, а не догадка о тексте:
-# без него обкатываемый гейт обязан был выходить нулём, попадал в зелёные, и
-# его находки срезались до последних 90 знаков последней строки — владелец
-# видел «все зелёные» при живых нарушениях (находка ревью I-2).
-YELLOW_CODE=77
-
-проверка() {  # имя, команда...
-    local name="$1"; shift
-    local out rc last
-    # Гейт без команды — самый опасный: он всегда зелёный и всегда молчит.
-    # 11.09.2026 правка ворот текстом разорвала строку «указания», команда
-    # уехала в хвост соседней, и гейт полсмены отчитывался «ок» ни о чём.
-    if [ "$#" -eq 0 ]; then
-        RED=$((RED + 1))
-        printf '  ПЛОХО · %s — гейт объявлен БЕЗ КОМАНДЫ: он зелёный всегда\n' "$name"
-        return
-    fi
-    out=$("$@" 2>&1); rc=$?
-    if [ $rc -eq "$YELLOW_CODE" ]; then
-        YELLOW=$((YELLOW + 1))
-        printf '  жёлтый · %s (обкатка, коммит не валит)\n' "$name"
-        printf '%s\n' "$out" | sed 's/^/       /'
-    elif [ $rc -eq 0 ]; then
-        GREEN=$((GREEN + 1))
-        # Резка ПОДСТРОКОЙ, а не `cut -c`: cut считает байты и рвёт кириллицу
-        # посреди буквы (тот же больной случай, что в tg_send.sh 08.08.2026).
-        # Выравнивания колонок нет по той же причине — printf %-22s тоже
-        # байтовый, и русские имена разъезжали бы вместо ровного столбца.
-        last=$(printf '%s' "$out" | tail -1)
-        printf '  ок · %s — %s\n' "$name" "${last:0:90}"
-    else
-        RED=$((RED + 1))
-        printf '  ПЛОХО · %s (код %d)\n' "$name" "$rc"
-        printf '%s\n' "$out" | sed 's/^/       /'
-    fi
-}
+# Обёртка проверки и счётчики зелёных/красных/жёлтых — scripts/lib/gates_check.sh.
+# shellcheck disable=SC1091
+. "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/lib/gates_check.sh"
 
 # ── самотест: зелёная и красная проверки обязаны считаться порознь ───────────
 if [ "${1:-}" = "--selftest" ]; then
@@ -79,7 +42,10 @@ if [ "${1:-}" = "--selftest" ]; then
     # счётчики выросли бы в ней, а здесь остались нулями. Тогда самотест
     # хвалил бы ворота за работу, которой не было.
     TRACE=$(mktemp)
-    trap 'rm -f "$TRACE"' EXIT
+    # Журнал секунд самотеста — во временный каталог: боевой журнал не
+    # засоряется строками фиктивных проверок.
+    GATES_TIMING_DIR=$(mktemp -d)
+    trap 'rm -f "$TRACE"; rm -rf "$GATES_TIMING_DIR"' EXIT
 
     # БОЛЬНОЙ СЛУЧАЙ первым: падающая проверка обязана попасть в красные И
     # показать свой вывод. Ворота, которые глотают падение, хуже отсутствия
@@ -105,19 +71,65 @@ if [ "${1:-}" = "--selftest" ]; then
     grep -q 'находка обкатки' "$TRACE" \
         || { echo "САМОТЕСТ ПРОВАЛЕН: находка жёлтой не показана"; cat "$TRACE"; exit 1; }
 
-    echo "САМОТЕСТ ПРОЙДЕН: 6 путей (падение красное с выводом и кодом, успех зелёный одной строкой, жёлтая отдельно и целиком)"
+    # Секунды каждой проверки — по строке на проверку в журнале прогона.
+    [ "$(grep -c '"event": "gate.check"' "$GATES_TIMING_DIR/gates-timing.jsonl" 2>/dev/null)" = 3 ] \
+        || { echo "САМОТЕСТ ПРОВАЛЕН: журнал секунд — не по строке на каждую из 3 проверок"; exit 1; }
+
+    echo "САМОТЕСТ ПРОЙДЕН: 7 путей (падение красное с выводом и кодом, успех зелёный одной строкой, жёлтая отдельно и целиком, журнал секунд)"
     exit 0
 fi
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT" || { echo "не нашёл корень проекта"; exit 1; }
 
+# Выборка проверок по имени (через «|») — для живой пробы прогона по снимку,
+# которому полный набор стоит полчаса. Аргумент, а не переменная среды:
+# унаследованная переменная тихо урезала бы ворота выката.
+ONLY_CHECKS=""
+if [ "${1:-}" = "--только" ]; then
+    ONLY_CHECKS="${2:?--только: нужен список имён проверок через |}"
+    shift 2
+    echo "--- выборка: $ONLY_CHECKS ---"
+fi
+
 echo "=== ворота харнеса: $(date '+%d.%m %H:%M') ==="
-проверка "секреты"        bash scripts/check-secrets.sh
+
+# Быстрый прогон режима хакатон: состав — данные (gates-hackathon.yaml), а не
+# вторая копия списка в коде; механизм тот же «проверка». Полный набор ниже не идёт.
+if [ "${1:-}" = "--хакатон" ]; then
+    REZHIM="хакатон"
+    export ROOT
+    # Список читается ДО прогона: нечитаемый или пустой состав — отказ, а не
+    # «ноль красных»: пустые быстрые ворота пускали бы выкат без единой проверки.
+    HK_LIST=$(mktemp)
+    if ! python3 -c '
+import sys, yaml
+checks = yaml.safe_load(open(sys.argv[1], encoding="utf-8"))["checks"]
+if not checks:
+    sys.exit("список checks пуст")
+for item in checks:
+    sys.stdout.write(item["name"] + "\0" + item["cmd"] + "\0")' \
+            "$ROOT/harness/config/gates-hackathon.yaml" > "$HK_LIST"; then
+        rm -f "$HK_LIST"
+        echo "ворота хакатон: список проверок gates-hackathon.yaml пуст или нечитаем — отказ"
+        exit 1
+    fi
+    while IFS= read -r -d '' NAME && IFS= read -r -d '' CMD; do
+        проверка "$NAME" bash -c "$CMD"
+    done < "$HK_LIST"
+    rm -f "$HK_LIST"
+    echo "=== итог: зелёных $GREEN, красных $RED ==="
+    printf '{"ts":"%s","режим":"%s","зелёных":%s,"красных":%s}\n' \
+        "$(date -Is)" "$REZHIM" "$GREEN" "$RED" >> "$ITOG_LOG" 2>/dev/null || true
+    exit "$RED"
+fi
+# Корень — аргументом: без него гейт берёт PROJECT_DIR паспорта и в прогоне по
+# снимку судил бы живое дерево.
+проверка "секреты"        bash scripts/check-secrets.sh "$ROOT"
 # Права ВНУТРИ каталога секретов не проверял никто: два файла пролежали
 # читаемыми для всей машины с 10.09 по 27.09.2026 (замер ревизии харнеса).
 проверка "права секретов" python3 scripts/check-secrets-perms.py
-проверка "гигиена"        python3 scripts/check-context-hygiene.py
+проверка "гигиена"        python3 scripts/check-context-hygiene.py --repo "$ROOT"
 # Карта едет в контекст КАЖДОЙ сессии: подробности карточки нужны при разборе
 # задачи, а не всегда. Замер 12.09.2026 — 31 карточка держала 29 397 лишних
 # знаков, карта была на 92 % потолка.
@@ -132,6 +144,15 @@ echo "=== ворота харнеса: $(date '+%d.%m %H:%M') ==="
 # (курсор отстал, первый запуск, пометка второй раз) живут в самотесте
 # модуля, а не в каждом стороже по копии.
 проверка "чтение настроек" python3 scripts/lib/config.py --selftest
+проверка "дверь укладки" python3 scripts/test_layout_door.py
+проверка "опись раскладки" python3 scripts/test_layout_manifest.py
+проверка "журнал раскладки" python3 scripts/test_layout_journal.py
+проверка "история раскладки" python3 scripts/test_layout_history.py
+проверка "замок раскладки" python3 scripts/test_layout_lock.py
+проверка "заметки выпуска" python3 scripts/test_release_notes.py
+# Только этот самотест судит plan_absent, info/exclude, коммит пакета и связку
+# «дверь ↔ раскладчик»; раскладчик живёт в пакете, а не в проекте.
+проверка "самотест раскладчика" bash -c 'bash "$(python3 -c "import sys; sys.path.insert(0, \"scripts/lib\"); import config; print(config.katalog_paketa())")/harness/razlozhit-harnes.sh" --selftest'
 проверка "границы задачи" python3 scripts/lib/cards.py --selftest
 # Четыре пробы, которые не звал НИКТО: их нашёл гейт «кто зовёт» 14.09.2026 —
 # ровно тот случай, ради которого он написан (проверка есть, вызова нет).
@@ -141,6 +162,8 @@ echo "=== ворота харнеса: $(date '+%d.%m %H:%M') ==="
 проверка "глубина автоматом" python3 scripts/test_depth_automatic.py
 проверка "задание и метка" python3 scripts/check-job-and-mark.py
 проверка "метка-самотест" python3 scripts/check-job-and-mark.py --selftest
+проверка "реестр стека" python3 scripts/check-stack-registry.py
+проверка "реестр стека-самотест" python3 scripts/check-stack-registry.py --selftest
 проверка "кто зовёт"      python3 scripts/check-who-calls.py
 # Мера Ф2 ревизии: население — ВСЕ .py/.sh харнеса (193), а не только
 # механизмы реестра. Печатает СПИСОК: инструменты смены, живых только через
@@ -181,6 +204,10 @@ echo "=== ворота харнеса: $(date '+%d.%m %H:%M') ==="
 проверка "сторож команд"  python3 scripts/hooks/test_guard_bash.py
 проверка "ворота выката"  python3 scripts/test_deploy_guard.py
 проверка "свои процессы"  python3 scripts/test_deploy_guard_own_user.py
+проверка "два агента"     python3 scripts/test_deploy_guard_two_agents.py
+проверка "процессы агента"  python3 scripts/test_agent_processes.py
+проверка "одна смена"       python3 scripts/test_one_shift.py
+проверка "потеря сокета"    bash scripts/test_warden_socket_loss.sh
 проверка "дверь данных"   python3 scripts/test_data_delete_door.py
 проверка "живая проверка" python3 scripts/build-live-check-list.py --проверить
 # Список файлов сверке подаётся ЯВНО. БОЛЬНОЙ СЛУЧАЙ 12.08.2026: без него
@@ -198,6 +225,12 @@ for SKIP_PATH in ${GATES_SKIP_PATHS:-./.git/*}; do
 done
 проверка "кириллица"      bash -c 'find . -name "*.sh" '"$SKIP_ARGS"' -print0 | xargs -0 python3 scripts/check-cyrillic-in-names.py'
 проверка "секрет в логах" python3 scripts/check-secret-in-logs.py
+# Журналы харнеса: писатели и демоны (G1), реестр ↔ код (G2), диск → реестр (G2),
+# потеря без разбора и тишина при работе сессии (G3).
+проверка "журналы: писатели"   python3 scripts/check-event-writers.py
+проверка "журналы: реестр"     python3 scripts/check-event-writers.py --registry
+проверка "журналы: диск"       python3 scripts/check-event-writers.py --disk
+проверка "журналы: потери"     python3 scripts/events.py lost --gate
 # Имена НОВЫХ файлов кода — латиницей (задача владельца 11.09). Существующие
 # 601 переводятся отдельной задачей: их переименование трогает прод.
 проверка "имена файлов"   bash -c 'git -c core.quotepath=false diff --cached --name-only --diff-filter=AR | python3 scripts/check-file-names.py'
@@ -268,14 +301,30 @@ done
 проверка "витрина панели"  python3 harness/panel/test_state.py
 # Канбан: снимок доски, её страницы в панели и приём комментариев с карточки.
 проверка "снимок доски"   python3 scripts/test_build_board.py
+проверка "очередь по статусам" python3 scripts/test_work_queue.py
 проверка "доска панели"   python3 harness/panel/test_task_board.py
 проверка "приём комментариев" python3 scripts/test_comments_intake.py
 проверка "шаги пайплайна" python3 scripts/test_write_step.py
+проверка "судья безопасности" python3 scripts/test_security_gate.py
+проверка "печать скила" python3 scripts/hooks/test_artifact_seal.py
+проверка "носители шагов" python3 scripts/test_step_carriers.py
+проверка "докер-уборка" python3 scripts/test_docker_sweep.py
 проверка "правка памяти" python3 scripts/test_write_memory.py
 # Описание устройства стареет быстрее всего: механизмы заводятся каждую смену.
 # Сверка двусторонняя — механизм без описания и описание без механизма красные.
 проверка "обновление"     python3 scripts/test_update.py
 проверка "доустановка"    python3 scripts/test_install_new.py
+проверка "исход одним судьёй" python3 scripts/test_map_from_message_outcome.py
+проверка "«не работает» — работа" python3 scripts/test_map_from_message_not_work.py
+# Тревоги сторожей: писатель карточек, его форма в приёмке, гейт писателей карты,
+# донос в sentinel и общий писатель lib/cards.py.
+проверка "писатель тревог"  python3 scripts/test_alert_task.py
+проверка "форма --is-green" python3 scripts/test_acceptance_is_green.py
+проверка "мутации до принятия" python3 scripts/test_mutations_before_accept.py
+проверка "писатели карты в библиотеке" python3 scripts/test_map_writers_library.py
+проверка "снятие из карты"  python3 scripts/test_archive_map.py
+проверка "донос тревог sentinel" python3 scripts/test_sentinel_drain.py
+проверка "писатель карты lib" python3 scripts/test_cards_lib.py
 # Ежемесячная ревизия: данные (области и пороги) и порции с курсором.
 # Область с маской, под которую не попадает ни один файл, читала бы пустоту и
 # отчитывалась «находок нет»; без курсора каждый месяц читались бы те же 15 %.
@@ -316,6 +365,7 @@ done
 # (находка ревью кода 12.09.2026).
 проверка "модели под шаги"  python3 scripts/model-steps.py
 проверка "пайплайн"        python3 scripts/pipeline.py --selftest
+проверка "безопасность-самотест" python3 scripts/check-security.py --selftest
 # Правила переписки (владелец 11.09.2026) держит сторож внутри tg_send.sh;
 # здесь — его самотест, иначе сторож канала стоит без проверки.
 проверка "переписка"       python3 scripts/check-channel-messages.py --selftest
@@ -325,6 +375,7 @@ done
 # задавала настройки окружением, а скрипт перечитывал их из harness.conf.
 # Поймано первой живой попыткой публикации 11.09.2026.
 проверка "сборка-публичного" python3 scripts/build-public.py --selftest
+проверка "сборка-в-секунду" python3 scripts/test_build_public_same_second.py
 проверка "чистота-самотест" python3 scripts/check-public-clean.py --selftest
 проверка "quotepath"      python3 scripts/check-quotepath-flag.py
 # Расширения ставит код, а не человек слэш-командой: список жил текстом скила
@@ -338,6 +389,9 @@ done
 # Вопрос владельца 12.09.2026 про генерацию скилов вскрыл, что сверки не было.
 проверка "скилы"          python3 harness/BUILD-SKILLS.py --сверить
 проверка "скилы-самотест" python3 scripts/test_skills_build.py
+# Живая проверка скила ждёт файл из skill-artifacts.yaml; скил, чья глава этот
+# файл не называет, не оставит его никогда.
+проверка "файл скила"     python3 scripts/test_skill_names_its_artifact.py
 # Уровень вызова помощников: владелец выбирает его ключом AGENT_LEVEL, а
 # опечатка в нём не должна выглядеть как обычный уровень (12.09.2026).
 проверка "уровень агентов" python3 scripts/test_agent_level.py
@@ -348,11 +402,17 @@ done
 проверка "лимит-журнал"   python3 scripts/limit-in-log.py --selftest
 проверка "лимит-сторож"   bash scripts/test_limit_watch.sh
 проверка "тишина-лимита"  bash scripts/test_limit_silence.sh
+проверка "хеш-деревья"    bash scripts/test_tg_send_commit_trees.sh
 проверка "дверь-сторожа"  bash scripts/test_warden_channel_door.sh
 # Смена сессии без написанной передачи невозможна (владелец 18.10.2026).
 проверка "дверь-ротации"  bash scripts/test_warden_handover_gate.sh
 # Важный шаг делается моделью из таблицы, а не какой случилась (владелец 18.10).
 проверка "модель-шага"    python3 scripts/hooks/test_model_guard.py
+# Потолок помощников на задачу по уровню глубины (pipeline.yaml → помощники).
+проверка "потолок-помощников" python3 scripts/hooks/test_agent_budget_guard.py
+# Заявка помощника на файл и предупреждение о чужой (FILE_CLAIM_* в harness.conf).
+проверка "заявка-на-файл" python3 scripts/hooks/test_file_claim_guard.py
+проверка "роли помощников" python3 scripts/hooks/test_lead_role_guard.py
 проверка "носитель-хуков" python3 scripts/test_live_check_hook.py
 проверка "носитель-входящих" python3 scripts/test_live_check_inbox.py
 проверка "отправители"    python3 scripts/check-owner-senders.py
@@ -361,9 +421,22 @@ done
 проверка "остатки пакета" python3 scripts/check-package-leftovers.py
 проверка "ключи образца"  python3 scripts/check-sample-config-keys.py
 проверка "память-в-гит"   bash scripts/test_memory_commit.sh
-# Диспетчер обязан будить смену, когда работы у неё нет: 28.09.2026
-# задача владельца ждала «рубежа», которого не было.
-проверка "будильник смены" bash scripts/test_dispatcher_busy.sh
+# Каждое сообщение владельца доезжает до панели сразу, и все писатели в панель
+# идут одной дверью под общим локом: иначе тексты склеиваются до Enter.
+проверка "лок панели"      bash scripts/test_pane_lock_instant.sh
+проверка "метки доставки"  bash scripts/test_delivery_marks.sh
+проверка "голос отдельным обработчиком"  bash scripts/test_voice_worker.sh
+# Каждое принятое сообщение имеет конечную метку; «принял» не держит цикл приёма.
+проверка "след доставки (проба)"  bash scripts/test_delivery_trace.sh
+проверка "след доставки"  python3 scripts/delivery-latency.py --след --ворота
+# Приём канала не должен вставать от зависшего tmux и сторож обязан это видеть.
+проверка "приём-зависание" bash scripts/test_dispatcher_hang.sh
+проверка "сторож приёма"   bash scripts/test_dispatcher_stall_watch.sh
+# Ручка «слать сразу» (PANE_SEND_NOW): аккорд только после успешного толчка и
+# только при ключе 1, прочитанном в момент толчка; в панели она видна и пишется.
+проверка "толчок-сразу"    bash scripts/test_pane_send_now.sh
+проверка "дверь толчка: пауза, ротация, лимит"    bash scripts/test_pane_door_pause.sh
+проверка "ручка-сразу"     python3 harness/panel/test_send_now_switch.py
 # У факта один судья: кто о факте говорит — тот его и спрашивает. Гейт написан
 # под три ночных отказа 12.09.2026, у которых был один корень.
 проверка "признаки"       python3 scripts/check-signals.py
@@ -392,6 +465,13 @@ done
 # отставшим текстом не краснеет и не жалуется, и круг правок оставляет её
 # позади незамеченной (13.10.2026 — десять из 78).
 проверка "мутации стоят"         bash scripts/mutation-probe.sh --сверить-тексты
+# Новая проба без записи мутаций: оба прибора выше судят только строки, которые
+# в данных ЕСТЬ, и молчали о четырёх файлах проб (замер 27.10.2026).
+проверка "пробы без мутаций"     python3 scripts/check-probe-mutations.py
+проверка "проба ворот мутаций"   python3 scripts/test_check_probe_mutations.py
+проверка "события: проба записи" python3 scripts/test_events_lib.py
+проверка "события: проба разбора" python3 scripts/test_events_cli.py
+проверка "события: проба ворот" python3 scripts/test_events_gates.py
 # Догоняние публичной ветки: пока тот же общий гит правят две машины владельца,
 # расхождение повторяется, и переносить его правки руками — терять их молча.
 проверка "догоняние публичной" python3 scripts/catch-up-public.py --selftest
@@ -407,6 +487,7 @@ done
 проверка "вызов модели" python3 scripts/check-daemon-calls-model.py
 проверка "вызов-самотест" python3 scripts/check-daemon-calls-model.py --selftest
 проверка "обёртка демона" bash scripts/test_claude_demon.sh
+проверка "обёртка демона: поток" bash scripts/test_demon_stream_json.sh
 проверка "установка панели" python3 scripts/test_panel_install.py
 проверка "установка-самотест" python3 scripts/test_panel_install.py --selftest
 проверка "рубеж панели"   python3 scripts/check-panel-boundary.py
@@ -432,6 +513,16 @@ done
 # Предложения ревизии памяти обязаны разбираться, а не копиться: демон без
 # принуждения — половина механизма (замечание владельца П-5).
 проверка "предложения"    python3 scripts/check-proposals.py
+# Режим хакатон: пробы задачи идут в полных воротах; в быстрое подмножество
+# (harness/config/gates-hackathon.yaml) они не входят.
+проверка "хакатон" python3 scripts/test_hackathon.py
+проверка "хакатон: карта" bash scripts/test_hackathon_map_gate.sh
+проверка "хакатон: ворота" bash scripts/test_hackathon_gates.sh
+проверка "хакатон: метка" bash scripts/test_hackathon_mark.sh
+проверка "хакатон: ручка" python3 scripts/test_hackathon_switch.py
+проверка "хакатон: меню" bash scripts/test_hackathon_menu.sh
+проверка "маска секретов" bash scripts/test_check_secrets_mask.sh
+проверка "секреты под маской" python3 scripts/test_security_secrets_masked.py
 
 # Самотесты живут врозь от гейтов: они долгие, и на каждом коммите не нужны.
 # Список явный — искать «кто понимает --selftest» грепом значило бы решать
@@ -453,14 +544,19 @@ if [ "${1:-}" = "--всё" ]; then
                 harness/demons/check-builder.sh \
                 harness/demons/heartbeat-watch.sh harness/demons/task-closer.sh \
                 harness/demons/memory-revision.sh \
+                harness/demons/stack-watch.sh \
                 harness/demons/update-watch.sh \
                 harness/demons/tokens-collector.sh scripts/tg-dispatcher.sh \
                 scripts/start-agent.sh scripts/capability.sh \
                 scripts/handover-check.sh scripts/check-secrets.sh \
                 scripts/restore-probe.sh \
                 scripts/model-for.sh; do
-        проверка "$(basename "$f" .sh)" bash "$f" --selftest
+        # Демоны берут код из PROJECT_DIR (окружение старше паспорта): без
+        # него их самотесты в прогоне по снимку гоняли бы живое дерево.
+        PROJECT_DIR="$ROOT" проверка "$(basename "$f" .sh)" bash "$f" --selftest
     done
+    # Свежесть стека: замер и гейт реестра (Ф1); пробы сводки и демона идут через stack-watch.sh выше.
+    проверка "свежесть стека" python3 scripts/stack_freshness.py --selftest
     # Проверка самих проверок: «самотест зелёный» значит лишь, что код согласован
     # со своим тестом. Мутационная проба портит механизм и требует красного.
     проверка "мутации"        bash scripts/mutation-probe.sh
@@ -485,10 +581,24 @@ if [ "${1:-}" = "--всё" ]; then
     # нет, смена у приглашения» доходит до канала и до панели. Поднимает свою
     # tmux-сессию, поэтому за флагом --всё, как дозор выхода.
     проверка "сторож у приглашения" bash scripts/test_warden_blocked_idle.sh
+    # «Если пауза то пауза» (владелец 20.10): на паузе решение о ротации не
+    # доходит до двери, явный --rotate-now идёт. Своя tmux-сессия — за --всё.
+    проверка "пауза гасит ротацию" bash scripts/test_warden_pause_rotation.sh
+    # Работа помощников — это работа (25.10.2026): судья, сторож целиком, дверь
+    # канала и limit-watch на стенде. Своя tmux-сессия — за --всё.
+    проверка "работа помощников" bash scripts/test_warden_subagent_work.sh
     # Третье состояние гейта (жёлтый, код 77) — механизм обкатки: без него
     # новый гейт обязан молчать, а краснящий зря — отключают.
     проверка "жёлтый в pre-commit" bash scripts/pre-commit-gate.sh --selftest-yellow
     проверка "жёлтый в воротах"    bash scripts/gates.sh --selftest
+    # Секунды каждой проверки пишутся в gates-timing.jsonl: долгую видно
+    # числом, а не догадкой. Проба гоняет ворота на стенде — за --всё.
+    проверка "секунды проверок" python3 scripts/test_gates_timing.py
+    # Прогон по снимку: правка живого дерева не меняет итог, снимок убирается.
+    проверка "прогон по снимку" bash scripts/test_gates_snapshot.sh
+    # Пять бумажных гейтов хука до коммита одним проходом: проба строит свой
+    # репозиторий с текстом настоящего хука — за --всё.
+    проверка "предварительная проверка коммита" python3 scripts/test_precheck.py
     # Слово владельца «да» тратится ПРОХОДОМ ворот, а выкат идёт дальше:
     # упади он на секретах или смоуке — согласие сгорело на действии, которого
     # не было. Проба поднимает свой стенд и судит состояние согласия.
@@ -499,6 +609,17 @@ if [ "${1:-}" = "--всё" ]; then
     # Пробы правок с соседней установки (18.10.2026): каждая судит свой механизм
     # на стенде, больной случай первым.
     проверка "дверь-демонов"    bash scripts/test_demon_channel_door.sh
+    # Пять сторожей волны 1 заводят задачу модели и гасят её на зелёном; идёт ~4 минуты.
+    проверка "сторожа-задачи"   bash scripts/test_watchers_wave2.sh
+    # Семь сторожей волны 3 (приёмка, строитель, расширения, ревизия памяти,
+    # здоровье, страж, сторож сессий) — то же; сторож сессий на своём tmux, ~6 минут.
+    проверка "сторожа-задачи-3" bash scripts/test_watchers_wave3.sh
+    # Предел ночного прогона: настоящий timeout на стенде, ~1 минута.
+    проверка "ночной-предел"    bash scripts/test_nightly_gates_ceiling.sh
+    # Правка ночного демона на ходу не роняет прогон; выход без итога назван, ~15 с.
+    проверка "ночной-правка"    bash scripts/test_nightly_gates_live_edit.sh
+    проверка "тревога-диска"    python3 scripts/test_disk_report.py
+    проверка "уборка /tmp"      python3 scripts/test_tmp_sweep.py
     проверка "коммит карты"     bash scripts/test_devmap_selfheal.sh
     проверка "stop-хук"         bash scripts/hooks/test_stop_reminder.sh
     проверка "вид работы"       bash scripts/test_model_for.sh
@@ -538,6 +659,8 @@ echo "=== итог: зелёных $GREEN, красных $RED$YELLOW_TAIL ==="
 # 28.09.2026 приёмка не смогла судить карточку, требующую «--всё», по следу
 # ворот именно поэтому ([[freshness-by-mtime-is-false]] того же класса —
 # след есть, а сказать по нему нечего).
+# Выборка — свой режим: её «красных 0» не годится за итог полного прогона.
+[ -n "$ONLY_CHECKS" ] && REZHIM="выборка"
 printf '{"ts":"%s","режим":"%s","зелёных":%s,"красных":%s}\n' \
     "$(date -Is)" "$REZHIM" "$GREEN" "$RED" \
     >> "$ITOG_LOG" 2>/dev/null || true

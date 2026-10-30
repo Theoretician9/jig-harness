@@ -12,12 +12,14 @@
 # на одной модели.
 #
 # Таблица «вид работы → модель» — данные (harness/config/models.yaml). Здесь
-# только чтение и подстраховка: неизвестный вид получает умолчание и строку в
-# лог, а не пустоту — пустое `--model` уронило бы вызов claude.
+# только чтение и подстраховка. Неизвестный или пустой вид — ОТКАЗ (код 1,
+# список видов в stderr): молчаливое умолчание прятало опечатку в имени вида, и
+# вызов шёл на haiku, никому не видный. Решать, что делать с отказом, обязан
+# вызывающий, а не эта таблица.
 #
 #   model-for.sh спека         → fable
 #   model-for.sh дежурный      → haiku
-#   model-for.sh что-то-новое  → haiku (умолчание, с записью в лог)
+#   model-for.sh что-то-новое  → отказ: код 1, stdout пуст, виды таблицы в stderr
 #   model-for.sh --таблица     показать таблицу целиком
 #   model-for.sh --selftest    самотест
 #
@@ -67,21 +69,30 @@ PY
 # Ручка владельца из канала (model.sh --демоны) старше таблицы для ДЕЖУРНЫХ
 # видов: команда, которой он пользуется, обязана продолжать работать.
 для_вида() {  # вид работы → имя модели
-    local kind="${1:-}" handle="${DEMON_MODEL:-}" model=""
+    local kind="${1:-}" handle="${DEMON_MODEL:-}" model="" rc=0
     if [ -r "$MODELS_CONF" ]; then
-        model=$(MODELS_CONF="$MODELS_CONF" VID="$kind" python3 - <<'PY' || true
+        model=$(MODELS_CONF="$MODELS_CONF" VID="$kind" python3 - <<'PY'
 import os, sys, yaml
 try:
     d = yaml.safe_load(open(os.environ["MODELS_CONF"], encoding="utf-8")) or {}
 except Exception:
     raise SystemExit
 вид = os.environ.get("VID", "")
-взято = (d.get("модели") or {}).get(вид)
+таблица = d.get("модели") or {}
+взято = таблица.get(вид)
 if not взято:
-    print(f"model-for: вид «{вид}» не из таблицы, беру умолчание", file=sys.stderr)
-print(взято or d.get("умолчание") or "")
+    # Код 3 отличает отказ «вида нет» от битой таблицы (та идёт в умолчание).
+    print(f"model-for: вид «{вид}» не из таблицы; допустимые виды: "
+          + ", ".join(таблица), file=sys.stderr)
+    raise SystemExit(3)
+print(взято)
 PY
-)
+) || rc=$?
+    if [ "$rc" = 3 ]; then
+        printf '%s [model-dlya] вид «%s»: не из таблицы, отказ\n' "$(date -Iseconds)" "$kind" \
+            >> "$LOG_DIR/model-dlya.log" 2>/dev/null || true
+        return 1
+    fi
     fi
     # Ручка владельца — АВАРИЙНОЕ переопределение, а не главный источник: ключ
     # DEMON_MODEL задан на каждой установке, и «ключ старше таблицы» означало бы,
@@ -113,11 +124,11 @@ PY
 selftest() {
     local ok=1 tmp
     tmp=$(mktemp -d)
-    случай() {  # $1=ждём $2=вышло $3=зачем
+    случай() {  # $1=ждём $2=refusal_out $3=зачем
         if [ "$1" = "$2" ]; then
             echo "  ок    $3"
         else
-            echo "  ПЛОХО $3: ждали «$1», вышло «$2»"; ok=0
+            echo "  ПЛОХО $3: ждали «$1», refusal_out «$2»"; ok=0
         fi
     }
     cat > "$tmp/models.yaml" <<'YAML'
@@ -131,10 +142,12 @@ YAML
         "спека идёт на fable — слово владельца"
     случай "opus" "$(MODELS_CONF=$tmp/models.yaml LOG_DIR=$tmp DEMON_MODEL= для_вида код)" \
         "код идёт на opus"
-    # БОЛЬНОЙ СЛУЧАЙ: вида нет в таблице. Пустая строка уронила бы вызов
-    # claude — вместо неё умолчание и запись в лог.
-    случай "haiku" "$(MODELS_CONF=$tmp/models.yaml LOG_DIR=$tmp DEMON_MODEL= для_вида новое-дело)" \
-        "БОЛЬНОЙ СЛУЧАЙ: неизвестный вид даёт умолчание, а не пустоту"
+    # БОЛЬНОЙ СЛУЧАЙ: вида нет в таблице — отказ, а не тихое умолчание. Код
+    # снимается через «|| rc=$?»: голый вызов под set -e оборвал бы самотест.
+    local rc=0 refusal_out=""
+    refusal_out=$(MODELS_CONF=$tmp/models.yaml LOG_DIR=$tmp DEMON_MODEL= для_вида новое-дело 2>/dev/null) || rc=$?
+    случай "1" "$rc" "БОЛЬНОЙ СЛУЧАЙ: неизвестный вид — отказ с кодом 1"
+    случай "" "$refusal_out" "БОЛЬНОЙ СЛУЧАЙ: при отказе stdout пуст"
     случай "haiku" "$(MODELS_CONF=$tmp/нет.yaml LOG_DIR=$tmp DEMON_MODEL= для_вида спека)" \
         "БОЛЬНОЙ СЛУЧАЙ: таблицы нет вовсе — умолчание, а не отказ"
     printf 'модели:\n  спека: "не-модель"\nумолчание: haiku\n' > "$tmp/битая.yaml"
@@ -150,7 +163,6 @@ YAML
     # БОЛЬНОЙ СЛУЧАЙ (ревью C-7): шаг пайплайна без строки в таблице.
     # Код возврата снимается через «|| rc=$?»: под set -e голый вызов, вернувший
     # 1, обрывает ВЕСЬ самотест молча — грабля «падение под set -e молчит».
-    local rc=0
     printf 'шаги:\n  обычная: [тесты, спека]\n' > "$tmp/pipeline.yaml"
     rc=0; MODELS_CONF="$tmp/models.yaml" PIPELINE_CONF="$tmp/pipeline.yaml" шаги_покрыты 2>/dev/null || rc=$?
     случай "1" "$rc" "БОЛЬНОЙ СЛУЧАЙ: шаг «тесты» без модели — красный"
@@ -158,13 +170,12 @@ YAML
     rc=0; MODELS_CONF="$tmp/models.yaml" PIPELINE_CONF="$tmp/пайплайн2.yaml" шаги_покрыты 2>/dev/null || rc=$?
     случай "0" "$rc" "все шаги покрыты — зелёный"
     rm -rf "$tmp"
-    (( ok )) && { echo "SELFTEST: зелёный (10 путей, среди них четыре больных случая)"; return 0; }
+    (( ok )) && { echo "SELFTEST: зелёный (11 путей, среди них пять больных случаев)"; return 0; }
     echo "SELFTEST: КРАСНЫЙ"; return 1
 }
 
-case "${1:-}" in
-    "")          echo "нужен вид работы, например: model-for.sh спека" >&2; таблица; exit 2 ;;
+case "${1-}" in
     --таблица)   таблица ;;
     --selftest)  selftest ;;
-    *)           для_вида "$1"; echo ;;
+    *)           для_вида "${1-}" || exit 1; echo ;;
 esac

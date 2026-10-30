@@ -132,6 +132,85 @@ verdict "$(printf '%s' "$out" | grep -q "$DIRTY_WORDS: 1\$" && echo 1 || echo 0)
     "ключа DAEMON_OWNED_PATHS нет — файл считается, список не вшит в код" \
     "хук сказал: ${out:-ничего}"
 
+# ══ «СЛЕДУЮЩАЯ РАБОТА» не называет сделанную задачу (п.6 отчёта чужого сервера 25.10) ══
+# Беда: хук после каждого хода писал «<id> — внимание владельца: «первым
+# делом» — бери её» про карточку в test (выкачена, ждёт проверки владельца).
+# За смену ~20 раз. Сигнал истинен и у здоровой системы — сведений не несёт
+# ([[a-signal-that-does-not-discriminate]]).
+# Правило: test без провала проверки хук «бери её» не называет — даже со
+# словом владельца и незакрытыми пунктами чеклиста; wip, plan и test с
+# провалом проверки — называет.
+# Стенд: копия прибора очереди (work-queue.py + lib/) в scripts/ стенда — хук
+# зовёт его оттуда; своя карта, свой журнал внимания в LOG_DIR стенда.
+# Дверь для мутаций: STOP_REMINDER_QUEUE_UNDER_TEST — путь к копии прибора.
+QUEUE_SRC="${STOP_REMINDER_QUEUE_UNDER_TEST:-}"
+if [ -z "$QUEUE_SRC" ]; then
+    for cand in "$HERE/../work-queue.py" "$HERE/../scripts/work-queue.py"; do
+        [ -f "$cand" ] && { QUEUE_SRC="$cand"; break; }
+    done
+fi
+QUEUE_LIB="$(dirname "$(readlink -f "$HERE/../work-queue.py" 2>/dev/null || true)")/lib"
+[ -d "$QUEUE_LIB" ] || QUEUE_LIB="$HERE/../scripts/lib"
+[ -f "$QUEUE_SRC" ] && [ -d "$QUEUE_LIB" ] \
+    || { echo "ПРОБА СЛОМАНА: нет прибора очереди ($QUEUE_SRC) или lib ($QUEUE_LIB)"; exit 1; }
+
+ATTENTION_ID="1790000000.5"
+
+# $1 — YAML карточки (одна задача, отступ 4). Стенд с картой, закоммиченной,
+# чтобы хвост «изменённых файлов без коммита» не смешивался со случаем.
+queue_stand() {
+    new_stand ""
+    local R="$T/repo"
+    cp "$QUEUE_SRC" "$R/scripts/work-queue.py"
+    cp -r "$QUEUE_LIB" "$R/scripts/lib"
+    printf 'queue: []\nlines:\n- id: h\n  tasks:\n%s\n' "$1" > "$R/dev-map.yaml"
+    printf '{"id": "%s", "слово": "первым делом"}\n' "$ATTENTION_ID" > "$T/log/внимание.jsonl"
+    git -C "$R" add -A
+    git -C "$R" commit -q -m 'карта стенда'
+}
+
+card() {  # $1 id, $2 status, $3 доп. строки (уже с отступом)
+    printf '  - id: %s\n    status: %s\n    источник: "inbox:%s"\n    checklist:\n    - label: выкатить\n      done: false\n    - label: проверить на живом\n      done: false\n%s' \
+        "$1" "$2" "$ATTENTION_ID" "${3:-}"
+}
+
+names_it() {  # $1 вывод, $2 id → 1 если хук велит «бери её» про эту карточку
+    printf '%s' "$1" | grep -F -- "$2" | grep -qF "бери её" && echo 1 || echo 0
+}
+
+# ── БОЛЬНОЙ СЛУЧАЙ п.6: test, слово владельца «первым делом», пункты открыты ─
+queue_stand "$(card pr.vykachena test)"
+out=$(run_hook)
+verdict "$([ "$(names_it "$out" pr.vykachena)" = 0 ] && echo 1 || echo 0)" \
+    "БОЛЬНОЙ п.6: задача в test (ждёт проверки владельца) — «бери её» нет" \
+    "хук сказал: $(printf '%s' "$out" | grep -F pr.vykachena)"
+
+# ── тот же test без слова владельца — тоже молчит ─────────────────────────
+queue_stand "$(card pr.vykachena test)"
+: > "$T/log/внимание.jsonl"
+out=$(run_hook)
+verdict "$([ "$(names_it "$out" pr.vykachena)" = 0 ] && echo 1 || echo 0)" \
+    "задача в test без слова владельца — «бери её» нет" \
+    "хук сказал: $(printf '%s' "$out" | grep -F pr.vykachena)"
+
+# ── соседи: начатая и плановая работа называются ──────────────────────────
+queue_stand "$(card pr.nachata wip)"
+out=$(run_hook)
+verdict "$(names_it "$out" pr.nachata)" \
+    "задача в wip — хук называет её «бери её»" "хук сказал: ${out:-ничего}"
+
+queue_stand "$(card pr.v-plane plan)"
+out=$(run_hook)
+verdict "$(names_it "$out" pr.v-plane)" \
+    "задача в plan — хук называет её «бери её»" "хук сказал: ${out:-ничего}"
+
+# ── сосед: test с провалом проверки — починка за сменой, называется ────────
+queue_stand "$(card pr.provalena test '    провал_проверки: "смоук красный"
+')"
+out=$(run_hook)
+verdict "$(names_it "$out" pr.provalena)" \
+    "задача в test с провалом проверки — хук называет её «бери её»" "хук сказал: ${out:-ничего}"
+
 echo
 echo "всего путей: $total, неудач: $bad"
 [ "$bad" = 0 ]

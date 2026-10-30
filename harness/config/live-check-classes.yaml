@@ -314,6 +314,8 @@
     класс: C1
   "scripts/check-secret-in-logs.py":
     класс: C1
+  "scripts/check-event-writers.py":
+    класс: C1
   "scripts/check-secrets-perms.py":
     класс: C1
   "scripts/check-secrets.sh":
@@ -375,6 +377,16 @@
     класс: C1
   "scripts/hooks/agent_skill_guard.py":
     класс: B1
+  "scripts/hooks/agent_budget_guard.py":
+    класс: B1
+  "scripts/hooks/test_agent_budget_guard.py":
+    класс: D
+  "scripts/hooks/file_claim_guard.py":
+    класс: B1
+  "scripts/hooks/test_file_claim_guard.py":
+    класс: D
+  "scripts/who-writes.py":
+    класс: C2
   "scripts/hooks/guard_bash.py":
     класс: B1
   "scripts/hooks/pause_guard.py":
@@ -534,8 +546,6 @@
     класс: D
   "scripts/test_depth_automatic.py":
     класс: D
-  "scripts/test_dispatcher_busy.sh":
-    класс: D
   "scripts/test_environment.sh":
     класс: D
   "scripts/test_install_docker.sh":
@@ -545,6 +555,12 @@
   "scripts/test_late_exit_watch.sh":
     класс: D
   "scripts/test_limit_silence.sh":
+    класс: D
+  "scripts/test_tg_send_commit_trees.sh":
+    класс: D
+  "scripts/test_nightly_gates_ceiling.sh":
+    класс: D
+  "scripts/test_nightly_gates_live_edit.sh":
     класс: D
   "scripts/test_limit_watch.sh":
     класс: D
@@ -559,6 +575,10 @@
   "scripts/test_warden_channel_door.sh":
     класс: D
   "scripts/test_demon_channel_door.sh":
+    класс: D
+  "scripts/test_watchers_wave2.sh":
+    класс: D
+  "scripts/test_watchers_wave3.sh":
     класс: D
   "scripts/test_devmap_selfheal.sh":
     класс: D
@@ -619,6 +639,8 @@
   "scripts/test_version.py":
     класс: D
   "scripts/test_warden_blocked_idle.sh":
+    класс: D
+  "scripts/test_warden_subagent_work.sh":
     класс: D
   "scripts/test_who_is_on_port.py":
     класс: D
@@ -696,4 +718,142 @@
   "scripts/test_probe_mutations.sh":
     класс: D
   "scripts/test_live_check_trace.py":
+    класс: D
+  "scripts/disk-report.py":
+    класс: C2
+  "scripts/test_disk_report.py":
+    класс: D
+  "scripts/tmp-sweep.py":
+    класс: C3
+    причина: "необратим на производстве"
+  "scripts/test_tmp_sweep.py":
+    класс: D
+  "scripts/docker-sweep.py":
+    класс: C3
+    причина: "необратим на производстве"
+  "scripts/test_docker_sweep.py":
+    класс: D
+  "harness/demons/dispatcher-stall-watch.sh":
+    класс: A1
+  "scripts/model-guard-door.py":
+    класс: C1
+  "scripts/hooks/model_guard.py":
+    класс: B1
+  "scripts/hooks/test_model_guard.py":
+    класс: D
+  "scripts/test_warden_pause_rotation.sh":
+    класс: D
+  "scripts/test_dispatcher_hang.sh":
+    класс: D
+  "scripts/test_pane_send_now.sh":
+    класс: D
+  "scripts/test_pane_door_pause.sh":
+    класс: D
+  "scripts/test_pane_lock_instant.sh":
+    класс: D
+  "harness/panel/test_send_now_switch.py":
+    класс: D
+  "scripts/test_dispatcher_stall_watch.sh":
+    класс: D
+  "scripts/test_archive_map.py":
+    класс: D
+  "scripts/test_demon_stream_json.sh":
+    класс: D
+  "scripts/test_build_public_same_second.py":
+    класс: D
+  "scripts/lib/release_notes.py":
+    класс: C2
+  "scripts/check-release-notes.py":
+    класс: C1
+  "scripts/test_release_notes.py":
+    класс: D
+  "scripts/layout-door.py":
+    класс: C2
+  "scripts/test_layout_door.py":
+    класс: D
+  "scripts/lib/layout_manifest.py":
+    класс: C2
+  "scripts/test_layout_manifest.py":
+    класс: D
+  "scripts/lib/layout_journal.py":
+    класс: C2
+  "scripts/test_layout_journal.py":
+    класс: D
+  "scripts/lib/layout_history.py":
+    класс: C2
+  "scripts/test_layout_history.py":
+    класс: D
+  "scripts/lib/layout_lock.py":
+    класс: C2
+  "scripts/test_layout_lock.py":
+    класс: D
+  "scripts/test_map_from_message_outcome.py":
+    класс: D
+  "scripts/test_work_queue.py":
+    класс: D
+  "harness/demons/stack-watch.sh":
+    класс: A1
+  "scripts/stack_freshness.py":
+    класс: C2
+  "scripts/check-stack-registry.py":
+    класс: C1
+  "scripts/test_stack_freshness.py":
+    класс: D
+  "scripts/test_stack_watch.py":
+    класс: D
+  "scripts/check-security.py":
+    класс: C1
+  "scripts/hooks/artifact_seal.py":
+    класс: B1
+  "harness/skills/security-check/SKILL.md":
+    класс: E
+  "scripts/test_check_security.py":
+    класс: D
+  "scripts/test_security_gate.py":
+    класс: D
+  "scripts/hooks/test_artifact_seal.py":
+    класс: D
+  "scripts/test_step_carriers.py":
+    класс: D
+  "scripts/alert-task.py":
+    класс: C2
+  "scripts/test_alert_task.py":
+    класс: D
+  "scripts/test_acceptance_is_green.py":
+    класс: D
+  "scripts/test_map_writers_library.py":
+    класс: D
+  "scripts/test_sentinel_drain.py":
+    класс: D
+  "scripts/test_cards_lib.py":
+    класс: D
+  "scripts/check-probe-mutations.py":
+    класс: C1
+  "scripts/lib/probe_coverage.py":
+    класс: C2
+  "scripts/test_check_probe_mutations.py":
+    класс: D
+  "scripts/delivery-latency.py":
+    класс: C2
+  "scripts/voice-worker.sh":
+    класс: A2
+  "scripts/lib/events.py":
+    класс: C2
+  "scripts/lib/events.sh":
+    класс: C2
+  "scripts/lib/token_estimate.py":
+    класс: C2
+  "scripts/events.py":
+    класс: C2
+  "scripts/test_delivery_marks.sh":
+    класс: D
+  "scripts/test_voice_worker.sh":
+    класс: D
+  "scripts/test_delivery_trace.sh":
+    класс: D
+  "scripts/test_events_lib.py":
+    класс: D
+  "scripts/test_events_cli.py":
+    класс: D
+  "scripts/test_events_gates.py":
     класс: D

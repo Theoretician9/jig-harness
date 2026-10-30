@@ -157,6 +157,25 @@ def активная_линия() -> str:
     return из_файла(путь_harness_conf()).get("ACTIVE_LINE", "")
 
 
+def job_mark(job: dict) -> str:
+    """Метка задания system-jobs.yaml — имя скрипта из команды: два режима
+    одного демона (с ключом и без) пишут одну метку."""
+    command = str(job.get("команда", "")).split()
+    return re.sub(r"\.(sh|py)$", "", Path(command[0]).name) if command else str(job.get("имя", ""))
+
+
+def switched_off_marks(jobs: list, values: dict) -> set:
+    """Метки заданий, выключенных пустым ключом конфига `если_задан`.
+
+    Такое задание не ставится в расписание и не получает срока метки: сторож
+    продукта на машине без продукта запускался 2 016 раз в неделю впустую
+    (замер О7 28.10.2026), а срок без строки крона — ложное «МЁРТВ». Судят
+    одинаково доустановка (что ставить) и сверка сроков (что требовать).
+    """
+    return {job_mark(job) for job in jobs
+            if job.get("если_задан") and not values.get(job["если_задан"])}
+
+
 def log_dir() -> str:
     return конфиг()["LOG_DIR"]
 
@@ -171,6 +190,19 @@ def secrets_dir() -> str:
 
 def panel_state_dir() -> str:
     return конфиг()["PANEL_STATE_DIR"]
+
+
+def backup_dir() -> Path:
+    """Каталог копий — из ключа BACKUP_DIR, умолчания нет.
+
+    Умолчание здесь стало бы второй дверью: ключ в файле был бы мёртв, а
+    раскладка при отсутствии файла писала бы архив в живой каталог копий.
+    Окружение старше файла только над ключом, который в файле есть.
+    """
+    значение = конфиг(путь_harness_conf()).get("BACKUP_DIR", "")
+    if not значение:
+        raise LookupError(f"ключ BACKUP_DIR пуст в {путь_harness_conf()}")
+    return Path(значение)
 
 # Каталог кода продукта — ДАННЫЕ установки, а не знание харнеса о чужом
 # проекте. Живёт в harness.conf (пороги механики), а не в install.conf
@@ -304,6 +336,59 @@ def _selftest() -> int:
           "/etc/harness" if Path("/etc/harness").is_dir()
           else str(Path(os.environ.get("HOME") or "/root") / ".harness"),
           корень())
+
+    # ── backup_dir(): one door to the backup directory, no default ──
+    # The sick case is «no file»: a default /var/backups/harness would answer a
+    # path there, and the layout would write the archive into the live directory.
+    def backup_dir_outcome():
+        try:
+            return ("путь", backup_dir())
+        except LookupError as refusal:
+            return ("LookupError", str(refusal))
+
+    def refused_naming(conf_path: str):
+        outcome = backup_dir_outcome()
+        if outcome[0] != "LookupError":
+            return outcome
+        return (outcome[0], "ключ BACKUP_DIR пуст в" in outcome[1], conf_path in outcome[1])
+
+    saved = {k: os.environ.get(k) for k in ("HARNESS_CONF", "BACKUP_DIR")}
+    try:
+        with tempfile.TemporaryDirectory() as stand:
+            conf = Path(stand) / "harness.conf"
+            conf.write_text('BACKUP_DIR="/стенд/копии"\n', encoding="utf-8")
+            os.environ["HARNESS_CONF"] = str(conf)
+            os.environ["BACKUP_DIR"] = ""
+            проба("backup_dir: ключ файла — путь", ("путь", Path("/стенд/копии")),
+                  backup_dir_outcome())
+        with tempfile.TemporaryDirectory() as stand:
+            missing = str(Path(stand) / "нет-такого.conf")
+            os.environ["HARNESS_CONF"] = missing
+            os.environ["BACKUP_DIR"] = ""
+            проба("БОЛЬНОЙ СЛУЧАЙ backup_dir: файла нет — отказ с путём, умолчания нет",
+                  ("LookupError", True, True), refused_naming(missing))
+        with tempfile.TemporaryDirectory() as stand:
+            conf = Path(stand) / "harness.conf"
+            conf.write_text('BACKUP_DIR=""\nLOG_DIR="/стенд/лог"\n', encoding="utf-8")
+            os.environ["HARNESS_CONF"] = str(conf)
+            os.environ["BACKUP_DIR"] = ""
+            проба("backup_dir: ключ пуст — тот же отказ", ("LookupError", True, True),
+                  refused_naming(str(conf)))
+        with tempfile.TemporaryDirectory() as stand:
+            conf = Path(stand) / "harness.conf"
+            conf.write_text('BACKUP_DIR="/стенд/копии"\n', encoding="utf-8")
+            os.environ["HARNESS_CONF"] = str(conf)
+            os.environ["BACKUP_DIR"] = "/из/окружения"
+            проба("backup_dir: окружение старше ключа файла", ("путь", Path("/из/окружения")),
+                  backup_dir_outcome())
+            os.environ["BACKUP_DIR"] = ""
+            проба("backup_dir: пустое окружение — значение файла",
+                  ("путь", Path("/стенд/копии")), backup_dir_outcome())
+    finally:
+        for k, v in saved.items():
+            os.environ.pop(k, None)
+            if v is not None:
+                os.environ[k] = v
 
     print(f"SELFTEST: {'зелёный' if случаи.ok else 'КРАСНЫЙ'} ({случаи.paths} путей; "
           "среди них больной случай «решётка внутри кавычек»)")

@@ -188,12 +188,15 @@ def papers(task_id: str, spec_stem: str, steps: list) -> None:
         "контракт": f".tasks/{task_id}/pretask.yaml",
         "план": f".tasks/{task_id}/план.md",
         "мутации": f".tasks/{task_id}/мутации.log",
+        "безопасность": f".tasks/{task_id}/безопасность.yaml",
     }
     for step in steps:
         put(where[step])
 
 
 SPEC_ONLY = ["спека", "ревью_спеки"]
+# «безопасность» сюда НЕ входит, пока шаг не включён в живом пульте: доска берёт
+# шаги из него, и бумага шага, которого там нет, не отмечается.
 ALL_PAPERS = ["спека", "ревью_спеки", "контракт", "план", "ревью_кода", "мутации"]
 papers("t.small", "t-small", SPEC_ONLY)
 papers("t.debt", "t-debt", SPEC_ONLY)
@@ -283,9 +286,12 @@ CODE_STAGE = "код"
 # (pipeline.yaml). Ожидание записано здесь, а снимок обязан брать порядок из
 # ДАННЫХ (harness/config/board.yaml): тест сверяет и то, и другое.
 PIPELINE_ORDER = ["очередь", "спека", "ревью_спеки", "план", "контракт", "тесты", CODE_STAGE,
-                  "ревью_кода", "мутации", "живая_проверка", "закрытие"]
+                  "ревью_кода", "безопасность", "мутации", "живая_проверка", "закрытие"]
 COLUMNS = [stage.replace("_", " ") for stage in PIPELINE_ORDER]
 QUEUE, CHECK, DONE = "очередь", "живая проверка", "закрытие"
+# Беклог — своя колонка ВНЕ пайплайна: «беклог: не трогать, пока владелец не скажет» не входит
+# ни в очередь, ни в приёмку, иначе число над колонкой «очередь» считает его.
+BACKLOG = "беклог"
 FIRST = "спека"
 BOARD_DATA = HERE.parent / "harness" / "config" / "board.yaml"
 try:
@@ -293,8 +299,14 @@ try:
 except OSError as exc:
     board_stages = None
     path_bad(f"данных колонок нет: {BOARD_DATA} — {exc}")
-check(board_stages == PIPELINE_ORDER, "колонки в данных board.yaml — в порядке пайплайна CLAUDE.md",
-      f"колонки board.yaml {board_stages}, ждали {PIPELINE_ORDER}")
+check([s for s in board_stages or [] if s != BACKLOG] == PIPELINE_ORDER,
+      "колонки пайплайна в данных board.yaml — в порядке CLAUDE.md",
+      f"колонки board.yaml {board_stages}, ждали {PIPELINE_ORDER} (+ «{BACKLOG}»)")
+check(BACKLOG in (board_stages or []), f"у беклога своя колонка «{BACKLOG}» в board.yaml",
+      f"колонки «{BACKLOG}» в board.yaml нет: {board_stages}")
+check((yaml.safe_load(BOARD_DATA.read_text(encoding="utf-8")) or {}).get("по_статусу", {}).get("беклог")
+      == BACKLOG, "статус беклог → колонка «беклог» в данных",
+      "статус беклог в board.yaml ведёт не в свою колонку")
 # Шаг, заведённый в пульте, но без колонки, положил бы карточку «вне списка».
 all_steps = {s for level in (settings.get("шаги") or {}).values() for s in level or []}
 check(all_steps <= set(board_stages or []), "у каждого шага пульта есть колонка доски",
@@ -323,7 +335,7 @@ ROWS = [
     # У задачи в очереди бумаг ещё нет по определению: «нет: …» было бы шумом.
     ("t.queued", QUEUE, [], ["нет:"], "plan с глубиной → очередь без «нет: …»"),
     # Беклог трогает только владелец (28.09.2026) — доска говорит это прямо.
-    ("t.backlog", QUEUE, ["не трогаю без слова"], [], "беклог → очередь с «не трогаю без слова»"),
+    ("t.backlog", BACKLOG, ["не трогаю без слова"], [], "беклог → своя колонка с «не трогаю без слова»"),
     # Взята без глубины: гейт шагов не назначил — шагов нет, жёлтая пометка.
     ("t.nodepth", FIRST, ["глубины нет — шаги не назначены"], [],
      "wip без глубины → первая колонка шагов"),
@@ -416,6 +428,48 @@ for task_id, want_column, must, must_not, label in ROWS:
         problems.append(f"у plan пилюли быть не должно: {text}")
     check(not problems, label, f"{label}: {'; '.join(problems)} (пилюли: {text or '—'})")
 
+# ── колонка беклога из данных ─────────────────────────────────────────────
+# Имя колонки беклога — ДАННЫЕ board.yaml (`по_статусу.беклог`). Константа в
+# коде рядом с данными — вторая правда: переименуй колонку, и каждая карточка
+# беклога с глубиной получит «нет: спека, …» — шум «пропустили бумаги» у того,
+# что не трогали по слову владельца. Дверь подмены — переменная окружения
+# HARNESS_BOARD_DATA с путём к своему board.yaml, читаемая build-board.py при
+# загрузке модуля; свежая копия модуля грузится с ней.
+print("── колонка беклога из данных ──")
+RENAMED = "отложено"
+renamed_data = yaml.safe_load(BOARD_DATA.read_text(encoding="utf-8")) or {}
+renamed_data["колонки"] = [RENAMED if c == BACKLOG else c for c in renamed_data.get("колонки") or []]
+renamed_data.setdefault("по_статусу", {})["беклог"] = RENAMED
+RENAMED_BOARD = TMP / "board-renamed.yaml"
+RENAMED_BOARD.write_text(yaml.safe_dump(renamed_data, allow_unicode=True, sort_keys=False),
+                         encoding="utf-8")
+os.environ["HARNESS_BOARD_DATA"] = str(RENAMED_BOARD)
+try:
+    renamed_module = load("build_board_renamed", HERE / "build-board.py")
+finally:
+    os.environ.pop("HARNESS_BOARD_DATA", None)
+renamed_stages = renamed_module.stages()
+# Посылка: без двери копия читает боевой board.yaml, и красный ниже значил бы
+# «стенд не тот», а не «константа в коде».
+check(RENAMED in renamed_stages and BACKLOG not in renamed_stages,
+      f"дверь HARNESS_BOARD_DATA: копия модуля читает свой board.yaml (колонка «{RENAMED}»)",
+      f"дверь HARNESS_BOARD_DATA не подключена: колонки копии {renamed_stages}")
+# Глубина с долгом бумаг: без неё шагов нет и пилюлям «нет: …» неоткуда взяться.
+deep_backlog = dict(cards["t.backlog"], глубина=dict(DEPTH))   # цена BIG: гейт требует бумаги
+try:
+    got_column, pills, _steps = renamed_module.column(deep_backlog, judge)
+except Exception as exc:  # noqa: BLE001
+    got_column, pills = None, [f"column() упала — {type(exc).__name__}: {exc}"]
+text = joined(pills)
+check(got_column == RENAMED and "не трогаю без слова" in text and "нет:" not in text,
+      f"беклог с глубиной → колонка «{RENAMED}» из данных, без «нет: …»",
+      f"беклог с глубиной в переименованной колонке: «{got_column}», пилюли: {text or '—'}")
+# Та же копия у закрытой задачи «нет: …» называет: иначе зелёный выше значил бы
+# «сверку шагов выключили всем», а не «беклог узнан по данным».
+got_column, pills, _steps = renamed_module.column(cards["t.done"], judge)
+check("нет: план" in joined(pills), "та же копия: у done недостача шагов названа",
+      f"та же копия: у done нет «нет: план…» — сверка шагов не работает: {joined(pills)}")
+
 # ── одна правда (§7.1, приложение Б2) ────────────────────────────────────
 # Охраняет главное: владелец закрывает задачу по доске — и гейт обязан
 # согласиться. «Бумаги собраны» ⇔ гейт при переходе в test долга не назовёт;
@@ -481,9 +535,10 @@ if isinstance(board, dict):
     top = {"снято", "направление", "архив", "колонки", "задачи", "беда"}
     check(top <= set(board), "ключи верхнего уровня на месте",
           f"нет ключей: {sorted(top - set(board))}")
-    check(board.get("колонки") == COLUMNS,
-          f"колонки — полный пайплайн ({len(COLUMNS)}): от очереди до закрытия",
-          f"колонки {board.get('колонки')}, ждали {COLUMNS}")
+    check([c for c in board.get("колонки") or [] if c != BACKLOG] == COLUMNS
+          and BACKLOG in (board.get("колонки") or []),
+          f"колонки — полный пайплайн ({len(COLUMNS)}) и своя «{BACKLOG}»",
+          f"колонки {board.get('колонки')}, ждали {COLUMNS} + «{BACKLOG}»")
     check(str(board.get("снято", "")).startswith("2026-10-14T12:00"), "«снято» — переданное время в ISO",
           f"«снято» = {board.get('снято')!r}")
     check(board.get("беда") is None, "у исправной карты беды нет", f"беда: {board.get('беда')!r}")
@@ -498,8 +553,18 @@ if isinstance(board, dict):
                  "уровень_по_коммитам", "цена", "шаги", "источники", "журнал", "коммиты", "скилы"}
     missing = {t.get("id"): sorted(task_keys - set(t)) for t in tasks if task_keys - set(t)}
     check(not missing, "у каждой задачи полный набор полей §3.3", f"нет полей: {missing}")
-    stray = {t.get("id"): t.get("колонка") for t in tasks if t.get("колонка") not in COLUMNS}
+    stray = {t.get("id"): t.get("колонка") for t in tasks if t.get("колонка") not in COLUMNS + [BACKLOG]}
     check(not stray, "колонка каждой задачи — из списка колонок", f"колонки вне списка: {stray}")
+    # Счёт колонки «очередь» — то, что владелец видит числом над колонкой.
+    statuses = {t["id"]: t["status"] for line in MAP["lines"] for t in line["tasks"]}
+    in_queue = [t.get("id") for t in tasks if t.get("колонка") == QUEUE]
+    backlog_in_queue = [i for i in in_queue if statuses.get(i) == "беклог"]
+    check(not backlog_in_queue and "t.backlog" not in in_queue,
+          f"счёт колонки «очередь» ({len(in_queue)}) без беклога",
+          f"беклог в колонке «очередь»: {backlog_in_queue} — счёт очереди врёт")
+    backlog_col = [t.get("id") for t in tasks if t.get("колонка") == BACKLOG]
+    check(backlog_col == ["t.backlog"], f"в колонке «{BACKLOG}» ровно беклог: {backlog_col}",
+          f"в колонке «{BACKLOG}» {backlog_col}, ждали ['t.backlog']")
     by_id = {t.get("id"): t for t in tasks}
     same = {i: (by_id[i].get("колонка"), results[i][0]) for i in results
             if i in by_id and by_id[i].get("колонка") != results[i][0]}
@@ -536,8 +601,13 @@ if isinstance(board, dict):
           f"неполные шаги: {[s for s in steps.values() if not step_keys <= set(s)]}")
     check(steps.get("тесты", {}).get("есть", False) is None,
           "«тесты» машиной не судятся: есть = null", f"тесты: {steps.get('тесты')}")
-    check(all(steps.get(k, {}).get("есть") is True for k in ALL_PAPERS),
+    check(all(steps.get(k, {}).get("есть") is True for k in ALL_PAPERS if k != "мутации"),
           "положенные бумаги отмечены «есть»", f"шаги: {steps}")
+    # Мутации отложены до приёмки: в wip их не просят (иначе колонка wip-задачи
+    # прыгала бы на «мутации»), после test — просят (см. t.test1 и t.done).
+    check(steps.get("мутации", {}).get("есть") is None
+          and "не положен" in str(steps.get("мутации", {}).get("почему")),
+          "wip: мутации приёмки не требуются — «не положен этой задаче»", f"мутации wip: {steps.get('мутации')}")
     check(str(steps.get("спека", {}).get("путь", "")).endswith("docs/specs/t-all.md"),
           "путь спеки — тот, что назвал гейт", f"путь спеки: {steps.get('спека')}")
     named = {s.get("шаг"): s for s in (by_id.get("t.named") or {}).get("шаги") or []}.get("план", {})
@@ -638,5 +708,99 @@ leftovers = sorted(p.name for p in PANEL.iterdir() if p.name != "board.json")
 check(not leftovers, "в каталоге состояния нет tmp-огрызков", f"огрызки: {leftovers}")
 mode = target.stat().st_mode & 0o777 if target.exists() else None
 check(mode == 0o640, "права board.json 0640", f"права board.json {oct(mode) if mode else mode}")
+
+# ── пересборка только при смене входов ───────────────────────────────────
+# Замер О7 28.10.2026: снимок пересобирался каждые 5 минут (16,9 с) без
+# проверки, менялось ли что-то. Отпечаток входов: HEAD, незакоммиченное в
+# дереве, журналы и состояние вне дерева, час. Совпал — снимок не собирается,
+# но «снято» и метка обновляются: панель судит возраст снимка, сторож — метку.
+print("── отпечаток входов ──")
+import subprocess  # noqa: E402
+
+FP = TMP / "fp-repo"
+FP.mkdir()
+
+
+def git_fp(*args: str) -> None:
+    subprocess.run(["git", "-C", str(FP), "-c", "user.name=p", "-c", "user.email=p@p",
+                    *args], check=True, capture_output=True)
+
+
+git_fp("init", "-q")
+(FP / "dev-map.yaml").write_text("lines: []\n", encoding="utf-8")
+git_fp("add", "-A")
+git_fp("commit", "-qm", "старт")
+fingerprint = getattr(board_module, "inputs_fingerprint", None)
+if fingerprint is None:
+    path_bad("inputs_fingerprint нет — снимок пересобирается без проверки входов")
+else:
+    HOUR = datetime(2026, 10, 29, 4, 10)
+    base = fingerprint(FP, HOUR)
+    check(base == fingerprint(FP, HOUR.replace(minute=55)), "те же входы в тот же час — тот же отпечаток",
+          "отпечаток плавает без смены входов")
+
+    def changed(what: str, act) -> None:
+        global base
+        before = base
+        act()
+        base = fingerprint(FP, HOUR)
+        check(base != before, f"{what} — отпечаток другой", f"{what}, а отпечаток прежний — доска застынет")
+
+    paper = FP / ".tasks" / "t" / "журнал.md"
+    changed("новая бумага задачи (неотслеживаемая)",
+            lambda: (paper.parent.mkdir(parents=True), paper.write_text("а", encoding="utf-8")))
+    changed("та же бумага дописана", lambda: paper.write_text("аб", encoding="utf-8"))
+    changed("коммит", lambda: (git_fp("add", "-A"), git_fp("commit", "-qm", "бумага")))
+    changed("правка закоммиченной карты", lambda: (FP / "dev-map.yaml").write_text("lines: [] \n", encoding="utf-8"))
+    changed("вызов скила в журнале",
+            lambda: (LOGS / "skills.jsonl").open("a", encoding="utf-8").write('{"task": "t"}\n'))
+    changed("новое сообщение во входящих", lambda: (LOGS / "inbox" / "m1.txt").write_text("я", encoding="utf-8"))
+    changed("доска состояния", lambda: (LOGS / "доска.json").write_text("{}", encoding="utf-8"))
+    changed("направление в harness.conf",
+            lambda: HARNESS_CONF.write_text(HARNESS_CONF.read_text(encoding="utf-8") + "# \n", encoding="utf-8"))
+    check(fingerprint(FP, HOUR.replace(hour=5)) != base, "новый час — отпечаток другой (снимок не старше часа)",
+          "смена часа отпечаток не меняет — то, что отпечаток не видит, застынет навсегда")
+
+    print("── main(): входы те же — снимок не собирается ──")
+    builds = []
+
+    def counting_build(*_args, **_kwargs):
+        builds.append(1)
+        return dict(fixture_board, снято=datetime.now().isoformat(timespec="seconds"))
+
+    setattr(board_module, "build", counting_build)
+    setattr(board_module, "load_gate", lambda: types.SimpleNamespace(КОРЕНЬ=FP))
+    mark = TMP / "state" / "heartbeat" / "build-board"
+
+    def run_main() -> str:
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            getattr(board_module, "main")()
+        return out.getvalue()
+
+    try:
+        run_main()
+        stale = dict(json.loads(target.read_text(encoding="utf-8")), снято="2000-01-01T00:00:00")
+        target.write_text(json.dumps(stale, ensure_ascii=False), encoding="utf-8")
+        os.utime(mark, (0, 0))
+        said = run_main()
+        again = json.loads(target.read_text(encoding="utf-8"))
+        check(len(builds) == 1, "второй прогон без смены входов снимок не собирает",
+              f"сборок {len(builds)} при неизменных входах")
+        check(again.get("снято") != "2000-01-01T00:00:00" and again.get("задачи") == stale.get("задачи"),
+              "«снято» обновлено, задачи прежние — панель не зовёт демон молчащим",
+              f"снято {again.get('снято')!r} — панель через 15 минут скажет «демон молчит»")
+        check(mark.stat().st_mtime > 0, "метка обновлена и без сборки — сторож меток не зовёт мёртвым",
+              "метка не тронута при пропуске сборки")
+        check("без изменений" in said, "пропуск назван в журнале словами", f"вывод: {said!r}")
+        (LOGS / "skills.jsonl").open("a", encoding="utf-8").write('{"task": "t2"}\n')
+        run_main()
+        check(len(builds) == 2, "вход сменился — снимок собран заново", f"сборок {len(builds)} после смены входа")
+        target.unlink()
+        run_main()
+        check(len(builds) == 3, "снимка нет — собран, даже при прежних входах",
+              f"сборок {len(builds)}: отпечаток пережил пропавший снимок")
+    except Exception as exc:  # noqa: BLE001
+        path_bad(f"main() с отпечатком упал — {type(exc).__name__}: {exc}\n{traceback.format_exc()}")
 
 finish()

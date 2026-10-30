@@ -1,0 +1,13 @@
+6.8.0-138-generic
+/boot/vmlinuz-6.8.0-138-generic
+/boot/vmlinuz-6.8.0-147-generic
+2026-10-15 06:24:45.710002456 +0500 /var/run/reboot-required
+linux-image-6.8.0-139-generic
+linux-base
+libc6
+linux-image-6.8.0-142-generic
+linux-base
+linux-image-6.8.0-146-generic
+linux-base
+linux-image-6.8.0-147-generic
+linux-base

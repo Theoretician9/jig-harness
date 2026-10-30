@@ -67,6 +67,8 @@ PROJECT_DIR — то есть из каталога ХАРНЕСА. Осмотр
 """
 from __future__ import annotations
 
+import datetime as dt
+import json
 import os
 import re
 import subprocess
@@ -370,13 +372,34 @@ def проверить_границы(контейнеры: list[dict]) -> list[
     return беды
 
 
-def проверить_машину() -> list[str]:
+def тревога_диска_отправлена(сейчас: float | None = None) -> str | None:
+    """Время «ЧЧ:ММ» вести о диске, если метка уборки (disk-alert) ещё свежа, иначе None.
+
+    Вторую весть о том же диске гигиена не шлёт: владелец получил бы две за одно
+    пересечение порога. Нечитаемая метка — «метки нет»: весть лучше тишины.
+    """
+    try:
+        метка = json.loads(Path(КОНФИГ["HEARTBEAT_DIR"], "disk-alert").read_text(encoding="utf-8"))
+        когда = dt.datetime.fromisoformat(метка["когда"])
+        повтор_ч = float(КОНФИГ.get("DISK_ALERT_REPEAT_H") or 24)
+    except (OSError, KeyError, ValueError, TypeError):
+        return None
+    if когда.tzinfo is None:
+        return None
+    возраст_ч = ((сейчас if сейчас is not None else dt.datetime.now().timestamp()) - когда.timestamp()) / 3600
+    return когда.astimezone().strftime("%H:%M") if 0 <= возраст_ч < повтор_ч else None
+
+
+def проверить_машину(запуск=subprocess.run) -> list[str]:
     беды: list[str] = []
     try:
-        из = subprocess.run(("df", "--output=pcent", "/"), capture_output=True,
-                            text=True, timeout=10).stdout.split()
+        из = запуск(("df", "--output=pcent", "/"), capture_output=True,
+                    text=True, timeout=10).stdout.split()
         занято = int(из[-1].rstrip("%"))
-        if занято >= ПОРОГ_ДИСКА:
+        отправлена = тревога_диска_отправлена() if занято >= ПОРОГ_ДИСКА else None
+        if отправлена:
+            print(f"  (диск занят на {занято}%: тревога уже отправлена уборкой в {отправлена})")
+        elif занято >= ПОРОГ_ДИСКА:
             беды.append(f"диск занят на {занято}% (порог {ПОРОГ_ДИСКА}%)")
     except Exception:                                       # noqa: BLE001
         беды.append("диск: замерить не вышло")
@@ -576,6 +599,35 @@ def _самотест() -> int:
 
     # Сайты не объявлены — проверять нечего, и это сказано вслух.
     проба("сайты не объявлены — претензий нет", 0, len(проверить_сертификаты([])))
+
+    # БОЛЬНОЙ: уборка уже отправила весть о диске — вторая от гигиены удваивает её.
+    import tempfile
+    с = 1_800_000_000.0
+    с_iso = dt.datetime.fromtimestamp(с - 3600, dt.timezone.utc).isoformat(timespec="seconds")
+    with tempfile.TemporaryDirectory(prefix="гигиена-стенд-") as стенд:
+        Путь = Path(стенд, "disk-alert")
+        КОНФИГ["HEARTBEAT_DIR"] = стенд
+        Путь.write_text(json.dumps({"процент": 90, "когда": с_iso}, ensure_ascii=False), encoding="utf-8")
+        проба("БОЛЬНОЙ: метка тревоги свежая — гигиена не шлёт вторую весть", "да",
+              "да" if тревога_диска_отправлена(с) else "нет")
+
+        class _Диск90:
+            returncode, stderr, stdout = 0, "", "Use%\n 90%\n"
+        свежая = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
+        Путь.write_text(json.dumps({"процент": 90, "когда": свежая}, ensure_ascii=False), encoding="utf-8")
+        проба("БОЛЬНОЙ: диск 90 % при свежей метке — «диск занят» в бедах нет", 0,
+              sum("диск занят" in б for б in проверить_машину(lambda *а, **к: _Диск90())))
+        Путь.unlink()
+        проба("диск 90 % без метки — беда есть", 1,
+              sum("диск занят" in б for б in проверить_машину(lambda *а, **к: _Диск90())))
+        Путь.write_text(json.dumps({"процент": 90, "когда": с_iso}, ensure_ascii=False), encoding="utf-8")
+        Путь.write_text(json.dumps({"процент": 90, "когда": с_iso}, ensure_ascii=False), encoding="utf-8")
+        проба("метка старше DISK_ALERT_REPEAT_H — весть положена снова", None,
+              тревога_диска_отправлена(с + 24 * 3600))
+        Путь.write_text("{не json", encoding="utf-8")
+        проба("нечитаемая метка = метки нет", None, тревога_диска_отправлена(с))
+        Путь.unlink()
+        проба("метки нет — беда остаётся за гигиеной", None, тревога_диска_отправлена(с))
 
     print("самотест: всё зелено" if not плохо else f"самотест: красных {плохо}")
     return 1 if плохо else 0

@@ -21,18 +21,29 @@
 Код возврата --сверить: 0 — стоит последняя, 3 (КОД_ЕСТЬ_НОВОЕ) — вышла
 новая, 2 — спросить не удалось.
 """
+import contextlib
+import fcntl
+import itertools
 import json
 import os
 import re
 import shutil
+import signal
+import socket
 import subprocess
 import sys
 import time
+import yaml
+from collections import Counter
+from datetime import datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
 import patterns as формы                          # noqa: E402
 import config as конф_модуль                              # noqa: E402
+import layout_journal                                     # noqa: E402
+import layout_history                                     # noqa: E402
+import release_notes                                      # noqa: E402
 
 КОРЕНЬ = Path(__file__).resolve().parent.parent
 
@@ -205,7 +216,9 @@ def разбор(эталон: str, новый: str) -> dict:
             итог["расхождения"].append(путь)
     # Файлы, которых обновление не касалось, но которые правлены здесь, в
     # список не попадают вовсе: их никто не собирался трогать.
-    for путь in sorted(_гит("diff", "--name-only", где=каталог).stdout.split("\n")):
+    # Дерево И индекс против HEAD: правка, добавленная `git add`, тоже правка
+    # здесь, и сброс до публичного коммита стёр бы её молча.
+    for путь in sorted(_гит("diff", "--name-only", "HEAD", где=каталог).stdout.split("\n")):
         путь = путь.strip()
         if путь and путь not in названные:
             итог["не трогать"].append(путь)
@@ -224,8 +237,22 @@ def _сказать_владельцу(текст: str) -> None:
         pass
 
 
+def _спросить_владельца(текст: str) -> int:
+    """Вопрос в канал отдельной отправкой → код отправки; 1 — не отправлено.
+    Код нужен вызывающему: носитель «вопрос задан» пишется только после 0, а
+    `_сказать_владельцу` код глотает."""
+    отправка = КОРЕНЬ / "scripts" / "tg_send.sh"
+    if not отправка.exists() or os.environ.get("HARNESS_TG_SEND") == "":
+        return 1
+    try:
+        return subprocess.run(["bash", str(отправка), текст], timeout=60,
+                              capture_output=True).returncode
+    except (OSError, subprocess.SubprocessError):
+        return 1
+
+
 def каталог_копий() -> Path:
-    return Path(os.environ.get("HARNESS_BACKUP_DIR") or "/var/backups/harness")
+    return конф_модуль.backup_dir()
 
 
 def _снять_копию(каталог: Path) -> Path | None:
@@ -234,7 +261,13 @@ def _снять_копию(каталог: Path) -> Path | None:
     Имя с датой И временем: два обновления за сутки затирали бы копию друг
     друга (находка I10 разбора спеки).
     """
-    основа = каталог_копий() / time.strftime("обновление-%Y%m%d-%H%M%S")
+    try:
+        основа = каталог_копий() / time.strftime("обновление-%Y%m%d-%H%M%S")
+    except LookupError as беда:
+        # Копия некуда — установка не начинается; причину видно в журнале, владельцу
+        # уходит прежний текст отказа.
+        print(f"[обновление] {беда}", file=sys.stderr)
+        return None
     # Два обновления в одну секунду — не выдумка: так идут проверки, и второе
     # падало на «каталог уже есть», то есть отказывалось ставиться молча.
     цель, номер = основа, 1
@@ -278,19 +311,157 @@ def _занят_выкат() -> bool:
     return готово.returncode != 0
 
 
-def прогнать_ворота() -> tuple:
-    """Самопроверка обновлённого харнеса. Итог — по строке ворот, а не по коду
-    возврата: жёлтые проверки в код не входят (находка M3)."""
-    готово = subprocess.run(["bash", str(КОРЕНЬ / "scripts" / "gates.sh")],
-                            capture_output=True, text=True, timeout=1800)
-    строки = [с for с in готово.stdout.splitlines() if с.startswith("=== итог:")]
-    строка = строки[-1] if строки else "итоговой строки нет"
-    return ("красных 0" in строка, строка)
+def красные_из_вывода(текст: str) -> Counter | None:
+    """Красные ворота из вывода gates.sh: имя → сколько строк; None — итог не
+    прочитан.
+
+    Красная — строка ровно с двумя пробелами отступа: вывод красного гейта
+    идёт глубже, и его строки красными не считаются. Счёт, а не множество: две
+    разные проверки носят одно имя, и вторая красная того же имени — новая."""
+    if "=== итог:" not in текст:
+        return None
+    красные = Counter()
+    for строка in текст.splitlines():
+        if строка.startswith("  ПЛОХО · "):
+            имя = строка[len("  ПЛОХО · "):]
+            красные[re.split(r" \(код | — ", имя, maxsplit=1)[0]] += 1
+    return красные
+
+
+def прогнать_ворота() -> Counter | None:
+    """Самопроверка харнеса: счёт красных имён. Код возврата не судим: жёлтые
+    проверки в него не входят. Оборванный пределом прогон — не прочитанный
+    итог, то есть None."""
+    try:
+        готово = subprocess.run(["bash", str(КОРЕНЬ / "scripts" / "gates.sh")],
+                                capture_output=True, text=True, timeout=1800)
+    except subprocess.TimeoutExpired:
+        return None
+    return красные_из_вывода(готово.stdout)
+
+
+@contextlib.contextmanager
+def _замок_постановки():
+    """Одна постановка за раз: два прогона ворот разом откатывают друг друга
+    под запись версии. Держится до конца постановки; дочерние процессы его не
+    наследуют (close_fds)."""
+    лок = Path(конф_модуль.log_dir()) / "locks" / "update.lock"
+    лок.parent.mkdir(parents=True, exist_ok=True)
+    with open(лок, "a+") as файл:
+        try:
+            fcntl.flock(файл, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            yield False
+            return
+        try:
+            yield True
+        finally:
+            fcntl.flock(файл, fcntl.LOCK_UN)
 
 
 def поставить(*, разложить=None, перезапустить=None, проверить=None,
-              сказать=None) -> dict:
-    """Поставить обновление: копия → пакет вперёд → раскладка → проверка.
+              сказать=None, спросить=None, reset_own=False, host=None) -> dict:
+    """Поставить обновление под замком постановки; занят — отказ словами."""
+    сказать = сказать or (lambda текст: None)
+    with _замок_постановки() as взят:
+        if not взят:
+            причина = "уже идёт другая постановка обновления"
+            сказать(f"Обновление не поставлено: {причина}")
+            return {"поставлено": False, "беда": причина}
+        return _поставить_под_замком(разложить=разложить, перезапустить=перезапустить,
+                                     проверить=проверить, сказать=сказать, спросить=спросить,
+                                     reset_own=reset_own, host=host)
+
+
+def _count_own_commits(каталог: Path, public: str) -> int | None:
+    """Сколько коммитов пакета нет в публичном; 0 — пакет просто позади.
+    None — git не ответил: считать «своих нет» значило бы стереть их сбросом."""
+    ancestor = _гит("merge-base", "--is-ancestor", "HEAD", public, где=каталог)
+    if ancestor.returncode == 0:
+        return 0
+    if ancestor.returncode != 1:
+        return None
+    count = _гит("rev-list", "--count", "HEAD", f"^{public}", где=каталог)
+    if count.returncode != 0 or not count.stdout.strip().isdigit():
+        return None
+    return int(count.stdout.strip())
+
+
+def _branch_exists(каталог: Path, name: str) -> bool:
+    return _гит("show-ref", "--verify", "--quiet", f"refs/heads/{name}",
+                где=каталог).returncode == 0
+
+
+def _save_own_and_reset(каталог: Path, прежний: str, public: str,
+                        host: str | None) -> tuple[str | None, int | None, str | None]:
+    """Свои коммиты пакета → ветка-страховка, и только затем пакет встаёт на
+    публичный коммит. → (имя | None, число своих | None, причина отказа | None):
+    при отказе пакет остался на своём коммите (И-1).
+
+    Число считается здесь, прямо перед веткой: коммит, лёгший за время ворот
+    «до», уезжает в ветку вместе с прочими.
+    Занятое имя не затирается: `git branch` без -f не перезаписывает ветку,
+    поэтому гонка за имя кончается отказом git, а не потерей чужой ветки."""
+    own_count = _count_own_commits(каталог, public)
+    if own_count is None:
+        return None, None, "не удалось сосчитать свои коммиты пакета — пакет не тронут"
+    base_name = (f"server-{host or socket.gethostname()}-local-"
+                 f"{time.strftime('%Y%m%d-%H%M')}")
+    name = base_name
+    for suffix in range(2, 102):
+        if not _branch_exists(каталог, name):
+            created = _гит("branch", name, прежний, где=каталог)
+            if created.returncode == 0:
+                break
+            if not _branch_exists(каталог, name):
+                return None, own_count, (f"ветка-страховка {name} не создалась: "
+                                         f"{(created.stderr or created.stdout).strip()}")
+        name = f"{base_name}-{suffix}"
+    else:
+        return None, own_count, f"не нашлось свободного имени ветки-страховки от {base_name}"
+    count = _гит("rev-list", "--count", name, f"^{public}", где=каталог)
+    if count.returncode != 0 or count.stdout.strip() != str(own_count):
+        return name, own_count, (f"в ветке-страховке {name} число своих коммитов не сошлось: "
+                                 f"{count.stdout.strip() or '?'} вместо {own_count}")
+    reset = _гит("reset", "--hard", public, где=каталог)
+    if reset.returncode != 0:
+        # Отвергнутый на обновлении ссылки reset уже переписал индекс и дерево.
+        restored = _гит("read-tree", "--reset", "-u", прежний, где=каталог)
+        restore_note = ("" if restored.returncode == 0 else
+                        f"; дерево на свой коммит вернуть не удалось: "
+                        f"{(restored.stderr or restored.stdout).strip()}")
+        return name, own_count, (f"пакет не встал на публичный коммит: "
+                                 f"{(reset.stderr or reset.stdout).strip()}{restore_note}")
+    return name, own_count, None
+
+
+def _reset_phrase() -> str | None:
+    """Слова владельца для команды сброса — из данных команд бота; None, если
+    команды в данных нет (отказ тогда идёт без подсказки, но идёт)."""
+    data = yaml.safe_load((КОРЕНЬ / "harness" / "config" / "bot-commands.yaml")
+                          .read_text(encoding="utf-8"))
+    command = next((к for к in data["команды"] if к["имя"] == "update_reset"), None)
+    return command["слова"][0] if command else None
+
+
+def _plural_ru(count: int, one: str, few: str, many: str) -> str:
+    if count % 100 in range(11, 15) or count % 10 not in (1, 2, 3, 4):
+        return many
+    return one if count % 10 == 1 else few
+
+
+def _commits_word(count: int) -> str:
+    return _plural_ru(count, "коммит", "коммита", "коммитов")
+
+
+def _branch_words(own_count: int, name: str) -> str:
+    return (f" Свои правки пакета ({own_count} {_commits_word(own_count)}) сохранены "
+            f"в ветке {name}. Они не потеряны, но в новую версию не перенесены.")
+
+
+def _поставить_под_замком(*, разложить, перезапустить, проверить, сказать,
+                          спросить=None, reset_own=False, host=None) -> dict:
+    """Поставить обновление: ворота до → копия → пакет вперёд → раскладка → проверка.
 
     Не прошло — откат на прежний коммит, версия НЕ меняется, владельцу сказано
     словами. Внешние действия приходят доводами: так их подменяет проверка, а
@@ -299,7 +470,8 @@ def поставить(*, разложить=None, перезапустить=No
     разложить = разложить or _разложить_пакет
     перезапустить = перезапустить or _перезапустить_службы
     проверить = проверить or прогнать_ворота
-    сказать = сказать or (lambda текст: None)
+    спросить = спросить or _спросить_владельца
+    начало = datetime.now().astimezone()
 
     каталог = пакет()
 
@@ -317,16 +489,47 @@ def поставить(*, разложить=None, перезапустить=No
     if _занят_выкат():
         return отказ("идёт выкат — обновление подождёт")
 
+    own = _count_own_commits(каталог, ответ["коммит"])
+    if own is None:
+        return отказ("не удалось сосчитать свои коммиты пакета — пакет не тронут")
+    if own and not reset_own:
+        phrase = _reset_phrase()
+        hint = (f" Чтобы сберечь их в отдельной ветке и поставить обновление, "
+                f"напиши: «{phrase}»") if phrase else ""
+        return отказ(f"пакет разошёлся с публичной веткой: в нём {own} "
+                     f"{_commits_word(own)}, которых нет в публичной.{hint}")
+
+    # Судим РАЗНИЦУ красных: среда живой установки (срок входа, nginx,
+    # журналы) даёт красные всегда, «красных 0» не бывает. Прогон «до» идёт
+    # РАНЬШЕ копии: правка пакета, сделанная за его минуты, обязана в неё попасть.
+    красные_до = проверить()
+    if красные_до is None:
+        return отказ("ворота до обновления не дали итога — пакет не тронут")
+    # Выкат мог начаться за время прогона, а первая проверка его не видела.
+    if _занят_выкат():
+        return отказ("идёт выкат — обновление подождёт")
+
     копия = _снять_копию(каталог)
     if копия is None:
         return отказ("копия не снята — установка не начата")
 
+    forward_archive, rollback_archive = _layout_archives()
     прежний = _гит("rev-parse", "HEAD", где=каталог).stdout.strip()
     # Что здесь правили — знаем ДО слияния: после него отличить правку
     # владельца от пришедшей строки уже нечем.
     исходы = разбор(прежний, ответ["коммит"])
     сберечь = исходы["не трогать"] + исходы["расхождения"]
 
+    branch_text, branch_info = "", {}
+    if own:
+        safety_branch, own, reset_failure = _save_own_and_reset(
+            каталог, прежний, ответ["коммит"], host)
+        if reset_failure:
+            _вернуть_из_копии(копия, каталог, сберечь)
+            return отказ(f"{reset_failure}; пакет остался на своём коммите",
+                         **({"ветка-страховка": safety_branch} if safety_branch else {}))
+        branch_text = _branch_words(own, safety_branch)
+        branch_info = {"ветка-страховка": safety_branch, "своих коммитов": own}
     # Слияние не смеет спотыкаться о правки владельца: дерево сбрасывается до
     # HEAD (копия уже снята), а сбережённые файлы возвращаются из копии после.
     # Живая проверка 11.09.2026: без этого merge --ff-only отказывался словами
@@ -340,49 +543,506 @@ def поставить(*, разложить=None, перезапустить=No
                      f"{причина[0] if причина else '?'}")
     _вернуть_из_копии(копия, каталог, сберечь)
 
-    разложить()
-    перезапустить()
-    прошло, строка = проверить()
-    if прошло:
+    раскладка_ок, упавшие, причина, новые = _разложить_и_проверить(
+        разложить, перезапустить, проверить, красные_до, forward_archive)
+    if причина is None:
+        orphans_text, orphans = _orphan_report((forward_archive, rollback_archive))
+        строка = f"красных {sum(новые.values())}, все были до обновления"
         записать_версию(ответ["коммит"])
         хвост = ("" if not исходы["расхождения"] else
                  f" Не тронуто (правлено здесь и в обновлении): "
                  f"{', '.join(исходы['расхождения'][:5])}")
-        сказать(f"Харнес обновлён до {ответ['коммит'][:7]}. Проверки: {строка}.{хвост}")
+        хвост += _слова_об_упавших(упавшие) + branch_text + orphans_text
+        хвост += _removed_words(forward_archive)
+        сказать(_with_release_note(
+            f"Харнес обновлён до {ответ['коммит'][:7]}. Проверки: {строка}.{хвост}", каталог))
+        _ask_about_seed(_seed_paths_since(начало), спросить)
         return {"поставлено": True, "коммит": ответ["коммит"], "проверки": строка,
-                "копия": str(копия), "расхождения": исходы["расхождения"]}
+                "копия": str(копия), "расхождения": исходы["расхождения"],
+                "упавшие сборщики": упавшие, "архив раскладки": str(forward_archive),
+                "оборванные": orphans, **branch_info}
 
-    _гит("reset", "--hard", прежний, где=каталог)
-    разложить()
+    # Правка пакета за прогон «после» иначе стирается reset --hard без следа (И-1).
+    копия_до_отката = _снять_копию(каталог)
+    rolled_back = _гит("reset", "--hard", прежний, где=каталог)
+    rollback_failure = ""
+    if rolled_back.returncode != 0:
+        saved = (f" Свои коммиты целы в ветке {branch_info['ветка-страховка']}."
+                 if branch_info else "")
+        rollback_failure = (f" ВНИМАНИЕ: откат не удался — пакет стоит на НОВОЙ версии: "
+                            f"{(rolled_back.stderr or rolled_back.stdout).strip()}.{saved}")
+    elif branch_info:
+        # Пакет снова на своих коммитах: ветка-страховка им не нужна.
+        deleted = _гит("branch", "-d", branch_info["ветка-страховка"], где=каталог)
+        if deleted.returncode == 0:
+            branch_text, branch_info = "", {}
+    # Раскладка читает пакет: правки владельца должны лежать в нём до неё.
+    _вернуть_из_копии(копия, каталог, сберечь)
+    if isinstance(раскладка_ок, LayoutNotStarted):
+        # Проект не тронут: раскладывать прежнюю версию незачем, а перезапуск
+        # диспетчера рвёт канал с владельцем (C4).
+        return _отказ_раскладки_не_начата(
+            раскладка_ок.reason, прежний, rollback_failure, branch_text, branch_info, сказать,
+            copy=копия, copy_before_rollback=копия_до_отката, archive=forward_archive)
+    откат_разложен, _ = разложить(archive=rollback_archive, rollback_of=forward_archive)
     перезапустить()
-    сказать(f"Обновление не прошло проверку ({строка}) — сделан откат на "
-            f"{прежний[:7]}. Копия: {копия}")
-    return {"поставлено": False, "беда": f"самопроверка не прошла: {строка}",
-            "откат": прежний, "копия": str(копия)}
+    где_копия = (f"Копия до отката: {копия_до_отката}" if копия_до_отката
+                 else "Второй копии нет — снять не удалось")
+    rollback_words, rollback_outcome = _rollback_report(forward_archive, rollback_archive, откат_разложен)
+    orphans_text, orphans = _orphan_report((forward_archive, rollback_archive))
+    итог_отката = (f"сделан откат на {прежний[:7]}" if not rollback_failure
+                   else "откат не сделан")
+    сказать(f"Обновление не прошло проверку ({причина}) — {итог_отката}. "
+            f"Копия: {копия}. {где_копия}.{rollback_words}{rollback_failure}{branch_text}{orphans_text}")
+    return {"поставлено": False, "беда": f"самопроверка не прошла: {причина}", **branch_info,
+            "откат": прежний, "откат удался": not rollback_failure, "копия": str(копия),
+            "копия до отката": str(копия_до_отката) if копия_до_отката else None,
+            "новые красные": новые or [], "откат разложен": bool(откат_разложен),
+            "архив раскладки": str(forward_archive), "архив отката": str(rollback_archive),
+            "откат по журналу": rollback_outcome, "оборванные": orphans}
 
 
-def _разложить_пакет() -> bool:
-    """Раскладка пакета в проект И пересборка производных.
+def _отказ_раскладки_не_начата(reason, прежний, rollback_failure, branch_text, branch_info, сказать,
+                               *, copy, copy_before_rollback, archive):
+    """Итог отката, когда раскладчик отказал до первой записи."""
+    вернули = "" if rollback_failure else f", пакет возвращён на {прежний[:7]}"
+    сказать(f"Обновление не встало: {reason}. Проект не тронут{вернули}."
+            f"{rollback_failure}{branch_text}")
+    return {"поставлено": False, "беда": f"раскладка не начата: {reason}", **branch_info,
+            "откат": прежний, "откат удался": not rollback_failure,
+            "раскладка не начата": reason, "откат разложен": None,
+            "копия": str(copy), "копия до отката": str(copy_before_rollback) if copy_before_rollback else None,
+            "архив раскладки": str(archive)}
+
+
+def _разложить_и_проверить(разложить, перезапустить, проверить, красные_до, archive):
+    """Шаги после слияния → (раскладка_ок, упавшие, причина отката | None, новые).
+
+    Исключение здесь — тоже причина отката: пакет уже ушёл вперёд, и трасса
+    вместо отката оставила бы установку на половине. Неудачная раскладка
+    откатывает сразу: перезапуск и ворота «после» судили бы проект с
+    устаревшими производными. Упавший сборщик отката не вызывает: «сиротский»
+    ключ состояния откатывал бы каждое обновление навсегда.
+    """
+    раскладка_ок, упавшие = False, []
+    try:
+        раскладка_ок, упавшие = разложить(archive=archive, rollback_of=None)
+        if not раскладка_ок:
+            return раскладка_ок, упавшие, "раскладка пакета не удалась", None
+        перезапустить()
+        красные_после = проверить()
+    except Exception as беда:
+        return раскладка_ок, упавшие, f"исключение после слияния: {type(беда).__name__}: {беда}", None
+    if красные_после is None:
+        return раскладка_ок, упавшие, "ворота после обновления не дали итога", None
+    новые = sorted(красные_после - красные_до)
+    if новые:
+        return раскладка_ок, упавшие, f"новые красные: {', '.join(новые)}", новые
+    return раскладка_ок, упавшие, None, красные_после
+
+
+def _слова_об_упавших(упавшие: list) -> str:
+    if not упавшие:
+        return ""
+    return " Сборщики производных упали: " + "; ".join(
+        f"{файл} — {хвост or 'без текста'}" for файл, хвост in упавшие)
+
+
+def сборщики_производных(реестр: dict) -> list[str]:
+    """Файлы сборщиков документов: записи реестра с полем `собирает`.
+
+    Список — данные реестра, а не перечень в коде: сборщик, которого здесь
+    забыли, оставляет производный документ устаревшим, и гейт краснеет.
+    """
+    return [м["файл"] for м in реестр.get("механизмы", []) if м.get("собирает")]
+
+
+def _запустить_сборщик(путь: Path) -> tuple[int, str]:
+    """(код, последняя непустая строка stderr): по ней владелец видит причину."""
+    готово = subprocess.run([sys.executable, str(путь)], capture_output=True,
+                            text=True, timeout=300)
+    строки = [с.strip() for с in готово.stderr.splitlines() if с.strip()]
+    return готово.returncode, (строки[-1] if строки else "")
+
+
+def пересобрать_производные(реестр=None, запустить=None) -> list[tuple[str, str]]:
+    """Позвать каждого сборщика из реестра → упавшие [(файл, хвост)].
+
+    Без пересборки документа устройства (build-registry-doc.py) гейт реестра
+    краснеет побайтно. Звать надо ВСЕХ даже после падения: остальные документы
+    не должны остаться устаревшими из-за чужой поломки; сбой запуска — тоже
+    падение сборщика, а не конец обхода.
+    """
+    if реестр is None:
+        with open(КОРЕНЬ / "harness" / "config" / "mechanisms.yaml",
+                  encoding="utf-8") as файл:
+            реестр = yaml.safe_load(файл)
+    запустить = запустить or _запустить_сборщик
+    упавшие = []
+    for сборщик in сборщики_производных(реестр):
+        try:
+            код, хвост = запустить(КОРЕНЬ / сборщик)
+        except (subprocess.TimeoutExpired, OSError) as беда:
+            код, хвост = 1, str(беда)
+        if код != 0:
+            упавшие.append((сборщик, хвост))
+    return упавшие
+
+
+# Договор с раскладчиком: код 3 и этот маркер в stderr — «проект не тронут».
+КОД_РАСКЛАДКА_НЕ_НАЧАТА = 3
+МАРКЕР_РАСКЛАДКА_НЕ_НАЧАТА = "РАСКЛАДКА НЕ НАЧАТА: "
+
+
+class LayoutNotStarted:
+    """Раскладчик отказал до первой записи (код 3): проект не тронут.
+
+    Ложен в булевом смысле, как и неудача раскладки, но откат по нему не
+    раскладывает прежнюю версию: она упёрлась бы в ту же беду и сказала бы
+    владельцу ложное «раскладка прежней версии не удалась».
+    """
+
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+
+    def __bool__(self) -> bool:
+        return False
+
+
+class LayoutTimedOut:
+    """Раскладчик убит по пределу времени: проект мог остаться на середине.
+
+    Ложен, как неудача, но отдельным классом: откат, оборванный по времени, не
+    должен говорить владельцу «раскладка прежней версии не удалась» — файлы
+    новой версии могут остаться, и это надо сказать прямо."""
+
+    def __bool__(self) -> bool:
+        return False
+
+
+def _причина_отказа_раскладки(stderr: str) -> str:
+    строки = [с.strip() for с in stderr.splitlines() if с.strip()]
+    for номер, строка in enumerate(строки):
+        if строка.startswith(МАРКЕР_РАСКЛАДКА_НЕ_НАЧАТА):
+            причина = строка[len(МАРКЕР_РАСКЛАДКА_НЕ_НАЧАТА):]
+            # Раскладчик может назвать держателя замка отдельной строкой после маркера.
+            следом = строки[номер + 1] if номер + 1 < len(строки) else ""
+            return f"{причина}; {следом}" if следом.startswith("держатель") else причина
+    return строки[0] if строки else "раскладчик отказал кодом 3 без объяснения"
+
+
+# Строки суда описи (lib/layout_manifest.py) и двери: без «ключ … не задан» и
+# «порог» владелец перед Ф-в прочёл бы «снимется», хотя без ключа не снимется.
+ПРЕФИКСЫ_СТРОК_ОПИСИ = ("опись", "не снимается", "уже не было", "группа ", "ключ ", "порог",
+                        "снято", "в расписании", "расписание", "не снято",
+                        "откат по журналу", "оборванная раскладка", "оборванные журналы",
+                        "положен укладкой", "остаток оборванной", "строка журнала не понята",
+                        "по истории пакета", "вопрос о затравке", "не наш по содержимому",
+                        "чужих вне описи", "пустых вне описи", "вне корней по истории",
+                        "затравки нет", "история пакета неполная", "согласие не прочитано")
+# Дверь печатает путь архива в той же строке итога, что и числа; итог без архива — шум.
+ЗНАК_АРХИВА_В_СТРОКЕ_ДВЕРИ = ", архив "
+
+
+def _строка_описи(строка: str) -> bool:
+    return строка.startswith(ПРЕФИКСЫ_СТРОК_ОПИСИ) or (
+        строка.startswith("дверь укладки") and ЗНАК_АРХИВА_В_СТРОКЕ_ДВЕРИ in строка)
+
+
+def _напечатать_строки_описи(вывод: str) -> None:
+    """Строки описи раскладки в журнал обновления (stdout уходит в update-watch.log).
+
+    Кортеж итога не трогаем: на нём стоят вызывающие; владельцу в канал строки
+    описи не идут.
+    """
+    for строка in вывод.splitlines():
+        if _строка_описи(строка):
+            print(f"[обновление] {строка}")
+
+
+# Бюджет §3.5: ожидание замка раскладки (300 с) и сама раскладка. Постоянная модуля,
+# а не литерал: проба подменяет предел, а не спит его целиком.
+LAYOUT_TIMEOUT_SEC = 900
+ROLLBACK_SUFFIX = "-откат"
+
+
+def _layout_root() -> Path:
+    return конф_модуль.backup_dir() / "раскладка"
+
+
+def _layout_archives() -> tuple[Path, Path]:
+    """Пути архивов прямой и откатной раскладки; только выбирает.
+
+    Каталоги создаёт дверь укладки: запись в архив — её граница §0, и update.py
+    мимо неё не пишет. Имя занято (два обновления в одну секунду одним процессом) —
+    время сдвигается вперёд: имя обязано держать форму, по которой журналы ищет
+    читатель оборванных."""
+    project = конф_модуль.конфиг().get("PROJECT_NAME", "")
+    for shift in itertools.count():
+        stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(time.time() + shift))
+        forward = _layout_root() / f"{project}-{stamp}-{os.getpid()}"
+        rollback = forward.with_name(forward.name + ROLLBACK_SUFFIX)
+        if not (os.path.lexists(forward) or os.path.lexists(rollback)):
+            return forward, rollback
+
+
+def _run_layout(command: list, env: dict, timeout: float) -> subprocess.CompletedProcess:
+    """Раскладчик своей группой процессов. По пределу убивается вся группа: прежний
+    `subprocess.run` убивал одного ребёнка, а внук (генератор) продолжал писать в
+    проект. Код по пределу — -9 всегда: лидер мог выйти сам, и 0 прочёлся бы успехом."""
+    with subprocess.Popen(command, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                          text=True, start_new_session=True) as proc:
+        try:
+            out, err = proc.communicate(timeout=timeout)
+            timed_out = False
+        except subprocess.TimeoutExpired:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(proc.pid, signal.SIGKILL)
+            out, err = proc.communicate()
+            timed_out = True
+    done = subprocess.CompletedProcess(command, -9 if timed_out else proc.returncode, out, err)
+    done.timed_out = timed_out
+    return done
+
+
+# Список вопроса берёт тот же судья, что снимает: дверь прямого прогона. Итог прогона
+# ложится в LOG_DIR: `--затравка` показывает его без новой раскладки.
+_SEED_LINE = re.compile(r"^по истории пакета снял бы \d+: .+; ждёт «да, убрать»$", re.M)
+_SEED_LIST = re.compile(r"^список затравки: (\[.*\])$", re.M)
+QUESTION_CEILING = 600
+LISTED_CEILING = 400
+
+
+def _save_seed_view(stdout: str) -> None:
+    line = _SEED_LINE.search(stdout)
+    listed = _SEED_LIST.search(stdout)
+    paths = json.loads(listed.group(1)) if listed else []
+    try:
+        layout_history.record_seed_view(конф_модуль.log_dir(), datetime.now().astimezone(),
+                                        paths, line.group(0) if line else "")
+    except OSError as trouble:
+        print(f"[обновление] итог затравки не записан: {trouble.strerror or trouble}")
+
+
+def _seed_paths_since(moment) -> list:
+    """Пути последнего итога, если он записан этим прогоном, а не прежним."""
+    view = layout_history.last_seed_view(конф_модуль.log_dir())
+    if isinstance(view, layout_history.SeedView) and view.ts >= moment:
+        return view.paths
+    return []
+
+
+def _ask_about_seed(paths: list, спросить) -> None:
+    """Вопрос о файлах от прежних версий: тот же набор моложе 7 суток не повторяется.
+    Время берётся до отправки, носитель пишется только при коде 0: неотправленный
+    вопрос не должен глушить следующий."""
+    if not paths:
+        return
+    log_dir = конф_модуль.log_dir()
+    previous = layout_history.last_question(log_dir)
+    if isinstance(previous, layout_history.Unreadable):
+        print(f"[обновление] вопрос о затравке не задан: {previous.reason}")
+        return
+    text, asked = layout_history.question_text(paths, QUESTION_CEILING)
+    asked_at = datetime.now().astimezone()
+    window = timedelta(days=layout_history.CONSENT_MAX_AGE_DAYS)
+    if previous and asked_at - previous.ts < window and set(previous.paths) == set(asked):
+        return
+    if спросить(text) == 0:
+        layout_history.record_question(log_dir, asked_at, asked, text)
+
+
+def _files_words(count: int) -> str:
+    return f"{count} {_plural_ru(count, 'файл', 'файла', 'файлов')}"
+
+
+def _named(paths: list, ceiling: int = LISTED_CEILING) -> str:
+    """Пути через «, » под потолок знаков; остальные — числом: отчёт об успехе
+    длиннее жёсткого предела канала не дойдёт до владельца вовсе."""
+    shown = []
+    for path in paths:
+        if shown and len(", ".join(shown + [path])) > ceiling:
+            break
+        shown.append(path)
+    rest = len(paths) - len(shown)
+    return ", ".join(shown) + (f" и ещё {rest}" if rest else "")
+
+
+# Сообщение об обновлении несёт строку заметок простым языком, только пока
+# остаётся заметно ниже отказа сторожа канала (900/1800): вылететь из канала
+# целиком из-за выдержки оно не должно.
+RELEASE_NOTE_CEILING = 800
+
+
+def _with_release_note(message: str, package_dir) -> str:
+    """Сообщение плюс «Что нового: …» из заметок пакета, если влезает в потолок."""
+    notes = Path(package_dir) / release_notes.ИМЯ_ФАЙЛА
+    note = release_notes.кратко(notes.read_text(encoding="utf-8")) if notes.is_file() else ""
+    longer = f"{message} Что нового: {note}" if note else message
+    return longer if len(longer) <= RELEASE_NOTE_CEILING else message
+
+
+def _removed_words(archive) -> str:
+    """Что убрала раскладка, словами владельцу; по пометке журнала история и опись раздельно.
+    Журнал, который не прочитался, — не «ничего не убрано»."""
+    if not archive:
+        return ""
+    journal, reason = layout_journal.read_journal(archive)
+    if journal is None:
+        return f" Что убрано, не прочитал: {reason}." if reason else ""
+    removed = [a.path for a in journal.actions if a.kind == "снят" and a.done]
+    seeded = [p for p in removed if p in journal.seed_paths]
+    listed = len(removed) - len(seeded)
+    words = ""
+    if seeded:
+        pronoun = "он" if len(seeded) == 1 else "они"
+        words += (f" Убрал по истории пакета {_files_words(len(seeded))}: "
+                  f"{_named(seeded)} — {pronoun} в архиве копий.")
+    if listed:
+        pronoun = "он" if listed == 1 else "они"
+        words += f" Убрал {_files_words(listed)} прежней версии — {pronoun} в архиве копий."
+    return words
+
+
+def _launch_layout(archive=None, rollback_of=None, timeout=LAYOUT_TIMEOUT_SEC):
+    """Только раскладчик → True | False | LayoutNotStarted | LayoutTimedOut.
+
+    Без пересборки и доустановки: они пишут живой crontab и harness.conf, поэтому
+    пробы зовут эту половину. Архив и откат идут доводами, а не окружением процесса
+    update.py: переменная утекла бы в ворота и вложенные раскладки самотестов."""
+    command = ["bash", str(пакет() / "harness" / "razlozhit-harnes.sh")]
+    if rollback_of is not None:
+        command += ["--откат", str(rollback_of)]
+    env = {k: v for k, v in os.environ.items() if k != "HARNESS_LAYOUT_ARCHIVE"}
+    if archive is not None:
+        env["HARNESS_LAYOUT_ARCHIVE"] = str(archive)
+    done = _run_layout(command, env, timeout)
+    if getattr(done, "timed_out", False):
+        return LayoutTimedOut()
+    if done.returncode == КОД_РАСКЛАДКА_НЕ_НАЧАТА:
+        return LayoutNotStarted(_причина_отказа_раскладки(done.stderr))
+    if done.returncode != 0:
+        return False
+    _напечатать_строки_описи(done.stdout)
+    if rollback_of is None:
+        _save_seed_view(done.stdout)
+    return True
+
+
+def _разложить_пакет(archive=None, rollback_of=None) -> tuple:
+    """Раскладка пакета в проект И пересборка производных → (раскладка_ок, упавшие).
 
     Пересборка обязательна: документ устройства собирается из реестра, и без
     неё гейт `check-registry.py` краснеет побайтно — то есть КАЖДОЕ
-    обновление откатывалось бы самопроверкой (находка C1 разбора спеки).
+    обновление откатывалось бы самопроверкой. Упавшие сборщики отдаются
+    отдельно от успеха раскладки: см. `_разложить_и_проверить`.
     """
-    готово = subprocess.run(["bash", str(пакет() / "harness" / "razlozhit-harnes.sh")],
-                            capture_output=True, text=True, timeout=900)
-    if готово.returncode != 0:
-        return False
-    собрано = subprocess.run(
-        [sys.executable, str(КОРЕНЬ / "scripts" / "build-registry-doc.py")],
-        capture_output=True, text=True, timeout=300)
-    if собрано.returncode != 0:
-        return False
+    launched = _launch_layout(archive, rollback_of)
+    if not launched and not _rollback_finished(launched, archive, rollback_of):
+        return launched, []
+    упавшие = пересобрать_производные()
     # Новый демон без строки cron и без периода метки мёртв и незаметен
     # (находка C7): доустановка добавляет недостающее и ничего не удаляет.
     доставлено = subprocess.run(
         [sys.executable, str(КОРЕНЬ / "scripts" / "install-new.py")],
         capture_output=True, text=True, timeout=300)
-    return доставлено.returncode == 0
+    return bool(launched) and доставлено.returncode == 0, упавшие
+
+
+def _rollback_finished(launched, archive, rollback_of) -> bool:
+    """Откат дошёл до «итог», но дверь вернула 1 (занятый путь): файлы уже разложены, и проект
+    без пересборки производных остался бы с производными новой версии."""
+    if launched is not False or rollback_of is None or archive is None:
+        return False
+    journal = layout_journal.read_journal(archive)[0]
+    return journal is not None and journal.mode == "откат" and journal.has_total
+
+
+def _new_files_count(forward) -> int | None:
+    """Сколько файлов новой версии положил прямой прогон; None — журнал не прочитан."""
+    journal, reason = layout_journal.read_journal(forward)
+    if journal is None:
+        return 0 if reason is None else None
+    return layout_journal.count_new_version_files(journal)
+
+
+def _in_parens(count: int | None) -> str:
+    return "" if count is None else f" ({count})"
+
+
+def _rollback_report(forward, rollback, result) -> tuple[str, dict | None]:
+    """Слова владельцу об откатной раскладке и её итог по журналу отката (или None).
+
+    «Убраны: 0» без журнала отката была бы ложью: раскладчик без Ф-г игнорирует
+    довод --откат и раскладывает прежнюю версию как обычно."""
+    count = _new_files_count(forward)
+    journal, reason = layout_journal.read_journal(rollback)
+    outcome = layout_journal.rollback_outcome(journal) if journal is not None else None
+    finished = outcome is not None and outcome["по журналу"]
+    if isinstance(result, LayoutTimedOut):
+        if finished and not journal.has_total:
+            return (f" Откат оборван по времени: возвращено {outcome['снято'] + outcome['возвращено']}, "
+                    f"осталось {outcome['строк без готово']}."), None
+        return (f" Откат оборван по времени: файлы новой версии могут остаться"
+                f"{_in_parens(count)}."), None
+    if isinstance(result, LayoutNotStarted):
+        return f" Файлы новой версии не убраны{_in_parens(count)}: {result.reason.rstrip('.')}.", None
+    if not result and finished and journal.has_total:
+        return _occupied_words(outcome), outcome
+    if not result:
+        return (" Внимание: раскладка прежней версии не удалась — проект может "
+                "нести устаревшие производные."), None
+    if reason:
+        return (f" Файлы новой версии не убраны{_in_parens(count)}: "
+                f"журнал отката не прочитан: {reason}."), None
+    if not finished:
+        return (" Файлы новой версии не убраны: прежняя версия раскладчика "
+                "откатывать по журналу не умеет."), None
+    return _rollback_words(outcome), outcome
+
+
+def _rollback_words(outcome: dict) -> str:
+    words = (f" Файлы новой версии убраны: {outcome['снято']}. "
+             f"Свои файлы возвращены: {outcome['возвращено']}.")
+    kept = Counter(why for why, _ in outcome["оставлено"])
+    edited = kept.pop("правлен после обновления", 0)
+    if edited:
+        words += f" Оставлено на месте (правлены после обновления): {edited}."
+    other = sum(kept.values())
+    if other:
+        words += f" Оставлено на месте по другим причинам: {other}."
+    return words
+
+
+def _occupied_words(outcome: dict) -> str:
+    busy = [path for why, path in outcome["оставлено"] if why == "занято"]
+    return (f"{_rollback_words(outcome)} Есть занятые пути, не возвращены ({len(busy)}): "
+            f"{', '.join(busy[:5])}. Производные пересобраны.")
+
+
+def _orphan_report(archives) -> tuple[str, list]:
+    """Прошлые раскладки без итога, которые разобрала эта постановка (прямой или откатный
+    прогон назвал свой архив в строке «разобран»). Числа берутся из журналов, а не из
+    вывода двери: вывод могли не прочесть."""
+    project = конф_модуль.конфиг().get("PROJECT_NAME", "")
+    found = layout_journal.resolved_by_archive(
+        str(_layout_root()), project, {str(archive) for archive in archives})
+    names = [[Path(str(archive)).name, k] for archive, k in found]
+    words = "".join(
+        f" Прошлая раскладка оборвалась на середине: {k} {_plural_ru(k, 'файл', 'файла', 'файлов')} без итога."
+        for _, k in names)
+    return words, names
+
+
+def _archive_line(result: dict) -> str | None:
+    """Строка журнала обновления: где архив раскладки и что в нём; архива нет — нет строки."""
+    archive = result.get("архив раскладки")
+    journal = layout_journal.read_journal(archive)[0] if archive else None
+    if journal is None:
+        return None
+    kinds = Counter(action.kind for action in journal.actions)
+    return (f"[обновление] архив раскладки: {archive}; перекрыто {kinds['перекрыт']}, "
+            f"новых {kinds['положен-новый']}, снято {kinds['снят']}")
 
 
 def _перезапустить_службы() -> bool:
@@ -401,15 +1061,41 @@ def _перезапустить_службы() -> bool:
 КОД_ЕСТЬ_НОВОЕ = 3
 
 
+def _seed_command(ask: bool) -> int:
+    """Итог последней раскладки: ничего не раскладывает и не пишет в проект. Спрашивает
+    только по `--затравка-спросить`, и то по найденному последним прогоном."""
+    view = layout_history.last_seed_view(конф_модуль.log_dir())
+    if view is None:
+        print("[обновление] затравки нет: прогона ещё не было")
+        return 0
+    if isinstance(view, layout_history.Unreadable):
+        print(f"[обновление] затравка не прочитана: {view.reason}", file=sys.stderr)
+        return 1
+    stamp = f"прогон {view.ts:%Y-%m-%d %H:%M}"
+    if not view.paths:
+        print(f"[обновление] снимать по истории нечего ({stamp})")
+        return 0
+    print(f"[обновление] {view.line} ({stamp})")
+    if ask:
+        _ask_about_seed(view.paths, _спросить_владельца)
+    return 0
+
+
 def main(argv: list) -> int:
     if "--поставить" in argv:
-        итог = поставить(сказать=_сказать_владельцу)
+        итог = поставить(сказать=_сказать_владельцу,
+                         reset_own="--сбросить-свои" in argv)
+        archive_line = _archive_line(итог)
+        if archive_line:
+            print(archive_line)
         if итог.get("поставлено"):
             print(f"[обновление] поставлено: {итог['коммит'][:7]}; "
                   f"проверки: {итог['проверки']}")
             return 0
         print(f"[обновление] не поставлено: {итог.get('беда')}", file=sys.stderr)
         return 1
+    if "--затравка" in argv or "--затравка-спросить" in argv:
+        return _seed_command("--затравка-спросить" in argv)
     if "--версия" in argv:
         версия = версия_установки()
         print(json.dumps(версия or {"нет данных": "версия ещё не записана"},

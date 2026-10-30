@@ -176,7 +176,8 @@ def позвать(механизм: str, команда: str) -> tuple[int, str
     имя = механизм.replace("/", "-") + ".log"
     try:
         готово = subprocess.run(["bash", "scripts/live-check.sh", механизм, "--",
-                                 "bash", "-c", команда],
+                                 # pipefail и -e: хвостовая команда конвейера прятала отказ первой
+                                 "bash", "-o", "pipefail", "-e", "-c", команда],
                                 cwd=КОРЕНЬ, capture_output=True, text=True,
                                 env=среда, timeout=предел)
         код = готово.returncode

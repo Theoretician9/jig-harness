@@ -14,6 +14,7 @@ import datetime
 import json
 import os
 import pathlib
+import re
 import subprocess
 import sys
 import tempfile
@@ -397,6 +398,15 @@ CASES = [
     (0, "класс символов ломает самосовпадение — законная форма",
      'until ! pgrep -f "[c]ollectors/progon_dvizhka.py" >/dev/null; do sleep 30; done'),
     (0, "ожидание по PID — рекомендованная форма", "until ! kill -0 243581 2>/dev/null; do sleep 30; done"),
+    # п.4 отчёта чужого сервера 25.10: разовая проверка живости той формой, которую
+    # сторож советует сам, обязана проходить в любой записи кавычек.
+    (0, "п.4: рекомендованная форма «[t]g-…» в двойных кавычках проходит",
+     'pgrep -af "[t]g-dispatcher"'),
+    (0, "п.4: та же форма в одинарных кавычках", "pgrep -af '[t]g-dispatcher'"),
+    (0, "п.4: та же форма без кавычек", "pgrep -af [t]g-dispatcher"),
+    (0, "п.4: класс с продолжением имени (.sh)", 'pgrep -af "[t]g-dispatcher.sh"'),
+    (2, "п.4: голое имя tg-dispatcher — самосовпадение, отказ", 'pgrep -f "tg-dispatcher"'),
+    (2, "п.4: голое имя через -af", "pgrep -af tg-dispatcher"),
     # --- ожидание без предела времени (замер 12.09.2026) ---
     # БОЛЬНОЙ СЛУЧАЙ, ради которого правило: ожидание строки в логе не кончится
     # НИКОГДА, если прогон упал и строки не будет. Замер по журналам: 96 раз
@@ -434,6 +444,22 @@ CASES = [
     (0, "шаблон из переменной — раскрытия нет, самосовпадения не доказать", 'pgrep -f "$ИМЯ"'),
     (0, "В-3: pgrep в тексте документации — не команда", "grep -rn 'pgrep -f' docs/"),
     (0, "В-3: echo про pgrep — не команда", "echo 'не жди через pgrep -f progon_dvizhka.py'"),
+    # Тревогу заводит и снимает сторож, а не смена (R1-01, второй носитель после
+    # родословной процесса): отрыв через setsid делает сироту без предка claude.
+    (2, "ALERT-1: alert-task.py --resolve из сессии",
+     "python3 scripts/alert-task.py --resolve nightly-gates:red"),
+    (2, "ALERT-2: --key из сессии с пустым CLAUDE_CODE_SESSION_ID=",
+     "CLAUDE_CODE_SESSION_ID= python3 scripts/alert-task.py --key a:b --title t"),
+    (2, "ALERT-3: env -u снимает признак сессии — правило всё равно ловит",
+     "env -u CLAUDE_CODE_SESSION_ID python3 scripts/alert-task.py --resolve a:b"),
+    (2, "ALERT-4: отрыв setsid nohup с полным путём",
+     "setsid nohup python3 /var/www/project/scripts/alert-task.py --resolve a:b > /dev/null 2>&1 &"),
+    (2, "ALERT-5: timeout перед писателем",
+     "timeout 30 python3 scripts/alert-task.py --key a:b --title t"),
+    (0, "ALERT-6: --is-green — чтение, не запрещено",
+     "python3 scripts/alert-task.py --is-green nightly-gates:red"),
+    (0, "ALERT-7: --open — чтение, не запрещено", "python3 scripts/alert-task.py --open"),
+    (0, "ALERT-8: имя писателя в grep — не зов", "grep -n -- '--resolve' scripts/alert-task.py"),
 ]
 
 # Литералы стенда учёта стоят в случаях ТЕКСТОМ (подстановка внутри строки
@@ -444,6 +470,47 @@ _КОМАНДЫ_СЛУЧАЕВ = " ".join(к for _, _, к in CASES)
 for _литерал in _ЛИТЕРАЛЫ_УЧЁТА:
     assert _литерал in _КОМАНДЫ_СЛУЧАЕВ, (
         f"стенд учёта знает «{_литерал}», а ни один случай его не называет")
+
+# Гнездо tmux: каталог /tmp/tmux-<uid> держит сокет ЖИВОГО сервера агента; снесённое
+# гнездо сторож смены читает как «агент пропал» и поднимает вторую смену (улики
+# 29.10.2026). Решается по тексту команды, ничего не удаляется.
+CASES += [
+    (2, "гнездо tmux: чистка /tmp всего, кроме claude-* (улика 1)",
+     "find /tmp -mindepth 1 -maxdepth 1 ! -name 'claude-*' -exec rm -rf {} +"),
+    (2, "гнездо tmux: rm -rf живого каталога-сокета (улика 2)", "rm -rf /tmp/tmux-1004"),
+    (2, "гнездо tmux: find -name 'tmux-*' -delete (улика 3)",
+     "find /tmp -name 'tmux-*' -delete"),
+    (2, "гнездо tmux: rm -rf /tmp/tmux-* (шаблон не решается)", "rm -rf /tmp/tmux-*"),
+    (2, "гнездо tmux: rm -rf /tmp/* сносит всё", "rm -rf /tmp/*"),
+    (2, "гнездо tmux: rm -rf /tmp целиком", "rm -rf /tmp"),
+    (2, "гнездо tmux: сокет сервера прямым путём", "rm /tmp/tmux-1004/default"),
+    (2, "гнездо tmux: find /tmp -exec rm без исключения", "find /tmp -mindepth 1 -exec rm -rf {} +"),
+    (2, "гнездо tmux: find /tmp -mtime -delete без выборки по имени", "find /tmp -mtime +1 -delete"),
+    (2, "гнездо tmux: в bash -c тоже", "bash -c 'rm -rf /tmp/tmux-1004'"),
+    (0, "гнездо tmux: свой каталог в /tmp/claude-*", "rm -rf /tmp/claude-1004/scratch/x"),
+    (0, "гнездо tmux: свой временный файл", "rm -f /tmp/my-probe.log"),
+    (0, "гнездо tmux: find -name '*.log' -delete", "find /tmp -name '*.log' -delete"),
+    (0, "гнездо tmux: чистка с исключением tmux-* и claude-*",
+     "find /tmp -mindepth 1 -maxdepth 1 ! -name 'claude-*' ! -name 'tmux-*' -exec rm -rf {} +"),
+    (0, "гнездо tmux: только обычные файлы (-type f)", "find /tmp -type f -mtime +3 -delete"),
+    (0, "дверь (а): чистка /tmp штатным tmp-sweep", "python3 scripts/tmp-sweep.py"),
+    (0, "дверь (б): свой пробный сервер гасится через tmux", "tmux -L w2probe kill-server"),
+    # Ревью M2: тот же снос другой записью пути или другим глаголом.
+    (2, "гнездо tmux: find | xargs rm без исключения", "find /tmp -name 'tmux-*' | xargs rm -rf"),
+    (2, "гнездо tmux: cd /tmp и шаблон относительно", "cd /tmp && rm -rf tmux-*"),
+    (2, "гнездо tmux: cd /tmp и find . -delete", "cd /tmp && find . -delete"),
+    (2, "гнездо tmux: cd /tmp и find . -path './tmux-*'", "cd /tmp && find . -path './tmux-*' -delete"),
+    (2, "гнездо tmux: find / -path '/tmp/tmux-*'", "find / -path '/tmp/tmux-*' -delete"),
+    (2, "гнездо tmux: find / -mtime без выборки по имени", "find / -mtime +1 -delete"),
+    (2, "гнездо tmux: //tmp — тот же /tmp", "rm -rf //tmp"),
+    (2, "гнездо tmux: /var/../tmp — тот же /tmp", "rm -rf /var/../tmp"),
+    (2, "гнездо tmux: mv шаблоном уносит гнездо", "mv /tmp/tmux-* /tmp/old"),
+    (0, "гнездо tmux: mv В /tmp — цель не сносится", "mv build.log /tmp/"),
+    (0, "гнездо tmux: cd /tmp и свой файл", "cd /tmp && rm -f my-probe.log"),
+    (0, "гнездо tmux: cd в чужой каталог и tmux-* там", "cd src && rm -rf tmux-1004"),
+    (0, "гнездо tmux: find / -name '*.pyc' -delete", "find / -name '*.pyc' -delete"),
+    (0, "гнездо tmux: unlink своего сокета", "unlink /tmp/my.sock"),
+]
 
 # Случаи БЕЗ install.conf: (ожидаемый код, описание, команда). Гоняются с
 # HARNESS_INSTALL_CONF на заведомо несуществующий файл. Раньше лежали в CASES,
@@ -934,6 +1001,69 @@ def проверить_прогон_в_сессии() -> int:
     return плохо
 
 
+def проверить_гнездо_tmux() -> tuple[int, int]:
+    """Дверь (в): гнездо без живого владельца удалять можно, с живым — нет.
+
+    Условие создаётся здесь: два каталога tmux-* со своими сокетами — один держит
+    слушающий сокет, у другого сокет-файл остался от умершего сервера. Агентский
+    /tmp/tmux-<uid> не трогается. Заодно сверяется «одна правда»: префикс, который
+    бережёт сторож, обязан стоять в списке защищённых имён уборщика /tmp.
+    """
+    import shutil
+    import socket
+    плохо = 0
+    путей = 0
+    ядро = pathlib.Path(__file__).resolve().parents[2]
+    списки = [ядро / "harness" / "config" / "tmp-sweep.yaml",
+              ядро / "config" / "tmp-sweep.yaml"]
+    текст = next((c.read_text(encoding="utf-8") for c in списки if c.exists()), "")
+    путей += 1
+    if '"tmux-"' not in текст:
+        print("  ПЛОХО  tmux-: уборщик /tmp не называет префикс защищённым (или список не найден)")
+        плохо += 1
+    else:
+        print("  ок  tmux-: префикс гнезда назван защищённым в tmp-sweep.yaml")
+    жив = tempfile.mkdtemp(prefix="tmux-w2live-", dir="/tmp")
+    мёртв = tempfile.mkdtemp(prefix="tmux-w2dead-", dir="/tmp")
+    слушатель = socket.socket(socket.AF_UNIX)
+    бывший = socket.socket(socket.AF_UNIX)
+    try:
+        слушатель.bind(f"{жив}/default")
+        слушатель.listen(1)
+        бывший.bind(f"{мёртв}/default")
+        бывший.listen(1)
+        бывший.close()                    # файл остаётся, слушателя нет
+        среда = dict(os.environ, TMPDIR="/tmp")
+        for ждём, описание, команда, слово in [
+            (2, "живой сервер в каталоге: rm -rf отменён", f"rm -rf {жив}", "kill-server"),
+            (2, "живой сокет прямым путём отменён", f"rm {жив}/default", "tmp-sweep"),
+            (2, "живой: find по гнезду -delete отменён", f"find {жив} -delete", ""),
+            (0, "умерший: find по гнезду -delete пропущен", f"find {мёртв} -delete", ""),
+            (2, "живой: cd /tmp и относительное имя", f"cd /tmp && rm -rf {os.path.basename(жив)}", ""),
+            (2, "живой: путь через /./", f"rm -rf /tmp/./{os.path.basename(жив)}", ""),
+            (2, "живой: путь через $TMPDIR", f"rm -rf $TMPDIR/{os.path.basename(жив)}", ""),
+            (2, "живой: mv уносит гнездо", f"mv {жив} /tmp/w2-унесено", ""),
+            (2, "живой: unlink сокета", f"unlink {жив}/default", ""),
+            (0, "умерший: mv гнезда пропущен", f"mv {мёртв} {мёртв}-x", ""),
+            (0, "каталог умершего сервера: дверь (в) открыта", f"rm -rf {мёртв}", ""),
+            (0, "несуществующее гнездо: удалять нечего", "rm -rf /tmp/tmux-w2-net-такого", ""),
+        ]:
+            путей += 1
+            код, вывод = run_вывод(команда, env=среда)
+            ок = код == ждём and (слово in вывод)
+            if ок:
+                print(f"  ок  дверь (в): {описание}")
+            else:
+                print(f"  ПЛОХО  дверь (в): {описание} — код {код}, слово «{слово}» "
+                      f"{'есть' if слово in вывод else 'нет'} в отказе")
+                плохо += 1
+    finally:
+        слушатель.close()
+        shutil.rmtree(жив, ignore_errors=True)
+        shutil.rmtree(мёртв, ignore_errors=True)
+    return плохо, путей
+
+
 def _загрузить_сторожа():
     """Модуль сторожа — ИЗ ТОГО ЖЕ файла, что запускает run_процессом.
 
@@ -987,9 +1117,84 @@ def проверить_подсказку_pgrep() -> tuple[int, int]:
     else:
         print(f"  ПЛОХО  отказ советует литерал: код {p.returncode}, «[[]» есть={если_литерал}")
         плохо += 1
+    # БОЛЬНОЙ СЛУЧАЙ п.4 отчёта чужого сервера 25.10: шаблон УЖЕ с классом, а имя
+    # стоит литералом в другом звене той же команды. Отказ верен — замер
+    # 26.10: `bash -c "pgrep -af '[z]z-…'; echo zz-…"` нашёл саму оболочку
+    # bash -c. Но отказ советовал «классом символов, он ломает
+    # самосовпадение: pgrep -af "[t]g-dispatcher"» — ту самую форму, что и
+    # отменил. Подсказка обязана назвать, ЧТО совпало (литерал в другом
+    # звене), и не обещать, что класс поможет: он уже стоит.
+    путей += 1
+    p = subprocess.run(
+        GUARD,
+        input=json.dumps({"tool_name": "Bash", "tool_input": {
+            "command": 'pgrep -af "[t]g-dispatcher" || echo "нет tg-dispatcher"'}}),
+        capture_output=True, text=True,
+    )
+    своя_часть = p.stderr.split("Сторож отменяет ВСЮ")[0]
+    назвал_литерал = "«tg-dispatcher»" in своя_часть
+    обещает_класс = "ломает самосовпадение" in своя_часть
+    if p.returncode == 2 and назвал_литерал and not обещает_класс:
+        print("  ок  БОЛЬНОЙ п.4: шаблон уже с классом — отказ называет совпавший литерал,"
+              " класс не обещает")
+    else:
+        print(f"  ПЛОХО  БОЛЬНОЙ п.4: код {p.returncode}, назван литерал «tg-dispatcher»="
+              f"{назвал_литерал}, обещает класс={обещает_класс} — отказ советует ту же форму")
+        плохо += 1
     return плохо, путей
 
 
+def проверить_совет_проходит() -> tuple[int, int]:
+    """Совет сторожа обязан проходить самого сторожа.
+
+    БОЛЬНОЙ СЛУЧАЙ п.4 отчёта другой установки, ветка литерала (замер 28.10): шаблон без
+    класса, а имя стоит литералом и в другом звене команды (путь лога, строка
+    echo). Отказ верен, но советует «классом символов, он ломает
+    самосовпадение» — подставленный в ту же команду, этот совет сторож
+    отменяет снова: литерал в другом звене никуда не делся.
+    Правило судится поведением: для каждого совета `pgrep -af "<X>"` из отказа
+    (1) сам совет отдельной командой проходит; (2) либо отказ велит вынести
+    проверку отдельной командой, либо команда с подставленным советом проходит.
+    """
+    имя = "tg-" + "dispatcher"
+    случаи = [  # (команда, шаблон в ней как написан, имя случая, совет обязан подставляться)
+        (f"until pgrep -f {имя}; do sleep 1; done; tail -3 /var/log/harness/{имя}.log", имя,
+         "БОЛЬНОЙ п.4-литерал: until pgrep -f <имя> …; tail …/<имя>.log", False),
+        (f'pgrep -af {имя} || echo "нет {имя}"', имя,
+         "БОЛЬНОЙ п.4-литерал: pgrep -af <имя> || echo \"нет <имя>\"", False),
+        ("until pgrep -f gates.sh; do sleep 5; done", "gates.sh",
+         "сосед: имя только в шаблоне — совет подставляется в ту же команду", True),
+        (f'pgrep -af "[t]g-dispatcher" || echo "нет {имя}"', '"[t]g-dispatcher"',
+         "сосед: шаблон уже с классом, имя в другом звене", False),
+    ]
+    плохо, путей = 0, 0
+    for cmd, шаблон, назв, подставлять in случаи:
+        путей += 1
+        код, текст = run_вывод(cmd)
+        своя_часть = текст.split("Сторож отменяет ВСЮ")[0]
+        советы = re.findall(r'^\s+pgrep -af "([^"]+)"', своя_часть, re.M)
+        беды = []
+        if код != 2:
+            беды.append(f"отказа нет (код {код})")
+        if not советы:
+            беды.append("в отказе нет совета pgrep -af")
+        отдельно = "отдельной командой" in своя_часть
+        if подставлять and отдельно:
+            беды.append("имени вне шаблона нет, а отказ велит выносить проверку отдельной командой")
+        for совет in советы:
+            один = f'pgrep -af "{совет}"'
+            if run_процессом(один) != 0:
+                беды.append(f"совет «{один}» отдельной командой отменён")
+            if not отдельно:
+                подставлено = cmd.replace(шаблон, f'"{совет}"', 1)
+                if run_процессом(подставлено) != 0:
+                    беды.append(f"совет, подставленный в ту же команду, отменён: «{подставлено}»")
+        if беды:
+            print(f"  ПЛОХО  {назв} — {'; '.join(беды)}")
+            плохо += 1
+        else:
+            print(f"  ок  {назв}")
+    return плохо, путей
 
 
 def run_процессом(cmd: str, tool: str = "Bash", env: dict | None = None) -> int:
@@ -1333,9 +1538,15 @@ def main() -> int:
         fake.wait()
 
     bad += проверить_прогон_в_сессии()
+    _плохо_т, _путей_т = проверить_гнездо_tmux()
+    bad += _плохо_т
+    total += _путей_т
     _плохо_п, _путей_п = проверить_подсказку_pgrep()
     bad += _плохо_п
     total += _путей_п
+    _плохо_с, _путей_с = проверить_совет_проходит()
+    bad += _плохо_с
+    total += _путей_с
     _плохо, _путей = проверить_публикацию_мимо_двери()
     bad += _плохо
     total += _путей

@@ -45,6 +45,7 @@
     python3 scripts/acceptance.py              # сухой прогон: только отчёт
     python3 scripts/acceptance.py --применить  # + записать исходы в карту
     python3 scripts/acceptance.py --selftest
+    python3 scripts/acceptance.py --кандидаты  # «сделано, но не заявлено»: только список
 Код возврата: 0 — прогон состоялся, 1 — есть провалы.
 """
 from __future__ import annotations
@@ -61,6 +62,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
 import config as конф                                    # noqa: E402
 import cards as разбор_карточки                     # noqa: E402
+import patterns as формы                            # noqa: E402
 
 КОРЕНЬ = Path(__file__).resolve().parent.parent
 КАРТА = КОРЕНЬ / "dev-map.yaml"
@@ -184,6 +186,12 @@ def запрещено(звено: str) -> bool:
     re.compile(rf"test -s {БЕЗОПАСНЫЙ_ПУТЬ}"),
     re.compile(rf"grep -c ('[^']*'|\"[^\"]*\"|\S+) {БЕЗОПАСНЫЙ_ПУТЬ}"),
     re.compile(r"curl -s http://127\.0\.0\.1[\w:/.?=-]*"),
+    # Карточка тревоги сторожа проверяется ЕЁ ЖЕ формой: читающий вопрос
+    # «ключ тревоги снова зелёный?». Ключ узкий (строчная латиница, цифры,
+    # «:._-», до 80 знаков, первый знак буква или цифра): пустой, с пробелом,
+    # «;» или «..» сюда не пройдёт, а пишущие флаги скрипта (--resolve,
+    # --drain, --key) форме не соответствуют вовсе.
+    re.compile(r"python3 scripts/alert-task\.py --is-green [a-z0-9][a-z0-9:._-]{0,79}"),
 )
 
 
@@ -198,6 +206,7 @@ def запрещено(звено: str) -> bool:
     "grep -c '<образец>' <путь относительно корня проекта>",
     "curl -s http://127.0.0.1<адрес>",
     "bash scripts/test_<имя>.sh              (скрипт-проба, флаг не нужен)",
+    "python3 scripts/alert-task.py --is-green <ключ тревоги>   (карточка тревоги сторожа)",
     "любые две-три формы выше через «&&»     (ждём тогда СПИСКОМ, по строке на звено)",
 )
 
@@ -347,7 +356,164 @@ def судить(задача: dict, корень: Path) -> dict:
     if вердикт["исход"] == "доказать-нечем" and почему_владельцу:
         return {**вердикт, "исход": "ждёт-владельца",
                 "почему": f"доказать может только владелец: {почему_владельцу}"}
+    if вердикт["исход"] == "доказано":
+        долг = долг_мутаций_задачи(задача, корень)
+        if долг:
+            return {**вердикт, "исход": "ждёт-мутаций", "почему": долг}
     return вердикт
+
+
+# ── Мутации — долг до принятия (пульт pipeline.yaml, ключ «шаги_приёмки») ──
+ИТОГ_МУТАЦИЙ = re.compile(r"дыр (\d+)")
+ПРИБОР_МУТАЦИЙ = ["bash", "scripts/mutation-probe.sh"]
+_ПАЙПЛАЙН = []
+
+
+def шаги_приёмки_карточки(задача: dict, корень: Path):
+    """Шаги, отложенные пайплайном до приёмки; None — история не прочитана.
+
+    Судья один — гейт пайплайна. Раскладка без него (стенд демона) пайплайна
+    не ведёт, и требовать его шагов там некому.
+    """
+    if not _ПАЙПЛАЙН:
+        путь = Path(__file__).resolve().parent / "check-pipeline.py"
+        if not путь.is_file():
+            return []
+        import importlib.util
+        спец = importlib.util.spec_from_file_location("check_pipeline", путь)
+        модуль = importlib.util.module_from_spec(спец)
+        спец.loader.exec_module(модуль)
+        _ПАЙПЛАЙН.append(модуль)
+    return _ПАЙПЛАЙН[0].шаги_приёмки_задачи(задача, корень)
+
+
+def последний_коммит(ид: str, корень: Path) -> float | None:
+    """Время последнего коммита задачи (эпоха); None — git молчит."""
+    try:
+        ответ = subprocess.run(
+            ["git", "-C", str(корень), "log", "-1", "--format=%ct",
+             f"--grep=^Dev-Map: {ид}$", "--extended-regexp"],
+            capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if ответ.returncode != 0 or not ответ.stdout.strip():
+        return None
+    return float(ответ.stdout.strip())
+
+
+def журнал_мутаций(корень: Path, ид: str) -> Path:
+    return корень / ".tasks" / ид / "мутации.log"
+
+
+def долг_мутаций(ид: str, корень: Path, отложенные, последний: float | None) -> str | None:
+    """Почему мутации задачи не закрыты; None — долга нет.
+
+    Закрывает долг только итог «дыр 0» в журнале НОВЕЕ последнего коммита:
+    журнал от прошлого кода доказывает прошлый код.
+    """
+    if "мутации" not in (отложенные or ()):
+        return None
+    журнал = журнал_мутаций(корень, ид)
+    if not журнал.is_file():
+        return f"мутации: ждут ночи — нет .tasks/{ид}/мутации.log"
+    итоги = ИТОГ_МУТАЦИЙ.findall(журнал.read_text(encoding="utf-8", errors="replace"))
+    if not итоги:
+        return "мутации: в журнале нет итога «дыр N» — мутаций механизмов задачи нет"
+    if int(итоги[-1]):
+        return f"мутации: дыр {итоги[-1]} — проба слабая, карточка заведена"
+    if последний is None or журнал.stat().st_mtime < последний:
+        return "мутации: журнал старше последнего коммита задачи — ждут ночи"
+    return None
+
+
+def долг_мутаций_задачи(задача: dict, корень: Path) -> str | None:
+    """Долг мутаций карточки. История задачи — в репозитории харнеса (КОРЕНЬ),
+    журнал — там, где судятся её проверки (корень)."""
+    ид = задача.get("id", "?")
+    отложенные = шаги_приёмки_карточки(задача, КОРЕНЬ)
+    if отложенные is None:
+        return "мутации: история задачи не прочитана (git молчит) — долг не судим"
+    if "мутации" not in отложенные:
+        return None
+    return долг_мутаций(ид, корень, отложенные, последний_коммит(ид, КОРЕНЬ))
+
+
+def файлы_задачи(ид: str, корень: Path) -> list[str]:
+    """Существующие файлы из коммитов задачи — кандидаты в механизмы."""
+    ответ = subprocess.run(
+        ["git", "-C", str(корень), "-c", "core.quotepath=false", "log", "--format=",
+         "--name-only", f"--grep=^Dev-Map: {ид}$", "--extended-regexp"],
+        capture_output=True, text=True, timeout=120)
+    имена = dict.fromkeys(с for с in ответ.stdout.splitlines() if с.strip())
+    return [и for и in имена if (корень / и).is_file()]
+
+
+def мутации_задачи(ид: str, корень: Path, прибор: list[str]) -> int | None:
+    """Прогнать мутации механизмов задачи в её журнал. Дыр N; None — мутаций нет."""
+    покраснели = дыр = 0
+    куски = []
+    for файл in файлы_задачи(ид, корень):
+        ответ = subprocess.run(прибор + ["--механизм", файл], cwd=str(корень),
+                               capture_output=True, text=True, errors="replace")
+        вывод = ответ.stdout + ответ.stderr
+        if "записей для механизма нет" in вывод:
+            continue
+        итог = re.findall(r"покраснели как надо (\d+), дыр (\d+)", вывод)
+        # Прибор без итога ничего не доказал — это дыра, а не тишина.
+        к, д = (int(итог[-1][0]), int(итог[-1][1])) if итог else (0, 1)
+        покраснели += к
+        дыр += д
+        куски.append(f"--- {файл}\n{вывод}")
+    if not куски:
+        итог = f"=== мутации задачи {ид}: мутаций для её файлов в таблице нет ==="
+    else:
+        итог = f"=== мутации задачи {ид}: покраснели {покраснели}, дыр {дыр} ==="
+    журнал = журнал_мутаций(корень, ид)
+    журнал.parent.mkdir(parents=True, exist_ok=True)
+    журнал.write_text("\n".join(куски + [итог]) + "\n", encoding="utf-8")
+    return дыр if куски else None
+
+
+def ночные_мутации(карта: dict, корень: Path, прибор: list[str], писатель) -> list:
+    """Ночь: мутации задач `test` с долгом. Дыр 0 гасит карточку слабой пробы,
+    дыры или их отсутствие заводят её. Отдаёт [(id, дыр | None)]."""
+    import hashlib
+    итог = []
+    for з in карточки(карта):
+        if з.get("status") != "test":
+            continue
+        долг = долг_мутаций_задачи(з, корень)
+        if not долг or "не прочитана" in долг:
+            continue
+        ид = з.get("id", "?")
+        дыр = мутации_задачи(ид, корень, прибор)
+        ключ = "task-mutations:" + hashlib.sha1(ид.encode()).hexdigest()[:12]
+        if дыр == 0:
+            писатель(["--resolve", ключ])
+        else:
+            беда = f"дыр {дыр}" if дыр else "мутаций для её механизмов нет"
+            писатель(["--key", ключ, "--title", f"Проба слабая: мутации задачи {ид} — {беда}",
+                      "--text", f"Журнал .tasks/{ид}/мутации.log. Приёмка не примет задачу, "
+                                "пока мутации механизмов задачи не покраснеют все."])
+        итог.append((ид, дыр))
+    return итог
+
+
+def _ночные_мутации() -> int:
+    import shlex
+    import yaml
+    карта = yaml.safe_load(КАРТА.read_text(encoding="utf-8"))
+    прибор = shlex.split(os.environ.get("HARNESS_MUTATION_PROBE") or "") or ПРИБОР_МУТАЦИЙ
+
+    def писатель(доводы: list) -> None:
+        subprocess.run([sys.executable, str(КОРЕНЬ / "scripts" / "alert-task.py"), *доводы],
+                       stdin=subprocess.DEVNULL, capture_output=True, timeout=120)
+
+    итог = ночные_мутации(карта, КОРЕНЬ, прибор, писатель)
+    for ид, дыр in итог:
+        print(f"  {ид}: " + ("мутаций нет" if дыр is None else f"дыр {дыр}"))
+    print(f"мутации задач с долгом: {len(итог)}")
+    return 0
 
 
 def негодна_почему(задача: dict) -> str | None:
@@ -883,6 +1049,8 @@ def _selftest() -> int:
         "curl -s http://127.0.0.1<адрес>": "curl -s http://127.0.0.1:8080/health",
         "bash scripts/test_<имя>.sh              (скрипт-проба, флаг не нужен)":
             "bash scripts/test_memory_commit.sh",
+        "python3 scripts/alert-task.py --is-green <ключ тревоги>   (карточка тревоги сторожа)":
+            "python3 scripts/alert-task.py --is-green nightly-gates:red",
         "любые две-три формы выше через «&&»     (ждём тогда СПИСКОМ, по строке на звено)":
             "python3 scripts/acceptance.py --selftest && test -s dev-map.yaml",
         }
@@ -1372,6 +1540,78 @@ queue: []
           судить({**его_задача, "owner_testable": False,
                   "как_проверить": None}, Path.cwd())["исход"])
 
+    # ── «Сделано, но не заявлено» (план 28.10, пункт 1в) ──────────────────
+    # БОЛЬНОЙ СЛУЧАЙ 28.10: 14 карточек с чеклистом 100 %, но закрыты в них
+    # следы «Коммит …», а не работа. Кандидат судится по пунктам РАБОТЫ.
+    now = 1_800_000_000.0
+    day = 86400.0
+    commit_items = [{"label": "Коммит a1: правка", "done": True},
+                    {"label": "Коммит b2: правка", "done": True}]
+    work_done = commit_items + [{"label": "Шаг 1", "done": True}]
+    work_open = commit_items + [{"label": "Шаг 1"}]
+    stand_cards = [
+        {"id": "к.готова", "status": "plan", "checklist": work_done},
+        {"id": "к.wip-готова", "status": "wip", "checklist": work_done},
+        {"id": "к.работа-открыта", "status": "plan", "checklist": work_open},
+        {"id": "к.одни-коммиты", "status": "plan", "checklist": commit_items},
+        {"id": "к.свежая", "status": "wip", "checklist": work_done},
+        {"id": "к.без-коммитов", "status": "plan", "checklist": work_done},
+        {"id": "к.старая", "status": "plan", "checklist": work_done},
+        {"id": "к.уже-test", "status": "test", "checklist": work_done},
+    ]
+    stand_times = {"к.готова": [now - 2 * day], "к.wip-готова": [now - day],
+                   "к.работа-открыта": [now - 2 * day],
+                   "к.одни-коммиты": [now - 2 * day],
+                   "к.свежая": [now - 3 * day, now - 3600],
+                   "к.старая": [now - 40 * day], "к.уже-test": [now - 2 * day]}
+    found = set(done_but_unclaimed(stand_cards, stand_times, now))
+    проба("БОЛЬНОЙ СЛУЧАЙ: закрыты одни «Коммит …», работа открыта — не кандидат",
+          False, "к.работа-открыта" in found)
+    проба("кандидаты: plan с коммитом и закрытой работой — в списке", True,
+          "к.готова" in found)
+    проба("кандидаты: wip с закрытой работой — в списке", True, "к.wip-готова" in found)
+    проба("кандидаты: без пунктов работы судить не по чему — нет", False,
+          "к.одни-коммиты" in found)
+    проба("кандидаты: коммит последних часов — работа идёт, нет", False,
+          "к.свежая" in found)
+    проба("кандидаты: без коммитов задачи — нет", False, "к.без-коммитов" in found)
+    проба("кандидаты: коммиты старше окна — нет", False, "к.старая" in found)
+    проба("кандидаты: уже test — заявлена, нет", False, "к.уже-test" in found)
+    проба("кандидаты: статус машина НЕ меняет", ["plan", "wip"],
+          [card["status"] for card in stand_cards
+           if card["id"] in ("к.готова", "к.wip-готова")])
+
+    # Времена коммитов читаются из трейлера Dev-Map настоящего git-стенда.
+    with tempfile.TemporaryDirectory() as tmp:
+        repo = Path(tmp)
+        git_env = {**os.environ, "GIT_AUTHOR_NAME": "p", "GIT_AUTHOR_EMAIL": "p@s",
+                   "GIT_COMMITTER_NAME": "p", "GIT_COMMITTER_EMAIL": "p@s",
+                   "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null"}
+        subprocess.run(["git", "init", "-q", str(repo)], check=True, env=git_env)
+        for message in ("шаг А\n\nDev-Map: hr.а\nCo-Authored-By: p <p@s>",
+                        "шаг Б\n\nDev-Map: hr.б", "без трейлера\n\nтекст Dev-Map: hr.в"):
+            subprocess.run(["git", "-C", str(repo), "commit", "-q", "--allow-empty",
+                            "-m", message], check=True, env=git_env)
+        parsed = dev_map_commit_times(repo, 30)
+    проба("трейлер Dev-Map: обе задачи найдены, строка в тексте — не трейлер",
+          ["hr.а", "hr.б"], sorted(parsed or {}))
+    проба("нечитаемый git — None, а не «коммитов нет»", None,
+          dev_map_commit_times(Path("/nonexistent-acceptance-stand"), 30))
+
+    # 1г: кандидат без проверки — долг строителя заранее; с годной — нет.
+    stand_debt = {"lines": [{"id": "harness", "tasks": [
+        {"id": "д.кандидат", "status": "plan", "title": "К"},
+        {"id": "д.кандидат-с-проверкой", "status": "plan", "title": "КП",
+         "проверка": {"команда": "python3 scripts/check-secrets.py", "ждём": "чисто"}},
+        {"id": "д.просто-plan", "status": "plan", "title": "П"}]}]}
+    taken = {task_id for task_id, _, _ in долг_строителя(
+        stand_debt, направление="harness",
+        candidates={"д.кандидат", "д.кандидат-с-проверкой"})}
+    проба("строитель: кандидат без проверки — берётся", True, "д.кандидат" in taken)
+    проба("строитель: кандидат с годной проверкой — НЕ берётся", False,
+          "д.кандидат-с-проверкой" in taken)
+    проба("строитель: plan не кандидат — НЕ берётся", False, "д.просто-plan" in taken)
+
     # Границы карточки: правка обязана остаться внутри своей задачи.
     плохо += _проба_границ()
 
@@ -1514,6 +1754,7 @@ def снять_провал(текст: str, ид: str) -> str:
     "провал": "провал_проверки",          # долг разработчика: сломан механизм
     "проверка-врёт": "проверка_врёт",     # долг строителя: обещание неверно
     "проверка-долгая": "проверка_долгая",  # долг строителя: не уложилась
+    "ждёт-мутаций": "мутации_ждут",       # долг до принятия: мутации ночью
 }
 # Долг СТРОИТЕЛЯ — всё, кроме провала: провал чинит тот, кто писал механизм.
 ПОМЕТКИ_СТРОИТЕЛЯ = ("проверка_врёт", "проверка_долгая")
@@ -1547,7 +1788,8 @@ def нет_инструкции(задача: dict) -> str | None:
     return None
 
 
-def долг_строителя(карта: dict, направление: str | None = None) -> list[tuple[str, str, str]]:
+def долг_строителя(карта: dict, направление: str | None = None,
+                   candidates: set | frozenset = frozenset()) -> list[tuple[str, str, str]]:
     """Задачи, которые обязан взять строитель: `(id, title, почему)`.
 
     Отдельно от печати — чтобы проба могла судить ОТБОР, а не текст на экране:
@@ -1558,11 +1800,14 @@ def долг_строителя(карта: dict, направление: str | 
     его спрашивали только у конфига, стенд пробы играл на производстве: живое
     направление сменилось, карточек этой линии в стенде нет — и пять путей
     отбора покраснели на верном коде.
+
+    `candidates` — id «сделано, но не заявлено» (`closing_candidates`): им
+    проверку строят заранее, чтобы к переводу в `test` она была готова.
     """
     активное = направление if направление is not None else активное_направление()
     итог = []
     for з in карточки(карта, направление=активное or None):
-        if з.get("status") != "test":
+        if з.get("status") != "test" and з.get("id") not in candidates:
             continue
         # Причины СКЛАДЫВАЮТСЯ: у задачи с пометкой «может только владелец»
         # проверка тоже может врать, и тогда её не чинил никто — число
@@ -1579,11 +1824,89 @@ def долг_строителя(карта: dict, направление: str | 
     return итог
 
 
+# Окно кандидата «сделано, но не заявлено»: коммит задачи был за последние
+# CANDIDATE_DAYS суток, и ни одного — за последние QUIET_HOURS часов (работа
+# по ней не идёт прямо сейчас).
+CANDIDATE_DAYS = 14
+QUIET_HOURS = 6
+CANDIDATE_STATUSES = ("plan", "wip")
+
+
+def dev_map_commit_times(root: Path, days: int) -> dict[str, list[float]] | None:
+    """Времена коммитов по трейлеру `Dev-Map: <id>` за последние `days`.
+
+    Один вызов git на всю карту. Git не ответил — None: «не прочитали» не
+    равно «коммитов нет», и кандидатов тогда не называем вовсе.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(root), "log", f"--since={days} days ago",
+             "--format=%ct%x00%B%x1e"],
+            capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    found: dict[str, list[float]] = {}
+    for record in result.stdout.split("\x1e"):
+        stamp, _, body = record.strip().partition("\x00")
+        if not stamp.isdigit():
+            continue
+        for task_id in разбор_карточки.dev_map_ids(body):
+            found.setdefault(task_id, []).append(float(stamp))
+    return found
+
+
+def done_but_unclaimed(cards: list[dict], commit_times: dict[str, list[float]], now: float,
+                       days: int = CANDIDATE_DAYS, quiet_hours: int = QUIET_HOURS) -> list[str]:
+    """id карточек `plan`/`wip`, где вся РАБОТА закрыта, а по задаче затихли коммиты.
+
+    Только список: заявить «сделано» (перевести в `test`) — решение смены,
+    машина по косвенному признаку готовность не объявляет (И-4).
+    """
+    found = []
+    for card in cards:
+        if card.get("status") not in CANDIDATE_STATUSES:
+            continue
+        work = формы.work_items(card.get("checklist"))
+        if not work or not all(item.get("done") for item in work):
+            continue
+        recent = [t for t in commit_times.get(card.get("id"), []) if now - t <= days * 86400]
+        if recent and now - max(recent) >= quiet_hours * 3600:
+            found.append(card["id"])
+    return found
+
+
+def closing_candidates(dev_map: dict) -> list[str] | None:
+    """Живые кандидаты активного направления; None — git не прочитан."""
+    commit_times = dev_map_commit_times(КОРЕНЬ, CANDIDATE_DAYS)
+    if commit_times is None:
+        return None
+    return done_but_unclaimed(карточки(dev_map, направление=активное_направление() or None),
+                              commit_times, time.time())
+
+
+def _print_closing_candidates() -> int:
+    """`id :: title :: подсказка`, последней строкой — «к закрытию: N»."""
+    import yaml
+    dev_map = yaml.safe_load(КАРТА.read_text(encoding="utf-8"))
+    candidates = closing_candidates(dev_map)
+    if candidates is None:
+        print("к закрытию: ? — git не прочитан, кандидатов не назвать")
+        return 1
+    titles = {card.get("id"): str(card.get("title", ""))[:90] for card in карточки(dev_map)}
+    for task_id in candidates:
+        print(f"{task_id} :: {titles.get(task_id, '')} :: переведи в test и впиши «проверка»")
+    print(f"к закрытию: {len(candidates)}")
+    return 0
+
+
 def _печать_долга(порция: int = 0) -> int:
     """Печать долга строителя: `id :: title :: почему`, порция сверху."""
     import yaml
     карта = yaml.safe_load(КАРТА.read_text(encoding="utf-8"))
-    for номер, (ид, имя, беда) in enumerate(долг_строителя(карта), 1):
+    candidates = set(closing_candidates(карта) or ())
+    for номер, (ид, имя, беда) in enumerate(долг_строителя(карта, candidates=candidates), 1):
         print(f"{ид} :: {имя} :: {беда}")
         if порция and номер >= порция:
             break
@@ -1600,6 +1923,11 @@ def main() -> int:
         for форма in ФОРМЫ_СЛОВАМИ:
             print(f"   • {форма}")
         return 0
+    if "--мутации-долга" in sys.argv:
+        return _ночные_мутации()
+    if "--кандидаты" in sys.argv:
+        # «Сделано, но не заявлено»: только список, статус не меняется (И-4).
+        return _print_closing_candidates()
     if "--долг" in sys.argv:
         # Работа строителя проверок — ПО МЕРКЕ СУДЬИ, а не по своей. Формы
         # команд он уже берёт отсюда (`--формы`); отбор задач шёл своей мерой

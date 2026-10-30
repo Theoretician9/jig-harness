@@ -894,6 +894,13 @@ EOF
   else
     скажи "  + пакет уже лежит в $pkg_dst — копирование пропущено"
   fi
+  # harness.conf — раскладчик от agent не имеет прав на /etc; докладываем под root, живой не затираем.
+  # Стоит ДО самотеста раскладчика: раскладка поверх живого проекта берёт каталог
+  # копий из ключа BACKUP_DIR, и без живого конфига самотест целится в пустоту.
+  делай "[ -f /etc/harness/harness.conf ] && echo 'harness.conf уже живой — не трогаю' || { cp '$pkg_dst/harness/config/harness.conf' /etc/harness/harness.conf && chmod 644 /etc/harness/harness.conf; }"
+  проверка "$step" "/etc/harness/harness.conf существует и читается" \
+    "[ -f /etc/harness/harness.conf ] && bash -n /etc/harness/harness.conf" \
+    "ls -l /etc/harness/; bash -n /etc/harness/harness.conf"
   local rollout="$pkg_dst/harness/razlozhit-harnes.sh"
   # scp с Windows теряет exec-бит — возвращаем его до вызова (сам вызов идёт
   # через bash, но селфтест раскладчика перезапускает себя, и бит нужен живым).
@@ -908,11 +915,6 @@ EOF
   проверка "$step" "каркас на месте: хуки, скрипты, демоны, скилы" \
     "[ -f '$PROJECT_DIR/scripts/hooks/guard_bash.py' ] && [ -f '$PROJECT_DIR/scripts/tg_send.sh' ] && [ -f '$PROJECT_DIR/harness/demons/heartbeat-watch.sh' ] && [ -d '$PROJECT_DIR/harness/skills' ]" \
     "ls '$PROJECT_DIR/scripts' '$PROJECT_DIR/harness/demons'"
-  # harness.conf — раскладчик от agent не имеет прав на /etc; докладываем под root, живой не затираем
-  делай "[ -f /etc/harness/harness.conf ] && echo 'harness.conf уже живой — не трогаю' || { cp '$pkg_dst/harness/config/harness.conf' /etc/harness/harness.conf && chmod 644 /etc/harness/harness.conf; }"
-  проверка "$step" "/etc/harness/harness.conf существует и читается" \
-    "[ -f /etc/harness/harness.conf ] && bash -n /etc/harness/harness.conf" \
-    "ls -l /etc/harness/; bash -n /etc/harness/harness.conf"
   # harness.conf пишет агент сам (решение владельца 13.10.2026): ключи при
   # обновлениях, эталон аккаунта, переименования меток — без root-шага руками.
   # Файл живёт в каталоге агента, а в /etc/harness — root-овая ссылка на него:

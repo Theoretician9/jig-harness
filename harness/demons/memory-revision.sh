@@ -212,6 +212,11 @@ else
 fi
 
 # ── сводка владельцу ────────────────────────────────────────────────────────
+# Писателя может не быть (раскладка неполна) — сторож от этого не падает.
+alert_task() {  # $@ = доводы писателя
+    [ -f "$PROJECT_DIR/scripts/alert-task.py" ] || return 0
+    python3 "$PROJECT_DIR/scripts/alert-task.py" "$@" </dev/null >/dev/null 2>&1 || true
+}
 if [ -n "$FINDINGS" ]; then
     N=$(printf '%s\n' "$FINDINGS" | grep -c '^•' || true)
     SUMMARY="Ежемесячная ревизия памяти/правил/скилов: позиций к решению — $N.$FINDINGS
@@ -219,6 +224,7 @@ if [ -n "$FINDINGS" ]; then
 По каждой — готовое предложение; решение за вами. Анализ грубый (grep-эвристика), ложные срабатывания возможны."
 else
     SUMMARY="Ежемесячная ревизия памяти/правил/скилов: замечаний нет — записи датированы, правила с проверками, скилы зовутся."
+    alert_task --resolve memory-revision:findings
 fi
 say "$SUMMARY"
 
@@ -267,7 +273,9 @@ tg_deliver() {
     # длине — не повод обойти сторожа: ревизия уходит вложением, как он велит.
     # Прямой curl ниже — только когда tg_send.sh нет вовсе.
     if [ -x "$PROJECT_DIR/scripts/tg_send.sh" ]; then
-        "$PROJECT_DIR/scripts/tg_send.sh" "$SUMMARY" && return 0
+        local door_args=()
+        [ -z "$FINDINGS" ] || door_args=(--task memory-revision:findings)
+        "$PROJECT_DIR/scripts/tg_send.sh" "$SUMMARY" "${door_args[@]}" && return 0
         local doc="$LOG_DIR/memory-revision-$(date +%F).txt"
         printf '%s\n' "$SUMMARY" > "$doc"
         say "текстом не прошло — шлю вложением $doc"
@@ -298,6 +306,9 @@ tg_deliver() {
 if [ "$QUIET" = "1" ]; then
     say "запуск по порогу: владельцу не шлём, находки ушли в предложения"
     записать_предложения || say "предложения в журнал не записались"
+    # Дверь тихому прогону не нужна, а находки — работа модели, как и в громком.
+    [ -z "$FINDINGS" ] || alert_task --key memory-revision:findings \
+        --title "${SUMMARY%%$'\n'*}" --text "$SUMMARY"
     touch "$HEARTBEAT_DIR/memory-revision"
     exit 0
 fi

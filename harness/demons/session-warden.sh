@@ -323,6 +323,54 @@ print(f"в {сброс:%H:%M}, через {сколько}")
     python3 "$HARNESS_SCRIPTS/stall-in-log.py" "$1" 2>/dev/null
 }
 
+# Работа сессии = ответ главной ИЛИ живого помощника (stall-in-log.py --работа).
+# Одно измерение на обход: тишину, немоту и пульс судят по ЕГО числам, а не по
+# mtime транскрипта и не по одной главной. 25.10.2026 «Работа встала» ушла
+# владельцу, пока помощник отвечал каждые полминуты.
+# Выход: JUDGE_WORK_MIN/SEC, JUDGE_MAIN_MIN, JUDGE_HELPERS (число), JUDGE_OUT.
+judge_work() {
+    local rc=0 reason=""
+    JUDGE_WORK_MIN="" JUDGE_WORK_SEC="" JUDGE_MAIN_MIN="" JUDGE_HELPERS=0 JUDGE_OUT=""
+    [ -f "$TRANSCRIPT" ] || return 0
+    reason=$(mktemp)
+    JUDGE_OUT=$(HELPER_FRESH_MIN="${HELPER_FRESH_MIN:-}" \
+        python3 "$HARNESS_SCRIPTS/stall-in-log.py" --работа "$TRANSCRIPT" 2>"$reason") || rc=$?
+    if [ "$rc" = 0 ]; then
+        JUDGE_WORK_MIN=$(judge_field работа_мин)
+        JUDGE_WORK_SEC=$(judge_field работа_сек)
+        JUDGE_MAIN_MIN=$(judge_field главная_мин)
+        JUDGE_HELPERS=$(judge_field помощников)
+        [[ "$JUDGE_HELPERS" =~ ^[0-9]+$ ]] || JUDGE_HELPERS=0
+        [[ "$JUDGE_MAIN_MIN" =~ ^[0-9]+$ ]] || JUDGE_MAIN_MIN=""
+    else
+        # Судья молчать не должен: отказ реестра и сбой прибора сводятся к
+        # главной сессии, а без её ответов — к возрасту файла.
+        JUDGE_OUT=""
+        [ "$rc" != 3 ] || say "судья работы отказал: $(head -c 300 "$reason") — сужу по главной сессии"
+        [ "$rc" = 3 ] || say "судья работы не ответил (код $rc) — сужу по главной сессии"
+        JUDGE_MAIN_MIN=$(немота_агента_минут "$TRANSCRIPT" || true)
+        JUDGE_WORK_MIN="$JUDGE_MAIN_MIN"
+    fi
+    rm -f "$reason"
+    [[ "$JUDGE_WORK_MIN" =~ ^[0-9]+$ ]] || \
+        JUDGE_WORK_MIN=$(( ( $(date +%s) - $(stat -c '%Y' "$TRANSCRIPT") ) / 60 ))
+    [[ "$JUDGE_WORK_SEC" =~ ^[0-9]+$ ]] || JUDGE_WORK_SEC=$(( JUDGE_WORK_MIN * 60 ))
+}
+judge_field() {  # $1 = ключ строки судьи → значение
+    printf '%s\n' "$JUDGE_OUT" | awk -F'\t' -v key="$1" '$1 == key { print $2; exit }'
+}
+# Живые помощники строкой для текста: $1 = «пинок» (с «идёт N мин») | «весть».
+judge_helpers_text() {
+    printf '%s\n' "$JUDGE_OUT" | awk -F'\t' -v mode="$1" '
+        $1 == "помощник" {
+            one = "«" $5 "» ("
+            if (mode == "пинок") one = one "идёт " $4 " мин, "
+            one = one "последний ответ " $3 " мин назад)"
+            out = out (out == "" ? "" : (mode == "пинок" ? "; " : ", ")) one
+        }
+        END { print out }'
+}
+
 # Что слать диалогу на N-й попытке. Улика 10.09.2026: за ОДНУ ротацию сторож
 # послал Enter СОРОК раз (rotate_exit_dialog=40 при rotate_exit_sent=1) и
 # двадцать минут ничего не менялось — сессия жила, преемник не поднимался,
@@ -569,7 +617,7 @@ print(f"в {сброс:%H:%M}, через {сколько}")
         [ -d "$d" ] || continue
         for f in "$d"/*; do
             [ -f "$f" ] || continue
-            age=$(( now - $(stat -c %Y "$f" 2>/dev/null || echo 0) ))
+            age=$(( now - $(stat -L -c %Y "$f" 2>/dev/null || echo 0) ))
             [ "$age" -le "$fresh" ] && return 0
         done
     done
@@ -811,30 +859,122 @@ knopka_revizii() {  # $1 = файл-флага, $2 = путь демона ре�
     return 0
 }
 
-# ── входящие: будить смену или ждать рубежа ────────────────────────────────
-# Владелец 12.09.2026: несрочное сообщение не должно сбивать шаг. С 12.09 его
-# не пинает диспетчер канала — но сторож пинал бы через две минуты сам, и
-# правило было бы перекрыто ровно наполовину (память:
-# [[a-rule-covering-one-path-of-two]]).
-#
-# Решение чистое, без побочных действий, — чтобы его можно было проверить:
-#   • есть срочное (прибор urgency.py через inbox-digest.py) — будим;
-#   • ход уже закончился ПОСЛЕ прихода сообщения, а оно всё лежит — рубеж
-#     прошёл мимо, будим;
-#   • ждёт дольше порога INBOX_WAIT_MAX_MIN — будим: рубежа можно и не
-#     дождаться, если смена встала;
-#   • иначе — ждём рубежа молча.
-reshenie_po_vhodyashchim() {  # $1=срочных $2=минут ждёт старшее $3=порог мин $4=ход завершён после его прихода
-    [ "${1:-0}" -gt 0 ] 2>/dev/null && { printf 'пинок'; return 0; }
-    [ "${4:-0}" = 1 ] && { printf 'пинок'; return 0; }
-    [ "${2:-0}" -ge "${3:-30}" ] 2>/dev/null && { printf 'пинок'; return 0; }
-    printf 'ждём'
-}
-
 # Кто в панели. Отдельным словом «мертва» — панель, переживившая свой процесс
 # (remain-on-exit): опыт 13.08.2026 показал, что `pane_current_command` у неё
 # продолжает показывать ПРЕЖНЮЮ команду, то есть «claude» уже после выхода
 # агента. Всякий, кто спросит «агент на месте?», получил бы ответ про мертвеца.
+
+# Судья по дереву процессов (scripts/lib/agent_processes.py). Из проб путь к
+# проекту подменяется, поэтому библиотека берётся от PROJECT_DIR, как tg_send.sh.
+agent_proc() {
+    TMUX_SESSION="$TMUX_SESSION" AGENT_USER="${AGENT_USER:-}" \
+        python3 "$PROJECT_DIR/scripts/lib/agent_processes.py" "$@"
+}
+
+# Тревога не чаще раза в период: метка $LOG_DIR/<ключ>.told хранит время
+# последней УСПЕШНОЙ отправки. Не ушла — метки нет, и следующий круг повторит.
+# $1 ключ, $2 текст, $3 задача для tg_send.
+alarm_once() {
+    local stamp="$LOG_DIR/$1.told" period="${NEST_ALARM_PERIOD_SEC:-3600}" age
+    if [ -f "$stamp" ]; then
+        age=$(( $(date +%s) - $(stat -c '%Y' "$stamp") ))
+        [ "$age" -lt "$period" ] && return 0
+    fi
+    mkdir -p "$LOG_DIR"
+    if tg_send "$2" --несмотря-на-лимит --task "$3"; then
+        date +%s > "$stamp"
+    else
+        say "тревога «$1» не ушла — повторю в следующем круге"
+    fi
+    return 0
+}
+
+# Совет «systemctl restart» — только если живого агента нет: при lost/orphan
+# перезапуск юнита убил бы живую смену, а тревогу о них уже послал nest_guard.
+refusal_hint() {
+    [ -z "${NEST_REFUSAL:-}" ] || return 0
+    tg_send "Сессии агента нет, и поднять её командой «$AGENT_START_CMD» не удалось. Нужны ваши руки: sudo -u $AGENT_USER -H systemctl restart harness-agent" --несмотря-на-лимит --task session-warden:no-agent \
+        || say "и сигнал не ушёл"
+}
+
+# Гнезда tmux нет — это не всегда «агента нет». Сокет бывает удалён при живом
+# сервере (отчёт другого сервера, 29.10.2026): подъём по has-session поднял
+# второй сервер со второй сменой. Здесь судится по дереву процессов.
+# Коды: 0 — гнездо есть или возвращено (start_agent кончен), 1 — отказ с
+# тревогой владельцу, 2 — агента нет вовсе, поднимать штатно.
+# NEST_REFUSAL нужен вызывающему: при живом агенте совет «systemctl restart»
+# вреден — перезапуск юнита убил бы живую смену.
+nest_guard() {
+    local verdict waited=0
+    NEST_REFUSAL=""
+    verdict=$(agent_proc status 2>/dev/null) || true
+    case "${verdict%%$'\n'*}" in
+        ok) rm -f "$LOG_DIR/nest-lost.told" "$LOG_DIR/nest-orphan.told"; return 0 ;;
+        lost)
+            say "сокет tmux '$TMUX_SESSION' пропал, а сервер с агентом жив — возвращаю сокет сигналом USR1, второй сервер не поднимаю"
+            agent_proc restore-nest >/dev/null 2>&1 || true
+            while :; do
+                if tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
+                    say "сокет tmux вернулся"
+                    return 0
+                fi
+                [ "$waited" -lt "${NEST_RESTORE_WAIT_SEC:-10}" ] || break
+                sleep 1; waited=$((waited + 1))
+            done
+            NEST_REFUSAL="lost"
+            alarm_once nest-lost "Гнездо tmux '$TMUX_SESSION' пропало, а сервер tmux с агентом жив. Сигнал возврата сокета не помог за ${waited}с. Вторую смену не поднимаю — она писала бы в то же дерево. Нужны ваши руки: найти сервер (pgrep -a 'tmux: server') и вернуть сокет (kill -USR1 <pid>), перезапуск юнита убьёт живую смену." \
+                session-warden:nest-lost
+            return 1 ;;
+        orphan)
+            NEST_REFUSAL="orphan"
+            say "tmux-сервера нет, но агент (claude) жив вне tmux — вторую смену не поднимаю"
+            alarm_once nest-orphan "Сервера tmux нет, но процесс агента claude жив вне tmux. Вторую смену не поднимаю — она работала бы параллельно с живой. Нужны ваши руки: посмотреть, кто это (pgrep -a claude), и закрыть лишнее." \
+                session-warden:nest-orphan
+            return 1 ;;
+    esac
+    return 2
+}
+
+# Два основных агента сразу — две смены пишут в одно дерево. Тревога только
+# когда ТОТ ЖЕ состав pid'ов держится два круга подряд и не короче
+# TWO_AGENTS_CONFIRM_SEC: короткоживущий второй (каждый круг новый pid) — не
+# смена. Порог 540, а не 600: круги cron расходятся на секунды. Смена состава
+# сбрасывает since. Метка .told хранит, о каком составе уже сказано.
+check_two_agents() {
+    local state="$LOG_DIR/two-agents.state" pids rc=0 since="" since_epoch="" now fresh=1
+    pids=$(agent_proc two-agents 2>/dev/null) || rc=$?
+    case "$rc" in
+        0)
+            # Тревога поднята (.told) и условие ушло — карточку снимаем, иначе она висит вечно.
+            if [ -e "$state.told" ] && declare -F alert_task >/dev/null; then
+                alert_task --resolve session-warden:two-agents
+            fi
+            rm -f "$state" "$state.told"; return 0 ;;
+        1) ;;
+        *) return 0 ;;
+    esac
+    mkdir -p "$LOG_DIR"
+    now=$(date +%s)
+    if [ "$(sed -n 's/^pids=//p' "$state" 2>/dev/null | head -1)" = "$pids" ]; then
+        since=$(sed -n 's/^since=//p' "$state" | head -1)
+        since_epoch=$(sed -n 's/^since_epoch=//p' "$state" | head -1)
+        [ -z "$since_epoch" ] || fresh=0
+    fi
+    [ -n "$since_epoch" ] || { since_epoch=$now; since=$(date -d "@$now" '+%Y-%m-%dT%H:%M:%S'); }
+    printf 'count=%s\npids=%s\nsince=%s\nsince_epoch=%s\nupdated=%s\n' \
+        "$(wc -w <<<"$pids")" "$pids" "$since" "$since_epoch" "$(date '+%Y-%m-%dT%H:%M:%S')" > "$state"
+    [ "$fresh" = 0 ] && [ $((now - since_epoch)) -ge "${TWO_AGENTS_CONFIRM_SEC:-540}" ] || return 0
+    [ "$(cat "$state.told" 2>/dev/null)" = "$pids" ] && return 0
+    # Выключатель данными (harness.conf): ложная тревога будит владельца.
+    [ "${TWO_AGENTS_ALARM:-1}" != 0 ] || { say "тревога «два агента» выключена: TWO_AGENTS_ALARM=0"; return 0; }
+    if tg_send "Работают два агента: pids $pids. Оставить одну смену: bash scripts/one-shift.sh" \
+        --несмотря-на-лимит --task session-warden:two-agents; then
+        printf '%s' "$pids" > "$state.told"
+    else
+        say "тревога о двух агентах не ушла — повторю в следующем круге"
+    fi
+    return 0
+}
 
 # Подъём агента после ротации (Б-4а). Команда запуска — только в оболочку:
 # в чужой процесс (редактор, зависший claude) её слать так же опасно.
@@ -876,6 +1016,11 @@ start_agent() {
     # чтобы его не унаследовала панель, открытая руками.
     tmux set-environment -gu "$NOSITEL_CHUZHOGO_VHODA" 2>/dev/null || true
     if ! tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
+        local nest=0
+        nest_guard || nest=$?
+        case "$nest" in 0) return 0 ;; 1) return 1 ;; esac
+    fi
+    if ! tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
         say "tmux-сессии '$TMUX_SESSION' нет — поднимаю её вместе с агентом"
         if [ -x "$PROJECT_DIR/scripts/start-agent.sh" ]; then
             "$PROJECT_DIR/scripts/start-agent.sh" 8>&- || return 1
@@ -884,7 +1029,7 @@ start_agent() {
             # вместе с агентом и выбрасывает приаттаченного владельца из tmux
             # (улика 13.08.2026 — та же, что в scripts/start-agent.sh).
             tmux new-session -d -s "$TMUX_SESSION" -c "$PROJECT_DIR" 8>&- || return 1
-            tmux send-keys -t "$TMUX_SESSION" "$zapusk" Enter 8>&- || return 1
+            pane_command keys "$zapusk" Enter || return 1
         fi
         while [ "$waited" -lt "$AGENT_START_TIMEOUT_SEC" ]; do
             sleep 5; waited=$((waited + 5))
@@ -908,9 +1053,9 @@ start_agent() {
             # ПЕРВУЮ букву следующей команды. Улика 21.09.2026: подъём пришёл
             # как «laude --model claude-opus-5 …», «Command laude not found»,
             # агент не поднялся за 120с, работа стояла 27 минут.
-            tmux send-keys -t "$TMUX_SESSION" C-c 8>&- 2>/dev/null || true
+            pane_command keys C-c || true
             sleep "${PANE_ENTER_DELAY:-0.7}"
-            tmux send-keys -t "$TMUX_SESSION" "$zapusk" Enter 8>&- ;;
+            pane_command keys "$zapusk" Enter || return 1 ;;
         *) say "в панели '$cmd' — не оболочка, команду запуска не шлю"; return 1 ;;
     esac
     while [ "$waited" -lt "$AGENT_START_TIMEOUT_SEC" ]; do
@@ -1098,20 +1243,6 @@ if [ "${1:-}" = "--selftest" ]; then
     выход смена         оболочка 10 0 60 900 0 "панель стала оболочкой — смена состоялась, выход не нужен"
     выход смена         преемник  0 1 90 900 0 "в панели уже преемник — дальше обычный путь"
 
-    # ── входящие: кого будить, а кого ждать до рубежа ───────────────────────
-    входящее() {  # $1=ожидание $2=срочных $3=минут ждёт $4=порог $5=ход завершён $6=имя случая
-        local got
-        got=$(reshenie_po_vhodyashchim "$2" "$3" "$4" "$5")
-        if [ "$got" = "$1" ]; then printf '  ок    %s\n' "$6"
-        else printf '  ПЛОХО %s: ждали «%s», получили «%s»\n' "$6" "$1" "$got"; ok_flag=0; fi
-    }
-    # БОЛЬНОЙ СЛУЧАЙ 12.09.2026: диспетчер перестал пинать несрочное, а сторож
-    # будил бы смену через две минуты — и правило было бы перекрыто наполовину.
-    входящее ждём  0 5  30 0 "БОЛЬНОЙ СЛУЧАЙ: несрочное ждёт рубежа, сторож не будит"
-    входящее пинок 1 0  30 0 "срочное будит смену сразу, рубежа не ждёт"
-    входящее пинок 0 31 30 0 "несрочное дольше порога — будим: рубежа можно не дождаться"
-    входящее пинок 0 5  30 1 "рубеж прошёл, а сообщение всё лежит — будим"
-
     # ── метка конца хода: её пишет хук Stop, читает ротация ─────────────────
     метка() { # $1=ожидание $2=что лежит в метке $3=момент поручения $4=имя случая
         local want="$1" got T; T=$(mktemp -d)
@@ -1195,8 +1326,8 @@ if [ "${1:-}" = "--selftest" ]; then
     if ! стенд_oboloch "$SES"; then
         printf '  ПЛОХО стенд оболочки не поднялся во второй раз\n'; ok_flag=0
     else
-        TMUX_SESSION="$SES" AGENT_START_CMD="echo VSTAL > '$PODYOM'" \
-            AGENT_START_TIMEOUT_SEC=5 start_agent >/dev/null 2>&1 || true
+        LOG_DIR="$T/log" TMUX_SESSION="$SES" AGENT_START_CMD="echo VSTAL > '$PODYOM'" \
+            AGENT_PROC_ROOT="$T/proc" AGENT_MAINPID=0 AGENT_START_TIMEOUT_SEC=5 start_agent >/dev/null 2>&1 || true
         if [ -s "$PODYOM" ]; then
             printf '  ок    start_agent сбрасывает строку: команда подъёма доходит целой\n'
         else
@@ -1231,8 +1362,8 @@ if [ "${1:-}" = "--selftest" ]; then
             printf '  ПЛОХО больной случай не воспроизвёлся: оболочка носитель не отдала\n'; ok_flag=0
         fi
         : > "$NOSITEL_OUT"
-        TMUX_SESSION="$SES_N" AGENT_START_CMD="printenv CLAUDE_CODE_OAUTH_TOKEN > '$NOSITEL_OUT'" \
-            AGENT_START_TIMEOUT_SEC=5 start_agent >/dev/null 2>&1 || true
+        LOG_DIR="$T/log" TMUX_SESSION="$SES_N" AGENT_START_CMD="printenv CLAUDE_CODE_OAUTH_TOKEN > '$NOSITEL_OUT'" \
+            AGENT_PROC_ROOT="$T/proc" AGENT_MAINPID=0 AGENT_START_TIMEOUT_SEC=5 start_agent >/dev/null 2>&1 || true
         sleep 1.5
         if [ -s "$NOSITEL_OUT" ]; then
             printf '  ПЛОХО start_agent поднял агента С чужим носителем входа — работа уйдёт на чужую подписку\n'; ok_flag=0
@@ -1293,7 +1424,7 @@ if [ "${1:-}" = "--selftest" ]; then
     # должен спокойно завершить свою работу… а не хвататься за то что пишу».
     # Правило живёт в ПОРЯДКЕ СЛОВ, поэтому его и проверяем — иначе следующая
     # правка текста вернёт прежнее поведение, и никто не заметит.
-    KICK_TEXT=$(sed -n 's/.*send_to_pane "\(Ты — новая сессия[^"]*\)".*/\1/p' "$0" | head -1)
+    KICK_TEXT=$(sed -n 's/.*pane_command text "\(Ты — новая сессия[^"]*\)".*/\1/p' "$0" | head -1)
     POS_WORK=${KICK_TEXT%%ПРОДОЛЖАЙ ТЕКУЩИЙ ШАГ*}
     POS_INBOX=${KICK_TEXT%%inbox*}
     if [ -n "$KICK_TEXT" ] && [ ${#POS_WORK} -lt ${#POS_INBOX} ]; then
@@ -1610,21 +1741,13 @@ if [ "${1:-}" = "--selftest" ]; then
     rm -rf "$PULSE_YARD"
     unset -f tg_send jlog skazano_chto
 
-    # Паспорт читается ЗДЕСЬ: общий загрузчик подключается ниже по файлу, а
-    # самотест идёт раньше — и строка падала «пуст PROJECT_DIR», обрывая
-    # последние пробы (живой прогон механизмов 12.09.2026: демон отвечал кодом
-    # 0, но печатал ошибку bash после последней зелёной пробы).
-    # Загрузчик ищется в ОБЕИХ раскладках: в пакете скрипты под harness/, после
-    # раскладки — в scripts/ корня проекта (пятый случай за смену 12.09.2026).
+    # tg_send — от этого файла, а не из паспорта: в прогоне ворот по снимку
+    # самотест судит снимок. Ищется в ОБЕИХ раскладках: в пакете скрипты под
+    # harness/, после раскладки — в scripts/ корня проекта.
     WARDEN_DIR="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
-    KONF_SH="$WARDEN_DIR/../../scripts/lib/config.sh"
-    [ -r "$KONF_SH" ] || KONF_SH="$WARDEN_DIR/../scripts/lib/config.sh"
-    # shellcheck disable=SC1091
-    source "$KONF_SH"
-    PROJECT_DIR_ST="$(konf_iz_fajla PROJECT_DIR)"
-    if [ -z "$PROJECT_DIR_ST" ]; then
-        printf '  ПЛОХО паспорт установки не прочитан — доставку проверить нечем\n'; ok_flag=0
-    elif "$PROJECT_DIR_ST/scripts/tg_send.sh" --selftest >/dev/null 2>&1; then
+    TG_SEND_ST="$WARDEN_DIR/../../scripts/tg_send.sh"
+    [ -r "$TG_SEND_ST" ] || TG_SEND_ST="$WARDEN_DIR/../scripts/tg_send.sh"
+    if "$TG_SEND_ST" --selftest >/dev/null 2>&1; then
         printf '  ок    доставка длинного текста частями: самотест tg_send прошёл\n'
     else
         printf '  ПЛОХО самотест tg_send упал — длинный текст владельцу под вопросом\n'; ok_flag=0
@@ -2163,7 +2286,7 @@ PYEOF
         printf '  ок    итоговая строка сходится с файлом: %s пути живого диалога\n' "$COUNTED_Z"
     fi
 
-    (( ok_flag )) && { echo "SELFTEST: зелёный (7 путей распознавания диалога выхода + 4 пути живого диалога (текст + кто в панели) + 2 пути висячего Escape в оболочке + 6 путей лестницы ответов + 3 пути подсвеченного пункта + 3 пути номера пункта выхода + 11 путей решения по панели + 3 пути доставки в панель + 6 путей антиповтора + 5 путей кулдауна пинка + 6 путей признака смены + 11 путей выхода из ротации + 3 пути признака живой фоновой задачи + 4 пути решения по входящим + 4 пути метки конца хода + 2 пути доставки длинного текста владельцу целиком + 3 пути кулдауна разговора о блокировке + 4 пути замера окна + 8 путей выбора способа ротации + 7 путей двери ротации (передача дел и лимит) + 10 путей признака лимита подписки + 3 пути кнопки ревизии + 3 пути паузы владельца + 4 пути решения «будить ли смену» + 13 путей решения лимитной ветки + 12 путей времени сброса и пинка по нему + 16 путей «работы нет, смена у приглашения», в каждой группе первым — больной случай)"; exit 0; }
+    (( ok_flag )) && { echo "SELFTEST: зелёный (7 путей распознавания диалога выхода + 4 пути живого диалога (текст + кто в панели) + 2 пути висячего Escape в оболочке + 6 путей лестницы ответов + 3 пути подсвеченного пункта + 3 пути номера пункта выхода + 11 путей решения по панели + 3 пути доставки в панель + 6 путей антиповтора + 5 путей кулдауна пинка + 6 путей признака смены + 11 путей выхода из ротации + 3 пути признака живой фоновой задачи + 4 пути метки конца хода + 2 пути доставки длинного текста владельцу целиком + 3 пути кулдауна разговора о блокировке + 4 пути замера окна + 8 путей выбора способа ротации + 7 путей двери ротации (передача дел и лимит) + 10 путей признака лимита подписки + 3 пути кнопки ревизии + 3 пути паузы владельца + 4 пути решения «будить ли смену» + 13 путей решения лимитной ветки + 12 путей времени сброса и пинка по нему + 16 путей «работы нет, смена у приглашения», в каждой группе первым — больной случай)"; exit 0; }
     exit 1
 fi
 
@@ -2328,6 +2451,9 @@ jlog() {  # событие, сессия, детали
 # далее доводами: tg_send "текст" --не-досылать.
 tg_send() {
     local text="$1" rc=0; shift || true
+    # Звонящий, которому «ушло» и «придержано» не одно и то же, читает флаг: код 0
+    # остаётся для всех прежних вызовов, у которых после `||` стоит жалоба на сбой.
+    TG_SEND_HELD=0
     if [ -x "$PROJECT_DIR/scripts/tg_send.sh" ]; then
         # Код берётся у САМОЙ двери: `rc=$?` после `if … fi` читает код
         # СОСТАВНОГО оператора, а `if` без `else` на ложном условии даёт 0.
@@ -2336,7 +2462,7 @@ tg_send() {
         # Код 3 — дверь придержала весть БЕЗ досыла (так позвали). Это
         # исполнение правила, а не сбой доставки: ни прямого curl, ни тревоги,
         # иначе обход двери сделал бы правило пустым.
-        [ "$rc" = 3 ] && { say "придержано дверью канала: держится лимит подписки"; return 0; }
+        [ "$rc" = 3 ] && { TG_SEND_HELD=1; say "придержано дверью канала: держится лимит подписки"; return 0; }
         # Прочий отказ (потолок длины сторожа канала) — не повод обойти дверь:
         # весть уходит вложением через ту же дверь. Прямой путь ниже — только
         # когда двери нет вовсе.
@@ -2361,6 +2487,13 @@ tg_send() {
         | jq -e '.ok == true' >/dev/null
 }
 
+# Зелёное («агент на месте») гасит задачу модели. Писателя может не быть
+# (раскладка неполна) — сторож от этого не падает.
+alert_task() {  # $@ = доводы писателя: --resolve <ключ>
+    [ -f "$PROJECT_DIR/scripts/alert-task.py" ] || return 0
+    python3 "$PROJECT_DIR/scripts/alert-task.py" "$@" </dev/null >/dev/null 2>&1 || true
+}
+
 # Пересозданный лок — не мелочь механики: до этой минуты сторож не работал, а
 # значит не работала и ротация. Владелец узнаёт об этом сразу, а не когда
 # сессия дорастёт до автокомпакта.
@@ -2376,27 +2509,7 @@ fi
 # журнала, а не из «бежит ли процесс»: обычный прогон сторожа тоже виден в
 # ps, но преемника он не поднимет — выйти по нему значило бы уйти без смены.
 ротация_в_ходу() { # 0 = ротацию ведёт другой прогон и ждёт моего выхода
-    python3 - "$LOG_DIR/rotation.jsonl" "${ROTATE_FINISH_TIMEOUT_SEC:-900}" <<'PYEOF' 2>/dev/null
-import json, sys, datetime
-путь, окно = sys.argv[1], int(sys.argv[2])
-последняя = None
-try:
-    for строка in open(путь, encoding="utf-8"):
-        try:
-            событие = json.loads(строка)
-        except ValueError:
-            continue
-        if событие.get("event") in ("rotate_command", "agent_restarted",
-                                    "rotate_timeout", "restart_failed"):
-            последняя = событие
-except OSError:
-    sys.exit(1)
-if not последняя or последняя.get("event") != "rotate_command":
-    sys.exit(1)          # ротации нет или она уже завершилась — лок не про меня
-момент = datetime.datetime.fromisoformat(последняя["ts"])
-прошло = (datetime.datetime.now(момент.tzinfo) - момент).total_seconds()
-sys.exit(0 if прошло < окно else 1)
-PYEOF
+    rotation_in_progress
 }
 
 # Сессия агента обязана пережить выход агента: пока она умирала вместе с ним,
@@ -2438,10 +2551,22 @@ PYEOF
 
 # Текст агенту в tmux — ТОЛЬКО при живом claude/node в панели (Б-4б):
 # в голой оболочке «Продолжай текущую задачу» исполнился бы как команды bash.
+# Оба входа идут под общим локом двери. agent_prompt — служебный толчок (пауза
+# владельца его держит), agent_rotation_prompt — «/exit» смены сессии: ротация
+# паузой не гасится, иначе начатый выход застрял бы на полдороге.
 agent_prompt() {  # текст
     local cmd; cmd=$(pane_cmd)
     case "$cmd" in
-        claude|node) send_to_pane "$1"; return $? ;;
+        claude|node) pane_kick_service "$1"; return $? ;;
+    esac
+    say "в панели '$cmd', не claude/node — текст агенту НЕ шлю (оболочка исполнила бы его как команды)"
+    return 1
+}
+
+agent_rotation_prompt() {  # текст
+    local cmd; cmd=$(pane_cmd)
+    case "$cmd" in
+        claude|node) pane_command text "$1"; return $? ;;
     esac
     say "в панели '$cmd', не claude/node — текст агенту НЕ шлю (оболочка исполнила бы его как команды)"
     return 1
@@ -2450,7 +2575,7 @@ agent_prompt() {  # текст
 if [ "${LOCK_TAKEN:-1}" = 0 ] && ротация_в_ходу; then
     say "--rotate-now: смену уже ведёт другой прогон — просто выхожу, преемника поднимет он"
     jlog "rotate_already_running" "?" "лок держит идущая ротация — агент выходит, не мешая ей"
-    agent_prompt "/exit" || {
+    agent_rotation_prompt "/exit" || {
         say "команда выхода в панель НЕ ушла — сессия остаётся, смена не состоится"
         tg_send "Смену ведёт сторож, но команда выхода не дошла до панели — сессия жива. Нужно вмешаться." --несмотря-на-лимит || true
         exit 1
@@ -2506,7 +2631,7 @@ KICK_STAMP="${KICK_STAMP:-${LOG_DIR}/kick.stamp}"
     # хвататься за то что пишу». Прежний текст ставил входящие ПЕРЕД работой,
     # и поднятая сессия начинала с последнего сообщения вместо своего шага.
     # Срочное всё равно не потеряется: его поднимает свод входящих весами.
-    if send_to_pane "Ты — новая сессия после перезапуска. Прочитай STATE.md, последний docs/handover/SESSION-HANDOFF-*.md и CLAUDE.md, назови владельцу в канал текущую задачу и следующий шаг — и ПРОДОЛЖАЙ ТЕКУЩИЙ ШАГ с того места, где он оборвался. Входящие ($LOG_DIR/inbox/) разбери на ближайшем рубеже шага, не бросая его на полпути: срочное свод поднимет сам."; then
+    if pane_command text "Ты — новая сессия после перезапуска. Прочитай STATE.md, последний docs/handover/SESSION-HANDOFF-*.md и CLAUDE.md, назови владельцу в канал текущую задачу и следующий шаг — и ПРОДОЛЖАЙ ТЕКУЩИЙ ШАГ с того места, где он оборвался. Входящие ($LOG_DIR/inbox/) разбери на ближайшем рубеже шага, не бросая его на полпути: срочное свод поднимет сам."; then
         date +%s > "$KICK_STAMP"
         jlog "work_resumed" "${SESSION_ID:-?}" "новой сессии отдан пинок «подхвати работу»"
         say "новой сессии отдан пинок подхватить работу"
@@ -2573,6 +2698,7 @@ fi
 # кем-то ещё (юнитом, владельцем руками) — а платит за это владелец, которого
 # выбрасывает из tmux в момент ротации.
 беречь_сессию
+check_two_agents || true
 
 # ── 1. Найти транскрипт текущей сессии ЭТОГО проекта ────────────────────────
 # Claude Code пишет JSONL-транскрипты в ~/.claude/projects/<кодир-путь>/<uuid>.jsonl,
@@ -2662,6 +2788,24 @@ elif [ "$FILL_PCT" -ge "$CTX_ROTATE_PCT" ]; then
     NEED_ROTATE=1; REASON="окно ≈${FILL_PCT}% ≥ ${CTX_ROTATE_PCT}%"
 fi
 
+# Пауза владельца: «если пауза то пауза» (владелец, 20.10) — решение сторожа
+# о ротации на паузе не доходит до двери: её отказ ложился в журнал и в канал.
+# Метка в каталоге паузы называет «отложена» один раз; конец паузы снимает её
+# вместе с паузой (pause.py --снять, шаблон `пауза-сказано-*`).
+работа_на_паузе() {
+    python3 "$HARNESS_SCRIPTS/pause.py" --идёт-ли 2>/dev/null
+}
+if работа_на_паузе; then WORK_PAUSED=1; else WORK_PAUSED=0; fi
+ROTATE_SUPPRESSED=0
+if [ "$NEED_ROTATE" = 1 ] && [ "$FORCE_ROTATE" != 1 ] && [ "$WORK_PAUSED" = 1 ]; then
+    PAUSE_STATE_DIR="${HARNESS_PANEL_STATE:-$(python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import config; print(config.panel_state_dir())' "$HARNESS_SCRIPTS/lib" 2>/dev/null)}"
+    if [ -n "$PAUSE_STATE_DIR" ] && [ ! -e "$PAUSE_STATE_DIR/пауза-сказано-ротация" ]; then
+        : > "$PAUSE_STATE_DIR/пауза-сказано-ротация" 2>/dev/null \
+            && say "ротация отложена: пауза владельца ($REASON)"
+    fi
+    NEED_ROTATE=0; ROTATE_SUPPRESSED=1
+fi
+
 # Защита от спама — РАЗДЕЛЬНО по видам события. Анонс владельцу (semi) и
 # поданная в панель команда (full) — разные вещи: первый ждёт чужого решения,
 # вторая уже исполняется. Пока оба писались событием rotate_command, анонс,
@@ -2671,7 +2815,6 @@ fi
 # что ротация обязана предотвращать. Поэтому и окно у анонса своё, короткое:
 # неотвеченный вопрос стоит владельцу одного сообщения, а молчание сторожа —
 # потерянной сессии.
-ROTATE_SUPPRESSED=0
 if [ "$NEED_ROTATE" = 1 ] && [ "$FORCE_ROTATE" != 1 ]; then
     read -r VERDICT LAST_EVENT AGE_MIN GAP_MIN <<<"$(подавить_ротацию \
         "$ROTATION_LOG" "$SESSION_ID" "${ROTATE_NEEDS_OWNER:-0}" "$(date +%s)")"
@@ -2862,7 +3005,7 @@ rotate_clear() {
 
     say "регламент отработан за ${waited}с, панель молчит ${idle}с — подаю «/clear»"
 
-    send_to_pane "/clear" || { say "«/clear» в панель НЕ ушёл"; return 1; }
+    pane_command text "/clear" || { say "«/clear» в панель НЕ ушёл"; return 1; }
     # Новый идентификатор — единственное доказательство, что команда принята:
     # «/clear» заводит новую сессию и новый файл транскрипта (замер 11.09).
     waited=0
@@ -2918,8 +3061,17 @@ rotate_full() {
     # Обычный путь спрашивает ту же дверь ДО поручения по той же причине, что
     # и быстрый: под лимитом ждать нечего.
     дверь_ротации 0 || return $?   # тяжёлый путь: до «/exit» и до поручения
-    if ! agent_prompt "$PROMPT"; then
-        tg_send "Ротация нужна ($REASON), но в tmux-панели '$TMUX_SESSION' не агент — команду не отправил (текст в оболочке исполнился бы). Проверьте сессию." || say "и сигнал не ушёл"
+    # «/exit» — команда смены сессии: её дверь паузой не гасится (agent_prompt
+    # — служебный толчок, его пауза держит и «/exit» не пропустила бы).
+    local send_fn=agent_prompt
+    [ "$FORCE_ROTATE" = 1 ] && send_fn=agent_rotation_prompt
+    PANE_REFUSAL=""
+    if ! "$send_fn" "$PROMPT"; then
+        if [ -n "$PANE_REFUSAL" ]; then
+            tg_send "Ротация нужна ($REASON), но команда в панель '$TMUX_SESSION' не ушла: $PANE_REFUSAL." || say "и сигнал не ушёл"
+        else
+            tg_send "Ротация нужна ($REASON), но в tmux-панели '$TMUX_SESSION' не агент — команду не отправил (текст в оболочке исполнился бы). Проверьте сессию." || say "и сигнал не ушёл"
+        fi
         return 1
     fi
     # Команда реально ушла агенту — только теперь событие в журнал (кулдаун).
@@ -2985,7 +3137,7 @@ rotate_full() {
                         sent="${sent:+$sent,}$k=не нужен"
                         break
                     fi
-                    if tmux send-keys -t "$TMUX_SESSION" "$k" 2>/dev/null; then
+                    if pane_command keys "$k"; then
                         sent="${sent:+$sent,}$k=ок"
                     else
                         sent="${sent:+$sent,}$k=ОТКАЗ"
@@ -3002,7 +3154,7 @@ rotate_full() {
                 if [ "$keys" = Escape ]; then
                     dialog_rounds=$((dialog_rounds + 1))
                     say "диалог не поддался $dialog_tries раз (круг $dialog_rounds) — сбросил Escape и подаю «/exit» заново"
-                    agent_prompt "/exit" || say "«/exit» в панель не ушёл (в панели: $pane)"
+                    agent_rotation_prompt "/exit" || say "«/exit» в панель не ушёл (в панели: $pane)"
                     dialog_tries=0
                 fi
                 # Потолок кругов: без него ветка делала «continue» ДО решения о
@@ -3065,7 +3217,7 @@ rotate_full() {
                     дверь_ротации "$ordered_at" || return $?
                 fi
                 jlog "rotate_exit_sent" "$SESSION_ID" "$act: ход завершён=${turn_done}, простой панели ${idle}с, ждали ${waited}с — «/exit» введён в панель"
-                agent_prompt "/exit" || say "«/exit» в панель не ушёл (в панели: $pane)"
+                agent_rotation_prompt "/exit" || say "«/exit» в панель не ушёл (в панели: $pane)"
                 exit_sent=1; deadline=$(( waited + ${ROTATE_EXIT_WAIT_SEC:-180} )) ;;
         esac
     done
@@ -3210,18 +3362,20 @@ fi
 # ── Пауза владельца: присмотр молчит ────────────────────────────────────────
 # Владелец 14.09.2026: «Чтобы я остановил работу и больше лишней активности в
 # виде сторожа которой тебя пинает больше не было». Пауза гасит ветки, которые
-# ПОДГОНЯЮТ: тишину, лимит-немоту и пульс отчётности. Ветку входящих она НЕ
-# трогает — его сообщения обязаны доходить, и любое из них паузу снимает.
-# Ротация тоже идёт: она про окно контекста, а не про темп работы.
-работа_на_паузе() {
-    python3 "$HARNESS_SCRIPTS/pause.py" --идёт-ли 2>/dev/null
-}
-if работа_на_паузе; then
+# ПОДГОНЯЮТ: тишину, лимит-немоту и пульс отчётности. Ветку входящих она
+# не гасит, но толчок о сообщении идёт дверью pane_kick_owner, и та на паузе
+# отказывает: файл ждёт во входящих, смену не будят. Диспетчер на паузе
+# обычное сообщение ДЕРЖИТ, снимает паузу только команда resume («продолжай»).
+# Ротацию по порогам пауза тоже гасит (раздел 5, определение паузы там же):
+# «если пауза то пауза». Явный --rotate-now паузой не гасится.
+if [ "$WORK_PAUSED" = 1 ]; then
     say "работа на паузе по решению владельца: тишину, лимит и пульс не трогаю"
-    WORK_PAUSED=1
-else
-    WORK_PAUSED=0
+    # Запрос, отправленный до паузы, после неё ответа не ждёт: старая метка дала
+    # бы владельцу «не ответила N мин», где N — часы паузы.
+    rm -f "$LOG_DIR/pulse.kick" "$LOG_DIR/stall.kick" "$LOG_DIR/stall.replied"
 fi
+
+judge_work
 
 # ── 6. Silence-watchdog: очередь непуста, а агент молчит ────────────────────
 DEVMAP="$PROJECT_DIR/dev-map.yaml"
@@ -3242,8 +3396,10 @@ elif [ -f "$DEVMAP" ]; then
         say "прибор очереди не ответил — считаю по прежнему признаку (работа=$WORK)"
     fi
     if [ "$WORK" -gt 0 ]; then
-        IDLE_MIN=$(( ( $(date +%s) - $(stat -c '%Y' "$TRANSCRIPT") ) / 60 ))
-        if [ "$IDLE_MIN" -gt "$SILENCE_MAX_MIN" ]; then
+        IDLE_MIN="${JUDGE_WORK_MIN:-0}"
+        # Пинок «бери следующую» живому помощнику не нужен: главная ждёт его
+        # уведомления, и работа идёт; статус у смены просит пульс.
+        if [ "$IDLE_MIN" -gt "$SILENCE_MAX_MIN" ] && [ "$JUDGE_HELPERS" -eq 0 ]; then
             say "тишина: очередь непуста, транскрипт молчит ${IDLE_MIN} мин (> ${SILENCE_MAX_MIN}) — пинок в tmux"
             if tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
                 # Пинок НАЗЫВАЕТ, что брать: владелец 26.09.2026 — «если у
@@ -3258,12 +3414,12 @@ elif [ -f "$DEVMAP" ]; then
                     jlog "silence_kick" "$SESSION_ID" "тишина ${IDLE_MIN} мин при непустой очереди"
                 else
                     say "снимок панели: $(сохранить_снимок "выпал-в-оболочку")"
-                    tg_send "Очередь непуста, агент молчит ${IDLE_MIN} мин, а в tmux-панели не claude — пинок не отправлен. Похоже, агент выпал в оболочку." || say "и сигнал не ушёл"
+                    tg_send "Очередь непуста, агент молчит ${IDLE_MIN} мин, а в tmux-панели не claude — пинок не отправлен. Похоже, агент выпал в оболочку." --task session-warden:no-agent || say "и сигнал не ушёл"
                     WARDEN_RC=1
                 fi
             else
                 say "пинать некого: tmux-сессии '$TMUX_SESSION' нет — сигнал владельцу"
-                tg_send "Очередь в dev-map.yaml непуста, агент молчит ${IDLE_MIN} мин, tmux-сессии нет. Запустить агента?" || say "и сигнал не ушёл"
+                tg_send "Очередь в dev-map.yaml непуста, агент молчит ${IDLE_MIN} мин, tmux-сессии нет. Запустить агента?" --task session-warden:no-agent || say "и сигнал не ушёл"
                 WARDEN_RC=1
             fi
         fi
@@ -3280,7 +3436,7 @@ elif [ -f "$DEVMAP" ]; then
         # владелец в 01:20 получил «работы, которую я могу делать сам, нет».
         # Занятому агенту сигнал не нужен: упрётся — скажет сам.
         BUSY_MIN=0
-        [ -f "$TRANSCRIPT" ] && BUSY_MIN=$(( ( $(date +%s) - $(stat -c '%Y' "$TRANSCRIPT") ) / 60 ))
+        [ -f "$TRANSCRIPT" ] && BUSY_MIN="${JUDGE_WORK_MIN:-0}"
         if [ "$BUSY_MIN" -lt "${SILENCE_MAX_MIN:-30}" ]; then
             say "работы для смены нет, всё за блокерами, но агент работает (тишина ${BUSY_MIN} мин < ${SILENCE_MAX_MIN:-30}) — владельца не трогаю"
         elif подавлен_кулдауном "$AGE_MIN" "${BLOCKED_TELL_GAP_MIN:-720}"; then
@@ -3299,7 +3455,7 @@ fi
 # Одно состояние на весь обход: пульс и лимитная ветка читают его, а не
 # пересчитывают. Без карты и на паузе WORK не задан — прежнее поведение.
 BLOCKED_IDLE=0
-if [ -f "$TRANSCRIPT" ] && blocked_idle "${WORK:-1}" "${WAITING:-}" \
+if [ -f "$TRANSCRIPT" ] && [ "${JUDGE_HELPERS:-0}" -eq 0 ] && blocked_idle "${WORK:-1}" "${WAITING:-}" \
        "$(owner_last_word_epoch)" "$(epoch_from "$LOG_DIR/last_report")" \
        "$(epoch_from "$LOG_DIR/turn-end.stamp")" "$(last_answer_epoch "$TRANSCRIPT")"; then
     BLOCKED_IDLE=1
@@ -3312,31 +3468,57 @@ fi
 # моей памятью. Порог — число самого владельца от 21.08.2026: «Пиши статусы в
 # процессе работы», молчание дольше получаса он назвал отказом.
 PULSE_MARK="$LOG_DIR/last_report"
-PULSE_MAX_MIN="${PULSE_MAX_MIN:-${SILENCE_MAX_MIN:-30}}"
+PULSE_MAX_MIN="${PULSE_MAX_MIN:-30}"
 # Через сколько минут молчания смены сказать САМОМУ ВЛАДЕЛЬЦУ (порог — данные).
 PULSE_OWNER_MIN="${PULSE_OWNER_MIN:-60}"
 if [ "$WORK_PAUSED" = 0 ] && tmux has-session -t "$TMUX_SESSION" 2>/dev/null \
    && [ -f "$TRANSCRIPT" ]; then
-    WORK_AGE_MIN=$(( ( $(date +%s) - $(stat -c '%Y' "$TRANSCRIPT") ) / 60 ))
+    WORK_AGE_MIN="${JUDGE_WORK_MIN:-0}"
     if [ -f "$PULSE_MARK" ]; then
         REPORT_AGE_MIN=$(( ( $(date +%s) - $(stat -c '%Y' "$PULSE_MARK") ) / 60 ))
     else
         REPORT_AGE_MIN=9999
     fi
-    # Работает = транскрипт моложе порога тишины. Молчащему агенту пинок про
-    # отчёт не нужен: его будят другие ветки, каждая по своему признаку.
-    PULSE_VERDICT=$(pulse_verdict "$WORK_AGE_MIN" "$REPORT_AGE_MIN" "$BLOCKED_IDLE")
+    # Работает = ответ главной или живого помощника моложе порога тишины. Живой
+    # помощник — работа сам по себе, даже если его последний ответ старше порога
+    # тишины. Молчащему агенту пинок про отчёт не нужен: его будят другие ветки.
+    PULSE_WORK_AGE="$WORK_AGE_MIN"
+    [ "$JUDGE_HELPERS" -eq 0 ] || PULSE_WORK_AGE=0
+    PULSE_VERDICT=$(pulse_verdict "$PULSE_WORK_AGE" "$REPORT_AGE_MIN" "$BLOCKED_IDLE")
     if [ "$PULSE_VERDICT" = пинок ]; then
         PULSE_KICK="$LOG_DIR/pulse.kick"
         KICK_AGE=""
         [ -f "$PULSE_KICK" ] && KICK_AGE=$(( ( $(date +%s) - $(stat -c '%Y' "$PULSE_KICK") ) / 60 ))
+        # Доставка статуса проверяется ДО кулдауна пульса: иначе PULSE_MAX_MIN
+        # глушит ровно тот обход, где пинок остался без ответа.
+        if [ "$JUDGE_HELPERS" -gt 0 ] && [ -n "$KICK_AGE" ] \
+           && [ "$KICK_AGE" -ge "${KICK_ANSWER_WAIT_MIN:-5}" ] \
+           && [ "$(stat -c '%Y' "$PULSE_MARK" 2>/dev/null || echo 0)" -le "$(stat -c '%Y' "$PULSE_KICK")" ]; then
+            PULSE_UNANSWERED_MARK="$LOG_DIR/pulse.owner"
+            UNANSWERED_AGE=""
+            [ -f "$PULSE_UNANSWERED_MARK" ] && UNANSWERED_AGE=$(( ( $(date +%s) - $(stat -c '%Y' "$PULSE_UNANSWERED_MARK") ) / 60 ))
+            if подавлен_кулдауном "$UNANSWERED_AGE" "${PULSE_OWNER_MIN:-60}"; then
+                say "пульс: статус на пинок не пришёл $KICK_AGE мин, владельцу уже говорили $UNANSWERED_AGE мин назад — жду"
+            else
+                date +%s > "$PULSE_UNANSWERED_MARK"
+                jlog "pulse_unanswered" "$SESSION_ID" "статус на пинок не пришёл $KICK_AGE мин; работают помощники: $JUDGE_HELPERS"
+                tg_send "Смена не ответила на запрос статуса ${KICK_AGE} мин. Работают помощники: ${JUDGE_HELPERS} — $(judge_helpers_text весть). Работа не стоит." --не-досылать \
+                    || say "о неотвеченном запросе статуса владельцу сказать не удалось"
+            fi
+        fi
         if подавлен_кулдауном "$KICK_AGE" "$PULSE_MAX_MIN"; then
             say "пульс: отчёта нет ${REPORT_AGE_MIN} мин, но пинок был $KICK_AGE мин назад — жду"
         else
             date +%s > "$PULSE_KICK"
             say "пульс: работа идёт (${WORK_AGE_MIN} мин), а отчёта владельцу нет ${REPORT_AGE_MIN} мин — прошу статус"
-            jlog "pulse_kick" "$SESSION_ID" "отчёта нет ${REPORT_AGE_MIN} мин при идущей работе"
-            agent_prompt "[сторож сессий] Владельцу нет отчёта ${REPORT_AGE_MIN} минут, а работа идёт. Дай короткий статус в канал: что сделано числом, что делаешь сейчас. Без разбора своих действий — он идёт в журнал." \
+            if [ "$JUDGE_HELPERS" -gt 0 ]; then
+                jlog "pulse_kick" "$SESSION_ID" "отчёта нет ${REPORT_AGE_MIN} мин при идущей работе; работают помощники: $JUDGE_HELPERS"
+                PULSE_TEXT="[сторож сессий] Владельцу нет отчёта ${REPORT_AGE_MIN} мин. Работают помощники: $(judge_helpers_text пинок). Дай короткий статус в канал: что каждый делает и сколько осталось. Новых помощников в ответ на этот пинок не запускай."
+            else
+                jlog "pulse_kick" "$SESSION_ID" "отчёта нет ${REPORT_AGE_MIN} мин при идущей работе"
+                PULSE_TEXT="[сторож сессий] Владельцу нет отчёта ${REPORT_AGE_MIN} минут, а работа идёт. Дай короткий статус в канал: что сделано числом, что делаешь сейчас. Без разбора своих действий — он идёт в журнал."
+            fi
+            agent_prompt "$PULSE_TEXT" \
                 || say "пинок про пульс не ушёл (в панели: $(pane_cmd))"
             # Пинки не помогли — сказать ВЛАДЕЛЬЦУ. Улика 12.09.2026: агент
             # работал и не отчитывался 180 минут, сторож честно пинал его
@@ -3368,11 +3550,10 @@ LIMIT_KICK_ZAPAS_MIN="${LIMIT_KICK_ZAPAS_MIN:-15}"
 LIMIT_KICK_MAX_MIN="${LIMIT_KICK_MAX_MIN:-60}"
 if [ "$WORK_PAUSED" = 0 ] && tmux has-session -t "$TMUX_SESSION" 2>/dev/null \
    && [ -f "$TRANSCRIPT" ]; then
-    STALL_MIN=$(немота_агента_минут "$TRANSCRIPT" || true)
-    # Прибор не ответил — не молчать: берём прежний, заведомо заниженный
-    # признак, он хуже, но это лучше слепоты.
-    [[ "$STALL_MIN" =~ ^[0-9]+$ ]] || \
-        STALL_MIN=$(( ( $(date +%s) - $(stat -c '%Y' "$TRANSCRIPT") ) / 60 ))
+    # Немота = работа_мин судьи (главная ИЛИ живой помощник); судья не ответил —
+    # judge_work уже свёл её к главной или к возрасту файла: хуже, чем судья, но
+    # лучше слепоты.
+    STALL_MIN="${JUDGE_WORK_MIN:-0}"
     PANE_NOW=$(tmux capture-pane -p -t "$TMUX_SESSION" 2>/dev/null || true)
     LIMIT_SEEN=0
     признак_лимита_в "$PANE_NOW" && LIMIT_SEEN=1
@@ -3386,10 +3567,12 @@ if [ "$WORK_PAUSED" = 0 ] && tmux has-session -t "$TMUX_SESSION" 2>/dev/null \
     # бы тревогу владельцу на ровном месте — сигнал без различения здорового и
     # больного состояния.
     LIMIT_PROVEN=0
-    if [[ "$LIMIT_LOG_MIN" =~ ^[0-9]+$ ]] && [ "$LIMIT_LOG_MIN" -lt "$STALL_MIN" ]; then
+    # Доказывает лимит ГЛАВНАЯ сессия: отказ свежее её последнего ответа.
+    MAIN_SILENT_MIN="${JUDGE_MAIN_MIN:-$STALL_MIN}"
+    if [[ "$LIMIT_LOG_MIN" =~ ^[0-9]+$ ]] && [ "$LIMIT_LOG_MIN" -lt "$MAIN_SILENT_MIN" ]; then
         LIMIT_SEEN=1
         LIMIT_PROVEN=1
-        say "лимит виден в журнале сессии: отказ 429 был $LIMIT_LOG_MIN мин назад, успешного ответа нет $STALL_MIN мин"
+        say "лимит виден в журнале сессии: отказ 429 был $LIMIT_LOG_MIN мин назад, успешного ответа главной нет $MAIN_SILENT_MIN мин"
     fi
     # Будим по НЕМОТЕ, а признак лимита нужен лишь для слов владельцу. Прежде
     # пинок был заперт за признаком лимита — текста CLI при исчерпании я не
@@ -3419,6 +3602,54 @@ if [ "$WORK_PAUSED" = 0 ] && tmux has-session -t "$TMUX_SESSION" 2>/dev/null \
     if свежий_отказ "$TRANSCRIPT"; then FRESH=1; else FRESH=0; fi
     VERDICT=$(решение_лимита "$STALL_MIN" "$LIMIT_PROVEN" "$LIMIT_SEEN" "$MARKED" "$FRESH")
     say "решение лимитной ветки: $VERDICT (немота ${STALL_MIN} мин, доказан ${LIMIT_PROVEN}, виден ${LIMIT_SEEN}, метка ${MARKED}, свежий отказ ${FRESH})"
+    # Немота без признака лимита — в ДВА шага. Объявить «Работа встала» в том
+    # же обходе, что и пинок, значит не дать смене ответить: 25.10.2026 ответ
+    # пришёл через 3 секунды после объявления. Первый обход — только пинок и
+    # метка stall.kick; владельцу говорим, если за KICK_ANSWER_WAIT_MIN ответа
+    # (главной или помощника) не было и помощников нет. Метку гасит работа
+    # после пинка (правило ниже), а не любая реплика.
+    STALL_KICK="$LOG_DIR/stall.kick"
+    STALL_KICK_FIRST=0
+    STALL_KICK_AGE_SEC=""
+    [ -f "$STALL_KICK" ] && STALL_KICK_AGE_SEC=$(( $(date +%s) - $(stat -c '%Y' "$STALL_KICK") ))
+    # Ответ на пинок — реплика, а не работа: главная, которая ждёт вечно, отвечает
+    # «Жду.» на каждый пинок, и по одному ответу немота гасилась бы навсегда.
+    # Работой после пинка считаются отчёт владельцу новее метки или ответы,
+    # продолжавшиеся дольше KICK_ANSWER_WAIT_MIN после неё. Голая реплика метку
+    # пинка снимает, но запоминается: если смена снова замолчит в пределах часа
+    # без отчёта, второй пинок немоты уже не ждёт — «Работа встала» уходит сразу.
+    STALL_REPLIED="$LOG_DIR/stall.replied"
+    REPORT_EPOCH=$(stat -c '%Y' "$PULSE_MARK" 2>/dev/null || echo 0)
+    if [ -f "$STALL_REPLIED" ] && { [ "$REPORT_EPOCH" -gt "$(stat -c '%Y' "$STALL_REPLIED")" ] \
+         || [ $(( $(date +%s) - $(stat -c '%Y' "$STALL_REPLIED") )) -ge $(( ${STALL_REPLY_MEMORY_MIN:-60} * 60 )) ]; }; then
+        rm -f "$STALL_REPLIED"
+    fi
+    if [ -n "$STALL_KICK_AGE_SEC" ]; then
+        if [ "$REPORT_EPOCH" -gt "$(stat -c '%Y' "$STALL_KICK")" ] \
+           || [ $(( JUDGE_WORK_SEC + ${KICK_ANSWER_WAIT_MIN:-5} * 60 )) -lt "$STALL_KICK_AGE_SEC" ]; then
+            rm -f "$STALL_KICK" "$STALL_REPLIED"; STALL_KICK_AGE_SEC=""
+        elif [ "$JUDGE_WORK_SEC" -lt "$STALL_KICK_AGE_SEC" ] || [ "$VERDICT" != "объявить-немоту" ]; then
+            rm -f "$STALL_KICK"; STALL_KICK_AGE_SEC=""
+            date +%s > "$STALL_REPLIED"
+        fi
+    fi
+    if [ "$(stall_reason "$LIMIT_SEEN" "$BLOCKED_IDLE")" != nemota ]; then
+        rm -f "$STALL_KICK" "$STALL_REPLIED"
+    elif [ "$VERDICT" = "объявить-немоту" ]; then
+        if [ -z "$STALL_KICK_AGE_SEC" ] && [ ! -f "$STALL_REPLIED" ]; then
+            STALL_KICK_FIRST=1
+            VERDICT="пинок"
+            say "немота ${STALL_MIN} мин: сначала пинок; владельцу скажу, если ответа не будет ${KICK_ANSWER_WAIT_MIN:-5} мин"
+        elif [ -z "$STALL_KICK_AGE_SEC" ]; then
+            rm -f "$STALL_REPLIED"
+            say "немота ${STALL_MIN} мин после ответа на прошлый пинок без отчёта — объявляю сразу"
+        elif [ "$STALL_KICK_AGE_SEC" -lt $(( ${KICK_ANSWER_WAIT_MIN:-5} * 60 )) ] || [ "$JUDGE_HELPERS" -gt 0 ]; then
+            VERDICT="пинок"
+            say "немота ${STALL_MIN} мин: пинок был ${STALL_KICK_AGE_SEC} с назад — жду ответа"
+        else
+            rm -f "$STALL_KICK"
+        fi
+    fi
     # Когда обновится лимит — считаем ОДИН раз на обход: то же выражение стояло
     # и в условии пинка, и в записи журнала, а каждый вызов — запуск python3 с
     # чтением хвоста транскрипта (находка MAJOR-4 ревью 27.09.2026). Спрашиваем
@@ -3520,8 +3751,15 @@ if [ "$WORK_PAUSED" = 0 ] && tmux has-session -t "$TMUX_SESSION" 2>/dev/null \
             else
                 KICK_TEXT_LIMIT="[сторож сессий] Работы не видно ${STALL_MIN} мин, признака лимита нет. Продолжай текущий шаг: сверься с STATE.md и docs/handover/, проверь \$LOG_DIR/inbox/. Если стоишь по причине — назови её владельцу."
             fi
-            agent_prompt "$KICK_TEXT_LIMIT" \
-                || say "пинок не ушёл (в панели: $(pane_cmd))"
+            # Метка пинка немоты ставится ДО отправки (ответ, пришедший за время
+            # отправки, должен считаться новее метки) и снимается, если пинок не
+            # ушёл: иначе через KICK_ANSWER_WAIT_MIN объявилась бы немота без
+            # попытки разбудить смену.
+            [ "$STALL_KICK_FIRST" != 1 ] || date +%s > "$STALL_KICK"
+            if ! agent_prompt "$KICK_TEXT_LIMIT"; then
+                [ "$STALL_KICK_FIRST" != 1 ] || rm -f "$STALL_KICK"
+                say "пинок не ушёл (в панели: $(pane_cmd))"
+            fi
         fi
     elif [ "$VERDICT" = "возобновление" ]; then
         # Смена ожила: транскрипт снова растёт И свежего отказа в нём больше
@@ -3532,7 +3770,7 @@ if [ "$WORK_PAUSED" = 0 ] && tmux has-session -t "$TMUX_SESSION" 2>/dev/null \
         # спам»). Ежеминутный limit-watch.sh чинён тем же условием; здесь была
         # ВТОРАЯ копия того же суждения, и она бы врала дальше.
         # Метку читает, снимает и облекает в слова тот же судья, что её ставил.
-        SNYATO=$(python3 "$PROJECT_DIR/scripts/limit_mark.py" --снять 2>/dev/null) || SNYATO=""
+        SNYATO=$(python3 "$PROJECT_DIR/scripts/limit_mark.py" --снять --транскрипт "$TRANSCRIPT" 2>/dev/null) || SNYATO=""
         # Пусто — метки не было или судья не ответил. Своей вести здесь нет:
         # четвёртая формулировка вне судьи это четвёртый источник правды, а
         # «возобновилась» без метки — дубль с ложным «0 мин» (ревью 27.09).
@@ -3556,55 +3794,114 @@ if [ "$WORK_PAUSED" = 0 ] && tmux has-session -t "$TMUX_SESSION" 2>/dev/null \
     fi
 fi
 
+# Потолок повторов толчка о сообщении на один файл: сессия, трижды получившая
+# толчок и не взявшая файл, не возьмёт его и в четвёртый — дальше нужен человек.
+INBOX_KICK_CEILING=3
+
+# Уборка 6а: на КАЖДОМ круге и при любом числе входящих, до толчка.
+# Живёт отдельно от толчка потому, что файл обычно берут, когда толчку уже нечего
+# делать (входящие пусты): внутри толчка задача модели
+# «сессия не берёт сообщение» висела бы открытой до следующего толчка.
+inbox_cleanup_step() {
+    local state="$LOG_DIR/kick-state" counter counter_name
+    mkdir -p "$state"
+    for counter in "$state"/repeat-*; do
+        [ -e "$counter" ] || continue
+        counter_name="${counter##*/repeat-}"; counter_name="${counter_name%.told}"
+        [ -e "$INBOX_DIR/$counter_name" ] && continue
+        # Сигнал о потолке уходил (есть .told) — задача модели закрывается зелёным.
+        case "$counter" in *.told) ! declare -F alert_task >/dev/null || alert_task --resolve session-warden:inbox-stuck ;; esac
+        rm -f "$counter"
+    done
+    # Метка «отдано» живёт, пока лежит её файл: взятый сессией файл уходит в
+    # обработано/, и метка ему больше не нужна.
+    for counter in "$state"/sent-*; do
+        [ -e "$counter" ] || continue
+        [ -e "$INBOX_DIR/${counter##*/sent-}.txt" ] || rm -f "$counter"
+    done
+    # Пустые входящие: причина прошлого отказа снимается, иначе второй эпизод
+    # паузы промолчит о «смену не бужу».
+    if [ -z "$(find "$INBOX_DIR" -maxdepth 1 -type f -print -quit 2>/dev/null)" ]; then
+        rm -f "$state/inbox-refusal"
+    fi
+}
+
+# Законный отказ двери (пауза, ротация, лимит) — одна строка на СМЕНЕ причины,
+# без сигнала владельцу.
+inbox_say_refusal() {  # причина
+    local mark="$LOG_DIR/kick-state/inbox-refusal"
+    [ "$(cat "$mark" 2>/dev/null)" = "$1" ] && return 0
+    say "$1: $INBOX_N сообщений ждут в inbox, смену не бужу"
+    printf '%s' "$1" > "$mark"
+}
+
+# Один раз на файл: сторож толкнул сессию потолок раз, она файл не берёт — дальше
+# нужен человек. Метка «сказано» только при настоящей отправке: весть, придержанная
+# дверью канала, не ушла.
+inbox_signal_stuck() {  # имя файла, его время (эпоха)
+    local told="$LOG_DIR/kick-state/repeat-$1.told" hhmm
+    [ -e "$told" ] && return 0
+    hhmm=$(date -d "@$2" +%H:%M)
+    say "файл $hhmm на потолке повторов, не толкаю"
+    tg_send "Сообщение от $hhmm: толкнул сессию $INBOX_KICK_CEILING раза, она его не берёт — оно лежит во входящих." --task session-warden:inbox-stuck \
+        && [ "$TG_SEND_HELD" = 0 ] && : > "$told"
+    return 0
+}
+
+# Шаг толчка ветки 6а. Дверь спрашивается ПЕРВОЙ: на паузе, в ротации и в лимите
+# ни потолок, ни сигнал не судятся — пауза СТОП, а придержанный сигнал пропал бы.
+# Потолок — на файл, не на очередь: застрявшие сигналят и в выборку толчка не идут.
+inbox_kick_step() {
+    local state="$LOG_DIR/kick-state" reason line name epoch count target="" target_count=0
+    reason=$(pane_gate_owner)
+    if [ -n "$reason" ]; then
+        inbox_say_refusal "$reason"
+        return 0
+    fi
+    rm -f "$state/inbox-refusal"
+    while IFS= read -r line; do
+        name="${line#* }"; epoch="${line%%.*}"
+        count=$(cat "$state/repeat-$name" 2>/dev/null || echo 0)
+        [[ "$count" =~ ^[0-9]+$ ]] || count=0
+        if [ "$count" -ge "$INBOX_KICK_CEILING" ]; then
+            inbox_signal_stuck "$name" "$epoch"
+        elif [ -z "$target" ]; then
+            target="$name"; target_count="$count"
+        fi
+    done < <(find "$INBOX_DIR" -maxdepth 1 -type f -mmin +2 -printf '%T@ %f\n' 2>/dev/null | sort -n)
+    [ -n "$target" ] || return 0
+    if pane_kick_owner "В $INBOX_DIR лежат $INBOX_N сообщений владельца — свод одной командой: python3 scripts/inbox-digest.py; прочитанное перенеси в $INBOX_DIR/обработано/."; then
+        echo $((target_count + 1)) > "$state/repeat-$target"
+        say "в inbox $INBOX_N необработанных сообщений владельца — пинок в tmux (толчок $((target_count + 1)) из $INBOX_KICK_CEILING)"
+        jlog "inbox_kick" "$SESSION_ID" "необработанных: $INBOX_N"
+        return 0
+    fi
+    reason="${PANE_REFUSAL%%:*}"
+    case "$reason" in
+        пауза|ротация|лимит) inbox_say_refusal "$reason" ;;
+        *)
+            if tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
+                tg_send "У меня $INBOX_N ваших сообщений в inbox, но в tmux-панели не claude — агент выпал в оболочку. Поднимаю смену сейчас же, ответ будет от неё." --task session-warden:no-agent || say "и сигнал не ушёл"
+            else
+                say "tmux-сессии нет — входящие некому отдать, сигнал владельцу"
+                tg_send "У меня $INBOX_N ваших сообщений в очереди, но сессия агента не запущена." --task session-warden:no-agent || say "и сигнал не ушёл"
+            fi
+            WARDEN_RC=1 ;;
+    esac
+}
+
 # ── 6а. Входящие владельца: непустой inbox не должен лежать молча ───────────
 # Диспетчер складывает сообщения владельца в $LOG_DIR/inbox/ файлами; агент
 # переносит прочитанное в inbox/обработано/. Свежий необработанный файл старше
 # пары минут — пинок в сессию: сообщение владельца не имеет права ждать.
 INBOX_DIR="$LOG_DIR/inbox"
 OWNER_WAITING=0   # латиницей намеренно: кириллица в имени переменной bash запрещена
-# Порог ожидания рубежа: дольше него несрочное не лежит даже молча — рубежа
-# можно и не дождаться, если смена встала. Дефолт ПОСЛЕ загрузчика конфигов
-# (память: дефолт-до-загрузчика-убивает-настройку).
-INBOX_WAIT_MAX_MIN="${INBOX_WAIT_MAX_MIN:-30}"
 if [ -d "$INBOX_DIR" ]; then
+    inbox_cleanup_step
     INBOX_N=$(find "$INBOX_DIR" -maxdepth 1 -type f -mmin +2 2>/dev/null | wc -l | tr -d ' ')
     if [ "$INBOX_N" -gt 0 ]; then
         OWNER_WAITING=1
-        # Срочное ли что-то из накопленного — решает прибор на данных
-        # (scripts/urgency.py через свод), а не этот демон.
-        INBOX_URGENT=$(python3 "$PROJECT_DIR/scripts/inbox-digest.py" \
-            --инбокс "$INBOX_DIR" --сколько-срочных 2>/dev/null || echo 0)
-        [[ "$INBOX_URGENT" =~ ^[0-9]+$ ]] || INBOX_URGENT=0
-        # Возраст самого старого входящего и то, был ли рубеж после его прихода.
-        INBOX_OLDEST=$(find "$INBOX_DIR" -maxdepth 1 -type f -printf '%T@\n' 2>/dev/null \
-            | sort -n | head -1 | cut -d. -f1)
-        [ -n "${INBOX_OLDEST:-}" ] || INBOX_OLDEST=$(date +%s)
-        INBOX_WAIT_MIN=$(( ( $(date +%s) - INBOX_OLDEST ) / 60 ))
-        INBOX_TURN_DONE=$(ход_завершён_после "$INBOX_OLDEST")
-        INBOX_RESHENIE=$(reshenie_po_vhodyashchim "$INBOX_URGENT" "$INBOX_WAIT_MIN" \
-            "$INBOX_WAIT_MAX_MIN" "$INBOX_TURN_DONE")
-    fi
-    if [ "$INBOX_N" -gt 0 ] && [ "${INBOX_RESHENIE:-пинок}" = "ждём" ]; then
-        # Владелец 12.09.2026: несрочное не должно сбивать шаг. Диспетчер такое
-        # сообщение уже не пинает; пни его здесь — и правило было бы перекрыто
-        # ровно наполовину. Сообщение не потеряно: свод ждёт агента на рубеже.
-        say "в inbox $INBOX_N несрочных сообщений (ждут ${INBOX_WAIT_MIN} мин при пороге ${INBOX_WAIT_MAX_MIN}) — шаг не прерываю, их подаст свод на рубеже"
-        INBOX_N=0
-    fi
-    if [ "$INBOX_N" -gt 0 ]; then
-        say "в inbox $INBOX_N необработанных сообщений владельца — пинок в tmux"
-        if tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
-            if agent_prompt "В $INBOX_DIR лежат $INBOX_N сообщений владельца, среди них срочные — свод одной командой: python3 scripts/inbox-digest.py; прочитанное перенеси в $INBOX_DIR/обработано/."; then
-                jlog "inbox_kick" "$SESSION_ID" "необработанных: $INBOX_N"
-            else
-                tg_send "У меня $INBOX_N ваших сообщений в inbox, но в tmux-панели не claude — агент выпал в оболочку. Поднимаю смену сейчас же, ответ будет от неё." || say "и сигнал не ушёл"
-                WARDEN_RC=1
-            fi
-        else
-            say "tmux-сессии нет — входящие некому отдать, сигнал владельцу"
-            tg_send "У меня $INBOX_N ваших сообщений в очереди, но сессия агента не запущена." || say "и сигнал не ушёл"
-            WARDEN_RC=1
-        fi
+        inbox_kick_step
     fi
 fi
 
@@ -3635,6 +3932,7 @@ if tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
         ok)
             [ -f "$PANE_STATE" ] && rm -f "$PANE_STATE" "$DEAD_STAMP"
             say "в панели '$PANE_NOW' — агент на месте"
+            alert_task --resolve session-warden:no-agent
             ;;
         человек)
             say "в панели '$PANE_NOW', но к сессии подключён владелец (клиентов: $CLIENTS, простой ${PANE_IDLE_MIN} мин) — не вмешиваюсь"
@@ -3680,7 +3978,7 @@ if tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
             else
                 jlog "agent_revive_failed" "${SESSION_ID:-?}" "команда «$AGENT_START_CMD» не подняла claude"
                 tg_send "Агент выпал в оболочку, и поднять его командой «$AGENT_START_CMD» не удалось за ${AGENT_START_TIMEOUT_SEC}с. Нужны ваши руки: sudo -u $AGENT_USER -H tmux attach -t $TMUX_SESSION" \
-                    || say "и сигнал не ушёл"
+                    --task session-warden:no-agent || say "и сигнал не ушёл"
                 WARDEN_RC=1
             fi
             ;;
@@ -3702,12 +4000,11 @@ else
         fi
         if [ "$TELL" = 1 ]; then
             tg_send "Сессии агента не было совсем (панель закрылась вместе с ним) — поднял заново командой «$AGENT_START_CMD»." \
-                && date +%s > "$DEAD_STAMP" || say "сигнал о поднятой сессии не ушёл"
+                --task session-warden:no-agent && date +%s > "$DEAD_STAMP" || say "сигнал о поднятой сессии не ушёл"
         fi
     else
         jlog "agent_revive_failed" "${SESSION_ID:-?}" "сессии не было, поднять её с агентом не удалось"
-        tg_send "Сессии агента нет, и поднять её командой «$AGENT_START_CMD» не удалось. Нужны ваши руки: sudo -u $AGENT_USER -H systemctl restart harness-agent" --несмотря-на-лимит \
-            || say "и сигнал не ушёл"
+        refusal_hint
         WARDEN_RC=1
     fi
 fi

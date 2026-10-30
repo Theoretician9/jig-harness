@@ -103,9 +103,9 @@ TELO_FULL=$(telo rotate_full)
 case_check "тела обоих путей ротации вынуты из файла сторожа" \
     "да;да" "$([ -n "$TELO_CLEAR" ] && echo -n "да" || echo -n "нет");$([ -n "$TELO_FULL" ] && echo да || echo нет)"
 case_check "быстрый путь: дверь спрошена ДО «/clear»" \
-    "да" "$(dver_vyshe "$TELO_CLEAR" 'send_to_pane "/clear"')"
+    "да" "$(dver_vyshe "$TELO_CLEAR" 'pane_command text "/clear"')"
 case_check "тяжёлый путь: дверь спрошена ДО подачи выхода в панель" \
-    "да" "$(dver_vyshe "$TELO_FULL" 'agent_prompt "$PROMPT"')"
+    "да" "$(dver_vyshe "$TELO_FULL" '"$send_fn" "$PROMPT"')"
 
 # ── дверь 2: судья свежести передачи ОТНОСИТЕЛЬНО мига поручения ────────────
 echo "── СУДЬЯ ПЕРЕДАЧИ: сравнение с мигом поручения, а не с порогом возраста ──"

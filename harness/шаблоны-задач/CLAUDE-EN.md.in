@@ -126,6 +126,7 @@ consent means no action.
 ```bash
 bash scripts/gates.sh                   # ALL gates in one step
 bash scripts/hooks/session_state.sh      # one-step look around: inbox, work, spend, daemons
+python3 scripts/events.py status          # what is wrong with the harness (journals, losses); events.py --help for the rest
 ./scripts/deploy.sh                      # the ONLY way to deploy
 ```
 

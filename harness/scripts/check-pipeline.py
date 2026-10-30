@@ -2,7 +2,7 @@
 """Гейт середины пайплайна: у крупной задачи есть спека и ревью спеки.
 
 Откуда взят. Владелец 11.09.2026: «пайплайн контролируется по концам. Вход и
-выход. Середина на честном слове <…> Всё, что можно сделать кодом, делается
+выход. Середина на честном слове <…> всё, что можно поручить коду, поручается коду
 кодом». Первый из трёх названных им пунктов: «Задачу крупного тира не коммитить
 без файла спеки, привязанного к её id».
 
@@ -24,6 +24,7 @@
     python3 scripts/check-pipeline.py --selftest
 Код возврата: 0 — чисто, 1 — нарушение, 77 — жёлтый (обкатка, коммит идёт).
 """
+import hashlib
 import json
 import os
 import re
@@ -37,6 +38,8 @@ sys.path.insert(0, str(КОРЕНЬ / "scripts"))
 sys.path.insert(0, str(КОРЕНЬ / "scripts" / "lib"))
 import config as конф                                     # noqa: E402
 import spec_approval                                      # noqa: E402
+import hackathon                                          # noqa: E402
+import cards                                              # noqa: E402
 
 ЖУРНАЛ_ОБХОДОВ = Path(конф.log_dir()) / "пайплайн-обходы.jsonl"
 
@@ -173,6 +176,24 @@ def решение_без_названной_задачи() -> int:
     return 1
 
 
+def _single_wip(data):
+    """(id, карточка) единственной wip-карточки данных карты. Неоднозначно — (None, None)."""
+    def walk(node):
+        if isinstance(node, dict):
+            if "id" in node and node.get("status") == "wip":
+                yield node
+            for value in node.values():
+                yield from walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                yield from walk(value)
+
+    tasks = list(walk(data))
+    if len(tasks) != 1:
+        return None, None
+    return tasks[0]["id"], tasks[0]
+
+
 def задача_карты(карта=None):
     """(id, карточка) единственной задачи в работе. Неоднозначно — (None, None)."""
     import yaml
@@ -182,21 +203,12 @@ def задача_карты(карта=None):
             данные = yaml.safe_load(fh)
     except (OSError, ValueError, ImportError):
         return None, None
+    return _single_wip(данные)
 
-    def обход(узел):
-        if isinstance(узел, dict):
-            if "id" in узел and узел.get("status") == "wip":
-                yield узел
-            for значение in узел.values():
-                yield from обход(значение)
-        elif isinstance(узел, list):
-            for значение in узел:
-                yield from обход(значение)
 
-    задачи = list(обход(данные))
-    if len(задачи) != 1:
-        return None, None
-    return задачи[0]["id"], задачи[0]
+def wip_task_in_index():
+    """То же по карте из ИНДЕКСА: что уйдёт в коммит, а не что лежит в рабочем дереве."""
+    return _single_wip(_карта_из(":"))
 
 
 def старше_водораздела(карточка, водораздел):
@@ -207,7 +219,7 @@ def старше_водораздела(карточка, водораздел):
     return str(начата) < str(водораздел)
 
 
-def начало_по_коммитам(id_задачи: str):
+def начало_по_коммитам(id_задачи: str, корень=None):
     """Дата ПЕРВОГО коммита задачи (YYYY-MM-DD), «» — коммитов нет, None — git молчит.
 
     `when.started` — самоотчёт, и 27.09.2026 его не было у пяти задач из
@@ -222,7 +234,7 @@ def начало_по_коммитам(id_задачи: str):
         return ""
     try:
         вывод = subprocess.run(
-            ["git", "-C", str(КОРЕНЬ), "log", "--format=%cs",
+            ["git", "-C", str(корень or КОРЕНЬ), "log", "--format=%cs",
              f"--grep=^Dev-Map: {id_задачи}$", "--extended-regexp"],
             capture_output=True, text=True, timeout=60)
     except (OSError, subprocess.SubprocessError):
@@ -256,6 +268,9 @@ def _где_артефакт(шаг, id_задачи, спека, корень):
         return Path(корень) / ".tasks" / id_задачи / "pretask.yaml", "контракт задачи"
     if шаг == "план":
         return Path(корень) / ".tasks" / id_задачи / "план.md", "план"
+    if шаг == "безопасность":
+        return (Path(корень) / ".tasks" / id_задачи / "безопасность.yaml",
+                "безопасность")
     if шаг == "мутации":
         # Итог мутационного прогона ПО ЗАДАЧЕ: «самотест зелёный» доказывает
         # согласие кода со своим тестом, а не то, что тест ловит нарушение.
@@ -299,9 +314,195 @@ def путь_бумаги(карточка, шаг, корень=КОРЕНЬ):
             # «любой существующий путь» превращал гейт в самозаверение.
             return None, шаг, f"шаг «{шаг}»: путь в поле «бумаги» негоден — {беда}"
         return путь, f"{шаг} (путь назван картой)", None
+    if шаг == "план":
+        # План главы лежит в docs/plans/<план>.md; `бумаги.план` выше сильнее.
+        # Нет файла плана — прежний путь задачи.
+        план_главы = str((карточка or {}).get("глава") or "").split("/")[0].strip()
+        if план_главы:
+            файл = Path(корень) / "docs" / "plans" / f"{план_главы}.md"
+            if файл.is_file():
+                return файл, "план (по главе)", None
     путь, имя = _где_артефакт(шаг, (карточка or {}).get("id") or "-",
                               (карточка or {}).get("spec"), корень)
     return путь, имя, None
+
+
+SECURITY_PAPER = "безопасность.yaml"
+SECURITY_REASONS = {
+    "none_read": "изменения задачи не прочитаны: git молчит",
+    "no_file": "нет бумаги шага «безопасность»",
+    "not_sealed": "файл не запечатан: писан не помощником или правлен после",
+    "not_opus": "печать сделана не моделью opus",
+    "no_skill": "нет вызова скила security-check тем же помощником",
+    "stale": "бумага от прошлого кода: отпечаток не совпал",
+    "class_unanswered": "класс задет, ответа нет",
+    "where_bad": "место ответа вне задачи",
+    "open_major": "находка без closed",
+    "closed_foreign": "closed указывает не на коммит этой задачи",
+    "too_many_runs": "прогонов больше max_runs_per_task — нужен ответ владельца",
+}
+_SIBLINGS = {}
+
+
+def _sibling(имя, *кандидаты):
+    """Соседний модуль харнеса по пути: имена с дефисом обычным import не берутся.
+    Кандидаты — раскладка проекта и раскладка пакета."""
+    if имя not in _SIBLINGS:
+        import importlib.util
+        здесь = Path(__file__).resolve().parent
+        путь = next((здесь / к for к in кандидаты if (здесь / к).is_file()), None)
+        if путь is None:
+            raise ImportError(f"нет соседа {кандидаты}")
+        спец = importlib.util.spec_from_file_location(имя, путь)
+        модуль = importlib.util.module_from_spec(спец)
+        sys.modules[имя] = модуль
+        спец.loader.exec_module(модуль)
+        _SIBLINGS[имя] = модуль
+    return _SIBLINGS[имя]
+
+
+def _jsonl(путь) -> list:
+    try:
+        строки = Path(путь).read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    записи = []
+    for строка in строки:
+        try:
+            записи.append(json.loads(строка))
+        except ValueError:
+            continue
+    return записи
+
+
+def _git_out(корень, *args):
+    вывод = subprocess.run(["git", "-C", str(корень), *args], capture_output=True, text=True)
+    return вывод.stdout if вывод.returncode == 0 else None
+
+
+def _seal_debts(бумага, относительный, журнал):
+    """Печать и вызов скила: (печать | None, беды). Файл судится по последней печати."""
+    печати = [з for з in _jsonl(журнал / "artifact-seals.jsonl") if з.get("file") == относительный]
+    последняя = печати[-1] if печати else None
+    sha = hashlib.sha256(бумага.read_bytes()).hexdigest()
+    if (not последняя or последняя.get("источник") != "хук"
+            or not последняя.get("agent") or последняя.get("sha256") != sha):
+        return None, [SECURITY_REASONS["not_sealed"]]
+    guard = _sibling("model_guard", "hooks/model_guard.py", "../hooks/model_guard.py")
+    if guard.род(последняя.get("model")) != "opus":
+        return None, [SECURITY_REASONS["not_opus"]]
+    вызовы = [з for з in _jsonl(журнал / "skills.jsonl")
+              if з.get("skill") == "security-check" and з.get("источник") == "хук"
+              and з.get("успех") is True and з.get("агент") == последняя["agent"]
+              and str(з.get("ts") or "") <= str(последняя.get("ts") or "")]
+    if not вызовы:
+        return None, [SECURITY_REASONS["no_skill"]]
+    return печати, []
+
+
+def _answers_debts(данные, затронутые, чек_лист, находки_кода):
+    беды = []
+    классы = данные.get("classes") or {}
+    for класс in sorted(затронутые):
+        запись = классы.get(класс) or {}
+        ответы = {a.get("id") for a in (запись.get("answers") or []) if isinstance(a, dict)}
+        нужные = {q["id"] for q in чек_лист["classes"][класс].get("questions") or []}
+        if not запись.get("touched") or нужные - ответы:
+            беды.append(f"{SECURITY_REASONS['class_unanswered']}: {класс}")
+    названные = {(f.get("rule"), f.get("file")) for f in (данные.get("code_findings") or [])
+                 if isinstance(f, dict)}
+    for находка in находки_кода:
+        if (находка["rule"], находка["file"]) not in названные:
+            беды.append(f"{SECURITY_REASONS['class_unanswered']}: "
+                        f"находка кода {находка['rule']} в {находка['file']} без ответа")
+    return беды
+
+
+def _where_debts(данные, корень, файлы):
+    места = [a.get("where") for e in (данные.get("classes") or {}).values()
+             for a in (e.get("answers") or []) if isinstance(a, dict)]
+    места += [f.get("location") for f in (данные.get("findings") or []) if isinstance(f, dict)]
+    беды = []
+    for место in filter(None, места):
+        файл, _, номер = str(место).rpartition(":")
+        текст = _git_out(корень, "show", f":{файл}") if файл in файлы else None
+        if текст is None or not номер.isdigit() or not 1 <= int(номер) <= len(текст.splitlines()):
+            беды.append(f"{SECURITY_REASONS['where_bad']}: {место}")
+    return беды
+
+
+def _findings_debts(данные, корень, id_задачи):
+    беды = []
+    for находка in данные.get("findings") or []:
+        if not isinstance(находка, dict) or находка.get("severity") not in ("critical", "major"):
+            continue
+        закрыто = str(находка.get("closed") or "")
+        if not закрыто:
+            беды.append(f"{SECURITY_REASONS['open_major']}: {находка.get('finding_id')}")
+            continue
+        файл = str(находка.get("location") or "").rpartition(":")[0]
+        сообщение = _git_out(корень, "log", "-1", "--format=%B", закрыто)
+        файлы = _git_out(корень, "show", "--name-only", "--format=", закрыто)
+        свой = сообщение is not None and id_задачи in cards.dev_map_ids(сообщение)
+        if not (свой and файлы is not None and файл in файлы.split()):
+            беды.append(f"{SECURITY_REASONS['closed_foreign']}: {находка.get('finding_id')}")
+    return беды
+
+
+def security_debts(карточка, корень=КОРЕНЬ) -> list:
+    """Долги шага «безопасность» (9 проверок): пусто — шаг пройден.
+
+    Задача без задетых классов бумаги не требует; «git молчит» — красный, а не
+    «классов нет». Первые пять проверок файла (есть, печать, модель, скил,
+    отпечаток) останавливают суд: всё остальное читает бумагу, которой уже
+    нельзя верить.
+    """
+    import yaml
+    id_задачи = (карточка or {}).get("id") or "-"
+    корень = Path(корень)
+    sec = _sibling("check_security", "check-security.py")
+    try:
+        чек_лист = sec.load_checklist()
+    except sec.Unreadable as err:
+        return [str(err)]
+    строки = sec.added_lines(id_задачи, корень)
+    if строки is None:
+        return [SECURITY_REASONS["none_read"]]
+    # Правила идут ДО решения «бумага не нужна»: находка правила задевает свой
+    # класс, и пустой список затронутых без них терял бы находки молча.
+    try:
+        находки_кода, _ = sec.run_rules(id_задачи, корень, чек_лист)
+    except sec.Unreadable as err:
+        return [f"правила кода не прочитаны: {err}"]
+    затронутые = sec.touched_classes(строки, чек_лист, находки_кода)
+    if not затронутые:
+        return []
+    относительный = f".tasks/{id_задачи}/{SECURITY_PAPER}"
+    бумага = корень / относительный
+    if not бумага.is_file():
+        return [f"{SECURITY_REASONS['no_file']}: ожидается {относительный}"]
+    журнал = Path(os.environ.get("LOG_DIR") or конф.log_dir())
+    печати, беды = _seal_debts(бумага, относительный, журнал)
+    if беды:
+        return беды
+    try:
+        данные = yaml.safe_load(бумага.read_text(encoding="utf-8")) or {}
+    except yaml.YAMLError:
+        return [SECURITY_REASONS["not_sealed"]]
+    отпечаток = sec.code_fingerprint(id_задачи, корень)
+    if отпечаток is None:
+        return [SECURITY_REASONS["none_read"]]
+    if str(данные.get("code_fingerprint")) != отпечаток:
+        return [SECURITY_REASONS["stale"]]
+    файлы = {f for f in sec.task_files(id_задачи, корень) or []
+             if not sec.is_excluded(f, чек_лист)}
+    беды = _answers_debts(данные, затронутые, чек_лист, находки_кода)
+    беды += _where_debts(данные, корень, файлы)
+    беды += _findings_debts(данные, корень, id_задачи)
+    # Печать ставится на КАЖДЫЙ Write/Edit: прогон — это помощник, а не запись.
+    if len({п.get("agent") for п in печати}) > int(чек_лист.get("max_runs_per_task") or 3):
+        беды.append(SECURITY_REASONS["too_many_runs"])
+    return беды
 
 
 def проверить(карточка, корень=КОРЕНЬ, шаги=None):
@@ -334,6 +535,11 @@ def проверить(карточка, корень=КОРЕНЬ, шаги=Non
     for шаг in шаги:
         if шаг == "тесты":
             continue           # судится гейтом тестов по коммитам, не файлом
+        if шаг == "безопасность":
+            # Бумагу этого шага код судит сам (печать, отпечаток, ответы), а
+            # не по наличию файла: смена пишет карту и может назвать любой путь.
+            беды += security_debts(карточка, корень)
+            continue
         путь, имя, беда = путь_бумаги(карточка, шаг, корень)
         if беда:
             беды.append(беда)
@@ -1199,6 +1405,13 @@ def шаги_уровня(настройки, имя_уровня):
             "крупная": ["спека", "ревью_спеки", "контракт", "тесты"]}[имя_уровня]
 
 
+# Шаг «безопасность» проходит любой характер: починка входа — та же работа со
+# входом. Бумагу считает код, и с задачи без задетых классов она ничего не
+# требует, поэтому шаг судится на закрытии у задачи ЛЮБОГО уровня.
+STEPS_NOT_NARROWED = ("безопасность",)
+STEPS_JUDGED_AT_ANY_LEVEL = ("безопасность",)
+
+
 def сузить_характером(настройки, шаги, карточка):
     """Шаги уровня, суженные ХАРАКТЕРОМ работы. Пустой характер ничего не режет.
 
@@ -1218,10 +1431,10 @@ def сузить_характером(настройки, шаги, карточ
     if not характер or разрешено in (None, "все"):
         return list(шаги)
     разрешено = set(разрешено)
-    return [ш for ш in шаги if ш in разрешено]
+    return [ш for ш in шаги if ш in разрешено or ш in STEPS_NOT_NARROWED]
 
 
-def шаги_для_задачи(настройки, имя_уровня, карточка):
+def шаги_для_задачи(настройки, имя_уровня, карточка, корень=None):
     """Шаги уровня МИНУС те, что включены позже, чем задача начата.
 
     Вопрос владельца 11.09.2026 (голосом): «что будет с текущими задачами,
@@ -1240,12 +1453,17 @@ def шаги_для_задачи(настройки, имя_уровня, кар
     включены = ((настройки.get("шаги_включены") or {}).get(имя_уровня) or {})
     начата = str(((карточка or {}).get("when") or {}).get("started") or "")
     if not начата:
+        # Самоотчёт `when.started` бывает пуст у прошлых задач — тогда дату даёт
+        # git, иначе включение шага красило бы всё, что начато до него. None
+        # (git молчит) оставляет прежнее поведение — полные правила.
+        начата = начало_по_коммитам((карточка or {}).get("id"), корень) or ""
+    if not начата:
         return шаги          # неизвестно, когда начата — судим по полным правилам
     return [ш for ш in шаги
             if not включены.get(ш) or начата > str(включены[ш])]
 
 
-def проверить_закрытие(цена, настройки):
+def проверить_закрытие(цена, настройки, корень=None):
     """М5: задача уходит в test — значит середина её пайплайна пройдена.
 
     Отдаёт ПАРЫ «чья задача → беда»: памятку на доску метит id ТОЙ задачи, о
@@ -1278,14 +1496,52 @@ def проверить_закрытие(цена, настройки):
             continue
         if not признаки.get("коммитов"):
             continue           # коммитов с трейлером ещё нет — судить нечего
-        значение = цена.цена(признаки, настройки["веса"])
-        if цена.уровень(значение, настройки["пороги"]) != "крупная":
-            continue
-        for беда in проверить(карточка,
-                              шаги=шаги_для_задачи(настройки, "крупная", карточка)):
+        значение, шаги, отложенные = шаги_закрытия(цена, настройки, признаки, карточка, корень)
+        if отложенные:
+            print(f"[пайплайн] {id_задачи}: долг до принятия — {', '.join(отложенные)}: "
+                  "ждут ночи, приёмка не примет задачу без них")
+        for беда in проверить(карточка, корень or КОРЕНЬ, шаги):
             беды.append((id_задачи,
                          f"{id_задачи} уходит в test (цена задачи {значение}): {беда}"))
     return беды
+
+
+def до_test_и_до_принятия(настройки, шаги) -> tuple:
+    """(шаги перехода в test, шаги приёмки). Отложенные — пульт, ключ «шаги_приёмки»:
+    мутации гоняются ночью, и смена не ждёт их перед test."""
+    отложенные = set(настройки.get("шаги_приёмки") or ())
+    return ([ш for ш in шаги if ш not in отложенные],
+            [ш for ш in шаги if ш in отложенные])
+
+
+def шаги_закрытия(цена, настройки, признаки, карточка, корень=None) -> tuple:
+    """(цена задачи, шаги до test, шаги до принятия) по признакам её коммитов."""
+    значение = цена.цена(признаки, настройки["веса"])
+    level_name = (hackathon.LEVEL if hackathon.is_hackathon(карточка)
+                  else цена.уровень(значение, настройки["пороги"]))
+    шаги = шаги_для_задачи(настройки, level_name, карточка, корень)
+    if level_name not in ("крупная", hackathon.LEVEL):
+        шаги = [ш for ш in шаги if ш in STEPS_JUDGED_AT_ANY_LEVEL]
+    return (значение, *до_test_и_до_принятия(настройки, шаги))
+
+
+def шаги_приёмки_задачи(карточка, корень=None):
+    """Отложенные до приёмки шаги, которые пайплайн требует с задачи.
+
+    None — история задачи не прочитана (git молчит): это не «долга нет».
+    Водораздел и дверь карточки действуют так же, как на переходе в test.
+    """
+    цена = _модуль_цены()
+    настройки = цена.конфиг()
+    водораздел = (настройки.get("строгость") or {}).get("водораздел")
+    if старше_водораздела(карточка, водораздел) or причина_полем(карточка):
+        return []
+    признаки = цена.признаки_задачи(карточка.get("id") or "", корень)
+    if признаки is None:
+        return None
+    if not признаки.get("коммитов"):
+        return []
+    return шаги_закрытия(цена, настройки, признаки, карточка, корень)[2]
 
 
 def дверь_открыта(id_задачи: str, повод: str = "") -> bool:
@@ -1412,9 +1668,10 @@ def шаги_под_состояние(настройки, карточка) -> 
     которой работа уже идёт, получала долг за ревью кода, которого ещё не
     может быть.
     """
-    шаги = шаги_для_задачи(настройки, "крупная", карточка)
+    level = hackathon.LEVEL if hackathon.is_hackathon(карточка) else "крупная"
+    шаги = шаги_для_задачи(настройки, level, карточка)
     if (карточка or {}).get("status") == "test":
-        return шаги
+        return до_test_и_до_принятия(настройки, шаги)[0]
     return [ш for ш in шаги if ш in ("спека", "ревью_спеки")]
 
 
@@ -1615,21 +1872,188 @@ def _все_карточки() -> list:
     return list(обход(данные))
 
 
+def judge_hackathon(task_id, price) -> int:
+    """Срок режима и запретные файлы. Зовётся ПОСЛЕ общих проверок и только на их «можно»."""
+    if not hackathon.active():
+        print(f"[пайплайн] {task_id}: срок хакатона вышел или не задан — "
+              f"режим включается `hackathon.py --включить`")
+        return 1
+    entries = price._индекс()
+    if entries is None:
+        print("[пайплайн] индекс не прочитан: git не отдал состав коммита.")
+        return 1
+    try:
+        touched = hackathon.touches_harness_guards([entry["путь"] for entry in entries])
+    except RuntimeError as error:
+        print(f"[пайплайн] {task_id}: {error} — хакатон без списка запретов не судится")
+        return 1
+    if touched:
+        print(f"[пайплайн] {task_id}: хакатон не трогает сторожей/гейты/хуки харнеса:")
+        for path in touched:
+            print(f"    {path}")
+        return 1
+    steps = price.конфиг()["шаги"][hackathon.LEVEL]
+    print(f"[пайплайн] {task_id}: хакатон, шаги: " + ", ".join(steps))
+    return 0
+
+
+def _cards_by_id(data):
+    """id -> все экземпляры карточки: повтор id не должен прятать хакатон."""
+    found = {}
+
+    def walk(node):
+        if isinstance(node, dict):
+            if "id" in node and "status" in node:
+                found.setdefault(node["id"], []).append(node)
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+
+    walk(data)
+    return found
+
+
+def _cards_head_and_index():
+    """(карточки HEAD, карточки индекса) по id или None: git не отдал карту."""
+    was, now = _карта_из("HEAD:"), _карта_из(":")
+    if was is None and _git_жив():
+        was = {}
+    if was is None or now is None:
+        return None
+    return _cards_by_id(was), _cards_by_id(now)
+
+
+def _is_hackathon_anywhere(task_id, before, after):
+    # Уровень хакатон в HEAD или в индексе: понижение уровня тем же коммитом суд не снимает.
+    return any(hackathon.is_hackathon(card)
+               for card in before.get(task_id, []) + after.get(task_id, []))
+
+
+def _only_map_leaves_hackathon(named, maps, price):
+    """Дверь выхода: в индексе одна карта, и ни одна названная карточка не осталась хакатоном в wip.
+
+    Без неё карточка, у которой срок вышел, запирала бы сама себя: понижение уровня
+    или закрытие — тоже коммит с её трейлером.
+    """
+    entries = price._индекс()
+    if entries is None or [entry["путь"] for entry in entries] != ["dev-map.yaml"]:
+        return False
+    after = maps[1]
+    return all(after.get(task_id) and not any(
+        hackathon.is_hackathon(card) and card.get("status") == "wip" for card in after[task_id])
+        for task_id in named)
+
+
+def _map_absent():
+    """True, если git жив и dev-map.yaml нет ни в индексе, ни в HEAD (карточек хакатона нет)."""
+    def _out(*args):
+        try:
+            done = subprocess.run(["git", "-C", str(КОРЕНЬ), *args], capture_output=True,
+                                  text=True, timeout=30)
+        except (OSError, subprocess.SubprocessError):
+            return None
+        return done.stdout if done.returncode == 0 else None
+    in_index = _out("ls-files", "--", "dev-map.yaml")
+    if _out("rev-parse", "-q", "--verify", "HEAD") is None:
+        in_head = ""
+    else:
+        in_head = _out("ls-tree", "HEAD", "--", "dev-map.yaml")
+    return in_index == "" and in_head == ""
+
+
+def commit_msg_gate(message_path):
+    """Стадия commit-msg: трейлер «Dev-Map: <id>» хакатона -> суд хакатона по индексу.
+
+    Сообщение коммита на стадии pre-commit ещё не написано, поэтому трейлер
+    читается только здесь; общие проверки при единственной wip хакатона
+    pre-commit отложил сюда, остальные уже отработал.
+    """
+    try:
+        text = Path(message_path).read_text(encoding="utf-8")
+    except OSError as error:
+        print(f"[пайплайн] сообщение коммита не прочитано ({error}): трейлер Dev-Map неизвестен.")
+        return 1
+    ids = cards.dev_map_ids(text)
+    # Без трейлера и без живого срока суду хакатона нечего делать: карту не читаем.
+    if not ids and not hackathon.active():
+        return 0
+    if _map_absent():
+        return 0
+    maps = _cards_head_and_index()
+    if maps is None:
+        print("[пайплайн] карта не прочитана: git не отдал dev-map.yaml — судить нечем.")
+        return 1
+    named = [task_id for task_id in dict.fromkeys(ids) if _is_hackathon_anywhere(task_id, *maps)]
+    if not ids and not _trailer_present_or_door(maps):
+        return 1
+    price = _модуль_цены()
+    # Чей коммит, знает только трейлер: общие проверки единственной wip хакатона
+    # pre-commit отложил сюда, и шагами хакатона они судят лишь коммит с его трейлером.
+    wip_id, wip_card = wip_task_in_index()
+    if hackathon.is_hackathon(wip_card):
+        code = run_checks(price, wip_id in ids)
+        if code:
+            return code
+    if not named:
+        return 0
+    if _only_map_leaves_hackathon(named, maps, price):
+        return 0
+    return judge_hackathon(", ".join(named), price)
+
+
+def _trailer_present_or_door(maps):
+    """Коммит без трейлера Dev-Map при активном режиме: пускает только дверь с причиной."""
+    mode_cards = [task_id for task_id in dict.fromkeys([*maps[0], *maps[1]])
+                  if _is_hackathon_anywhere(task_id, *maps)]
+    if not mode_cards or not hackathon.active():
+        return True
+    if дверь_открыта(", ".join(mode_cards), "коммит без трейлера Dev-Map при режиме хакатон"):
+        return True
+    print("[пайплайн] режим хакатон активен, а в сообщении нет трейлера Dev-Map: суд "
+          "хакатона по трейлеру, без него он молчит. Добавь строку:")
+    for task_id in mode_cards:
+        print(f"    Dev-Map: {task_id}")
+    print("    Честная дверь: HARNESS_PIPELINE_FORCE=1 и HARNESS_PIPELINE_WHY='почему'.")
+    return False
+
+
 def main():
     if "--selftest" in sys.argv:
         return самотест()
     if "--по-истории" in sys.argv:
         return по_истории()
+    if "--commit-msg" in sys.argv:
+        position = sys.argv.index("--commit-msg") + 1
+        if position >= len(sys.argv):
+            print("нужно: --commit-msg <файл сообщения>", file=sys.stderr)
+            return 2
+        return commit_msg_gate(sys.argv[position])
 
-    цена = _модуль_цены()
-    настройки = цена.конфиг()
-    признаки = цена.признаки_коммита()
+    price = _модуль_цены()
+    _, card = wip_task_in_index()
+    maps = _cards_head_and_index()
+    if maps is None:
+        print("[пайплайн] карта не прочитана: git не отдал dev-map.yaml — "
+              "судить нечем. «Нечем судить» это не «нарушений нет».")
+        return 1
+    # Суд хакатона (срок, запреты, шаги) ведёт стадия commit-msg по трейлеру: карточка
+    # в wip не должна судить чужие коммиты, а после срока запирать репозиторий.
+    if hackathon.is_hackathon(card):
+        return 0
+    return run_checks(price, False)
+
+
+def run_checks(price, is_hackathon):
+    настройки = price.конфиг()
+    признаки = price.признаки_коммита()
     if признаки is None:
         print("[пайплайн] индекс не прочитан: git не отдал состав коммита — "
               "цену считать не из чего. «Нечем судить» это не «мелкая задача».")
         return 1
-    значение = цена.цена(признаки, настройки["веса"])
-    имя_уровня = цена.уровень(значение, настройки["пороги"])
+    значение = price.цена(признаки, настройки["веса"])
+    level_name = hackathon.LEVEL if is_hackathon else price.уровень(значение, настройки["пороги"])
 
     # Беклог судится ДО всего: его трогать нельзя ни при какой цене коммита.
     карты_для_беклога = карты_коммита()
@@ -1667,11 +2091,11 @@ def main():
     # тот же факт второй меркой значило бы завести второго судью ровно там,
     # где задача его убирает (ревью кода 13.09, I-3).
     id_сверки, карточка_сверки = задача_карты()
-    уровень_факта = имя_уровня
+    уровень_факта = level_name
     if id_сверки:
-        признаки_задачи = цена.признаки_задачи(id_сверки)
+        признаки_задачи = price.признаки_задачи(id_сверки)
         if признаки_задачи:
-            уровень_факта = цена.уровень(цена.цена(признаки_задачи, настройки["веса"]),
+            уровень_факта = price.уровень(price.цена(признаки_задачи, настройки["веса"]),
                                          настройки["пороги"])
     сверка = сверить_глубину(карточка_сверки, уровень_факта)
     if сверка:
@@ -1682,10 +2106,10 @@ def main():
             return 1
         print(печать + " — разрыв в один уровень, это бывает; глубину уточни в карточке")
 
-    if имя_уровня != "крупная":
-        беды = [текст for _, текст in проверить_закрытие(цена, настройки)]
+    if level_name not in ("крупная", hackathon.LEVEL):
+        беды = [текст for _, текст in проверить_закрытие(price, настройки)]
         if not беды:
-            print(f"[пайплайн] задача {имя_уровня} (цена {значение}) — спека не требуется")
+            print(f"[пайплайн] задача {level_name} (цена {значение}) — спека не требуется")
             # Своя памятка снимается и здесь: задача подешевела, шаги перестали
             # требоваться — долг закрыт, иначе «намечено» врало бы неделю.
             id_текущей, _ = задача_карты()
@@ -1700,7 +2124,9 @@ def main():
         print("    Честная дверь: HARNESS_PIPELINE_FORCE=1 и HARNESS_PIPELINE_WHY='почему'.")
         return 1
 
-    id_задачи, карточка = задача_карты()
+    # Карточка из индекса, как и уровень: спека, вписанная только в рабочее
+    # дерево, в коммит не уйдёт.
+    id_задачи, карточка = wip_task_in_index()
     if карточка is None:
         return решение_без_названной_задачи()
     водораздел = (настройки.get("строгость") or {}).get("водораздел")
@@ -1717,7 +2143,7 @@ def main():
     # каждый раз, — не дверь (улика 11.09.2026: третий обход за сутки).
     свои = [(id_задачи, б)
             for б in проверить(карточка, шаги=шаги_под_состояние(настройки, карточка))]
-    чужие = проверить_закрытие(цена, настройки)
+    чужие = проверить_закрытие(price, настройки)
     пары = свои + чужие
     беды = [текст for _, текст in пары]
     if not беды:
@@ -1739,7 +2165,7 @@ def main():
                   "это требование целиком.")
             print("    Честная дверь: HARNESS_PIPELINE_FORCE=1 и HARNESS_PIPELINE_WHY='почему'.")
             return 1
-        print(f"[пайплайн] {id_задачи}: крупная (цена {значение}), спека и ревью на месте")
+        print(f"[пайплайн] {id_задачи}: {level_name} (цена {значение}), спека и ревью на месте")
         снять_намеченное(id_задачи)
         return 0
 
@@ -1752,7 +2178,7 @@ def main():
         return 0
 
     print(f"[пайплайн] {id_задачи}: задача крупная (цена {значение}: "
-          f"{цена.почему(признаки, настройки['веса'])}), а середина пайплайна не пройдена:")
+          f"{price.почему(признаки, настройки['веса'])}), а середина пайплайна не пройдена:")
     for беда in беды:
         print(f"    {беда}")
     print(f"    Намечено и записано на доску — переживёт смену и лимит: {беды[0]}")

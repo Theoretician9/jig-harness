@@ -40,7 +40,8 @@ for f in tg_send.sh limit_mark.py limit-in-log.py stall-in-log.py pause.py \
 done
 cp "$HERE/lib/config.sh" "$HERE/lib/config.py" "$HERE/lib/patterns.py" \
    "$HERE/lib/channel_queue.py" "$STAND_PROJECT/scripts/lib/" 2>/dev/null || true
-cp "$HERE/lib/pane.sh" "$STAND_PROJECT/scripts/lib/" 2>/dev/null || true
+# Дверь в панель подключает дверь журнала событий: без неё source в pane.sh падает.
+cp "$HERE/lib/pane.sh" "$HERE/lib/events.sh" "$HERE/lib/events.py" "$STAND_PROJECT/scripts/lib/" 2>/dev/null || true
 cp "$HERE/../harness/demons/limit-watch.sh" "$STAND_PROJECT/harness/demons/"
 
 # Паспорт стенда: номер чата выдуманный, ключ сгенерирован здесь и сейчас.

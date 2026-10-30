@@ -68,5 +68,6 @@
   - harness/dev-map.yaml
   - harness/scripts/publish.sh
   - harness/config/public-build.yaml
+  - harness/config/model-artifacts.yaml
   - USTANOVIT.sh
   - README.md

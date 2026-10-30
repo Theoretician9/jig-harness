@@ -83,7 +83,7 @@ STATUSES = {"done", "принято", "test", "wip", "plan", "беклог"}
 # Глубина задачи: уровень — цена ошибки, характер — чем работа является.
 # Списки берутся из пульта владельца (harness/config/pipeline.yaml), а не
 # вшиты сюда: иначе у факта снова окажется два судьи (находка ревью C-7).
-УРОВНИ = {"мелкая", "обычная", "крупная"}
+УРОВНИ = {"мелкая", "обычная", "крупная", "хакатон"}
 
 
 def _характеры():
@@ -196,6 +196,13 @@ print("[dev-map] схема в порядке")
 PYEOF
 )
 
+# Схема карты + долг «до продакшна» хакатона. Правила долга живут в одном
+# месте — hackathon.py; гейт только зовёт его и показывает вывод как есть.
+devmap_check() {
+    python3 -c "$DEVMAP_VALIDATOR" "$1" || return 1
+    python3 "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/hackathon.py" --проверить-карту "$1"
+}
+
 # Валидатор схемы на ОТДЕЛЬНОМ файле: им пользуются демоны, чьи агенты правят
 # карту. Одного yaml.safe_load им мало — дубль ключа он берёт молча последним,
 # и 11.09.2026 такой дубль остановил ВСЕ коммиты, включая сохранение памяти с
@@ -203,7 +210,7 @@ PYEOF
 # бы на первой правке.
 if [ "${1:-}" = "--devmap-only" ]; then
     [ -n "${2:-}" ] || { echo "--devmap-only: нужен путь к карте" >&2; exit 2; }
-    python3 -c "$DEVMAP_VALIDATOR" "$2"
+    devmap_check "$2"
     exit $?
 fi
 
@@ -506,6 +513,12 @@ python3 "$SCRIPT_DIR/check-context-hygiene.py" --repo "$PWD" || fail "context_hy
 # ── 2в. Писатель карты берёт общий лок ──────────────────────────────────────
 гейт "писатели_карты" python3 "$SCRIPT_DIR/check-map-writers.py"
 
+# ── 2г. Журналы: одна дверь записи, реестр ↔ код ────────────────────────────
+# Прямая дозапись в журнал мимо emit и журнал без строки реестра краснят коммит;
+# долг (journals.yaml) только сокращается. Диск и потери судит прогон ворот.
+гейт "писатели_журналов" python3 "$SCRIPT_DIR/check-event-writers.py"
+гейт "реестр_журналов" python3 "$SCRIPT_DIR/check-event-writers.py" --registry
+
 # ── 3. Синтаксис staged-скриптов — по содержимому индекса (К-4) ─────────────
 while IFS= read -r f; do
     [ -z "$f" ] && continue
@@ -547,6 +560,9 @@ ADDED=$(git -c core.quotepath=false diff --cached --name-only --diff-filter=AR)
 # Первый пункт владельца 11.09: «Задачу крупного тира не коммитить без файла
 # спеки, привязанного к её id». Уровень считает замер коммита, не моя заявка.
 гейт "пайплайн" python3 "$SCRIPT_DIR/check-pipeline.py"
+# Шаг «безопасность», часть 1: правила кода по индексу. Жёлтый: прогон
+# отмечается только на коммитах с задетым классом, подъём — общими порогами.
+гейт "безопасность" python3 "$SCRIPT_DIR/check-security.py" --staged
 
 # ── 3д. Тесты до кода: новый модуль приходит вместе с тестом ────────────────
 # Второй пункт владельца 11.09. Пока жёлтый: правило новое, база ненулевая
@@ -605,7 +621,7 @@ python3 "$SCRIPT_DIR/check-map-keeps-tasks.py" <<< "$CHANGED" || fail "карт�
 if echo "$CHANGED" | grep -qx "dev-map.yaml"; then
     git -c core.quotepath=false show ":dev-map.yaml" > "$STAGE_TMP/dev-map.yaml" \
         || fail "index_read:dev-map.yaml"
-    python3 -c "$DEVMAP_VALIDATOR" "$STAGE_TMP/dev-map.yaml" || fail "devmap_schema"
+    devmap_check "$STAGE_TMP/dev-map.yaml" || fail "devmap_schema"
 fi
 
 # ── 5. Линтеры кода продукта — данными, не кодом ────────────────────────────

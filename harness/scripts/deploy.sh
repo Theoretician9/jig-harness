@@ -43,7 +43,7 @@ HARNESS_CONF="${HARNESS_CONF:-$(konf_koren)/harness.conf}"
 # Путь берётся по РЕАЛЬНОМУ файлу (readlink -f): pre-commit подключён в
 # .git/hooks симлинком, и dirname дал бы .git/hooks, где библиотеки нет.
 # Поймано первым же коммитом после правки, 12.09.2026.
-konf_zagruzit PROJECT_DIR LOG_DIR TMUX_SESSION SECRETS_DIR AGENT_START_CMD
+konf_zagruzit PROJECT_DIR LOG_DIR TMUX_SESSION SECRETS_DIR AGENT_START_CMD DOCKER_SWEEP_ENABLED DOCKER_CACHE_KEEP_GB
 # harness.conf несёт секцию STACK_*; без него продукт заведомо не задан.
 : "${PROJECT_DIR:?в install.conf пуст PROJECT_DIR}" "${LOG_DIR:?пуст LOG_DIR}"
 
@@ -263,6 +263,13 @@ trap vernut_soglasie_pri_otkaze EXIT
 # Через bash, а не по биту исполнения: в пакете файл лежит 644, и отказ
 # «Permission denied» читался как «секреты найдены».
 bash "$SCRIPT_DIR/check-secrets.sh" "$PRODUCT_TREE" || { say "секреты в репозитории — выкат отменён (И-3)"; exit 1; }
+
+# ── 1б. Режим хакатон: вместо полных ворот — быстрое подмножество ───────────
+# Откат на :previous и живой смоук ниже не меняются: быстрее ворота, не выкат.
+if python3 "$SCRIPT_DIR/hackathon.py" --активен --карта "$PROJECT_DIR/dev-map.yaml" >/dev/null 2>&1; then
+    say "режим хакатон: быстрые ворота (gates.sh --хакатон)"
+    bash "$SCRIPT_DIR/gates.sh" --хакатон || { say "быстрые ворота хакатона красные — выкат отменён"; exit 1; }
+fi
 
 # ── 2. Тег выката: каждая выкатка адресуема ─────────────────────────────────
 TAG="deploy-$(date +%Y%m%d-%H%M%S)"
@@ -486,6 +493,12 @@ if [ -n "${STACK_PROXY_RELOAD_CMD:-}" ]; then
 else
     say "STACK_PROXY_RELOAD_CMD пуст — прокси не задан (честно пропущено)"
 fi
+
+# ── 9. Кэш сборки после выката ──────────────────────────────────────────────
+# Выкат уже состоялся и ворота пройдены, поэтому шаг их не обходит (И-2) и не фатален.
+# Кэш новой сборки остаётся (keep-storage), старый уходит; без выключателя ход сухой.
+SWEEP_FLAG="--dry-run"; [ "${DOCKER_SWEEP_ENABLED:-0}" = 1 ] && SWEEP_FLAG="--разрешено"
+python3 "$SCRIPT_DIR/docker-sweep.py" --после-выката "$SWEEP_FLAG" --кэш-гб "${DOCKER_CACHE_KEEP_GB:-2}" --журнал "$LOG_DIR/уборка-docker.jsonl" --метки "$LOG_DIR/уборка-docker-метки.json" || say "уборка кэша сборки не отработала (выкат не затронут)"
 
 # Итоговая строка не приукрашивает: что не прошло — названо (И-4).
 # Выкат СОСТОЯЛСЯ — согласие потрачено по делу, возвращать нечего.

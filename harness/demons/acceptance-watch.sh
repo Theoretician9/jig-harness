@@ -253,6 +253,13 @@ KARTA
     echo "SELFTEST: КРАСНЫЙ"; exit 1
 fi
 
+# Мутации задач с долгом до принятия (pipeline.yaml, «шаги_приёмки») — ДО
+# замка карты: прогон долгий, а карту он не правит, только журналы задач.
+if [ "${1:-}" != "--сухой" ]; then
+    (cd "$PROJECT_DIR" && python3 scripts/acceptance.py --мутации-долга) \
+        || say "мутации задач с долгом: прогон упал — долг остаётся открытым"
+fi
+
 # Карту пишут ПЯТЬ сторон: живой агент, devmap-selfheal, проверщик, строитель
 # и панель. Лок общий на карту, а не на демона: два писателя наперегонки
 # затирают правки друг друга целиком (находка C4 ревью кода 11.09.2026).
@@ -271,6 +278,14 @@ fi
 
 mkdir -p "$LOG_DIR" "$HEARTBEAT_DIR" "$OTCHET_DIR"
 
+# Зелёное гасит задачу модели. Писателя может не быть (раскладка неполна) —
+# сторож от этого не падает. Лок карты здесь занят нами же, поэтому писатель
+# законно откладывает намерение, а донос делает sentinel.
+alert_task() {  # $@ = доводы писателя: --resolve <ключ>
+    [ -f "$PROJECT_DIR/scripts/alert-task.py" ] || return 0
+    python3 "$PROJECT_DIR/scripts/alert-task.py" "$@" </dev/null >/dev/null 2>&1 || true
+}
+
 REZHIM="--применить"
 [ "${1:-}" = "--сухой" ] && REZHIM=""
 
@@ -286,7 +301,7 @@ if [ "$SUDYA_RC" -gt 1 ]; then
     printf '%s\n' "$VYVOD" | tail -5
     bash "$PROJECT_DIR/scripts/tg_send.sh" \
         "Приёмка задач упала и не отработала. Метка присмотра не обновлена — сторож это увидит." \
-        >/dev/null 2>&1 || true
+        --task acceptance-watch:crash >/dev/null 2>&1 || true
     exit "$SUDYA_RC"
 fi
 ITOG=$(printf '%s\n' "$VYVOD" | chisla)
@@ -315,7 +330,7 @@ if [ "$REZHIM" = "--применить" ]; then
         say "ТРЕВОГА: после переноса в архив карта не проходит валидатор"
         bash "$PROJECT_DIR/scripts/tg_send.sh" \
             "Приёмка убрала закрытые задачи в архив, и карта перестала проходить проверку. Работа остановлена — нужен разбор." \
-            >/dev/null 2>&1 || true
+            --task acceptance-watch:crash >/dev/null 2>&1 || true
         exit 1
     fi
 fi
@@ -396,5 +411,6 @@ if [ "$DVIZHENIE" = 1 ] || [ "$OCHERED_NOVA" = 1 ]; then
     fi
 fi
 
+alert_task --resolve acceptance-watch:crash
 date -Is > "$HEARTBEAT_DIR/acceptance-watch"
 exit 0

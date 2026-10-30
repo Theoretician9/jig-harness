@@ -36,6 +36,76 @@ PACKAGE_DIR="${STARTER_DIR:-/home/$(konf_iz_fajla AGENT_USER)/starter/STARTER-PA
 
 say() { printf '%s\n' "$*"; }
 
+# ── Дверь замка 1: слово владельца на пропуск полного прогона ──────────────
+# Замок «ворота зелёные» поставил владелец и вправе снять его на выпуск; снятие
+# обязано быть законной дверью, а не обходом ([[a-guard-without-a-legal-door]]).
+# Дверь — файл $LOG_DIR/publish-gates-waiver.json: дословная цитата, id входящего,
+# причина, срок. Срок конечный (не больше 6 часов с выдачи): запись без срока или
+# просроченная — не дверь. Окружение дверью быть не может. Вместо полного прогона
+# идёт быстрое подмножество, и пропуск пишется в журнал публикации.
+# Коды: 0 — дверь открыта (цитата в stdout), 3 — записи нет, 1 — запись негодна.
+PRAVO_NA_PROPUSK_MAX=21600
+proverit_zapis_propuska() { # $1=каталог журнала
+    python3 - "$1/publish-gates-waiver.json" "$PRAVO_NA_PROPUSK_MAX" <<'PY'
+import json, sys, time
+from pathlib import Path
+путь, потолок = Path(sys.argv[1]), int(sys.argv[2])
+if not путь.is_file():
+    sys.exit(3)
+try:
+    з = json.loads(путь.read_text(encoding="utf-8"))
+    поля = [str(з.get(k) or "").strip() for k in ("слово", "id_входящего", "причина")]
+    выдана, до = int(з["выдана"]), int(з["до"])
+except (OSError, ValueError, KeyError, TypeError, AttributeError) as беда:
+    print(f"запись о пропуске ворот нечитаема: {беда}", file=sys.stderr); sys.exit(1)
+if not all(поля):
+    print("в записи о пропуске пусты слово, id входящего или причина", file=sys.stderr); sys.exit(1)
+if not 0 < до - выдана <= потолок:
+    print(f"срок записи о пропуске вне 0..{потолок} с", file=sys.stderr); sys.exit(1)
+if до < time.time():
+    print("запись о пропуске ворот просрочена", file=sys.stderr); sys.exit(1)
+print(поля[0])
+PY
+}
+# Та же запись снимает и замок 3 (статусы задач): слово «без прогона полного»
+# владелец сказал про выпуск целиком. Честность держится оглаской: журнал
+# публикации и список непроверенных в канал владельцу, статус done не ставится.
+# $1=каталог журнала, $2=список непроверенных; 0 — пропуск по записи, иначе 1.
+propustit_statusy_po_slovu() {
+    local katalog="$1" spisok="$2" slovo
+    slovo=$(proverit_zapis_propuska "$katalog" 2>/dev/null) || return 1
+    printf '%s статусы пропущены по слову владельца «%s»; непроверенных: %s\n' \
+        "$(date -Is)" "$slovo" "$(printf '%s\n' "$spisok" | grep -c .)" >> "$katalog/publish.log"
+    say "замок 3 · статусы пропущены по слову владельца «$slovo»; уезжает непроверенное — $(printf '%s\n' "$spisok" | grep -c .) задач(и):"
+    printf '%s\n' "$spisok" | sed 's/^/  • /'
+    [ "$CHECK_ONLY" = 1 ] && return 0
+    bash "$PROJECT_DIR/scripts/tg_send.sh" "Публикую по твоему слову «$slovo». В публичную ветку уезжает непроверенное тобой: $(printf '%s\n' "$spisok" | sed 's/ (статус.*//' | paste -sd, | sed 's/,/, /g')" >/dev/null 2>&1 || true
+}
+
+zamok_vorot() { # $1=каталог журнала → 0 пустить, 1 отказ
+    local katalog="$1" slovo rc
+    slovo=$(proverit_zapis_propuska "$katalog" 2>/tmp/публикация-пропуск.err); rc=$?
+    if [ "$rc" = 3 ]; then
+        bash "$PROJECT_DIR/scripts/gates.sh" > /tmp/публикация-ворота.log 2>&1 || {
+            say "ОТКАЗ: ворота красные — публиковать нельзя. Хвост:"
+            tail -5 /tmp/публикация-ворота.log; return 1; }
+        say "замок 1 · ворота зелёные"; return 0
+    fi
+    if [ "$rc" != 0 ]; then
+        say "ОТКАЗ: $(cat /tmp/публикация-пропуск.err)"; return 1
+    fi
+    if ! { bash "$PROJECT_DIR/scripts/gates.sh" --хакатон \
+           && bash "$PROJECT_DIR/scripts/check-secrets.sh" "$PROJECT_DIR" \
+           && python3 "$PROJECT_DIR/scripts/build-public.py" --selftest; } \
+           > /tmp/публикация-ворота.log 2>&1; then
+        say "ОТКАЗ: быстрые ворота красные — публиковать нельзя. Хвост:"
+        tail -5 /tmp/публикация-ворота.log; return 1
+    fi
+    printf '%s ворота пропущены по слову владельца «%s»; быстрое подмножество зелёное\n' \
+        "$(date -Is)" "$slovo" >> "$katalog/publish.log"
+    say "замок 1 · ворота пропущены по слову владельца «$slovo»; быстрое подмножество зелёное"
+}
+
 # ── Задачи, попадающие на витрину, обязаны быть ПРОВЕРЕНЫ владельцем ────────
 # Трейлер «Dev-Map: <id>» стоит в коммитах ПРОЕКТА, а публикуется ПАКЕТ: они
 # коммитятся парой, и связать их можно только временем. Поэтому спрашиваем:
@@ -142,6 +212,19 @@ ids_iz_istorii() { # $1=момент ISO (пусто — вся история) 
         return 1
     fi
     say "замок 6 · следов установки в сборке нет"
+
+    # Замок 6в: релиз уходит с записью простым языком (слово владельца 24.10.2026:
+    # «в релизы харнеса писать человеческим языком что было исправлено добавлено»).
+    # Судится только когда есть что выпускать: пустой индекс — это повтор упавшей
+    # отправки или «публиковать нечего», и запись тогда уже вышла по праву.
+    if ! git -C "$sborka" diff --cached --quiet; then
+        if ! vyvod=$(python3 "$PROJECT_DIR/scripts/check-release-notes.py" "$sborka" 2>&1); then
+            say "ОТКАЗ: релиз без записи простым языком — публикация отменена"
+            printf '%s\n' "$vyvod" | sed 's/^/  /'
+            return 1
+        fi
+        say "замок 6в · заметки выпуска простым языком есть"
+    fi
 
     # Сухой прогон доходит ровно досюда: замки 4-6 ПРОГНАНЫ, а ничего не
     # закоммичено и не отправлено. Прежде «--проверка» печатала «публиковать
@@ -365,6 +448,8 @@ if [ "${1:-}" = "--selftest" ]; then
             > "$dvor/пакет/harness/шаблоны-задач/ТОН-заготовка.md"
         printf 'исключить: []\nзаменить_шаблоном:\n  harness/память/TONE.md: harness/шаблоны-задач/ТОН-заготовка.md\nобезличить_ключи: [PROJECT_DIR]\nоставить: [harness/CLAUDE.md]\n' \
             > "$dvor/пакет/harness/config/public-build.yaml"
+        : > "$dvor/пакет/ЧТО-НОВОГО.md"
+        proba_zapis "$dvor" "Первый выпуск"
         git -C "$dvor/пакет" init -q -b master
         git -C "$dvor/пакет" add -A
         git -C "$dvor/пакет" -c user.name=t -c user.email=t@t commit -qm проба
@@ -374,6 +459,12 @@ if [ "${1:-}" = "--selftest" ]; then
             "$PROJECT_DIR" "$dvor" > "$dvor/паспорт.conf"
         printf 'PUBLIC_REMOTE="jig"\nPUBLIC_BRANCH="master"\nPUBLIC_BUILD_DIR="%s"\nPUBLIC_COMMIT_NAME="проба-харнес"\nPUBLIC_COMMIT_EMAIL="proba@harness.local"\n' \
             "$dvor/сборка" > "$dvor/харнес.conf"
+    }
+    proba_zapis() {  # $1=двор $2=название: новая запись простым языком СВЕРХУ заметок
+        local fajl="$1/пакет/ЧТО-НОВОГО.md" staroe
+        staroe=$(cat "$fajl")
+        printf '# Что нового\n\n## 2026-10-24 — %s\n\n### Исправлено\n\n- Сессия больше не обрывается.\n\n### Что изменилось для вас\n\n- Ничего делать не нужно.\n\n%s\n' \
+            "$2" "${staroe#\# Что нового}" > "$fajl"
     }
     proba_publ() {  # запускает публикацию сборки в подставном дворе
         # ПОДОБОЛОЧКА: присваивания перед вызовом ФУНКЦИИ остаются в оболочке
@@ -389,6 +480,62 @@ if [ "${1:-}" = "--selftest" ]; then
         )
     }
     kommitov() { git -C "$1" rev-list --count master 2>/dev/null || echo 0; }
+
+    # ДВЕРЬ ЗАМКА 1: пропуск полного прогона по слову владельца. Двор — подставной
+    # проект с заглушками ворот: проба судит выбор прогона, а не сами ворота.
+    proba_vorota() { # $1=двор $2=запись (json или пусто) → печатает вывод замка
+        local d="$1"
+        mkdir -p "$d/проект/scripts" "$d/лог"
+        printf '#!/bin/sh\necho "gates $*" >> "%s/звали"\n' "$d" > "$d/проект/scripts/gates.sh"
+        printf '#!/bin/sh\necho "secrets" >> "%s/звали"\n' "$d" > "$d/проект/scripts/check-secrets.sh"
+        printf 'open("%s/звали","a").write("build\\n")\n' "$d" > "$d/проект/scripts/build-public.py"
+        [ -n "$2" ] && printf '%s' "$2" > "$d/лог/publish-gates-waiver.json"
+        ( PROJECT_DIR="$d/проект" zamok_vorot "$d/лог" 2>&1 ); echo "rc=$?"
+    }
+    zapis_propuska() { # $1=выдана-смещение $2=до-смещение (сек от сейчас)
+        local n; n=$(date +%s)
+        printf '{"слово":"без прогона полного","id_входящего":"1793351076.532892567","причина":"проба","выдана":%s,"до":%s}' \
+            "$((n+$1))" "$((n+$2))"
+    }
+    OUT=$(proba_vorota "$T/в1" ""); if printf '%s' "$OUT" | grep -q 'rc=0' \
+       && grep -qx 'gates ' "$T/в1/звали" && ! grep -q -- 'хакатон' "$T/в1/звали"; then
+        echo "  ок    ворота без записи о пропуске — полный прогон, как раньше"
+    else echo "  ПЛОХО без записи не полный прогон: ${OUT:0:150}"; ok=0; fi
+    OUT=$(proba_vorota "$T/в2" "$(zapis_propuska -60 3600)"); if printf '%s' "$OUT" | grep -q 'rc=0' \
+       && grep -q 'gates --хакатон' "$T/в2/звали" && grep -q secrets "$T/в2/звали" \
+       && grep -q build "$T/в2/звали" && grep -q 'ворота пропущены по слову владельца «без прогона полного»' "$T/в2/лог/publish.log"; then
+        echo "  ок    запись о пропуске — быстрое подмножество и строка в журнале публикации"
+    else echo "  ПЛОХО запись о пропуске не открыла быструю дверь: ${OUT:0:150}"; ok=0; fi
+    OUT=$(proba_vorota "$T/в3" "$(zapis_propuska -7200 -60)"); if printf '%s' "$OUT" | grep -q 'rc=1' \
+       && printf '%s' "$OUT" | grep -q 'просрочена' && [ ! -e "$T/в3/звали" ]; then
+        echo "  ок    БОЛЬНОЙ СЛУЧАЙ: просроченная запись о пропуске — отказ, ворота не звались"
+    else echo "  ПЛОХО просроченная запись: ${OUT:0:150}"; ok=0; fi
+    OUT=$(proba_vorota "$T/в4" "$(zapis_propuska -60 999999)"); if printf '%s' "$OUT" | grep -q 'rc=1' \
+       && printf '%s' "$OUT" | grep -q 'срок' && [ ! -e "$T/в4/звали" ]; then
+        echo "  ок    БОЛЬНОЙ СЛУЧАЙ: запись без конечного срока (дольше 6 часов) — не дверь"
+    else echo "  ПЛОХО запись без срока пропущена: ${OUT:0:150}"; ok=0; fi
+    OUT=$(proba_vorota "$T/в5" '{"слово":"","id_входящего":"1","причина":"x","выдана":1,"до":2}'); if printf '%s' "$OUT" | grep -q 'rc=1'; then
+        echo "  ок    запись без цитаты владельца — не дверь"
+    else echo "  ПЛОХО запись без цитаты пропущена: ${OUT:0:150}"; ok=0; fi
+
+    # ДВЕРЬ ЗАМКА 3: та же запись пропускает статусы, владельцу уходит список.
+    proba_statusy() { # $1=двор $2=запись → вывод и rc
+        local d="$1"
+        mkdir -p "$d/проект/scripts" "$d/лог"
+        printf '#!/bin/sh\necho "$1" >> "%s/ушло"\n' "$d" > "$d/проект/scripts/tg_send.sh"
+        [ -n "$2" ] && printf '%s' "$2" > "$d/лог/publish-gates-waiver.json"
+        ( PROJECT_DIR="$d/проект" CHECK_ONLY=0 propustit_statusy_po_slovu "$d/лог" $'задача-а (статус test)\nзадача-б (статус test)' 2>&1 ); echo "rc=$?"
+    }
+    OUT=$(proba_statusy "$T/с1" ""); if printf '%s' "$OUT" | grep -q 'rc=1' && [ ! -e "$T/с1/ушло" ]; then
+        echo "  ок    БОЛЬНОЙ СЛУЧАЙ: статусы без записи о пропуске — замок 3 не снят"
+    else echo "  ПЛОХО без записи статусы пропущены: ${OUT:0:150}"; ok=0; fi
+    OUT=$(proba_statusy "$T/с2" "$(zapis_propuska -7200 -60)"); if printf '%s' "$OUT" | grep -q 'rc=1' && [ ! -e "$T/с2/ушло" ]; then
+        echo "  ок    БОЛЬНОЙ СЛУЧАЙ: статусы с просроченной записью — замок 3 не снят"
+    else echo "  ПЛОХО просроченная запись сняла статусы: ${OUT:0:150}"; ok=0; fi
+    OUT=$(proba_statusy "$T/с3" "$(zapis_propuska -60 3600)"); if printf '%s' "$OUT" | grep -q 'rc=0' \
+       && grep -q 'задача-а, задача-б' "$T/с3/ушло" && grep -q 'статусы пропущены по слову владельца «без прогона полного»' "$T/с3/лог/publish.log"; then
+        echo "  ок    запись о пропуске — статусы пропущены, список ушёл владельцу, строка в журнале"
+    else echo "  ПЛОХО статусы по записи: ${OUT:0:150}"; ok=0; fi
 
     # СУХОЙ ПРОГОН: замки 4-6 обязаны выполниться, а коммита и отправки быть не
     # должно. Прежде «--проверка» печатала «публиковать можно», не выполнив ни
@@ -479,6 +626,7 @@ if [ "${1:-}" = "--selftest" ]; then
     mkdir -p "$T/здоровый/пакет/harness/demons"
     printf '#!/bin/sh\necho второй демон присмотра\n' \
         > "$T/здоровый/пакет/harness/demons/новый.sh"
+    proba_zapis "$T/здоровый" "Второй выпуск"
     git -C "$T/здоровый/пакет" add -A
     git -C "$T/здоровый/пакет" -c user.name=t -c user.email=t@t commit -qm "новый демон"
     OUT=$(proba_publ "$T/здоровый"); RC=$?
@@ -503,6 +651,7 @@ if [ "${1:-}" = "--selftest" ]; then
     git -C "$CHUZHOJ/копия" push -q origin master
     BYLO=$(kommitov "$T/здоровый/удалённый.git")
     printf 'ещё\n' > "$T/здоровый/пакет/новое.txt"
+    proba_zapis "$T/здоровый" "Третий выпуск"
     git -C "$T/здоровый/пакет" add -A
     git -C "$T/здоровый/пакет" -c user.name=t -c user.email=t@t commit -qm ещё
     OUT=$(proba_publ "$T/здоровый"); RC=$?
@@ -565,6 +714,24 @@ if [ "${1:-}" = "--selftest" ]; then
         echo "  ПЛОХО призрачный релиз: код $RC, теги было «$TEGI_BYLO» стало «$TEGI_STALO», ${OUT:0:90}"; ok=0
     fi
 
+    # БОЛЬНОЙ: в пакете есть что выпускать, а запись простым языком не
+    # написана — сверху та же, что ушла прошлым релизом. Отказ замком 6в,
+    # наружу второго коммита нет.
+    proba_dvor "$T/беззаписи"
+    proba_publ "$T/беззаписи" >/dev/null 2>&1
+    BYLO=$(kommitov "$T/беззаписи/удалённый.git")
+    printf 'ещё\n' > "$T/беззаписи/пакет/новое.txt"
+    git -C "$T/беззаписи/пакет" add -A
+    git -C "$T/беззаписи/пакет" -c user.name=t -c user.email=t@t commit -qm ещё
+    OUT=$(proba_publ "$T/беззаписи"); RC=$?
+    if [ "$RC" != 0 ] && [ "$BYLO" = 1 ] && printf '%s' "$OUT" | grep -q 'уже выходила' \
+       && [ "$(kommitov "$T/беззаписи/удалённый.git")" = "$BYLO" ]; then
+        echo "  ок    БОЛЬНОЙ СЛУЧАЙ: релиз без новой записи простым языком — отказ, наружу не уехало"
+    else
+        echo "  ПЛОХО релиз без записи не остановлен: код $RC, коммитов было $BYLO, ${OUT:0:120}"; ok=0
+    fi
+    rm -rf "$T"
+
     PUTEJ=$(grep -c '^\s*echo "  ок    ' "$0" || true)
     [ "$ok" = 1 ] && { echo "САМОТЕСТ ПРОЙДЕН: $PUTEJ путей, первым — больной случай"; exit 0; }
     echo "САМОТЕСТ ПРОВАЛЕН"; exit 1
@@ -597,12 +764,7 @@ PO_SLOVU=0
 say "=== публикация: сборка → $PUBLIC_REMOTE/$PUBLIC_BRANCH ==="
 
 # ── Замок 1: ворота ────────────────────────────────────────────────────────
-if ! bash "$PROJECT_DIR/scripts/gates.sh" > /tmp/публикация-ворота.log 2>&1; then
-    say "ОТКАЗ: ворота красные — публиковать нельзя. Хвост:"
-    tail -5 /tmp/публикация-ворота.log
-    exit 1
-fi
-say "замок 1 · ворота зелёные"
+zamok_vorot "${LOG_DIR:?пуст LOG_DIR — не прочитан паспорт установки}" || exit 1
 
 # ── Замок 2: согласие владельца ИМЕННО на публикацию ───────────────────────
 REFUSAL=$(python3 "$PROJECT_DIR/scripts/deploy_guard.py" --действие публикация --только-согласие $([ "$CHECK_ONLY" = 1 ] && echo --не-тратить) 2>&1) || true
@@ -669,6 +831,9 @@ fi
 if printf '%s' "$PENDING" | grep -q "НЕТ-PyYAML"; then
     say "ОТКАЗ: нет PyYAML — статусы задач проверить нечем (замок судить не может)"
     exit 2
+fi
+if [ -n "$PENDING" ] && [ "$PO_SLOVU" = 0 ] && propustit_statusy_po_slovu "$LOG_DIR" "$PENDING"; then
+    PENDING=""
 fi
 if [ -n "$PENDING" ] && [ "$PO_SLOVU" = 1 ]; then
     say "ПО СЛОВУ ВЛАДЕЛЬЦА: уезжает непроверенное им — $(printf '%s\n' "$PENDING" | grep -c .) задач(и):"

@@ -18,8 +18,19 @@
 # три больных (красный доходит до владельца, зелёный не дёргает, оборванный
 # прогон не считается чистым).
 #
+# Предел: прогон полного набора вырос до ~15 ч, и без предела он наложился бы
+# на следующий cron; ключ NIGHTLY_GATES_MAX_MIN (минуты), по пределу — отказ с
+# именем последнего гейта.
+#
 # Запуск: cron, ночью. Метка присмотра: nightly-gates (её срок — ключ
 # HEARTBEAT_PERIODS в harness.conf; без срока сторож меток демона не ждёт).
+#
+# Весь скрипт — одна группа { … }: bash разбирает группу ЦЕЛИКОМ до исполнения,
+# и правка файла во время многочасового прогона идущий прогон не задевает
+# (оболочка читает скрипт по байтовому смещению —
+# [[editing-a-running-bash-script]]). Последняя строка группы — exit: после
+# неё оболочка к файлу не возвращается.
+{ # весь скрипт в памяти до запуска
 set -uo pipefail
 export LC_ALL=C.UTF-8
 
@@ -30,12 +41,20 @@ INSTALL_CONF="${HARNESS_INSTALL_CONF:-${INSTALL_CONF:-$(konf_koren)/install.conf
 HARNESS_CONF="${HARNESS_CONF:-$(konf_koren)/harness.conf}"
 konf_zagruzit
 
+NIGHTLY_GATES_MAX_MIN="${NIGHTLY_GATES_MAX_MIN:-1200}"
 PROJECT_DIR="${PROJECT_DIR:-}"
 GATES_CMD="${NIGHTLY_GATES_CMD:-bash $PROJECT_DIR/scripts/gates.sh --всё}"
 
 say() { printf '%s  %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"; }
 
-kanal() {  # $1 = текст владельцу; молчание канала не роняет прогон
+# Зелёное гасит задачу модели. Писателя может не быть (раскладка неполна) —
+# сторож от этого не падает, а гасит ли карточка, видно по её журналу.
+alert_task() {  # $@ = доводы писателя: --resolve <ключ>
+    [ -f "$PROJECT_DIR/scripts/alert-task.py" ] || return 0
+    python3 "$PROJECT_DIR/scripts/alert-task.py" "$@" </dev/null >/dev/null 2>&1 || true
+}
+
+kanal() {  # $1 = текст владельцу, дальше --task <ключ задачи модели>; молчание канала не роняет прогон
     # Исход отправки ПИШЕТСЯ в журнал. Улика 21.09.2026: первый живой прогон
     # нашёл три красных гейта, а в журнале после итоговой строки не было
     # НИЧЕГО — отправил демон владельцу или промолчал, узнать было нечем.
@@ -44,7 +63,7 @@ kanal() {  # $1 = текст владельцу; молчание канала �
         say "канал: отправителя нет ($PROJECT_DIR/scripts/tg_send.sh) — владелец НЕ извещён"
         return 1
     fi
-    if bash "$PROJECT_DIR/scripts/tg_send.sh" "$1" >/dev/null 2>&1; then
+    if bash "$PROJECT_DIR/scripts/tg_send.sh" "$@" >/dev/null 2>&1; then
         say "канал: отправлено владельцу"
         return 0
     fi
@@ -58,6 +77,17 @@ itog_stroka() {  # $1 = журнал прогона; печатает строк
 
 krasnyh_v() {  # $1 = строка итога; печатает число красных (пусто, если не разобрал)
     printf '%s' "$1" | sed -n 's/.*красных \([0-9]\+\).*/\1/p' | head -1
+}
+
+# Любой выход боевого пути без вердикта — сигнал «прогон закончился без итога»:
+# оборванный прогон, падение самого демона (unbound variable, чужая строка) —
+# всё сюда, в одно место. «Не смог проверить» и «чисто» — разные ответы
+# ([[unreadable-source-turns-check-green]]).
+VERDICT=""
+report_no_summary() {  # $1 = код выхода демона
+    [ -n "$VERDICT" ] && return 0
+    say "ОТКАЗ: прогон закончился без итога (код демона $1), журнал $ZHURNAL"
+    kanal "Ночной прогон ворот оборвался — итоговой строки нет. Журнал: $(basename "$ZHURNAL")" --task nightly-gates:broken
 }
 
 # ── самотест ────────────────────────────────────────────────────────────────
@@ -126,28 +156,38 @@ fi
 : "${PROJECT_DIR:?пуст PROJECT_DIR}"
 ZHURNAL="$LOG_DIR/nightly-gates-$(date +%Y%m%d).log"
 say "полный прогон ворот: $GATES_CMD"
-bash -c "cd '$PROJECT_DIR' && $GATES_CMD" > "$ZHURNAL" 2>&1 || true
+START_TS=$(date +%s)
+trap 'report_no_summary $?' EXIT
+timeout -k 60 "${NIGHTLY_GATES_MAX_MIN}m" bash -c "cd '$PROJECT_DIR' && $GATES_CMD" > "$ZHURNAL" 2>&1
+RC=$?
 
 ITOG="$(itog_stroka "$ZHURNAL")"
 mkdir -p "$HEARTBEAT_DIR"
 date -Is > "$HEARTBEAT_DIR/nightly-gates"
 
-if [ -z "$ITOG" ]; then
-    # Оборванный прогон молчанием не считается: «не смог проверить» и «чисто» —
-    # разные ответы ([[unreadable-source-turns-check-green]]).
-    say "ОТКАЗ: прогон не дошёл до итоговой строки, журнал $ZHURNAL"
-    kanal "Ночной прогон ворот оборвался — итоговой строки нет. Журнал: $(basename "$ZHURNAL")"
+if [ -z "$ITOG" ] && { [ "$RC" = 124 ] || [ "$RC" = 137 ]; }; then
+    LAST_GATE="$(grep -E '^  (ок|ПЛОХО|жёлтый) · ' "$ZHURNAL" | tail -1 | sed -E 's/^  (ок|ПЛОХО|жёлтый) · //; s/ (—|\(код).*//')"
+    VERDICT=limit
+    say "ОТКАЗ: прогон упёрся в предел ${NIGHTLY_GATES_MAX_MIN} мин, последний гейт: ${LAST_GATE:-нет}"
+    kanal "Ночной прогон ворот упёрся в предел ${NIGHTLY_GATES_MAX_MIN} мин и остановлен. Последний гейт: ${LAST_GATE:-нет}. Журнал: $(basename "$ZHURNAL")" --task nightly-gates:broken
     exit 1
 fi
 
-say "$ITOG"
+# Итога нет — выход без вердикта, сигнал даёт report_no_summary.
+[ -n "$ITOG" ] || exit 1
+
+VERDICT=summary
+say "$ITOG за $(( ($(date +%s) - START_TS) / 60 )) мин"
 KRASNYH="$(krasnyh_v "$ITOG")"
 if [ "${KRASNYH:-0}" -gt 0 ]; then
     IMENA="$(grep -E '^  ПЛОХО ·' "$ZHURNAL" | sed 's/^  ПЛОХО · //; s/ (код.*//' | paste -sd', ' -)"
     kanal "Ночной прогон ворот: $ITOG
 Красные: ${IMENA:-не разобрал}
-Журнал: $(basename "$ZHURNAL")"
+Журнал: $(basename "$ZHURNAL")" --task nightly-gates:red
 else
     say "красных нет — владельца не беспокою"
+    alert_task --resolve nightly-gates:red
+    alert_task --resolve nightly-gates:broken
 fi
 exit 0
+}

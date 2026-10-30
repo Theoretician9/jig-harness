@@ -27,7 +27,7 @@
     python3 scripts/ask-the-model.py --повод состояние-другой-смены \\
         --вопрос-файл /tmp/вопрос.txt
     python3 scripts/ask-the-model.py --зачем разовый-замер \\
-        --вопрос-файл /tmp/вопрос.txt --схема /tmp/схема.json [--вид дежурное]
+        --вопрос-файл /tmp/вопрос.txt --схема /tmp/схема.json [--вид дежурный]
 
 Поводы — данные (`harness/config/model-call-reasons.yaml`): там сказано, КТО
 зовёт, ПРИ КАКОМ условии, о чём спрашивает, какая схема ответа и что делает с
@@ -108,6 +108,10 @@ def сверить_ответ(ответ: dict, схема: dict) -> str | None:
 def модель_для(вид: str, корень: Path) -> str:
     готово = subprocess.run(["bash", str(корень / "scripts" / "model-for.sh"), вид],
                             capture_output=True, text=True, timeout=30)
+    if готово.returncode != 0:
+        # Отказ model-for несёт имя вида и список допустимых: без этого
+        # следующая опечатка в виде снова была бы молчаливой.
+        print(готово.stderr, file=sys.stderr, end="")
     return готово.stdout.strip() or "haiku"
 
 
@@ -124,6 +128,17 @@ def вынуть_json(текст: str) -> dict | None:
                 continue
             return значение if isinstance(значение, dict) else None
     return None
+
+
+def лимит_по_источнику(вывод: str) -> bool:
+    """Лимит подписки судит один источник — limit-in-log.py (код 0 = лимит)."""
+    with tempfile.NamedTemporaryFile("w", suffix=".json", encoding="utf-8") as файл:
+        файл.write(вывод)
+        файл.flush()
+        итог = subprocess.run(
+            [sys.executable, str(Path(__file__).with_name("limit-in-log.py")),
+             "--в-потоке", файл.name], capture_output=True, text=True)
+    return итог.returncode == 0
 
 
 def спросить(вопрос: str, схема: dict, вид: str, таймаут: int, корень: Path) -> tuple:
@@ -158,14 +173,24 @@ def спросить(вопрос: str, схема: dict, вид: str, тайм�
     except subprocess.TimeoutExpired:
         return None, модель, round(time.monotonic() - начало, 1), f"нет ответа за {таймаут} с", {}
     секунды = round(time.monotonic() - начало, 1)
-    if готово.returncode != 0:
-        return None, модель, секунды, (готово.stderr or готово.stdout).strip()[:200], {}
     try:
         оболочка = json.loads(готово.stdout)
+    except ValueError:
+        оболочка = None
+    # Отказ API приходит в объекте result полями; код возврата CLI при нём
+    # не замерен, поэтому судим поля при любом коде.
+    if isinstance(оболочка, dict) and оболочка.get("is_error") is True:
+        вид = оболочка.get("api_error")
+        if лимит_по_источнику(готово.stdout):
+            return None, модель, секунды, "лимит подписки: " + str(оболочка.get("result", ""))[:150], {}
+        return None, модель, секунды, str(вид or оболочка.get("result", ""))[:200], {}
+    if готово.returncode != 0:
+        return None, модель, секунды, (готово.stderr or готово.stdout).strip()[:200], {}
+    if isinstance(оболочка, dict):
         текст = оболочка.get("result", "")
         цена = {"usd": оболочка.get("total_cost_usd"),
                 "ходов": оболочка.get("num_turns")}
-    except ValueError:
+    else:
         текст, цена = готово.stdout, {}
     ответ = вынуть_json(текст)
     if ответ is None:
@@ -249,7 +274,7 @@ def selftest() -> int:
         os.chdir(двор)
         try:
             ответ, _, _, отказ, _ = спросить("вопрос", {"где": "строка"},
-                                             "дежурное", 30, корень_дерева(__file__))
+                                             "дежурный", 30, корень_дерева(__file__))
         finally:
             os.environ["PATH"] = прежний_путь
             os.chdir(прежний_каталог)
@@ -306,14 +331,14 @@ def главная() -> int:
         запись = повод(имя_повода, корень)
         зачем = имя_повода
         схема_из_данных = запись.get("схема") or {}
-        вид = довод("--вид", запись.get("вид", "дежурное"))
+        вид = довод("--вид", запись.get("вид", "дежурный"))
         потолок = int(довод("--потолок", str(запись.get("потолок", общий_потолок))))
         файл_схемы = None
     else:
         зачем = довод("--зачем")
         файл_схемы = довод("--схема")
         схема_из_данных = None
-        вид = довод("--вид", "дежурное")
+        вид = довод("--вид", "дежурный")
         потолок = общий_потолок
 
     if not (зачем and файл_вопроса and (файл_схемы or схема_из_данных is not None)):
