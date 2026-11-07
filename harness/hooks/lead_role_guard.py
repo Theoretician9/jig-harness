@@ -30,6 +30,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT / "scripts" / "lib"))
+import config                                            # noqa: E402
 import events                                            # noqa: E402
 
 SRC = "scripts/hooks/lead_role_guard.py"
@@ -40,7 +41,7 @@ HINT = "Запиши это через исполнителя: Agent с subagent
 # Обёртки фонового запуска и безвредные перенаправления: сами ничего не пишут.
 WRAPPERS = ("setsid", "nohup")
 NULL_SINKS = ("/dev/null", "&1", "&2")
-LOG_DIR_PREFIX = "/var/log/harness/"
+LOG_DIR_PREFIX = config.log_dir().rstrip("/") + "/"
 
 
 def roles_path() -> Path:

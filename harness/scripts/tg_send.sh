@@ -139,8 +139,9 @@ verdict() {  # ответ-api, что-отправляли
     }
     local GUARD="${PROJECT_DIR:?пуст PROJECT_DIR — не прочитан паспорт установки}/scripts/check-channel-messages.py"
     [ -r "$GUARD" ] || return 0          # сторожа нет — не мешаем каналу работать
-    local REMARKS rc=0
-    REMARKS=$(printf '%s' "$1" | python3 "$GUARD") || rc=$?
+    local REMARKS rc=0 GUARD_ARGS=()
+    [ "${STATUS_DOOR:-0}" = 1 ] && GUARD_ARGS=(--статус)
+    REMARKS=$(printf '%s' "$1" | python3 "$GUARD" "${GUARD_ARGS[@]}") || rc=$?
     [ -n "$REMARKS" ] && printf '%s\n' "$REMARKS" >&2
     if [ "$rc" != 0 ]; then
         echo "tg_send: ОТКАЗ — сообщение нарушает правила переписки (владелец 11.09.2026)." >&2
@@ -414,6 +415,7 @@ fi
 BEZ_UCHETA_LIMITA=0
 NE_DOSYLAT=0
 JA_DOSYL=0
+STATUS_DOOR=0
 ARGS=()
 TASK_KEY=""
 ZHDU_KLYUCH=0
@@ -425,6 +427,9 @@ for A in "$@"; do
         --несмотря-на-лимит) BEZ_UCHETA_LIMITA=1 ;;
         --не-досылать)       NE_DOSYLAT=1 ;;
         --досыл)             JA_DOSYL=1 ;;
+        # Структурный статус: потолок длины берёт сторож канала из harness.conf,
+        # текст собирает status-report.py из журнала и карты, аргумент-текст отвергается.
+        --статус)            STATUS_DOOR=1 ;;
         # Единственный ключ со значением: без флага ожидания ключ задачи ушёл
         # бы владельцу текстом вести.
         --task|--задача)     ZHDU_KLYUCH=1 ;;
@@ -433,6 +438,18 @@ for A in "$@"; do
 done
 [ "$ZHDU_KLYUCH" = 0 ] || refuse "ключ --task без значения: нужен <демон>:<ключ>"
 [ ${#ARGS[@]} -gt 0 ] && set -- "${ARGS[@]}" || set --
+# Статус собирает только код: ручной текст через эту дверь был бы обходом потолка.
+if [ "$STATUS_DOOR" = 1 ] && [ $# -gt 0 ]; then
+    refuse "--статус не принимает текст: статус собирает только status-report.py, зови без аргумента"
+fi
+if [ "$STATUS_DOOR" = 1 ]; then
+    STATUS_BUILDER="${PROJECT_DIR:?пуст PROJECT_DIR — не прочитан паспорт установки}/scripts/status-report.py"
+    [ -r "$STATUS_BUILDER" ] || refuse "нет сборщика статуса $STATUS_BUILDER"
+    # Время запоминается ДО сборки: что кончилось за время сборки, попадёт в следующий статус.
+    STATUS_MARK_AT=$(date -Iseconds)
+    STATUS_BUILT=$(python3 "$STATUS_BUILDER") || refuse "сборщик статуса упал (код $?)"
+    set -- "$STATUS_BUILT"
+fi
 
 # Задача модели заводится ДО отправки и независимо от неё: отказ Telegram или
 # придержанная лимитом весть не должны терять работу. Код двери остаётся кодом
@@ -573,6 +590,8 @@ if [ "${1:-}" = "--file" ]; then
     if голый_файл "$CAPTION"; then
         refuse "файл без внятной подписи владельцу не уходит (нужно от ${CAPTION_MIN} знаков): опиши одной строкой, что внутри (--caption «…»), а отчёт шли текстом первым аргументом"
     fi
+    # Подпись — тот же текст владельцу: вопрос о «да» вложением не обходит сторожа.
+    проверить_правила "$CAPTION" || exit 1
     CAPTION_TAIL=""
     if [ ${#CAPTION} -gt "$CAPTION_MAX" ]; then
         CAPTION_TAIL="$CAPTION"
@@ -633,7 +652,8 @@ if [ "${#TREES[@]}" -gt 0 ]; then
 fi
 
 # Правила переписки — ДО резки на части: разрезанная простыня остаётся
-# простынёй, только в нескольких сообщениях.
+# простынёй, только в нескольких сообщениях. Метка хакатона дописывается НИЖЕ,
+# уже после проверки длины: потолок статуса её не считает, до лимита Telegram далеко.
 проверить_правила "$TEXT" || exit 1
 
 # Метка режима «хакатон» ставится здесь, а не памятью смены. Уровень судит
@@ -676,4 +696,9 @@ rm -f "$MARK_ERR"
 [ "$LIFT_AFTER_DELIVERY" = 0 ] || $LIMIT_MARK --снять --транскрипт "${CLAUDE_CODE_SESSION_ID:-}" >/dev/null 2>&1 || true
 отметить_отчёт
 zapisat_ishodyashchee "$TEXT"
+# Метка «сделано показано» — только после подтверждённой доставки: отказ оставляет её на месте.
+if [ "$STATUS_DOOR" = 1 ]; then
+    python3 "$STATUS_BUILDER" --отметить "$STATUS_MARK_AT" \
+        || echo "tg_send: метка статуса не записана — сделанное может показаться повторно" >&2
+fi
 echo "tg_send: доставлено (частей: $TOTAL_PARTS, message_id подтверждён)"

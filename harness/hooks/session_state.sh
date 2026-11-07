@@ -116,6 +116,12 @@ if [ -n "$project_dir" ] && [ -f "$project_dir/dev-map.yaml" ]; then
       --следующая 2>/dev/null | head -4
 fi
 
+# --- режим хакатон: включён ли и сколько карточек его уровня ---
+if [ -n "$project_dir" ]; then
+  python3 "$project_dir/scripts/hackathon.py" --строка 2>&1 | head -2 \
+    || echo "хакатон: строка недоступна"
+fi
+
 # --- режим автономии из конфига ---
 echo "автономия: $autonomy"
 [ "$autonomy" = "semi" ] && echo "  (полуавтомат: деплой и push — через ворота; владелец подтверждает в Telegram)"

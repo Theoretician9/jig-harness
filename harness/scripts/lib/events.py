@@ -36,7 +36,10 @@ OUTCOMES = ("ok", "refused", "error", "skipped", "held")
 
 JOURNAL_NAME = re.compile(r"[a-zа-яё0-9_-]+")
 HASH_VALUE = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
+HASH_RANGE = re.compile(r"[0-9a-f]{40}\.\.[0-9a-f]{40}")
 DIGEST_KEYS = frozenset({"sha256", "head", "commit", "ino_from"})
+# Предмет согласия (sha выката, пакета, спеки) — строка кода, а не речь: хэш в нём не секрет.
+SUBJECT_KEY = "цель"
 
 MAX_LINE_BYTES = 16384
 MAX_VALUE_CHARS = 4000
@@ -217,6 +220,11 @@ def _scrub_string(key: str, value: str, key_dirs: list[str], mangled: list[str])
             mangled.append("path-key")
     import patterns
     for secret in patterns.секреты_в_речи(value):
+        # Диапазон двух git-хэшей — предмет согласия на пуш, а не секрет: без него
+        # запись запроса кнопки теряет предмет и «Да» не сходится с воротами.
+        # Хэши выката, публикации и спеки несёт ключ «цель»: без них «Да» не сходится с воротами.
+        if HASH_RANGE.fullmatch(secret) or (key == SUBJECT_KEY and HASH_VALUE.fullmatch(secret)):
+            continue
         value = value.replace(secret, "<СКРЫТО>")
         mangled.append("digest" if HASH_VALUE.fullmatch(secret) else "secret")
     if len(value) > MAX_VALUE_CHARS:
@@ -316,6 +324,45 @@ def _emit(src, event, outcome, journal, task, session, n, unit, data, at) -> boo
         _record_lost(journal, src, failure)
         return False
     return True
+
+
+# ───────────────────────── метка запуска Python-демона ─────────────────────────
+
+def _run_mark(name: str, suffix: str, text: str) -> None:
+    try:
+        _ensure_dir(os.path.join(state_dir(), "runs"))
+        _atomic_write(os.path.join(state_dir(), "runs", f"{name}.{suffix}"), text)
+    except OSError as exc:
+        print(f"events.run: метку {name}.{suffix} записать не удалось ({exc})", file=sys.stderr)
+
+
+def run(src, main, *, journal, name, heartbeat=None) -> int:
+    """Python-аналог harness_run: событие и метка старта, затем main(), событие и метка
+    конца с исходом и кодом. Исключение main — исход error и код 1, трассировка в stderr
+    и дальше наверх не летит: демон под кроном отвечает кодом. Метка жизни heartbeat
+    ставится только при коде 0."""
+    started = int(time.time())
+    _run_mark(name, "start", f"pid={os.getpid()} started={started}\n")
+    emit(src, "run.start", "ok", journal=journal, data={"имя": name})
+    try:
+        code = main()
+        code = code if isinstance(code, int) else 0
+    except SystemExit as stop:
+        code = stop.code if isinstance(stop.code, int) else (0 if stop.code is None else 1)
+    except BaseException:  # noqa: BLE001 — падение не глотаем: пишем исход и показываем трассировку
+        import traceback
+        traceback.print_exc()
+        code = 1
+    ended = int(time.time())
+    _run_mark(name, "end", f"pid={os.getpid()} exit={code} ended={ended} seconds={ended - started}\n")
+    emit(src, "run.end", "ok" if code == 0 else "error", journal=journal,
+         data={"имя": name, "код": code, "секунд": ended - started})
+    if code == 0 and heartbeat:
+        try:
+            Path(config.heartbeat_dir(), heartbeat).touch()
+        except OSError as exc:
+            print(f"events.run: метку жизни {heartbeat} поставить не удалось ({exc})", file=sys.stderr)
+    return code
 
 
 # ───────────────────────── задача ─────────────────────────

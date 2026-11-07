@@ -41,10 +41,15 @@ for f in "$DAEMON" "$WATCHER"; do
 done
 
 PREFIX="warden-subwork-"
+# Мусор — только панели прогонов, чей процесс умер: соседний прогон (ночные
+# ворота рядом с пробой мутаций) иначе теряет панель посреди проверки.
 sweep_panes() {  # печатает, сколько сессий стенда убрано
     local name count=0
     while IFS= read -r name; do
-        case "$name" in "$PREFIX"*) tmux kill-session -t "$name" 2>/dev/null && count=$((count + 1)) ;; esac
+        case "$name" in "$PREFIX"*)
+            kill -0 "${name#"$PREFIX"}" 2>/dev/null && continue
+            tmux kill-session -t "=$name" 2>/dev/null && count=$((count + 1)) ;;
+        esac
     done < <(tmux ls -F '#{session_name}' 2>/dev/null)
     printf '%s\n' "$count"
 }
@@ -52,7 +57,7 @@ echo "мусор прежних прогонов: tmux-сессий стенда
 
 T=$(mktemp -d -t warden-subwork.XXXXXX)
 PANE="${PREFIX}$$"
-cleanup() { sweep_panes >/dev/null; rm -rf "$T"; }
+cleanup() { tmux kill-session -t "=$PANE" 2>/dev/null; rm -rf "$T"; }
 trap cleanup EXIT
 
 SID="5d2a9c1e-7b3f-4e10-9a8d-0c1b2a3f4e5d"
@@ -309,7 +314,8 @@ helper $H1 ok 180
 helper $H1 err 60
 EOF
 judge "$C_MAIN"
-case_check "Б3 судья: помощник в реестре, отказ свежее ответа — не работа" "0" "$(field помощников)"
+# Отказ API не отменяет «идёт»: CLI повторит запрос, ротация оборвала бы помощника так же.
+case_check "Б3 судья: помощник в реестре, отказ свежее ответа, уведомления нет — идёт" "1" "$(field помощников)"
 case_check "Б3 судья: работа — по главной (25 мин)" "25" "$(field работа_мин)"
 
 for kind in notify-user notify-attachment notify-queue; do
@@ -348,12 +354,14 @@ main ok 1500
 helper $H1 ok 1500
 EOF
 judge "$C_MAIN"
-case_check "Б6 судья: помощник в реестре молчит 25 мин (> 20) — не работа" "0" "$(field помощников)"
+# «Идёт» = запуск без результата: помощник в длинном инструменте молчит десятки минут.
+case_check "Б6 судья: помощник в реестре молчит 25 мин, уведомления нет — идёт" "1" "$(field помощников)"
+case_check "Б6 судья: молчание 25 мин — не работа (мерка пульса: ответ ≤ 20 мин)" "25" "$(field работа_мин)"
 # Файл помощника освежает не только ответ (результат инструмента, служебные
 # записи): свежий mtime при ответе 25 мин назад — порог по ОТВЕТУ решает сам.
 touch -d "@$(( $(date +%s) - 60 ))" "$C_DIR/$SID/subagents/agent-$H1.jsonl"
 judge "$C_MAIN"
-case_check "Б6б судья: файл помощника тронут 1 мин назад, ответ 25 мин назад — не работа" "0" "$(field помощников)"
+case_check "Б6б судья: файл помощника тронут 1 мин назад, ответ 25 мин назад — идёт, но не работа" "1 25" "$(field помощников) $(field работа_мин)"
 
 scene "$C_DIR" <<EOF
 main ok 1500
@@ -453,7 +461,7 @@ CONF
 
 stand_a() {  # свежий LOG_DIR, карта с работой, новая панель
     rm -rf "$T/log" "$T/state" "$T/channel.txt" "$T/pane.txt"
-    mkdir -p "$T/log/inbox/обработано" "$T/state/panel-state"
+    mkdir -p "$T/log/inbox/обработано" "$T/state/panel-state" "$T/proc"
     : > "$T/channel.txt"
     printf '%s\n' '{"queue": [], "lines": [{"id": "hr", "tasks": [{"id": "hr.b", "status": "wip"}]}]}' \
         > "$T/project/dev-map.yaml"
@@ -461,16 +469,34 @@ stand_a() {  # свежий LOG_DIR, карта с работой, новая п
     touch -d "@$(( $(date +%s) - 7200 ))" "$T/log/inbox/обработано/old.txt"
     tmux kill-session -t "$PANE" 2>/dev/null
     tmux new-session -d -s "$PANE" "exec $T/claude >> $T/pane.txt"
-    sleep 0.5
-    [ "$(tmux display-message -p -t "$PANE" '#{pane_current_command}')" = claude ] \
-        || { echo "ПЛОХО: подставной агент не встал в панель — проверять нечего"; exit 1; }
+    wait_until 5 pane_is_claude \
+        || { echo "ПЛОХО: подставной агент не встал в панель за 5 с — проверять нечего"; exit 1; }
 }
+wait_until() {  # $1 = предел в секундах, дальше — условие; код 1, если не дождались
+    local tries=$(( $1 * 10 )); shift
+    until "$@"; do
+        tries=$((tries - 1)); [ "$tries" -gt 0 ] || return 1
+        sleep 0.1
+    done
+}
+pane_is_claude() { [ "$(tmux display-message -p -t "$PANE" '#{pane_current_command}')" = claude ]; }
+BARRIER="стенд-барьер-панели"
+barriers() { local n; n=$(grep -cF -- "$BARRIER" "$T/pane.txt" 2>/dev/null); echo "${n:-0}"; }
+barrier_passed() { [ "$(barriers)" -gt "$1" ]; }
 run_warden() {
+    # Пустой корень /proc: иначе nest_guard судит по живым процессам машины
+    # и при пропаже гнезда шлёт USR1 боевому tmux.
     env -u TMUX -u CLAUDE_CODE_SESSION_ID HARNESS_CONF="$T/harness.conf" HARNESS_INSTALL_CONF="$T/harness.conf" \
-        HARNESS_ACTIVE_LINE=hr PANE_ENTER_DELAY=0.2 \
+        HARNESS_ACTIVE_LINE=hr PANE_ENTER_DELAY=0.2 AGENT_PROC_ROOT="$T/proc" \
         HARNESS_PANEL_STATE="$T/state/panel-state" CLAUDE_PROJECTS_DIR="$T/projects" \
         bash "$DAEMON" >> "$T/log/warden.out" 2>&1 < /dev/null
-    sleep 0.3   # cat успевает записать присланное в файл панели
+    # Барьер вместо паузы: cat пишет строки по порядку, значит метка, посланная
+    # после сторожа, легла в файл панели позже всего, что прислал сторож.
+    local before; before=$(barriers)
+    tmux send-keys -t "$PANE" -l "$BARRIER" && tmux send-keys -t "$PANE" Enter \
+        || { echo "ПЛОХО: панель стенда не принимает ввод — проверять нечего"; exit 1; }
+    wait_until 5 barrier_passed "$before" \
+        || { echo "ПЛОХО: присланное в панель не дошло до файла панели за 5 с — проверять нечего"; exit 1; }
 }
 report_ago() { echo $(( $(date +%s) - $1 )) > "$T/log/last_report"; touch -d "@$(( $(date +%s) - $1 ))" "$T/log/last_report"; }
 stamp_ago() { echo $(( $(date +%s) - $2 )) > "$T/log/$1"; touch -d "@$(( $(date +%s) - $2 ))" "$T/log/$1"; }
@@ -563,6 +589,25 @@ case_check "Б2: события agent_stalled нет" "0" "$(event agent_stalled
 case_check "Б11: пульс-пинков в окне лимита 0 (отказы 429 не работа)" "0" "$(event pulse_kick)"
 case_check "Б11: в панель не ушло «Владельцу нет отчёта»" "нет" "$(pane_has 'Владельцу нет отчёта')"
 
+echo "── А. Б11б: отказы 429 старше окна лимита, транскрипт свежий — это не работа ──"
+# Свежие 429 держат лимит (limit-in-log), и пульс молчит его веткой: возраст
+# работы виден суду, только когда признак лимита старше LIMIT_KICK_MAX_MIN (60).
+stand_a
+scene "$A_DIR" <<EOF
+main launch 5400 $H1 Помощник А
+main ok 4800
+main err 4500
+main notify-user 4440 $H1
+main err 4000
+main err 3700
+helper $H1 ok 5300
+helper $H1 err 4600
+mtime 60
+EOF
+report_ago 2400
+run_warden
+case_check "Б11б: пульс-пинков 0 — работа считается по ответу, а не по mtime транскрипта" "0" "$(event pulse_kick)"
+
 echo "── А. Б5: Bash помощника в полёте 15 мин, главная молчит 25 ──"
 stand_a
 scene "$A_DIR" <<EOF
@@ -591,7 +636,9 @@ run_warden
 case_check "Б5б: живой помощник с работой старше порога тишины — пульс-пинок отдан" "1" "$(event pulse_kick)"
 case_check "Б5б: в пинке список помощников" "да" "$(pane_has 'Работают помощники:')"
 
-echo "── А. Б6: помощник в реестре молчит 25 мин — пинок, без ответа 5 мин — «Работа встала» ──"
+echo "── А. Б6: помощник без результата молчит 25 мин — пинок, без ответа 6 мин — тревоги нет (идёт) ──"
+# «Идёт» = запуск без результата; свежесть — только потолок «завис»
+# (HELPER_HUNG_MIN): помощник в длинном инструменте молчит десятки минут.
 stand_a
 scene "$A_DIR" <<EOF
 main launch 3000 $H1 $DESC1
@@ -602,12 +649,31 @@ report_ago 1200
 run_warden
 case_check "Б6 обход 1: владельцу пока ничего (только пинок)" "0" "$(lines_in "$T/channel.txt")"
 case_check "Б6 обход 1: метка пинка немоты stall.kick поставлена" "есть" "$(exists "$T/log/stall.kick")"
-case_check "Б6 обход 1: пинок дошёл до панели" "да" "$([ -s "$T/pane.txt" ] && echo да || echo нет)"
+case_check "Б6 обход 1: пинок дошёл до панели" "да" "$(pane_has '[сторож сессий]')"
 stamp_ago stall.kick 360
 : > "$T/channel.txt"; : > "$T/log/rotation.jsonl"
 run_warden
-case_check "Б6 обход 2: на пинок нет ответа 6 мин — «Работа встала» ровно одно" "1" "$(said 'Работа встала')"
-case_check "Б6 обход 2: событие agent_stalled в этом обходе" "1" "$(event agent_stalled)"
+case_check "Б6 обход 2: на пинок нет ответа 6 мин, помощник идёт — «Работа встала» нет" "0" "$(said 'Работа встала')"
+case_check "Б6 обход 2: события agent_stalled нет" "0" "$(event agent_stalled)"
+case_check "Б6 обход 2: метка пинка стоит (ждём дальше, не сбросили)" "есть" "$(exists "$T/log/stall.kick")"
+
+echo "── А. Б6в: помощник молчит 130 мин (> HELPER_HUNG_MIN 120, завис) — пинок, без ответа 6 мин — «Работа встала» ──"
+# Пара к Б6: зависший в «помощников» не входит, немоту ничто не держит.
+stand_a
+scene "$A_DIR" <<EOF
+main launch 9000 $H1 $DESC1
+main ok 1500
+helper $H1 ok 7800
+EOF
+report_ago 1200
+run_warden
+case_check "Б6в обход 1: владельцу пока ничего (только пинок)" "0" "$(lines_in "$T/channel.txt")"
+case_check "Б6в обход 1: метка пинка немоты stall.kick поставлена" "есть" "$(exists "$T/log/stall.kick")"
+stamp_ago stall.kick 360
+: > "$T/channel.txt"; : > "$T/log/rotation.jsonl"
+run_warden
+case_check "Б6в обход 2: помощник завис, на пинок нет ответа 6 мин — «Работа встала» ровно одно" "1" "$(said 'Работа встала')"
+case_check "Б6в обход 2: событие agent_stalled в этом обходе" "1" "$(event agent_stalled)"
 
 echo "── А. Б7: главная молчит 21 мин, помощников нет, на пинок ответ ──"
 stand_a
@@ -661,7 +727,7 @@ case_check "Б8 обход 1: пульс-пинок отдан" "1" "$(event pul
 case_check "Б8 обход 1: в пинке список помощников" "да" "$(pane_has 'Работают помощники:')"
 case_check "Б8 обход 1: в пинке описание помощника из .meta.json" "да" "$(pane_has "$DESC1")"
 case_check "Б8 обход 1: пинок запрещает запускать новых помощников" \
-    "да" "$(pane_has 'Новых помощников в ответ на этот пинок не запускай')"
+    "да" "$(pane_has 'Новых помощников ради отчёта не запускай')"
 case_check "Б8 обход 1: пинка тишины нет" "0" "$(event silence_kick)"
 case_check "Б8 обход 1: владельцу ничего" "0" "$(lines_in "$T/channel.txt")"
 stamp_ago pulse.kick 360

@@ -229,3 +229,8 @@ opengraph  # Open Graph — ИМЯ протокола разметки ссыл�
 hang  # hang — английское «зависнуть»: имя пробы test_dispatcher_hang.sh задано карточкой отчёта другой установки (зависший tmux send-keys 25.10); в словаре гейта слова нет (26.10.2026)
 hackathon  # hackathon — английское слово, не транслит: ИМЯ режима быстрой работы (слово владельца 28.10.2026, карточка hr.hackathon-mode); в словаре гейта слова нет (29.10.2026)
 msg  # msg — ИМЯ git-хука `commit-msg`, заданное самим git: хук находится по имени файла в .git/hooks, а commit-msg-gate.sh назван в пару к pre-commit-gate.sh; в словаре гейта слова нет (29.10.2026, карточка hr.hackathon-mode)
+ack  # ack — сокращение английского acknowledgement («квитанция принятия»): ИМЯ квитанции «принял» диспетчера, check-ack-receipts.py и test_ack_receipts.sh названы по ней; в словаре гейта слова нет (03.11.2026, карточка hr.ack-always-visible)
+repro  # repro — общеупотребительное сокращение английского reproduce («воспроизвести»): ИМЯ каталога и скриптов воспроизведения дефекта, .tasks/hr.publish-selftest-flaky/repro/; в словаре гейта слова нет (04.11.2026)
+statusline  # statusline — ИМЯ настройки statusLine самого Claude Code (скрипт строки состояния): scripts/statusline_limits.py и его проба названы по ней в spec.md hr.speed-modes Ч9; в словаре гейта слова нет (05.11.2026)
+dir  # dir — общеупотребительное сокращение английского directory: часть имени записи памяти stale-copy-dir-with-symlinks-mutates-production.md; в словаре гейта слова нет (05.11.2026)
+symlinks  # symlinks — английское «символические ссылки» (термин ОС): та же запись памяти; в словаре гейта слова нет (05.11.2026)

@@ -1,15 +1,17 @@
 #!/usr/bin/env bash
-# Проба: отказ ПОСЛЕ ворот согласия оставляет разрешение владельца в силе.
+# Проба: выкат, упавший ПОСЛЕ ворот согласия, кнопку «Да» владельца не тратит.
 #
-# Откуда взята. Разрешение расходуется ПРОХОДОМ ворот, а выкат идёт дальше:
-# секреты, сборка, health, смоук. Упади он там — «да» владельца потрачено на
-# действие, которого не было, и просить приходится второй раз. У публикации это
-# чинилось 12.09.2026 (упала через две строки после замка), у выката тот же
-# дефект жил до 28.09.2026.
+# Откуда взята. Прежде разрешение расходовалось ПРОХОДОМ ворот, а выкат шёл
+# дальше: секреты, сборка, health, смоук. Упади он там — «да» владельца
+# потрачено на действие, которого не было (у выката дефект жил до 28.09.2026).
+# С 06.11.2026 ворота кнопку не тратят вовсе: гасит её только начатый выкат —
+# строка журнала выкатов deploy-releases.jsonl (owner_word.ПОГАШЕНИЕ). Проба
+# судит, что отказ на секретах эту строку не пишет и кнопка годна повтору.
 #
-# Проверка СОЗДАЁТ своё условие: свой паспорт, свой журнал согласий, свой
-# проект с подставным секретом — боевую установку не трогаем. Секрет
-# ГЕНЕРИРУЕТСЯ, а не берётся с машины (память: секрет-пробы-был-настоящим).
+# Проверка СОЗДАЁТ своё условие: свой паспорт, свой журнал, свой проект с
+# подставным секретом, ключ стенда HARNESS_OWNER_WORD_STEND=1 — без него ворота
+# читали бы ключи согласия у машины, а не у стенда. Секрет ГЕНЕРИРУЕТСЯ, а не
+# берётся с машины (память: секрет-пробы-был-настоящим).
 #
 # Имена переменных ЛАТИНИЦЕЙ: bash не берёт кириллические идентификаторы.
 set -uo pipefail
@@ -39,12 +41,18 @@ TMUX_SESSION="net-takoj"
 AGENT_START_CMD="true"
 AUTONOMY="semi"
 HEARTBEAT_DIR="$STAND/zhurnal/hb"
+TG_CHAT_ID="4242"
 CONF
 # Продукт стенда ОБЪЯВЛЕН: без этого выкат честно выходит нулём на шаге 0
 # («продукт не задан»), ворота согласия даже не зовутся — и проба зеленела бы,
 # не дойдя до проверяемого места. Сборка стенда — `true`: до неё выкат не
-# доходит, его останавливает гейт секретов двумя шагами раньше.
-printf 'STACK_IMAGES=""\nSTACK_BUILD_CMD="true"\nSTACK_COMPOSE=""\n' > "$STAND/harness.conf"
+# доходит, его останавливает гейт секретов. Ключи согласия — строгие: выкат
+# под кнопкой, стоящего согласия нет.
+printf 'STACK_IMAGES=""\nSTACK_BUILD_CMD="true"\nSTACK_COMPOSE=""\nDEPLOY_NEEDS_OWNER=1\nDEPLOY_CONSENT_STANDING=0\nCONFIRM_MAX_AGE_MIN=60\nCONSENT_BUTTON_TTL_MIN=15\n' \
+    > "$STAND/harness.conf"
+: > "$STAND/zhurnal/inbox.jsonl"
+export HARNESS_OWNER_WORD_STEND=1 HARNESS_INSTALL_CONF="$STAND/install.conf" HARNESS_CONF="$STAND/harness.conf" \
+       HARNESS_LOG_DIR="$STAND/zhurnal"
 
 # Подставной секрет собирается из кусков: цельная строка в файле пробы сама
 # выглядела бы утечкой для гейта секретов.
@@ -54,59 +62,54 @@ printf 'TOKEN = "%s:%s"\n' "$TOKEN_CHISLA" "$TOKEN_BUKVY" > "$PROJECT/config.py"
 git -C "$PROJECT" init -q
 git -C "$PROJECT" -c user.email="proba@stend" -c user.name="проба" add -A
 git -C "$PROJECT" -c user.email="proba@stend" -c user.name="проба" commit -qm "стенд"
+# Предмет выката считает проба сама: «<sha> <realpath дерева>».
+PREDMET="$(git -C "$PROJECT" rev-parse HEAD) $(readlink -f "$PROJECT")"
 
-svezhee_da() {  # свежее «да» владельца и ожидание именно на выкат
-    python3 - "$STAND" <<'PY'
-import json, sys, time
-stand = sys.argv[1]
-ts = time.strftime("%Y-%m-%dT%H:%M:%S+05:00")
-with open(f"{stand}/zhurnal/confirmations.jsonl", "w", encoding="utf-8") as fh:
-    fh.write(json.dumps({"ts": ts, "text": "да", "message_id": "1",
-                         "kind": "any"}, ensure_ascii=False) + "\n")
-with open(f"{stand}/zhurnal/согласие.json", "w", encoding="utf-8") as fh:
-    json.dump({"ожидание": {"действие": "deploy", "ts": time.time()}}, fh,
-              ensure_ascii=False)
+knopka_da() {  # «Да» кнопкой на предмет выката — конверт, как его пишет диспетчер канала
+    python3 - "$STAND/zhurnal" "$PREDMET" <<'PY'
+import datetime, json, sys
+log, target = sys.argv[1], sys.argv[2]
+ts = (datetime.datetime.now().astimezone() - datetime.timedelta(minutes=1)).isoformat(timespec="seconds")
+data = {"nonce": "proba-vozvrat", "вид": "выкат", "цель": target, "message_id": 4000, "from_id": "4242"}
+# Живой порядок: просьба ask-consent не позже нажатия, нажатие — с from_id владельца стенда.
+with open(f"{log}/consent-requests.jsonl", "w", encoding="utf-8") as fh:
+    fh.write(json.dumps({"v": 1, "ts": ts, "src": "scripts/ask-consent.py", "event": "consent" + ".request",
+                         "outcome": "ok", "data": {"nonce": "proba-vozvrat", "вид": "выкат", "цель": target,
+                                                  "почему": "проба"}}, ensure_ascii=False) + "\n")
+with open(f"{log}/consent-buttons.jsonl", "w", encoding="utf-8") as fh:
+    fh.write(json.dumps({"v": 1, "ts": ts, "src": "проба", "event": "consent" + ".yes", "outcome": "ok",
+                         "data": data}, ensure_ascii=False) + "\n")
 PY
 }
 
-soglasie_v_sile() {  # «да» — разрешение ещё действует, «нет» — потрачено
+knopka_v_sile() {  # «да» — ворота пускают по кнопке, «нет» — не пускают
     local otvet
-    otvet=$(HARNESS_INSTALL_CONF="$STAND/install.conf" \
-            HARNESS_CONF="$STAND/harness.conf" \
-            python3 "$HERE/deploy_guard.py" --действие deploy \
-                    --только-согласие --не-тратить 2>&1 || true)
-    case "$otvet" in
-        *"нет согласия"*) echo нет ;;
-        *)                echo да ;;
-    esac
+    otvet=$(python3 "$HERE/deploy_guard.py" --действие deploy --только-согласие 2>&1) \
+        && printf '%s' "$otvet" | grep -q "согласие кнопкой" && echo да || echo нет
 }
 
-echo "── БОЛЬНОЙ СЛУЧАЙ: выкат упал ПОСЛЕ ворот — «да» владельца не сгорает ──"
-svezhee_da
-itog "да" "$(soglasie_v_sile)" "стенд начинает со свежим согласием"
+echo "── контроль стенда: без кнопки ворота не пускают ──"
+itog "нет" "$(knopka_v_sile)" "стенд строгий: ключи стенда, кнопки нет — закрыто"
 
-VYVOD=$(HARNESS_INSTALL_CONF="$STAND/install.conf" HARNESS_CONF="$STAND/harness.conf" \
-        timeout 120 bash "$HERE/deploy.sh" 2>&1)
+echo "── БОЛЬНОЙ СЛУЧАЙ: выкат упал ПОСЛЕ ворот — кнопка «Да» не сгорает ──"
+knopka_da
+itog "да" "$(knopka_v_sile)" "стенд начинает с «Да» кнопкой на предмет выката"
+
+VYVOD=$(timeout 120 bash "$HERE/deploy.sh" 2>&1)
 RC=$?
 printf '%s\n' "$VYVOD" | sed 's/^/      /' | tail -8
-itog "да" "$(printf '%s' "$VYVOD" | grep -q "согласие владельца" && echo да || echo нет)" \
-     "выкат дошёл ДО ворот согласия, а не вышел на шаге «продукта нет»"
+itog "да" "$(printf '%s' "$VYVOD" | grep -q "согласие кнопкой" && echo да || echo нет)" \
+     "выкат прошёл ворота ПО КНОПКЕ, а не вышел раньше и не по ключу машины"
 itog "1" "$RC" "выкат отказал на секретах в проекте стенда"
 itog "да" "$(printf '%s' "$VYVOD" | grep -q "секрет" && echo да || echo нет)" \
      "причина отказа названа словом «секрет»"
-itog "да" "$(soglasie_v_sile)" \
-     "после отказа ворота по-прежнему пускают (окно повторной попытки)"
-# Судим СОСТОЯНИЕ, а не повторный вопрос: повтор того же действия попадает в
-# окно «та же попытка» и зеленеет даже у ПОТРАЧЕННОГО разрешения — без этого
-# пути проба проходила и с убранной ловушкой возврата (мутация 28.09.2026).
-IZRASHODOVANO=$(python3 -c 'import json,sys
-try:
-    s = json.load(open(sys.argv[1] + "/zhurnal/согласие.json", encoding="utf-8"))
-except Exception:
-    print("нечитаемо"); raise SystemExit
-print(len(s.get("израсходованы") or []))' "$STAND")
-itog "0" "$IZRASHODOVANO" \
-     "БОЛЬНОЙ СЛУЧАЙ: разрешение НЕ числится израсходованным — выкат его вернул"
+# Судим НОСИТЕЛЬ погашения, а не только повторный вопрос: строка журнала выкатов с
+# этим предметом погасила бы «Да» — отказ на секретах её писать не вправе.
+itog "0" "$(cat "$STAND/zhurnal/deploy-releases.jsonl" 2>/dev/null | grep -c -F "$PREDMET")" \
+     "БОЛЬНОЙ СЛУЧАЙ: отказ на секретах не записал выкат — кнопка не погашена"
+itog "да" "$(knopka_v_sile)" "после отказа та же кнопка по-прежнему пускает"
+itog "нет" "$( [ -e "$STAND/zhurnal/согласие.json" ] && echo да || echo нет)" \
+     "ворота и выкат не пишут согласие.json — тратить нечего"
 
 printf '\nВОЗВРАТ-СОГЛАСИЯ: путей %d, неудач %d\n' "$paths" "$fails"
 [ "$fails" -eq 0 ]

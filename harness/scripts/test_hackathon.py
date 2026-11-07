@@ -623,6 +623,8 @@ def cli_cases():
                     hackathon_cli("--активен", "--карта", str(probe_map))[0])
 
     write_conf(None)
+    # Мерка — миг вызова, а не NOW начала пробы: под нагрузкой до этих случаев идут десятки минут.
+    called = dt.datetime.now(TZ)
     rc, out = hackathon_cli("--включить")
     text = CONF.read_text(encoding="utf-8")
     values = until_values(text)
@@ -632,18 +634,19 @@ def cli_cases():
     cases.check("--включить: значение с поясом", True, bool(stamp and stamp.tzinfo))
     cases.check("--включить без часов: срок ≈ сейчас + 72 ч (±10 мин)", True,
                 bool(stamp and stamp.tzinfo
-                     and abs(stamp - (NOW + dt.timedelta(hours=72))) < dt.timedelta(minutes=10)))
+                     and abs(stamp - (called + dt.timedelta(hours=72))) < dt.timedelta(minutes=10)))
     cases.check("--включить: ключ дописан, прочие строки и комментарий целы", True,
                 bool(values) and 'OTHER_KEY="keep-me"' in text and "# образец конфига пробы" in text)
     copies = list((LOG_DIR / "панель-копии").glob("harness.conf.*"))
     cases.check("--включить: копия прежнего конфига в $LOG_DIR/панель-копии (И-1)", True,
                 bool(copies))
+    called = dt.datetime.now(TZ)
     hackathon_cli("--включить", "2")
     values = until_values(CONF.read_text(encoding="utf-8"))
     stamp = dt.datetime.fromisoformat(values[0]) if len(values) == 1 else None
     cases.check("--включить 2: строка одна, срок ≈ сейчас + 2 ч", True,
                 bool(stamp and stamp.tzinfo
-                     and abs(stamp - (NOW + dt.timedelta(hours=2))) < dt.timedelta(minutes=10)))
+                     and abs(stamp - (called + dt.timedelta(hours=2))) < dt.timedelta(minutes=10)))
 
 
 def enable_task_cases():
@@ -1496,6 +1499,40 @@ def forbidden_source_cases():
         shutil.copy2(FORBIDDEN_YAML, sandbox)
 
 
+def status_line_cases():
+    """Строка оглядки старта: режим и число карточек уровня хакатон."""
+    path = WORK / "status-map.yaml"
+    path.write_text(map_text(card("hr.h1", "wip", "хакатон"), card("hr.h2", "plan", "хакатон"),
+                             card("hr.o1", "wip", "обычная"), card("hr.h1-prod-debt", "plan")),
+                    encoding="utf-8")
+    future, past = iso(NOW + dt.timedelta(hours=3)), iso(NOW - dt.timedelta(hours=3))
+    for name, value, mode, other in (("ключа нет", None, "выкл", "до "),
+                                     ("срок истёк", past, "выкл", "до "),
+                                     ("срок в будущем", future, f"до {future}", "выкл")):
+        write_conf(value)
+        code, out = hackathon_cli("--строка", "--карта", str(path))
+        lines = out.strip().splitlines()
+        cases.check(f"--строка ({name}): код 0, одна строка «хакатон: … {mode} …»",
+                    (0, 1, True, True, False, True),
+                    (code, len(lines), bool(lines) and lines[0].startswith("хакатон:"),
+                     bool(lines) and mode in lines[0], bool(lines) and other in lines[0],
+                     bool(lines) and "уровней хакатон 2" in lines[0]))
+    # Блок оглядки исполняется, а не ищется: вызов с выводом в /dev/null тоже «есть в тексте».
+    shell = (SOURCE / "scripts" / "hooks" / "session_state.sh").read_text(encoding="utf-8").splitlines()
+    calls = [i for i, line in enumerate(shell)
+             if not line.lstrip().startswith("#") and "hackathon.py" in line and "--строка" in line]
+    start = next((i for i in range(calls[0], -1, -1) if shell[i].startswith("if ")), 0) if calls else 0
+    end = next((i for i in range(start, len(shell)) if shell[i] == "fi"), start) if calls else -1
+    project = WORK / "oglyadka"
+    shutil.copytree(SOURCE / "scripts" / "lib", project / "scripts" / "lib", dirs_exist_ok=True)
+    shutil.copy2(SOURCE / "scripts" / "hackathon.py", project / "scripts")
+    shutil.copy2(path, project / "dev-map.yaml")
+    done = subprocess.run(["bash", "-c", 'project_dir="$1"\n' + "\n".join(shell[start:end + 1]),
+                           "_", str(project)], capture_output=True, text=True, timeout=60)
+    cases.check("session_state.sh: блок оглядки печатает строку режима по карте проекта",
+                [f"хакатон: до {future}; уровней хакатон 2"], done.stdout.splitlines())
+
+
 def git_root_of(folder):
     done = subprocess.run(["git", "-C", str(folder), "rev-parse", "--show-toplevel"],
                           capture_output=True, text=True, timeout=30,
@@ -1534,6 +1571,8 @@ def main():
         guarded("n-10 разбор трейлера", trailer_parse_cases)
         print("── (а) запреты: вне git — с диска, в git — из индекса ──")
         guarded("источник запретов", forbidden_source_cases)
+        print("── --строка: режим и уровни хакатон в оглядке старта ──")
+        guarded("--строка", status_line_cases)
     finally:
         shutil.rmtree(WORK, ignore_errors=True)
     if cases.paths == 0:

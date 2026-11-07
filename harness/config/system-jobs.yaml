@@ -11,110 +11,152 @@
 # Поля задания: имя (оно же ключ), расписание (пять полей cron), команда,
 # журнал (куда писать вывод); необязательное если_задан — ключ harness.conf,
 # без значения которого задание не ставится и срока метки не получает.
+#
+# Разделы задания, метки, запас-порога и метки_без_задания ПОРОЖДАЮТСЯ из
+# harness/config/process-library.yaml (между маркерами ниже): править надо библиотеку,
+# затем запустить scripts/build-system-jobs.py. Руками правится только то, что вне блока
+# (ключи, переименовать_файлы, переименовать_метки, снять_ключи, живые_правки).
+# >>> порождено из process-library.yaml — руками не править
+# Блок ниже порождён scripts/build-system-jobs.py из harness/config/process-library.yaml.
+# Править расписание и метки нужно там, затем запустить build-system-jobs.py:
+# гейт сверки краснеет при расхождении. Комментарии «почему такое значение» — в библиотеке.
 задания:
   - имя: session-warden
-    расписание: "*/10 * * * *"
-    команда: "harness/demons/session-warden.sh"
+    расписание: '*/10 * * * *'
+    команда: harness/demons/session-warden.sh
     журнал: session-warden.log
   - имя: task-closer
-    расписание: "0 * * * *"
-    команда: "harness/demons/task-closer.sh"
+    расписание: 0 * * * *
+    команда: harness/demons/task-closer.sh
     журнал: task-closer.log
   - имя: disk-cleanup
-    расписание: "0 3 * * *"
-    команда: "harness/demons/disk-cleanup.sh"
+    расписание: 0 3 * * *
+    команда: harness/demons/disk-cleanup.sh
     журнал: disk-cleanup.log
   # Та же уборка ПОЧАСОВО, но она молчит, пока диску не тесно (DISK_TRIGGER_PCT).
   # Мусор появляется не по расписанию: улика 04.10.2026 в шапке disk-cleanup.sh.
   - имя: disk-pressure
-    расписание: "40 * * * *"
-    команда: "harness/demons/disk-cleanup.sh --по-давлению"
+    расписание: 40 * * * *
+    команда: harness/demons/disk-cleanup.sh --по-давлению
     журнал: disk-cleanup.log
   - имя: server-hygiene
-    расписание: "30 3 * * *"
-    команда: "harness/demons/server-hygiene.sh"
+    расписание: 30 3 * * *
+    команда: harness/demons/server-hygiene.sh
     журнал: server-hygiene.log
+  # Раз в 5 минут, а не раз в сутки: каждый проход дописывает выборку для итога
+  # за сутки, а время отправки — ключ RESOURCE_REPORT_TIME в harness.conf —
+  # решает сама обёртка; строка cron от него не зависит.
+  - имя: resource-report
+    расписание: '*/5 * * * *'
+    команда: harness/demons/resource-report.sh
+    журнал: resource-report.log
+  # Судья режима скорости: каждые 2 мин меряет мощность и пишет состояние,
+  # которое читают сторож, бюджет-страж и план запуска (спека hr.speed-modes, Ч3).
+  - имя: speed-mode
+    расписание: '*/2 * * * *'
+    команда: harness/demons/speed_mode.py --замер
+    журнал: speed-mode.log
+  # Диспетчер процессов: раз в минуту делит CPU и память между процессами библиотеки.
+  # Только читает /proc и cgroup, поэтому выключатель его не гасит (исключение выше).
+  - имя: process-dispatcher
+    расписание: '* * * * *'
+    команда: scripts/process-dispatcher.py --замер
+    журнал: process-dispatcher.log
   - имя: backup
-    расписание: "0 4 * * *"
-    команда: "harness/demons/backup.sh"
+    расписание: 0 4 * * *
+    команда: harness/demons/backup.sh
     журнал: backup.log
   - имя: devmap-selfheal
-    расписание: "15 4 * * *"
-    команда: "harness/demons/devmap-selfheal.sh"
+    расписание: 15 4 * * *
+    команда: harness/demons/devmap-selfheal.sh
     журнал: devmap-selfheal.log
   - имя: nightly-gates
-    расписание: "0 6 * * *"
-    команда: "harness/demons/nightly-gates.sh"
+    расписание: 0 6 * * *
+    команда: harness/demons/nightly-gates.sh
     журнал: nightly-gates.log
+  # Полный прогон мутаций раз в неделю, вторник 09:00. Окно выбрано по sar
+  # 27.10-04.11: вторник самый тихий, load5 на ядро 0.2-0.5. Предел 43 ч
+  # (NIGHTLY_MUTATIONS_MAX_MIN) отсчитывается от старта процесса, ожидание замка
+  # (до 75 мин) входит в него: 09:00 плюс 43 ч кончается до 04:00 четверга (прогон идёт под потолком среза). Пересмотреть через 3-4 недели замеров без
+  # ежедневных прогонов.
+  - имя: nightly-mutations
+    расписание: 0 9 * * 2
+    команда: harness/demons/nightly-mutations.sh
+    журнал: nightly-mutations.log
   # Дважды в сутки нарочно: 27.09.2026 утренний прогон упёрся в лимит
   # подписки (код 77, построено ноль) и второй попытки не было — сутки долга
   # за один отказ модели. Вечерний прогон при пустом долге выходит мгновенно и
   # не зовёт агента, так что цена повтора — один разбор карты.
   - имя: check-builder
-    расписание: "45 */3 * * *"
-    команда: "harness/demons/check-builder.sh"
+    расписание: 45 */3 * * *
+    команда: harness/demons/check-builder.sh
     журнал: check-builder.log
-
+  # Постоянный поток проверок: тревоги проверок (мутации, ночные ворота,
+  # ревизии) чинит отдельный процесс, в очередь основной сессии и пинки сторожа
+  # они не попадают. Частый крон: проход сам откладывается, пока идёт прошлый,
+  # держатся замки мутаций или высока нагрузка, а взятая тревога отдыхает.
+  - имя: checks-stream
+    расписание: '*/20 * * * *'
+    команда: harness/demons/checks-stream.sh
+    журнал: checks-stream.log
   - имя: acceptance-watch
-    расписание: "45 4 * * *"
-    команда: "harness/demons/acceptance-watch.sh"
-    журнал: acceptance-watch.log
-
+    расписание: 45 4 * * *
+    команда: harness/demons/acceptance-watch.sh
+    журнал: priyomka-watch.log
   - имя: ton-watch
-    расписание: "15 5 * * *"
-    команда: "harness/demons/ton-watch.sh"
+    расписание: 15 5 * * *
+    команда: harness/demons/ton-watch.sh
     журнал: ton-watch.log
-
   - имя: update-watch
-    расписание: "45 4 * * *"
-    команда: "harness/demons/update-watch.sh"
-    журнал: update-watch.log
+    расписание: 45 4 * * *
+    команда: harness/demons/update-watch.sh
+    журнал: obnovlenie-watch.log
   - имя: stack-watch
-    расписание: "10 7 * * *"
-    команда: "harness/demons/stack-watch.sh"
+    расписание: 10 7 * * *
+    команда: harness/demons/stack-watch.sh
     журнал: stack-watch.log
   # Раз в час, а не раз в 15 минут: замер О7 28.10.2026 — 345 прогонов из 347
   # за неделю «ответов 0, отложено []». Метку этот режим не пишет; цена —
   # ответ на «стек нет N» и досыл отложенной сводки ждут до часа.
   - имя: stack-watch-catchup
-    расписание: "20 * * * *"
-    команда: "harness/demons/stack-watch.sh --догнать"
+    расписание: 20 * * * *
+    команда: harness/demons/stack-watch.sh --догнать
     журнал: stack-watch.log
   - имя: extensions-watch
-    расписание: "35 5 * * *"
-    команда: "harness/demons/extensions-watch.sh"
-    журнал: extensions-watch.log
+    расписание: 35 5 * * *
+    команда: harness/demons/extensions-watch.sh
+    журнал: rasshirenija-watch.log
   - имя: evolution-collector
-    расписание: "5 * * * *"
-    команда: "harness/demons/evolution-collector.sh"
-    журнал: evolution-collector.log
+    расписание: 5 * * * *
+    команда: harness/demons/evolution-collector.sh
+    журнал: evo-collector.log
   - имя: tokens-collector
-    расписание: "10 * * * *"
-    команда: "harness/demons/tokens-collector.sh"
+    расписание: 10 * * * *
+    команда: harness/demons/tokens-collector.sh
     журнал: tokens-collector.log
   - имя: heartbeat-watch
-    расписание: "0 8 * * *"
-    команда: "harness/demons/heartbeat-watch.sh"
+    расписание: 0 8 * * *
+    команда: harness/demons/heartbeat-watch.sh
     журнал: heartbeat-watch.log
   - имя: memory-revision
-    расписание: "0 9 1 * *"
-    команда: "harness/demons/memory-revision.sh"
+    расписание: 0 9 1 * *
+    команда: harness/demons/memory-revision.sh
     журнал: memory-revision.log
   # Ревизия проекта идёт одновременно с ревизией памяти нарочно: та пишет
   # предложения и карту не трогает, столкновения нет. Утро первого числа —
   # после ночных демонов, до начала работы владельца.
   - имя: project-revision
-    расписание: "0 9 1 * *"
-    команда: "harness/demons/project-revision.sh"
+    расписание: 0 9 1 * *
+    команда: harness/demons/project-revision.sh
     журнал: project-revision.log
   - имя: memory-revision-порог
-    расписание: "30 9 * * *"
-    команда: "harness/demons/memory-revision.sh --по-порогу"
+    расписание: 30 9 * * *
+    команда: harness/demons/memory-revision.sh --по-порогу
     журнал: memory-revision.log
   - имя: memory-commit
-    расписание: "*/10 * * * *"
-    команда: "harness/demons/memory-commit.sh"
-    журнал: memory-commit.log
+    расписание: '*/10 * * * *'
+    команда: harness/demons/memory-commit.sh
+    журнал: pamyat-kommit.log
   # ЗДОРОВЬЕ ПРОДУКТА. Строка жила только в ЖИВОМ кроне этой машины, а в данных
   # установки её не было: на чистой установке демон не завёлся бы вовсе, и
   # свежесть наличия витрины не сторожил бы никто. Нашёл гейт «кто зовёт»
@@ -123,43 +165,43 @@
   # не получает — замер О7 28.10.2026: 2 016 запусков в неделю ради строки
   # «PRODUCT_HEALTH_URL не настроен». Стоящую строку доустановка не снимает.
   - имя: product-health
-    расписание: "*/5 * * * *"
-    команда: "harness/demons/product-health.sh"
+    расписание: '*/5 * * * *'
+    команда: harness/demons/product-health.sh
     журнал: product-health.log
     если_задан: PRODUCT_HEALTH_URL
   # Три задания ниже данные называли «ставит шаг установки», но такого шага не
   # было: на свежей установке 13.10.2026 ни одно не стояло в cron, и
   # сводка меток назвала limit-watch мёртвым с первого дня.
   - имя: limit-watch
-    расписание: "* * * * *"
-    команда: "harness/demons/limit-watch.sh"
+    расписание: '* * * * *'
+    команда: harness/demons/limit-watch.sh
     журнал: limit-watch.log
   # Сторож «приём канала встал»: в боевой конфиг идёт выключенным
   # (DISPATCH_STALL_ENABLED=0), строка в cron только даёт ему расписание.
   - имя: dispatcher-stall-watch
-    расписание: "* * * * *"
-    команда: "harness/demons/dispatcher-stall-watch.sh"
+    расписание: '* * * * *'
+    команда: harness/demons/dispatcher-stall-watch.sh
     журнал: dispatcher-stall-watch.log
   - имя: check-login-expiry
-    расписание: "*/15 * * * *"
-    команда: "scripts/check-login-expiry.py"
+    расписание: '*/15 * * * *'
+    команда: scripts/check-login-expiry.py
     журнал: check-login-expiry.log
   # Раз в пять минут, а не раз в минуту: замер 14.10.2026 — один снимок доски
   # идёт 16,9 с (166 задач), то есть при минутном расписании это четверть ядра
   # НАВСЕГДА, и прогоны наезжают друг на друга. Период метки у этого же задания
   # объявлен 5 минут — расписание приведено к нему (ревью F-nb-04).
   - имя: build-board
-    расписание: "*/5 * * * *"
-    команда: "scripts/build-board.py"
+    расписание: '*/5 * * * *'
+    команда: scripts/build-board.py
     журнал: build-board.log
   - имя: panel-tunnel
-    расписание: "* * * * *"
-    команда: "harness/demons/panel-tunnel.sh"
+    расписание: '* * * * *'
+    команда: harness/demons/panel-tunnel.sh
     журнал: panel-tunnel-demon.log
   - имя: restore-probe
-    расписание: "0 5 * * 1"
-    команда: "scripts/restore-probe.sh"
-    журнал: restore-probe.log
+    расписание: 0 5 * * 1
+    команда: scripts/restore-probe.sh
+    журнал: проба-восстановления.log
 
 # Период метки в минутах: через сколько молчание демона считается поломкой.
 # Имя = имя файла метки в HEARTBEAT_DIR. Сторож меток heartbeat-watch читает
@@ -167,7 +209,14 @@
 # недостающие, не трогая уже стоящие значения.
 метки:
   nightly-gates: 1440
+  # 5760 (4 суток): сторож объявляет метку мёртвой при возрасте больше 2x периода,
+  # то есть тревога через 8 суток молчания при недельном прогоне.
+  nightly-mutations: 5760
   sentinel: 5
+  # 2: судья ставит метку на каждом успешном проходе (*/2); тревога при возрасте больше 2x периода.
+  speed_mode: 2
+  # 5: замер раз в минуту; тревога при возрасте больше 2x периода.
+  process-dispatcher: 5
   session-warden: 10
   session-warden.запуск: 10
   memory-commit: 10
@@ -178,6 +227,8 @@
   # 120, а не 60: один пропущенный почасовой прогон — не беда, два подряд — беда.
   disk-pressure: 120
   server-hygiene: 1440
+  # 60, а не 1440: метка ставится на каждом проходе (раз в 5 минут).
+  resource-report: 60
   backup: 1440
   devmap-selfheal: 1440
   heartbeat-watch: 1440
@@ -193,12 +244,26 @@
   # честном слове. Замер 28.09.2026: последний успешный прогон 10.09.
   restore-probe: 11520
   check-builder: 480
+  # 60 при расписании */20: метка ставится на каждом проходе, включая
+  # отложенные; три пропущенных прохода подряд — это уже молчание.
+  checks-stream: 60
   ton-watch: 1440
   update-watch: 1440
   stack-watch: 1440
   extensions-watch: 1440
   memory-revision: 44640
   project-revision: 44640
+
+# Во сколько раз возраст метки может превысить её период, прежде чем сторож
+# меток объявит демона мёртвым. Не названная метка — ×2 (один пропуск прощается).
+# Страховка (суточная копия, проба восстановления) — ×1: пропуск на сутки уже
+# тревога, а не повод ждать ещё сутки. Гигиена прощает один пропуск.
+запас-порога:
+  backup: 1
+  restore-probe: 1
+  nightly-gates: 2
+  disk-cleanup: 2
+  server-hygiene: 2
 
 # Метки, у которых НЕТ строки в расписании выше, — и почему это законно.
 # Сверяет scripts/check-job-and-mark.py: без этой записи метка без задания
@@ -208,6 +273,7 @@
   disk-pressure: "её пишет та же уборка по ключу --по-давлению; метка СВОЯ, а не общая с disk-cleanup, потому что обещания разные: ночная обещает «уборка прошла за сутки» (1440), почасовая — «тесноту смотрели за два часа» (120). Общая метка сделала бы мёртвую ночную уборку невидимой: почасовой прогон трогал бы её каждый час"
   sentinel: "поднимается таймером systemd harness-sentinel.timer, а не крон-строкой"
   session-warden.запуск: "вторая метка того же сторожа: её пишет подъём смены, а не отдельное задание"
+# <<<
 
 # Ключи harness.conf с умолчаниями: install-new.py ДОПИСЫВАЕТ недостающие и
 # никогда не меняет стоящие — значение владельца старше умолчания пакета.
@@ -216,6 +282,7 @@
 # переключателей), а на чужой установке после обновления его туда не писал
 # никто: обновление привозит новый механизм, а его ключ — нет.
 ключи:
+  BACKGROUND_PROCESSES: "on"   # выключатель фоновых процессов: off — run-background.sh гасит все задания, кроме исключений process-library.yaml
   EVENTS_GROUP: "harness-panel"   # группа журналов и состояния событий: панель читает, агент пишет
   TWO_AGENTS_ALARM: "1"      # тревога сторожа «два агента»: 0 — молчит, 1 — шлёт
   REVIZIA_ENABLED: "1"      # ежемесячная ревизия проекта включена; ручка на панели
@@ -224,7 +291,27 @@
   PANEL_TUNNEL: "1"        # панель наружу туннелем cloudflared без root; 0 — выключен
   LIMIT_KICK_DELAY_SEC: "10"
   SECURITY_STEP_LIVE: "0"   # 1 — install-new включает шаг «безопасность» на трёх уровнях; 0 — шаг не трогается
+  NIGHTLY_MUTATIONS_MAX_MIN: "1140"   # предел недельного полного прогона мутаций, минут (19 ч: старт вторник 09:00, конец до 04:00 среды)
+  NIGHTLY_MUTATIONS_ALERT_GAP_H: "24"   # пауза между вестями полного прогона мутаций, часов
+  CHECKS_NIGHT_MAX_ALERTS: "3"   # сколько тревог проверок ночной агент берёт за проход; ручной прогон — ключ --предел N
+  CHECKS_NIGHT_TIMEOUT_MIN: "90"   # предел времени ночного агента тревог проверок, минут; проход обязан кончиться до 03:00
+  SPEED_MODE: "medium"      # режим скорости: slow | medium | fast | ultra; ручка на панели, судья — harness/demons/speed_mode.py
+  NIGHTLY_MUTATIONS_LOCK_WAIT_MIN: "75"   # сколько минут недельный прогон мутаций ждёт занятый замок до вести «не стартовал»
+  MUT_CACHE_DAYS: "14"   # срок кэша зелёных мутаций, суток: при недельном ритме кэш должен жить дольше 7
+  STATUS_STRUCT_MAX_CHARS: "1400"   # потолок отчёта владельцу кодом (tg_send.sh --статус), знаков
+  STATUS_MODEL_LABELS: "opus=Opus 5.5;sonnet=Sonnet 5.5;haiku=Haiku 5.5"   # подписи моделей в отчёте: «модель=подпись;…»
+  STATUS_DONE_SINCE_LAST: "1"   # «1» — СДЕЛАНО только после прошлого доставленного статуса (метка status-report.last), «0» — окно 12 ч
+  PROTECTED_PATHS: "sample-21/sample-20"   # пути, которых сессия не стирает и не переносит любым глаголом (дверь — слово владельца)
   STACK_NEIGHBOURS: ""   # чьё на этой машине задевает перезагрузка и общие части; пусто — «всё на машине»
+  SITE_HEALTH_URL: ""   # адрес сайта для проверки подъёма после перезагрузки; пусто — «не проверено»
+  SITE_FORM_URL: ""     # адрес формы заявки сайта (GET даёт 405 — это «жива»); пусто — «не проверено»
+  AUTO_REBOOT_IN_ROTATION: "0"   # перезагрузка сервера в окне ротации: 0 — выкл; включает только оркестратор
+  REBOOT_CMD: "sudo -n systemctl reboot"   # единственная команда перезагрузки; пусто — «не задана»
+  REBOOT_MIN_GAP_HOURS: "24"   # не чаще раза в сутки при любом сбое предиката
+  REBOOT_EXPECT_MIN: "3"       # сколько минут обещаем владельцу в вести
+  REBOOT_WAIT_SEC: "180"       # сторож, переживший столько секунд после команды, идёт обычным «/exit»
+  REBOOT_LATE_MIN: "15"        # срок метки перезагрузки, минут
+  REBOOT_CHECK_TIMEOUT_SEC: "600"   # предел live-check.sh для проверки подъёма, секунд
   LAYOUT_REMOVE_MAX_PERCENT: "25"   # порог снятия лишнего по описи раскладки, % строк описи
   DISK_ALERT_REPEAT_H: "24"          # повтор вести «диск занят», часов; раньше — при росте на 3 п.п.
   LAYOUT_LOCK_WAIT_SEC: "300"   # сколько секунд вторая раскладка ждёт замок первой; в рамках таймаута update.py
@@ -236,6 +323,7 @@
   HELPER_FRESH_MIN: "20"      # через сколько минут без ответа помощник не считается работающим
   KICK_ANSWER_WAIT_MIN: "5"   # сколько минут ждать ответа смены на пинок до «Работа встала»
   PULSE_MAX_MIN: "30"         # не реже, чем раз в столько минут сторож просит у смены отчёт
+  WARDEN_PERIOD_MIN: "10"     # шаг обхода сторожа, минут; равен шагу cron session-warden — пульс срабатывает на обходе до порога
   PUBLIC_BUILD_DIR: "/var/lib/harness/публичная-сборка"   # дерево публичной сборки; НЕ в логах: их чистят по mtime и сканируют с правкой
   PUBLIC_COMMIT_NAME: "jig-harness"                       # автор публичных коммитов — имя харнеса, а не личность машины
   PUBLIC_COMMIT_EMAIL: "jig-harness@users.noreply.github.com"
@@ -244,7 +332,18 @@
   DISPATCH_STALL_MIN: "5"
   DISPATCH_STALL_TELL_MIN: "60"
   DISPATCH_STALL_HEAL: "0"
+  OWNER_REPLY_WATCH_ENABLED: "1"   # страж ответа владельцу (dispatcher-stall-watch.sh)
+  OWNER_REPLY_MAX_MIN: "5"         # через сколько минут сообщение без ответа просрочено
   PANE_SEND_NOW: "0"               # ручка «слать сразу» (аккорд C-x C-s); 0 — выключена
+  RESOURCE_REPORT_TIME: "09:00"        # час суточной сводки ресурсов владельцу, ЧЧ:ММ
+  RESOURCE_REPORT_TOP: "3"             # строк в топе каждой части сводки
+  RESOURCE_REPORT_MIN_CPU_PCT: "5"     # ниже этого процессора потребитель в сводку не идёт, %
+  RESOURCE_REPORT_MIN_MEM_MB: "200"    # то же для памяти, МБ
+  RESOURCE_REPORT_MIN_DISK_MB: "1000"  # то же для каталога, МБ
+  RESOURCE_REPORT_DU_ROOTS: "/srv /var /home"   # где искать крупные каталоги
+  RESOURCE_REPORT_KEEP_HOURS: "48"     # сколько часов хранить выборки ресурсов
+  RESOURCE_REPORT_WINDOW_HOURS: "24"   # за сколько часов считать итог
+  RESOURCE_REPORT_SAMPLES: ""          # файл выборок; пусто — LOG_DIR/resource-samples.jsonl
   DAEMON_OWNED_PATHS: "память/.tasks-triaged docs/приёмка/"   # файлы, которые пишет демон: stop-хук не считает их работой смены
 
 # Ключи, которые харнес завёл сам и сам признал отработавшими. Чужих здесь не
@@ -275,6 +374,17 @@
 снять_ключи:
   - HYGIENE_BACKLOG_FILES    # запрет прополки снят владельцем 18.10.2026 — на чужих установках ключ тоже обязан исчезнуть
   - WORK_BRANCH             # публикуется СБОРКА, а не рабочая ветка пакета (спека §2.3)
+  - BUILD_CACHE_KEEP_H      # ключ снят коммитом 20b02fd6, на живых установках остался без хозяина
+  - MUTATIONS_CHANGED_LOAD_MAX         # демон мутаций по правкам снят 05.11.2026
+  - MUTATIONS_CHANGED_MAX_MIN          # то же
+  - MUTATIONS_CHANGED_PASS_MAX_MIN     # то же
+  - MUTATIONS_CHANGED_SETTLE_MIN       # то же
+
+# Сторожа, снятые насовсем. Тревогу снимает только сторож, поэтому тревога снятого
+# висела бы вечно; `alert-task.py --drain` гасит открытые тревоги этих сторожей
+# с причиной «сторож снят». Строка ставится тем же коммитом, что снимает сторожа.
+снятые_сторожа:
+  - mutations-changed   # демон мутаций по правкам снят 05.11.2026
 
 # Правки ЖИВЫХ файлов (пульт, таблица моделей): раскладка их не перезаписывает,
 # поэтому новое в них доносит install-new.py. Каждая правка выполняется ОДИН раз
@@ -303,3 +413,7 @@
     файл: harness/config/models.yaml
     ключ: модели.смена
     значение: sonnet
+  # Свои необёрнутые строки crontab переписываются под run-background.sh (копия до правки).
+  - id: обёртка-крона-2026-11
+    один_раз: true
+    команды: [python3 scripts/lib/process_library.py wrap-crontab]

@@ -21,9 +21,11 @@ LIVE_LIST="$HERE/../harness/config/gates-live.yaml"
 [ -r "$LIVE_LIST" ] || LIVE_LIST="$HERE/../config/gates-live.yaml"
 
 T="$(mktemp -d)"
-# Снимки — вне /tmp (там обёртка отказывает): свой каталог в домашнем, путь
-# доезжает до обёртки ключом GATES_SNAPSHOT_DIR стендового harness.conf.
-K="$(mktemp -d -p "$HOME" .gates-snapshot-probe.XXXXXX)"
+# Снимки — вне /tmp (там обёртка отказывает): свой каталог в /var/tmp, путь
+# доезжает до обёртки ключом GATES_SNAPSHOT_DIR стендового harness.conf. Не в
+# $HOME: дом — свойство хозяина машины, под чужим или пустым домом стенд не
+# поднимался и проба судила дом, а не обёртку.
+K="$(mktemp -d -p /var/tmp .gates-snapshot-probe.XXXXXX)"
 SNAPS="$K/snaps"
 cleanup() {
     [ -d "$T/live/.git" ] && git -C "$T/live" worktree prune 2>/dev/null

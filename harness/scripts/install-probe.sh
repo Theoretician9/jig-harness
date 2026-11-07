@@ -130,6 +130,34 @@ kluchi_oprosa() {
         | sed 's/[${:}-]//g' | sort -u | head -20
 }
 
+# Тяжёлые демоны: работа под `timeout "${X_MAX_MIN}m"` с пределом по умолчанию
+# больше потолка пробы. Установщик на шаге 9 гоняет каждый демон реестра, и
+# такой демон без лёгкой подмены держит пробу до её потолка (замер 04.11.2026:
+# nightly-mutations, предел 1140 мин, повесил полный прогон). Список —
+# РАЗБОРОМ реестра и текста демонов: новый тяжёлый демон попадает в него сам.
+heavy_demons() {  # $1 — потолок пробы в минутах
+    python3 - "$1" <<'PY'
+import os, re, sys, yaml
+ceiling = int(sys.argv[1])
+jobs = (yaml.safe_load(open("harness/config/system-jobs.yaml", encoding="utf-8")) or {}).get("задания") or []
+for path in sorted({(j.get("команда") or "").split()[0] for j in jobs if j.get("команда")}):
+    if not path.endswith(".sh") or not os.path.isfile(path):
+        continue
+    text = open(path, encoding="utf-8").read()
+    for var in re.findall(r'timeout\b[^\n]*"\$\{([A-Z_]+)\}m"', text):
+        default = re.search(r'^\s*' + var + r'="\$\{' + var + r':-(\d+)\}"', text, re.M)
+        if default and int(default.group(1)) > ceiling:
+            print(os.path.basename(path)[:-3])
+            break
+PY
+}
+
+# Имена демонов, которым установщик подставляет лёгкую работу (его LIGHT_RUN).
+light_run_names() {
+    grep -E 'LIGHT_RUN=\(' "$PAKET/USTANOVIT.sh" 2>/dev/null \
+        | grep -oE '"[a-z0-9-]+=' | tr -d '"=' | sort -u
+}
+
 # Применимость: чем мерить. «Нет docker» и «нет образа» — разные ответы, и оба
 # не равны «установка сломана».
 pochemu_nelzya() {
@@ -166,7 +194,9 @@ sledy_ustanovki() {
 
 if [ "${1:-}" = "--selftest" ]; then
     ST_OK=1
+    ST_N=0
     proba() { # $1 = имя, $2 = 0/1
+        ST_N=$((ST_N + 1))
         if [ "$2" = 1 ]; then printf '  ок    %s\n' "$1"
         else printf '  ПЛОХО %s\n' "$1"; ST_OK=0; fi
     }
@@ -284,8 +314,22 @@ DOCKER
           "$(printf '%s' "$SKAZANO" | grep -q 'контейнеров 2' && echo 1 || echo 0)"
     rm -rf "$STUB"
 
+    # БОЛЬНОЙ СЛУЧАЙ 04.11.2026: тяжёлый демон без лёгкой подмены в установщике
+    # держит пробу до потолка. Пустой список тяжёлых — сломанный разбор, а не
+    # «подменять нечего»: иначе путь молча зелёный.
+    HEAVY=$(heavy_demons "$POTOLOK_MIN")
+    proba "тяжёлые демоны (предел работы больше потолка пробы $POTOLOK_MIN мин) найдены разбором реестра: $(printf '%s' "$HEAVY" | tr '\n' ' ')" \
+          "$([ -n "$HEAVY" ] && echo 1 || echo 0)"
+    LIGHT=$(light_run_names)
+    BEZ_PARY=""
+    for demon in $HEAVY; do
+        printf '%s\n' "$LIGHT" | grep -qx "$demon" || BEZ_PARY="$BEZ_PARY $demon"
+    done
+    proba "каждому тяжёлому демону есть лёгкая работа в LIGHT_RUN установщика${BEZ_PARY:+ (нет:$BEZ_PARY)}" \
+          "$([ -n "$HEAVY" ] && [ -z "$BEZ_PARY" ] && echo 1 || echo 0)"
+
     if [ "$ST_OK" = 1 ]; then
-        echo "SELFTEST: зелёный (12 путей, первым — больной случай «паспорт стенда неполон»)"
+        echo "SELFTEST: зелёный ($ST_N путей, первым — больной случай «паспорт стенда неполон»)"
         exit 0
     fi
     echo "SELFTEST: КРАСНЫЙ"; exit 1
@@ -379,7 +423,7 @@ sledy_ustanovki "$KONT" "$KOREN_STENDA"
 # Падения демонов при установке: ожидаемы ТОЛЬКО у тех, кто зовёт модель или
 # канал — в контейнере нет ни OAuth-входа, ни живого Telegram. Остальные падения
 # — настоящая находка: без этого следа проба зеленела бы при любом падении.
-UPAVSHIE=$(grep -oE '^  - демон [a-z0-9-]+' "$UST_LOG" 2>/dev/null \
+UPAVSHIE=$(grep -oE '^  - демон [a-z0-9_-]+' "$UST_LOG" 2>/dev/null \
     | awk '{print $3}' | sort -u || true)
 NEOZHIDANNYE=""
 for demon in $UPAVSHIE; do
@@ -393,8 +437,13 @@ for demon in $UPAVSHIE; do
 import yaml
 data = yaml.safe_load(open('$KOREN_STENDA/harness/config/system-jobs.yaml', encoding='utf-8')) or {}
 for job in data.get('задания') or []:
-    if job.get('имя') == '$demon':
-        print(job.get('команда', ''))
+    # Установщик называет демона ИМЕНЕМ СКРИПТА (speed_mode), а задание в
+    # реестре зовётся иначе (speed-mode): ищем и по имени, и по скрипту. В файл
+    # идёт только первое слово команды — аргументы (--замер) не путь.
+    first = (job.get('команда') or '').split()[:1]
+    stem = first[0].rsplit('/', 1)[-1].rsplit('.', 1)[0] if first else ''
+    if '$demon' in (job.get('имя'), stem):
+        print(first[0] if first else '')
         break
 \"" 2>/dev/null | tr -d '\r')
     [ -n "$fajl" ] || fajl="harness/demons/$demon.sh"

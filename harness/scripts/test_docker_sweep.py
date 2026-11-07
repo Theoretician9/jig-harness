@@ -5,10 +5,10 @@
 убирает по возрасту и защите ровно то, что разрешают правила: старые неиспользуемые образы
 (кроме latest/previous/тегов отката/защищённых и образов, у которых хоть один тег защищён),
 остановленные контейнеры старше срока, безымянные тома без ссылок — только после выдержки
-между двумя пометками, кэш сборки — `builder prune --keep-storage`; без --разрешено и без
---dry-run отказывается, не позвав docker; журнал удалений 0600; закрытый stdout ход не роняет.
+между двумя пометками; кэш сборки не трогается вовсе (хозяина нет: builder prune чистит
+всю машину); без --разрешено и без --dry-run отказывается, не позвав docker; журнал удалений 0600; закрытый stdout ход не роняет.
 Демон `harness/demons/disk-cleanup.sh` зовёт механизм дверью DOCKER_SWEEP_SCRIPT по
-выключателю DOCKER_SWEEP_ENABLED; выкат зовёт его с --после-выката.
+выключателю DOCKER_SWEEP_ENABLED; выкат его не зовёт (D13).
 
 Механизм УДАЛЯЕТ, поэтому проба НИКОГДА не зовёт настоящий docker: PATH прогона состоит
 только из каталогов стенда (`bin` с заглушкой `docker` и `py` с ссылкой на python), и перед
@@ -25,13 +25,13 @@ volinspect.json), пишет каждый вызов JSON-массивом в ca
   ход с --тома видел его подключённым к СВОЕМУ контейнеру (C4; D5, D5b, D11 эту историю дают).
 * M-1 — возраст образа считается от первой встречи механизмом, не от CreatedAt (M1; D1, D3, D7,
   D8, D10, D11 проводят историю: образ появляется в час своей сборки).
-* M-2 — МБ кэша в итоге берутся из «Total reclaimed space» ответа docker (M2).
+* M-2 — итог «убрано» — сумма убранных классов; кэша сборки в нём нет (M2).
 * M-3 — без --тома нет ни `volume inspect`, ни меток томов (D5).
 
 D9 судится всегда: PATH без заглушки состоит из пустого каталога стенда, поэтому docker хоста
 недостижим по имени, и прогон идёт только сухим.
 D13 — ЕДИНСТВЕННАЯ текстовая проба: deploy.sh полным прогоном на стенде не запустить (он
-поднимает стек, ставит теги и ходит в health), поэтому судится место вызова в тексте.
+поднимает стек, ставит теги и ходит в health), поэтому отсутствие вызова уборки судится по тексту.
 
 Модуля нет — случаи D1–D11 красные «нет модуля», D12 и D13 красны нынешним демоном и выкатом.
 Итог: «УБОРКА DOCKER: случаев N, неудач M», код 0/1.
@@ -39,6 +39,7 @@ D13 — ЕДИНСТВЕННАЯ текстовая проба: deploy.sh пол
 from __future__ import annotations
 
 import datetime as dt
+import fcntl
 import glob
 import hashlib
 import importlib.util
@@ -60,13 +61,13 @@ STAND_PREFIX = "докер-стенд-"
 CLI_TIMEOUT = 60
 CLEANUP_TIMEOUT = 120
 SWEEP_STUB_MARK = "ЗАГЛУШКА-ДОКЕР-УБОРКИ"
-PROTECT = ("--защита", "sample-13")
+PROTECT = ("--защита", "neighbour-bot")
 # Разрешающий список СВОИХ (C-1): compose-проект или имя контейнера. Без него боевой ход отказывает.
 OWN_RE = "^jig-stand"
 OWN = ("--свои", OWN_RE)
 KEYS = (*OWN, *PROTECT)
 OWN_LABELS = {"com.docker.compose.project": "jig-stand"}
-CLASSES = ("контейнеры", "образы", "тома", "кэш сборки")
+CLASSES = ("контейнеры", "образы", "тома")
 JOURNAL_KEYS = {"когда", "класс", "идентификатор", "мб", "правило", "действие"}
 NOW = int(dt.datetime(2026, 10, 25, 12, 0, tzinfo=dt.timezone.utc).timestamp())
 H = 3600
@@ -128,24 +129,30 @@ def image(repo: str, tag: str, ident: str, age_h: float, size: str, containers: 
             "Size": size, "SharedSize": "0B", "UniqueSize": size}
 
 
-OLD_APP = "old/app:v1"
+# Образ свой, если его репозиторий совпал со списком своих (T1): у образа в `system df -v` нет
+# меток compose, имя — единственный признак. Висячий образ имени не имеет — он ничей и цел.
+OLD_APP = "jig-stand-app:v1"
+OLD_WORKER = "jig-stand-worker:v1"
 DANGLING_OLD = f"sha256:{hexid('висячий-старый')}"
-MID_APP = "mid/app:v1"
+MID_APP = "jig-stand-mid:v1"
 
 
 IMAGE_SPECS = (
-    ("old/app", "v1", "old", 200, "500MB", 0),
+    ("jig-stand-app", "v1", "old", 200, "500MB", 0),
+    ("jig-stand-worker", "v1", "old-worker", 250, "100MB", 0),
     ("<none>", "<none>", "висячий-старый", 300, "300MB", 0),
     ("<none>", "<none>", "висячий-молодой", 5, "200MB", 0),
-    ("used/app", "v1", "used", 400, "1.2GB", 1),
-    ("young/app", "v1", "young", 10, "90MB", 0),
-    ("svc/app", "latest", "svc-latest", 400, "700MB", 0),
-    ("svc/app", "previous", "svc-previous", 400, "700MB", 0),
-    ("svc/app", "20261001_1200_abcdef1", "svc-rollback", 400, "700MB", 0),
-    ("sample-13-web", "v3", "sample-13", 400, "250MB", 0),
-    ("multi/app", "v2", "multi", 400, "333MB", 0),
-    ("multi/app", "latest", "multi", 400, "333MB", 0),
-    ("mid/app", "v1", "mid", 72, "120MB", 0),
+    # Охраняемые правилами образы — СВОИ: чужой отсеется принадлежностью раньше суда
+    # правила, и мутация правила оставит D3 зелёным (чужие судит T1).
+    ("jig-stand-used", "v1", "used", 400, "1.2GB", 1),
+    ("jig-stand-young", "v1", "young", 10, "90MB", 0),
+    ("jig-stand-svc", "latest", "svc-latest", 400, "700MB", 0),
+    ("jig-stand-svc", "previous", "svc-previous", 400, "700MB", 0),
+    ("jig-stand-svc", "20261001_1200_abcdef1", "svc-rollback", 400, "700MB", 0),
+    ("jig-stand-neighbour-bot-web", "v3", "neighbour-bot", 400, "250MB", 0),
+    ("jig-stand-multi", "v2", "multi", 400, "333MB", 0),
+    ("jig-stand-multi", "latest", "multi", 400, "333MB", 0),
+    ("jig-stand-mid", "v1", "mid", 72, "120MB", 0),
 )
 
 
@@ -169,11 +176,11 @@ def containers() -> list:
     return [
         container("old_builder", "node:20", "exited", 48, labels=OWN_LABELS),
         container("young_builder", "node:20", "exited", 2, labels=OWN_LABELS),
-        container("sample-13-worker", "python:3.12", "exited", 48),
-        container("plain_name", "sample-13-api:1", "exited", 48),
+        container("neighbour-bot-worker", "python:3.12", "exited", 48),
+        container("plain_name", "neighbour-bot-api:1", "exited", 48),
         # Стоит в выдаче ps (гонка между ps и inspect): решает State.Status.
         # Свой: чужой отсеялся бы списком своих раньше, чем суд статуса.
-        container("live_service", "svc/app:latest", "running", 300, labels=OWN_LABELS),
+        container("live_service", "jig-stand-svc:latest", "running", 300, labels=OWN_LABELS),
     ]
 
 
@@ -415,7 +422,7 @@ def forbidden(all_calls: list) -> list:
         v = verb(c)
         if len(c) >= 2 and c[1] == "prune" and c[0] in ("system", "volume", "image", "container"):
             bad.append(c)
-        elif v == "builder prune" and any(a in ("-a", "--all") for a in c):
+        elif v == "builder prune":
             bad.append(c)
         elif v in ("rm", "rmi", "volume rm") and any(
                 a in ("-f", "--force", "-v", "--volumes") or re.fullmatch(r"-[a-z]*[fv][a-z]*", a) for a in c[1:]):
@@ -462,7 +469,7 @@ def sweep(stand: Path, *args: str, now: int = NOW, stdout=None, with_docker: boo
     return Run(proc)
 
 
-HOLD_ALL = ("--образы-ч", "1e9", "--контейнеры-ч", "1e9", "--кэш-гб", "1e9")
+HOLD_ALL = ("--образы-ч", "1e9", "--контейнеры-ч", "1e9")
 
 
 def image_history(stand: Path) -> None:
@@ -533,9 +540,9 @@ def mb_spellings(*decimal_mb: float) -> set:
     return {round(total), int(total), round(total * 1e6 / 1048576), int(total * 1e6 / 1048576)}
 
 
-KEPT_IMAGES = ("used/app:v1", "young/app:v1", "svc/app:latest", "svc/app:previous",
-               "svc/app:20261001_1200_abcdef1", "sample-13-web:v3", "multi/app:v2",
-               "multi/app:latest", MID_APP)
+KEPT_IMAGES = ("jig-stand-used:v1", "jig-stand-young:v1", "jig-stand-svc:latest", "jig-stand-svc:previous",
+               "jig-stand-svc:20261001_1200_abcdef1", "jig-stand-neighbour-bot-web:v3", "jig-stand-multi:v2",
+               "jig-stand-multi:latest", MID_APP, DANGLING_OLD)
 
 
 def image_ids_of(*refs: str) -> set:
@@ -545,7 +552,7 @@ def image_ids_of(*refs: str) -> set:
 # ─────────────────────────────── случаи ──────────────────────────────────────
 
 def case_d1(stand: Path) -> None:
-    """Сухой прогон: ничего не меняет, журнала нет, опись называет образы и кэш, итог с МБ."""
+    """Сухой прогон: ничего не меняет, журнала нет, опись называет образы, кэша в ней нет, итог с МБ."""
     if not need_module("D1"):
         return
     image_history(stand)
@@ -555,11 +562,11 @@ def case_d1(stand: Path) -> None:
     PROBE.check("D1", "журнал удалений не создан", not journal_path(stand).exists())
     rows = run.rows()
     img = rows.get("образы")
-    want_mb = mb_spellings(500, 300)
+    want_mb = mb_spellings(500, 100)
     PROBE.check("D1", f"строка «образы»: 2 шт., МБ ∈ {sorted(want_mb)}",
                 img is not None and img[1] == "2" and img[2].isdigit()
                 and any(abs(int(img[2]) - m) <= 1 for m in want_mb), rows)
-    PROBE.check("D1", "строка «кэш сборки» есть", "кэш сборки" in rows, rows)
+    PROBE.check("D1", "строки «кэш сборки» нет", not re.search(r"^кэш", run.out, re.M), run)
     total = re.search(r"^docker: убрал бы (\d+), (\d+) МБ$", run.out, re.M)
     PROBE.check("D1", "итог «docker: убрал бы N, M МБ», M не меньше образов",
                 total is not None and int(total.group(2)) >= min(want_mb) - 1, run)
@@ -576,26 +583,29 @@ def case_d2(stand: Path) -> None:
 
 
 def case_d3(stand: Path) -> None:
-    """Образы: убираются ровно старый тегированный и старый висячий; остальные по своим правилам целы."""
+    """Образы: убираются ровно два старых СВОИХ; висячий без имени и остальные по своим правилам целы."""
     if not need_module("D3"):
         return
     image_history(stand)
     run = sweep(stand, "--ночь", "--разрешено", *KEYS)
     PROBE.check("D3", "код 0", run.rc == 0, run)
     got = targets(stand, "rmi")
-    PROBE.check("D3", f"rmi ровно {{{OLD_APP}, {DANGLING_OLD[:19]}…}}",
-                sorted(got) == sorted([OLD_APP, DANGLING_OLD]), got)
+    PROBE.check("D3", f"rmi ровно {{{OLD_APP}, {OLD_WORKER}}}",
+                sorted(got) == sorted([OLD_APP, OLD_WORKER]), got)
     kept_ids = image_ids_of(*KEPT_IMAGES)
     touched = [t for t in got if t in KEPT_IMAGES or t in kept_ids
                or t == f"sha256:{hexid('висячий-молодой')}"]
+    foreign = [r for r in KEPT_IMAGES if r != DANGLING_OLD and not re.match(OWN_RE, r)]
+    PROBE.check("D3", "охраняемые образы стенда свои — судит правило, а не принадлежность",
+                not foreign, foreign)
     PROBE.check("D3", "целы: используемый, молодой, latest, previous, откат, защищённый, "
-                "двутеговый, молодой висячий, 72-часовой", not touched, touched)
+                "двутеговый, оба висячих, 72-часовой", not touched, touched)
     rmi_flags = [c for c in calls(stand) if verb(c) == "rmi" and any(a.startswith("-") for a in c[1:])]
     PROBE.check("D3", "rmi без флагов", not rmi_flags, rmi_flags)
     rows = [r for r in journal(stand) if r.get("класс") == "образы"]
     PROBE.check("D3", "журнал: 2 строки образов «удалено» со всеми ключами",
                 len(rows) == 2 and all(r.get("действие") == "удалено" and JOURNAL_KEYS <= set(r) for r in rows)
-                and sorted(r.get("идентификатор") for r in rows) == sorted([OLD_APP, DANGLING_OLD]),
+                and sorted(r.get("идентификатор") for r in rows) == sorted([OLD_APP, OLD_WORKER]),
                 journal(stand))
 
 
@@ -657,22 +667,6 @@ def case_d5b(stand: Path) -> None:
     PROBE.check("D5b", "в метках нет ни одного тома стенда", volume_marks(stand) == [], marks(stand))
 
 
-def case_d6(stand: Path) -> None:
-    """Кэш: сухой не чистит; после выката — ровно `builder prune -f --keep-storage 2GB`, образы целы."""
-    if not need_module("D6"):
-        return
-    sweep(stand, "--ночь", "--dry-run", *KEYS)
-    PROBE.check("D6", "--dry-run: builder prune не зван", not targets(stand, "builder prune")
-                and not any(verb(c) == "builder prune" for c in calls(stand)), calls(stand))
-    run = sweep(stand, "--после-выката", "--разрешено", "--кэш-гб", "2", *KEYS)
-    prunes = [c for c in calls(stand) if verb(c) == "builder prune"]
-    PROBE.check("D6", "код 0, ровно один вызов builder prune -f --keep-storage 2GB",
-                run.rc == 0 and prunes == [["builder", "prune", "-f", "--keep-storage", "2GB"]], (run, prunes))
-    PROBE.check("D6", "образы и контейнеры не тронуты", not targets(stand, "rmi") and not targets(stand, "rm"),
-                mutating(stand))
-    PROBE.check("D6", "ни system prune, ни builder prune -a", not forbidden(calls(stand)), forbidden(calls(stand)))
-
-
 def case_d7(stand: Path) -> None:
     """Порог давления: образ 72 ч по давлению убран, ночью цел."""
     if not need_module("D7"):
@@ -685,7 +679,7 @@ def case_d7(stand: Path) -> None:
         run = sweep(other, "--давление", "--разрешено", *KEYS)
         PROBE.check("D7", f"по давлению (48 ч) {MID_APP} убран, код 0",
                     run.rc == 0 and MID_APP in targets(other, "rmi"), (run, targets(other, "rmi")))
-        PROBE.check("D7", "по давлению молодой (10 ч) цел", "young/app:v1" not in targets(other, "rmi"),
+        PROBE.check("D7", "по давлению молодой (10 ч) цел", "jig-stand-young:v1" not in targets(other, "rmi"),
                     targets(other, "rmi"))
     finally:
         leak = forbidden(calls(other))
@@ -701,10 +695,10 @@ def case_d8(stand: Path) -> None:
     (stand / "fail-rmi").write_text("")
     run = sweep(stand, "--ночь", "--разрешено", *KEYS)
     PROBE.check("D8", "код 0, rmi звана 2 раза (отказ первой не останавливает вторую)",
-                run.rc == 0 and sorted(targets(stand, "rmi")) == sorted([OLD_APP, DANGLING_OLD]),
+                run.rc == 0 and sorted(targets(stand, "rmi")) == sorted([OLD_APP, OLD_WORKER]),
                 (run, targets(stand, "rmi")))
     refused = [r for r in journal(stand) if r.get("класс") == "образы"]
-    want = {t: f"отказ: Error: conflict: unable to remove {t}: stand refuses" for t in (OLD_APP, DANGLING_OLD)}
+    want = {t: f"отказ: Error: conflict: unable to remove {t}: stand refuses" for t in (OLD_APP, OLD_WORKER)}
     PROBE.check("D8", "журнал: две строки «отказ: <первая строка ошибки docker>»",
                 len(refused) == 2 and all(want.get(r.get("идентификатор")) == r.get("действие") for r in refused),
                 journal(stand))
@@ -732,7 +726,7 @@ def case_d10(stand: Path) -> None:
         image_history(other)
         with open("/dev/full", "wb") as full:
             closed = sweep(other, "--ночь", "--разрешено", *KEYS, stdout=full)
-        PROBE.check("D10", ">/dev/full: код 0, rmi old/app:v1 и rm дошли",
+        PROBE.check("D10", f">/dev/full: код 0, rmi {OLD_APP} и rm дошли",
                     closed.rc == 0 and OLD_APP in targets(other, "rmi") and targets(other, "rm"),
                     (closed, targets(other, "rmi")))
     finally:
@@ -740,7 +734,7 @@ def case_d10(stand: Path) -> None:
 
 
 def case_d11(stand: Path) -> None:
-    """Все режимы подряд: ни одного prune-всего, rm/rmi с -f/-v, builder prune -a; а работа была."""
+    """Все режимы подряд: ни одного prune-всего, rm/rmi с -f/-v, builder prune; а работа была."""
     if not need_module("D11"):
         return
     image_history(stand)
@@ -753,8 +747,9 @@ def case_d11(stand: Path) -> None:
         sweep(stand, *args, *KEYS, now=now)
     every = calls(stand)
     PROBE.check("D11", "запретных вызовов нет", not forbidden(every), forbidden(every))
-    PROBE.check("D11", "проба не пуста: rmi, rm, volume rm и builder prune случились",
-                all(any(verb(c) == v for c in every) for v in MUTATING), sorted({verb(c) for c in every}))
+    PROBE.check("D11", "проба не пуста: rmi, rm и volume rm случились",
+                all(any(verb(c) == v for c in every) for v in ("rmi", "rm", "volume rm")),
+                sorted({verb(c) for c in every}))
 
 
 OLD_BUILDER = hexid("контейнер-old_builder")
@@ -781,7 +776,7 @@ def case_c2(stand: Path) -> None:
                                    labels={"com.docker.compose.project": "shop"}))
     run = sweep(stand, "--ночь", "--разрешено", *OWN)
     got = targets(stand, "rm")
-    PROBE.check("C2", "код 0, rm ровно [old_builder]: shop-postgres-1, sample-13-worker, plain_name целы",
+    PROBE.check("C2", "код 0, rm ровно [old_builder]: shop-postgres-1, neighbour-bot-worker, plain_name целы",
                 run.rc == 0 and got == [OLD_BUILDER], (run, got))
 
 
@@ -801,9 +796,9 @@ def case_c4(stand: Path) -> None:
     if not need_module("C4"):
         return
     write_snapshot(stand, vols={VOL_OLD})
-    foreign = "sample-13-postgres-1"
+    foreign = "neighbour-bot-postgres-1"
     add_container(stand, container(foreign, "postgres:15-alpine", "running", 0,
-                                   labels={"com.docker.compose.project": "sample-13"}, mounts=(VOL_OLD,)))
+                                   labels={"com.docker.compose.project": "neighbour-bot"}, mounts=(VOL_OLD,)))
     set_links(stand, VOL_OLD, 1)
     base = ("--ночь", "--разрешено", "--тома", *KEYS)
     sweep(stand, *base)
@@ -815,7 +810,7 @@ def case_c4(stand: Path) -> None:
                 not targets(stand, "volume rm"), targets(stand, "volume rm"))
 
 
-POSTGIS = "postgis/postgis:16-3.4"
+POSTGIS = "jig-stand-postgis:16-3.4"
 
 
 def case_m1(stand: Path) -> None:
@@ -823,7 +818,7 @@ def case_m1(stand: Path) -> None:
     if not need_module("M1"):
         return
     rows = json.loads((stand / "dfv.json").read_text(encoding="utf-8"))["Images"]
-    write_images(stand, rows + [image("postgis/postgis", "16-3.4", "postgis", 17000, "400MB")])
+    write_images(stand, rows + [image("jig-stand-postgis", "16-3.4", "postgis", 17000, "400MB")])
     for hours, gone in ((0, False), (24, False), (170, True)):
         sweep(stand, "--ночь", "--разрешено", *KEYS, now=NOW + hours * H)
         PROBE.check("M1", f"через {hours} ч после появления: {POSTGIS} {'снят' if gone else 'цел'}",
@@ -831,17 +826,22 @@ def case_m1(stand: Path) -> None:
 
 
 def case_m2(stand: Path) -> None:
-    """Кэш: итог печатает ЗАМЕР из ответа docker («Total reclaimed space»), не расчёт Reclaimable−keep (M-2)."""
+    """Итог «убрано» — сумма строк классов; 30 ГБ кэша сборки снимка и приманка prune-reclaimed в нём не видны."""
     if not need_module("M2"):
         return
-    for reclaimed, want in (("1.5GB", mb_spellings(1500)), ("0B", {0})):
-        (stand / "prune-reclaimed").write_text(reclaimed)
-        run = sweep(stand, "--после-выката", "--разрешено", "--кэш-гб", "2", *KEYS)
-        row = run.rows().get("кэш сборки")
-        total = re.search(r"^docker: убрано \d+, (\d+) МБ$", run.out, re.M)
-        PROBE.check("M2", f"docker освободил {reclaimed}: строка кэша и итог — МБ ∈ {sorted(want)}, не 28000",
-                    run.rc == 0 and row is not None and row[2].isdigit() and int(row[2]) in want
-                    and total is not None and int(total.group(1)) in want, run)
+    image_history(stand)
+    (stand / "prune-reclaimed").write_text("1.5GB")
+    run = sweep(stand, "--ночь", "--разрешено", *KEYS)
+    rows = run.rows()
+    total = re.search(r"^docker: убрано (\d+), (\d+) МБ$", run.out, re.M)
+    want = mb_spellings(500, 100)
+    PROBE.check("M2", f"итог: убрано 3 (2 своих образа и old_builder), МБ ∈ {sorted(want)}",
+                run.rc == 0 and total is not None and total.group(1) == "3"
+                and any(abs(int(total.group(2)) - m) <= 1 for m in want), run)
+    PROBE.check("M2", "итог — сумма строк контейнеров, образов и томов",
+                total is not None and set(rows) == set(CLASSES)
+                and sum(int(r[1]) for r in rows.values()) == int(total.group(1))
+                and sum(int(r[2]) for r in rows.values()) == int(total.group(2)), (rows, run))
 
 
 def case_m4(stand: Path) -> None:
@@ -869,12 +869,65 @@ def load_disk_probe():
     return module
 
 
-def case_d12(_stand: Path) -> None:
-    """Демон: дверь DOCKER_SWEEP_SCRIPT, выключатель DOCKER_SWEEP_ENABLED (умолчание 0), ключи по режиму."""
+def daemon_script(label: str):
+    """disk-cleanup.sh рядом с пробой, если он читает дверь DOCKER_SWEEP_SCRIPT; иначе None."""
     disk = load_disk_probe()
     script = disk.cleanup_script()
-    if not PROBE.check("D12", "демон читает дверь DOCKER_SWEEP_SCRIPT (иначе не запускаю: пошёл бы настоящий)",
+    if not PROBE.check(label, "демон читает дверь DOCKER_SWEEP_SCRIPT (иначе не запускаю: пошёл бы настоящий)",
                        "DOCKER_SWEEP_SCRIPT" in script.read_text(encoding="utf-8"), script):
+        return None, None
+    return disk, script
+
+
+def install_layout(stand: Path, script: Path) -> Path:
+    """Копия демона в раскладке установки (razlozhit-harnes.sh: harness/demons → harness/demons,
+    harness/scripts → scripts): демон ищет scripts/lib по пути «../../scripts» от себя, а в пакете
+    рядом с harness/demons лежит не scripts, а harness/scripts. Каталог scripts установки — каталог
+    этой пробы: и в проекте, и в пакете она лежит среди scripts."""
+    demons = stand / "install/harness/demons"
+    demons.mkdir(parents=True)
+    copy = demons / script.name
+    shutil.copy2(script, copy)
+    (stand / "install/scripts").symlink_to(HERE, target_is_directory=True)
+    return copy
+
+
+def run_daemon(disk, script: Path, label: str, conf: str, args: tuple = (), pct: str = "50") -> tuple:
+    """Прогон демона на стенде test_disk_report: docker и docker-sweep.py — заглушки с журналом вызовов.
+
+    Возвращает (код, аргументы вызовов заглушки docker-sweep, вывод, аргументы вызовов docker)."""
+    stand = disk.make_stand()
+    try:
+        script = install_layout(stand, script)
+        door = stand / "project/scripts/docker-sweep.py"
+        door.write_text(DAEMON_STUB, encoding="utf-8")
+        door.chmod(0o755)
+        env = disk.stand_env(stand) | {"DOCKER_SWEEP_SCRIPT": str(door)}
+        bad = disk.stubs_in_front(stand) or disk.sweep_door_off_stand(stand, script)
+        if bad or not Path(env["DOCKER_SWEEP_SCRIPT"]).resolve().is_relative_to(stand.resolve()):
+            print(f"ПЛОХО СТЕНД: {bad or 'DOCKER_SWEEP_SCRIPT вне стенда'} — демон не запущен, проба остановлена")
+            raise SystemExit(2)
+        disk.set_conf(stand, disk.REPEAT_H, conf)
+        (stand / "pct").write_text(pct)
+        proc = subprocess.run(["bash", str(script), *args], cwd=stand, env=env, capture_output=True,
+                              timeout=CLEANUP_TIMEOUT)
+        out = proc.stdout.decode("utf-8", "replace")
+        log = disk.calls(stand)
+        sweeps = [a for n, a, *_ in log if n == "docker-sweep"]
+        real = [f"{n} {a}" for n, a, *_ in log
+                if (n == "docker-sweep" and not a.startswith(SWEEP_STUB_MARK))
+                or (n == "docker" and "system df" in a and "-v" in a.split())]
+        PROBE.check(label, f"страж — настоящий docker-sweep.py не ходил ({conf.strip() or 'нет ключа'})",
+                    not real, real)
+        return proc.returncode, [s.split()[1:] for s in sweeps], out, [a for n, a, *_ in log if n == "docker"]
+    finally:
+        shutil.rmtree(stand, ignore_errors=True)
+
+
+def case_d12(_stand: Path) -> None:
+    """Демон: дверь DOCKER_SWEEP_SCRIPT, выключатель DOCKER_SWEEP_ENABLED (умолчание 0), ключи по режиму."""
+    disk, script = daemon_script("D12")
+    if disk is None:
         return
     seen = {}
     for label, conf, args, pct in (("нет ключа", "", (), "50"),
@@ -882,30 +935,7 @@ def case_d12(_stand: Path) -> None:
                                    ("ключ 1", "DOCKER_SWEEP_ENABLED=1\nDOCKER_SWEEP_OWN=^jig-stand\n", (), "50"),
                                    ("ключ 1 --dry-run", "DOCKER_SWEEP_ENABLED=1\n", ("--dry-run",), "50"),
                                    ("ключ 1 --по-давлению", "DOCKER_SWEEP_ENABLED=1\n", ("--по-давлению",), "86")):
-        stand = disk.make_stand()
-        try:
-            door = stand / "project/scripts/docker-sweep.py"
-            door.write_text(DAEMON_STUB, encoding="utf-8")
-            door.chmod(0o755)
-            env = disk.stand_env(stand) | {"DOCKER_SWEEP_SCRIPT": str(door)}
-            bad = disk.stubs_in_front(stand) or disk.sweep_door_off_stand(stand, script)
-            if bad or not Path(env["DOCKER_SWEEP_SCRIPT"]).resolve().is_relative_to(stand.resolve()):
-                print(f"ПЛОХО СТЕНД: {bad or 'DOCKER_SWEEP_SCRIPT вне стенда'} — демон не запущен, проба остановлена")
-                raise SystemExit(2)
-            disk.set_conf(stand, disk.REPEAT_H, conf)
-            (stand / "pct").write_text(pct)
-            proc = subprocess.run(["bash", str(script), *args], cwd=stand, env=env, capture_output=True,
-                                  timeout=CLEANUP_TIMEOUT)
-            out = proc.stdout.decode("utf-8", "replace")
-            log = disk.calls(stand)
-            sweeps = [a for n, a, *_ in log if n == "docker-sweep"]
-            real = [f"{n} {a}" for n, a, *_ in log
-                    if (n == "docker-sweep" and not a.startswith(SWEEP_STUB_MARK))
-                    or (n == "docker" and "system df" in a and "-v" in a.split())]
-            PROBE.check("D12", f"{label}: страж — настоящий docker-sweep.py не ходил", not real, real)
-            seen[label] = (proc.returncode, [s.split()[1:] for s in sweeps], out)
-        finally:
-            shutil.rmtree(stand, ignore_errors=True)
+        seen[label] = run_daemon(disk, script, "D12", conf, args, pct)[:3]
     off_line = lambda out: any("выключена" in l and re.search(r"docker|DOCKER_SWEEP", l) for l in out.splitlines())
     for label in ("нет ключа", "ключ 0"):
         rc, sweeps, out = seen[label]
@@ -929,16 +959,162 @@ def case_d12(_stand: Path) -> None:
 
 
 def case_d13(_stand: Path) -> None:
-    """Выкат: вызов docker-sweep.py --после-выката, не фатальный, до итоговой строки (текстовая проба)."""
+    """Выкат не убирает docker: ни docker-sweep, ни prune (текстовая проба). Уборка идёт только
+    у демона ночью и по давлению под выключателем, где её держит deploy.lock."""
     lines = DEPLOY.read_text(encoding="utf-8").splitlines()
     final = next((i for i, l in enumerate(lines) if re.match(r'\s*say "deploy ok', l)), None)
-    calls_at = [i for i, l in enumerate(lines)
-                if not l.lstrip().startswith("#") and "docker-sweep.py" in l and "--после-выката" in l]
-    PROBE.check("D13", "итоговая строка say \"deploy ok есть", final is not None)
-    PROBE.check("D13", "вызов docker-sweep.py с --после-выката есть (не в комментарии)", bool(calls_at))
-    ok = [i for i in calls_at if "|| say" in lines[i] and final is not None and i < final]
-    PROBE.check("D13", "вызов не фатальный («|| say …») и стоит ДО «deploy ok»", bool(ok),
-                [(i + 1, lines[i].strip()) for i in calls_at])
+    PROBE.check("D13", "итоговая строка say \"deploy ok есть (текст выката прочитан)", final is not None)
+    sweeps = [(i + 1, l.strip()) for i, l in enumerate(lines)
+              if not l.lstrip().startswith("#") and ("docker-sweep" in l or re.search(r"\bprune\b", l))]
+    PROBE.check("D13", "вызова docker-sweep и prune нет (вне комментариев)", not sweeps, sweeps)
+
+
+# Чужие проекты этой машины (запрет владельца): старые, без контейнеров, вне --защита.
+FOREIGN_IMAGES = (("other_bot-web", "v1", "чужой-ob"), ("other-app", "v2", "чужой-oa"),
+                  ("dbadmin/dbadmin", "5.2", "чужой-dba"), ("neighbour_1-api", "v1", "чужой-n1"),
+                  ("neighbour-bot-api", "v7", "чужой-nb"))
+
+
+def case_t1(stand: Path) -> None:
+    """Образы: снимается только СВОЙ (репозиторий в списке своих); чужие и висячий без имени целы."""
+    if not need_module("T1"):
+        return
+    foreign = [image(repo, tag, ident, 400, "200MB") for repo, tag, ident in FOREIGN_IMAGES]
+    for mode in ("--ночь", "--давление"):
+        # Свой стенд на режим: первый ход снял бы свой образ и обеднил снимок второго.
+        here = stand if mode == "--ночь" else make_stand()
+        try:
+            write_images(here, images() + foreign)
+            # Защита пуста: чужое должно уцелеть по принадлежности, а не по списку защиты.
+            # Первая встреча за 500 ч до хода: возраст от появления (M-1) уже не держит ни один образ.
+            sweep(here, mode, "--разрешено", *OWN, now=NOW - 500 * H)
+            run = sweep(here, mode, "--разрешено", *OWN)
+            got = targets(here, "rmi")
+            hit = sorted({t for t in got if not t.startswith("jig-stand")})
+            PROBE.check("T1", f"{mode}: rmi чужих и висячего нет", run.rc == 0 and not hit, (run, hit))
+            PROBE.check("T1", f"{mode}: свой старый {OLD_APP} снят", OLD_APP in got, got)
+        finally:
+            if here is not stand:
+                leak = forbidden(calls(here))
+                PROBE.check("T1", "второй стенд: запретных вызовов нет", not leak, leak)
+                shutil.rmtree(here, ignore_errors=True)
+
+
+def case_t2(stand: Path) -> None:
+    """Кэш сборки: `builder prune` не зовётся ни в одном режиме; сухой ход и ход после выката ничего не меняют."""
+    if not need_module("T2"):
+        return
+    image_history(stand)
+    for args in (("--ночь", "--dry-run"), ("--после-выката", "--разрешено")):
+        sweep(stand, *args, *KEYS, "--кэш-гб", "2")
+    PROBE.check("T2", "сухой ход и после выката: изменяющих вызовов нет", not mutating(stand), mutating(stand))
+    for args in (("--ночь", "--разрешено"), ("--давление", "--разрешено")):
+        sweep(stand, *args, *KEYS, "--кэш-гб", "2")
+    # Кэш не несёт меток проекта: любой builder prune чистит кэш всех проектов машины.
+    prunes = [c for c in calls(stand) if verb(c) == "builder prune"]
+    PROBE.check("T2", "ни одного builder prune в четырёх режимах", not prunes, prunes)
+    PROBE.check("T2", "проба не пуста: ночью снят свой образ", OLD_APP in targets(stand, "rmi"),
+                targets(stand, "rmi"))
+
+
+def hold_deploy_lock(stand: Path):
+    """deploy.lock держит выкат (flock), как scripts/deploy.sh. Место — locks/ рядом с журналом
+    уборки: журнал и лок оба живут в LOG_DIR у демона и у выката."""
+    path = stand / "locks" / "deploy.lock"
+    path.parent.mkdir(exist_ok=True)
+    handle = open(path, "a")
+    fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    handle.write(f"{os.getpid()}\nвыкат пробы T3\n")
+    handle.flush()
+    return handle
+
+
+def case_t3(stand: Path) -> None:
+    """Идёт выкат (deploy.lock держится): ночью и по давлению ничего не удаляется, причина названа;
+    лок-файл без держателя (после выката он остаётся) уборку не останавливает."""
+    if not need_module("T3"):
+        return
+    image_history(stand)
+    lock = hold_deploy_lock(stand)
+    try:
+        for mode in ("--ночь", "--давление"):
+            run = sweep(stand, mode, "--разрешено", *KEYS)
+            PROBE.check("T3", f"{mode} при держимом deploy.lock: изменяющих вызовов нет",
+                        not mutating(stand), mutating(stand))
+            PROBE.check("T3", f"{mode}: код 0 и причина со словом deploy.lock",
+                        run.rc == 0 and "deploy.lock" in run.out + run.err, run)
+    finally:
+        lock.close()
+    run = sweep(stand, "--ночь", "--разрешено", *KEYS)
+    PROBE.check("T3", "лок отпущен, файл лежит: уборка идёт (rmi своего старого)",
+                run.rc == 0 and OLD_APP in targets(stand, "rmi"), (run, targets(stand, "rmi")))
+
+
+def case_t6(stand: Path) -> None:
+    """deploy.lock есть, но не читается: идёт ли выкат — неизвестно, поэтому ничего не удаляется."""
+    if not need_module("T6"):
+        return
+    image_history(stand)
+    lock = stand / "locks" / "deploy.lock"
+    lock.parent.mkdir(exist_ok=True)
+    lock.write_text("")
+    lock.chmod(0)
+    try:
+        try:
+            open(lock).close()
+            unreadable = False
+        except PermissionError:
+            unreadable = True
+        # Под root права 000 не держат: без нечитаемого замка случай ничего не судит.
+        if not PROBE.check("T6", "стенд: замок нечитаем", unreadable, lock):
+            return
+        for mode in ("--ночь", "--давление"):
+            run = sweep(stand, mode, "--разрешено", *KEYS)
+            PROBE.check("T6", f"{mode} при нечитаемом deploy.lock: изменяющих вызовов нет",
+                        not mutating(stand), mutating(stand))
+            PROBE.check("T6", f"{mode}: код 0 и причина со словом deploy.lock",
+                        run.rc == 0 and "deploy.lock" in run.out + run.err, run)
+    finally:
+        lock.chmod(0o600)
+
+
+def daemon_prunes(docker_calls: list) -> list:
+    return [a for a in docker_calls if re.search(r"\bprune\b", a)]
+
+
+def case_t4(_stand: Path) -> None:
+    """Демон: голого prune по всему docker нет ни при выключателе 0, ни при 1 (при 1 docker убирает
+    только docker-sweep.py со списком своих)."""
+    disk, script = daemon_script("T4")
+    if disk is None:
+        return
+    for conf in ("", "DOCKER_SWEEP_ENABLED=0\n", "DOCKER_SWEEP_ENABLED=1\nDOCKER_SWEEP_OWN=^jig-stand\n"):
+        rc, sweeps, out, docker_calls = run_daemon(disk, script, "T4", conf)
+        PROBE.check("T4", f"{conf.strip() or 'нет ключа'}: ни одного docker … prune",
+                    rc == 0 and not daemon_prunes(docker_calls), (rc, daemon_prunes(docker_calls), out[-300:]))
+        want = 1 if "ENABLED=1" in conf else 0
+        PROBE.check("T4", f"{conf.strip() or 'нет ключа'}: docker-sweep.py зван {want} раз",
+                    len(sweeps) == want, sweeps)
+
+
+def case_t5(_stand: Path) -> None:
+    """Срок остановленных контейнеров — только DOCKER_STOPPED_KEEP_H, и только через docker-sweep.py.
+
+    Форма «шаг 2б удалён»: шаг с `container prune` при ключе 0 нарушил бы T4, а при ключе 1 он
+    дублирует класс «контейнеры» механизма без списка своих. Приманка STOPPED_KEEP_H=5 (имя, которое
+    нигде не задаётся) не должна дойти ни до одного вызова."""
+    disk, script = daemon_script("T5")
+    if disk is None:
+        return
+    conf = "DOCKER_SWEEP_ENABLED=1\nDOCKER_SWEEP_OWN=^jig-stand\nDOCKER_STOPPED_KEEP_H=48\nSTOPPED_KEEP_H=5\n"
+    rc, sweeps, out, docker_calls = run_daemon(disk, script, "T5", conf)
+    container_prunes = [a for a in docker_calls if a.startswith("container prune")]
+    PROBE.check("T5", "container prune демоном не зван", not container_prunes, container_prunes)
+    PROBE.check("T5", "docker-sweep.py получил «--контейнеры-ч 48»",
+                len(sweeps) == 1 and any(sweeps[0][i:i + 2] == ["--контейнеры-ч", "48"]
+                                         for i in range(len(sweeps[0]))), (sweeps, out[-300:]))
+    decoy = [a for a in docker_calls if "until=5h" in a] + [l for l in out.splitlines() if "старше 5ч" in l]
+    PROBE.check("T5", "приманка STOPPED_KEEP_H=5 не дошла ни до вызова, ни до вывода", not decoy, decoy)
 
 
 CASES = (
@@ -948,21 +1124,26 @@ CASES = (
     ("D4", "правила контейнеров", case_d4),
     ("D5", "тома: две пометки и выдержка", case_d5),
     ("D5b", "том стал занятым", case_d5b),
-    ("D6", "кэш сборки после выката", case_d6),
     ("D7", "порог давления 48 ч", case_d7),
     ("D8", "отказ docker rmi", case_d8),
     ("D9", "docker не установлен", case_d9),
     ("D10", "журнал 0600 и /dev/full", case_d10),
     ("D11", "запретные вызовы за все режимы", case_d11),
     ("D12", "демон: дверь и выключатель", case_d12),
-    ("D13", "выкат зовёт уборку кэша", case_d13),
+    ("D13", "выкат не убирает docker", case_d13),
     ("C1", "пустой список своих — отказ", case_c1),
     ("C2", "чужой compose-проект цел", case_c2),
     ("C3", "контейнер с томом цел", case_c3),
     ("C4", "безымянный том чужого проекта цел", case_c4),
     ("M1", "возраст образа от появления", case_m1),
-    ("M2", "кэш: итог — замер", case_m2),
+    ("M2", "итог без кэша сборки", case_m2),
     ("M4", "контейнер, остановленный руками, цел", case_m4),
+    ("T1", "образы: только свои", case_t1),
+    ("T2", "кэш сборки не чистится", case_t2),
+    ("T3", "идёт выкат — уборка стоит", case_t3),
+    ("T4", "демон: голого prune нет", case_t4),
+    ("T5", "срок контейнеров — DOCKER_STOPPED_KEEP_H", case_t5),
+    ("T6", "замок выката не читается — уборка стоит", case_t6),
 )
 
 

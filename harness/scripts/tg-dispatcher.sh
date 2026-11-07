@@ -182,7 +182,7 @@ sudya_py() {
         vid=$(python3 "$(sudya_py)" --вердикт-согласия "$line" 2>/dev/null) || rc=$?
         case "$rc:$vid" in
             0:нет) ;;
-            0:deploy|0:any|0:текст) printf '%s\t%s\n' "$vid" "$line" ;;
+            0:deploy|0:any|0:адресовано|0:текст) printf '%s\t%s\n' "$vid" "$line" ;;
             *)
                 # Отказ судьи — НЕ согласие: пустой ответ, принятый за «нет
                 # предмета», стал бы видом any, то есть выкатом без спроса.
@@ -258,8 +258,10 @@ ne_rabota_dlya_smeny() {  # $1=метка сообщения (TS), $2=почем
 # Путь к pause.py — от САМОГО скрипта: PROJECT_DIR задаётся ниже по файлу, а
 # самотест идёт раньше, и обращение к нему дало бы пустую строку и немую пробу.
 PAUSE_PY="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/pause.py"
-pauza_derzhit() {  # $1 = имя команды («» — обычное сообщение)
-    python3 "$PAUSE_PY" --идёт-ли 2>/dev/null || return 1
+pauza_derzhit() {  # $1 = имя команды («» — обычное сообщение); HOLD_WORD = «пауза»
+    # Входящие копятся только на паузе владельца: ожидание ротации сообщения не
+    # прячет, смену будят как обычно — судья pause.py --holds-inbox.
+    HOLD_WORD=$(python3 "$PAUSE_PY" --holds-inbox 2>/dev/null) || return 1
     # Команда («resume», «панель», «статус») идёт своей веткой ниже: пауза
     # держит РАБОТУ, а не касание бота.
     [ -z "$1" ]
@@ -694,6 +696,11 @@ PY
 и чтото еще осталось у тебя по задачам?')" >/dev/null
     итог "- deploy any" "$(jq -r '.kind // "-"' "$CONFIRM_LOG" | tr '\n' ' ' | sed 's/ $//')" \
          "БОЛЬНОЙ СЛУЧАЙ 04.09: три согласия одним сообщением — три записи, вид от судьи"
+    # П7: ответ на пункт пишется видом «адресовано» — его текст читает layout_history.
+    : > "$CONFIRM_LOG"
+    zapisat_soglasiya "$(согласие_владельца 'Да, убрать')" >/dev/null
+    итог "адресовано да, убрать" "$(jq -r '"\(.kind // "-") \(.text)"' "$CONFIRM_LOG" | tr '\n' ' ' | sed 's/ $//')" \
+         "П7: «да, убрать» — запись видом «адресовано»"
 
     # БОЛЬНОЙ СЛУЧАЙ C-1: судья недоступен. Подменяется ПУТЬ судьи (ключ стенда),
     # а не имя функции: проба судит боевой вызов.
@@ -839,7 +846,7 @@ STUB
 
     wait   # фоновые метки доставки дописываются до сноса двора
     rm -rf "$T"
-    [ "$ok_flag" = 1 ] && { echo "SELFTEST: зелёный (4 пути доставки + 4 пути разбора слов + 11 путей согласия + 3 пути очереди + 3 пути паузы + 3 пути журнала входящих + 5 путей комментариев панели; больные — «Enter»/«C-c», «да» второй строкой, «да для выката», «По выкату пишу да» два согласия одним сообщением и сообщение без согласия под set -e)"; exit 0; }
+    [ "$ok_flag" = 1 ] && { echo "SELFTEST: зелёный (4 пути доставки + 4 пути разбора слов + 12 путей согласия + 3 пути очереди + 3 пути паузы + 3 пути журнала входящих + 5 путей комментариев панели; больные — «Enter»/«C-c», «да» второй строкой, «да для выката», «По выкату пишу да» два согласия одним сообщением и сообщение без согласия под set -e)"; exit 0; }
     echo "SELFTEST: КРАСНЫЙ"; exit 1
 fi
 
@@ -911,9 +918,32 @@ ack() {  # chat_id, текст
         || say "ack не ушёл (сеть?) — цикл продолжает"
 }
 
+# Квитанция «принял» на входящее владельца — с записью в журнал доставка
+# (delivery.ack): метка сообщения (= имя файла во входящих), время приёма и
+# отправки, id сообщения Telegram или причина отказа. Без записи «владелец
+# получил принял» нельзя было ни проверить, ни услышать сбой: ack() молчит о
+# ответе Bot API. Текст ответа API не пишется — только его message_id и
+# description; stderr curl в журнал не идёт (там может быть адрес с токеном).
+kvitanciya() {  # chat_id, метка(TS), message_id, текст
+    local resp rc=0 tg_id err outcome=ok
+    resp=$(printf 'url = "%s/sendMessage"\n' "$API" \
+        | curl -sS --max-time 10 -K - -X POST \
+            --data-urlencode "chat_id=$1" \
+            --data-urlencode "text=$4" 2>/dev/null) || rc=$?
+    tg_id=$(printf '%s' "$resp" | jq -r '.result.message_id // empty' 2>/dev/null || true)
+    if [ -z "$tg_id" ]; then
+        outcome=error
+        err=$(printf '%s' "$resp" | jq -r '.description // empty' 2>/dev/null || true)
+        err="${err:-нет ответа Bot API (curl rc=$rc)}"
+        say "квитанция на $3 не ушла: ${err:0:120}"
+    fi
+    HARNESS_LOG_DIR="$LOG_DIR" harness_event доставка scripts/tg-dispatcher.sh delivery.ack "$outcome" \
+        "ts=$2" "message_id=$3" "sent_at=$(date +%s.%N)" "tg_message_id=$tg_id" "error=${err:-}"
+}
+
 # «Принял» не ждёт ответа Bot API: толчок сообщения идёт следом, а не после curl.
 # Без дескрипторов 3 и 9 потомок не держит лок диспетчера после его смерти.
-ack_async() { ( exec 3<&- 9>&-; ack "$@" ) & }
+kvitanciya_async() { ( exec 3<&- 9>&-; kvitanciya "$@" ) & }
 
 # Ссылка входа в панель шлётся БЕЗ предпросмотра: Telegram открывает ссылки
 # сам, чтобы нарисовать карточку, и одноразовый вход сгорел бы до владельца
@@ -925,6 +955,58 @@ ack_async() { ( exec 3<&- 9>&-; ack "$@" ) & }
             --data-urlencode "text=$2" \
             --data-urlencode "disable_web_page_preview=true" >/dev/null 2>&1 \
         || say "ссылка панели не ушла (сеть?)"
+}
+
+# ── кнопки согласия ─────────────────────────────────────────────────────────
+# Решения (что слать, принять ли нажатие) принимает lib/consent_buttons.py;
+# здесь только ходьба в Bot API. Ответ API возвращается, а не выбрасывается:
+# «отправлено» пишется лишь по нему.
+bot_call() {  # $1=метод, дальше пары имя=значение
+    local method="$1" kv; local -a args=()
+    shift
+    for kv in "$@"; do args+=(--data-urlencode "$kv"); done
+    printf 'url = "%s/%s"\n' "$API" "$method" \
+        | curl -sS --max-time 10 -K - -X POST "${args[@]}" 2>/dev/null
+}
+
+# Запрос без «отправлено» шлётся на каждом круге, пока не выйдет срок.
+consent_send_pending() {
+    local row nonce target resp
+    while IFS= read -r row; do
+        nonce=$(printf '%s' "$row" | jq -r '.nonce')
+        target=$(printf '%s' "$row" | jq -r '.target')
+        resp=$(bot_call sendMessage "chat_id=$TG_CHAT_ID" \
+                   "text=$(printf '%s' "$row" | jq -r '.text')" \
+                   "reply_markup=$(printf '%s' "$row" | jq -r '.reply_markup')") || resp=""
+        if ! printf '%s' "$resp" | python3 "$HERE/lib/consent_buttons.py" sent "$LOG_DIR" "$nonce" "$target" >/dev/null; then
+            say "запрос согласия ${nonce:0:8} не отправлен (отправлю на следующем круге)"
+        fi
+    done < <(python3 "$HERE/lib/consent_buttons.py" unsent "$LOG_DIR" "${SECRETS_DIR:-}" 2>>"$DISPATCH_LOG")
+}
+
+# Нажатие кнопки. Решение пишет судья ДО ответа и правки (а persist_offset зовёт
+# цикл после): сбой между ними даёт повтор нажатия, а не потерянное решение.
+# Любой сбой вызовов — в лог; возврат всегда 0, иначе set -e уронит канал.
+handle_callback() {  # $1 = update
+    local cb cb_id verdict edit_text chat message_id resp
+    cb=$(printf '%s' "$1" | jq -c '.callback_query')
+    cb_id=$(printf '%s' "$cb" | jq -r '.id // empty')
+    verdict=$(printf '%s' "$cb" | python3 "$HERE/lib/consent_buttons.py" judge "$LOG_DIR" "$TG_CHAT_ID" 2>>"$DISPATCH_LOG") \
+        || verdict='{"answer":"Сбой, нажми ещё раз","log":"судья нажатий упал"}'
+    printf '%s' "$verdict" | jq -e . >/dev/null 2>&1 || verdict='{"answer":"Сбой, нажми ещё раз","log":"судья нажатий ответил не JSON"}'
+    say "кнопка: $(printf '%s' "$verdict" | jq -r '.log // "без пояснения"')"
+    if [ -n "$cb_id" ]; then
+        resp=$(bot_call answerCallbackQuery "callback_query_id=$cb_id" \
+                   "text=$(printf '%s' "$verdict" | jq -r '.answer')") || resp=""
+        printf '%s' "$resp" | jq -e '.ok == true' >/dev/null 2>&1 || say "answerCallbackQuery не прошёл: ${resp:0:120}"
+    fi
+    edit_text=$(printf '%s' "$verdict" | jq -r '.edit // empty')
+    [ -n "$edit_text" ] || return 0
+    chat=$(printf '%s' "$cb" | jq -r '.message.chat.id // empty')
+    message_id=$(printf '%s' "$cb" | jq -r '.message.message_id // empty')
+    resp=$(bot_call editMessageText "chat_id=$chat" "message_id=$message_id" "text=$edit_text") || resp=""
+    printf '%s' "$resp" | jq -e '.ok == true' >/dev/null 2>&1 || say "editMessageText не прошёл: ${resp:0:120}"
+    return 0
 }
 
 # Offset на диск — ПОСЛЕ укладки входящего в inbox (К-1а): смерть между
@@ -944,7 +1026,7 @@ mark_alive() { date +%s > "$ALIVE_FILE" || true; }
 # Сообщение в очередь легло выше по коду в любом случае. Карточку из сообщения
 # заводит код, фоном: разбор смысла зовёт модель и занял бы канал на минуты, а
 # getUpdates ждать не может.
-dostavit_agentu() {  # $1=метка сообщения, $2=слова владельца, $3=пинок
+razobrat_v_kartu() {  # $1=метка сообщения
     if [ -f "${PROJECT_DIR:-}/dev-map.yaml" ]; then
         setsid nohup python3 "$HERE/map-from-message.py" --сообщение "$1" \
             --карта "$PROJECT_DIR/dev-map.yaml" --инбокс "$INBOX" \
@@ -954,19 +1036,42 @@ dostavit_agentu() {  # $1=метка сообщения, $2=слова влад�
         # запускать разбор в пустоту: молча снятая работа неотличима от несделанной.
         say "карты ${PROJECT_DIR:-}/dev-map.yaml нет — карточку из сообщения не завожу"
     fi
+}
+
+dostavit_agentu() {  # $1=метка сообщения, $2=слова владельца, $3=пинок
+    razobrat_v_kartu "$1"
     say "в панель: толчок"
     agent_kick "$3"
+}
+
+# На паузе владелец накидывает мысли пачкой и ждёт не работы, а того, что они
+# легли в очередь: ответ один на пачку. Метку двигает КАЖДОЕ сообщение паузы,
+# поэтому ответ уходит только после тишины дольше порога. Метка живёт рядом с
+# пауза.json под именем `пауза-сказано-*`: pause.py --снять уносит её вместе
+# с паузой, и следующая пауза снова начинается с ответа.
+PAUSE_ACK_QUIET_S="${PAUSE_ACK_QUIET_S:-1800}"
+pause_ack() {  # $1=chat_id
+    local mark="${HARNESS_PANEL_STATE:-$PANEL_STATE_DIR}/пауза-сказано-приём"
+    local quiet=$(( $(date +%s) - $(stat -c %Y "$mark" 2>/dev/null || echo 0) ))
+    touch "$mark"
+    [ "$quiet" -ge "$PAUSE_ACK_QUIET_S" ] || return 0
+    ack "$1" "Принял в очередь (пауза): разложу по карте, работать начну после «продолжить»."
 }
 
 OFFSET=$(cat "$OFFSET_FILE" 2>/dev/null || echo 0)
 BACKOFF=2
 say "старт: слушаю чат $TG_CHAT_ID, offset=$OFFSET"
+# Сверка входящих с журналом квитанций (check-ack-receipts.py) судит только то,
+# что пришло после этой отметки: раньше квитанции не записывались.
+HARNESS_LOG_DIR="$LOG_DIR" harness_event доставка scripts/tg-dispatcher.sh delivery.ack_journal_on ok \
+    "started_at=$(date +%s.%N)"
 
 while true; do
     mark_alive
     deliver_panel_comments
     voice_pickup
     voice_worker_start
+    consent_send_pending || say "отправка запросов согласия упала"
     # Пока у обработчика есть работа, long-poll короткий: итог подбирается на круге.
     POLL_TIMEOUT=50
     if voice_pending; then POLL_TIMEOUT=2; fi
@@ -976,7 +1081,7 @@ while true; do
         | curl -sS --max-time 60 -K - \
             --data-urlencode "timeout=$POLL_TIMEOUT" \
             --data-urlencode "offset=$OFFSET" \
-            --data-urlencode 'allowed_updates=["message"]' 2>&1) || {
+            --data-urlencode 'allowed_updates=["message","callback_query"]' 2>&1) || {
         say "getUpdates упал (сеть?) — пауза ${BACKOFF}с и снова"
         sleep "$BACKOFF"
         BACKOFF=$((BACKOFF * 2)); [ "$BACKOFF" -gt 60 ] && BACKOFF=60
@@ -1015,6 +1120,14 @@ while true; do
         fi
         # persist_offset здесь НЕ зовётся (К-1а): сперва входящее должно лечь
         # в inbox; ветки-пропуски (не сообщение, чужой чат) сохраняют сразу.
+
+        # Нажатие кнопки — не сообщение: ни в inbox, ни в confirmations оно не идёт
+        # (их читают ворота выката), решение живёт только в consent-buttons.jsonl.
+        if printf '%s' "$U" | jq -e 'has("callback_query")' >/dev/null 2>&1; then
+            handle_callback "$U" || say "нажатие $UPDATE_ID не обработано"
+            persist_offset
+            continue
+        fi
 
         MSG=$(printf '%s' "$U" | jq -c '.message // {}')
         CHAT=$(printf '%s' "$MSG" | jq -r '.chat.id // empty')
@@ -1056,28 +1169,22 @@ while true; do
         # ── ack ≤30 с: владелец сразу видит, что услышан ────────────────────
         BRIEF="${WORDS:0:60}"   # срез по символам (К-1д), см. выше
         [ ${#WORDS} -gt 60 ] && BRIEF="$BRIEF…"
-        # На ПАУЗЕ смена сообщения не видит: они лежат во входящих до снятия.
-        # 28.09.2026 владелец написал задачу, получил «принял» и три раза
-        # спрашивал, дошло ли: подтверждение соврало ему о состоянии дела.
-        HVOST_PAUZY=""
-        # Судья паузы ОДИН — тот же, что у ветки команд выше ($PAUSE_PY):
-        # второй экземпляр вопроса разъехался бы с первым молча.
-        if python3 "$PAUSE_PY" --идёт-ли 2>/dev/null; then
-            HVOST_PAUZY=" (смена на паузе — увижу, когда снимете)"
-        fi
+        # «Принял» уходит на КАЖДОЕ сообщение, в том числе на паузе (указание
+        # владельца 03.11.2026: «всегда я видел это "принял"»); ответ паузы про
+        # очередь (pause_ack) идёт сверх него, один на пачку.
         # Голос уходит обработчику: скачивание и расшифровка цикл не держат.
         VOICE_HANDOFF=0
         if [ -z "$TEXT" ] && [ -n "$MSG_ID" ] && printf '%s' "$MSG" | jq -e '.voice' >/dev/null 2>&1; then
             VOICE_HANDOFF=1
         fi
+        KIND=$(printf '%s' "$MSG" | jq -r 'if .voice then "голосовое" elif .document then "файл" elif .photo then "фото" else "вложение" end')
         if [ -n "$TEXT" ]; then
-            ack_async "$CHAT" "принял: $BRIEF$HVOST_PAUZY"
+            kvitanciya_async "$CHAT" "$TS" "$MSG_ID" "принял: $BRIEF"
         elif [ "$VOICE_HANDOFF" = 1 ]; then
-            ack_async "$CHAT" "принял: голосовое, расшифровываю$HVOST_PAUZY"
+            kvitanciya_async "$CHAT" "$TS" "$MSG_ID" "принял: голосовое, расшифровываю"
         else
-            KIND=$(printf '%s' "$MSG" | jq -r 'if .voice then "голосовое" elif .document then "файл" elif .photo then "фото" else "вложение" end')
             # ${WORDS:+…} — подпись показывается, только если она есть.
-            ack_async "$CHAT" "принял: $KIND${WORDS:+ с подписью «$BRIEF»} (положу в очередь как есть)$HVOST_PAUZY"
+            kvitanciya_async "$CHAT" "$TS" "$MSG_ID" "принял: $KIND${WORDS:+ с подписью «$BRIEF»} (положу в очередь как есть)"
         fi
 
         # Уровень языка владельца — по ЕГО же сообщениям: владелец 11.09.2026
@@ -1227,14 +1334,17 @@ while true; do
         # сверяются целиком. Дальше сторож увидел непустую очередь и принялся
         # будить смену — ровно то, ради прекращения чего пауза и ставилась.
         #
-        # Теперь сообщение на паузе КОПИТСЯ во входящих, но смену не поднимает,
-        # и владелец слышит, почему тихо: молчание неотличимо от «игнорирует».
+        # Теперь сообщение на паузе КОПИТСЯ во входящих и сразу разбирается в
+        # карту, но смену не поднимает, и владелец слышит, что оно в очереди:
+        # молчание неотличимо от «игнорирует». Голос в карту разбирает подбор
+        # расшифровки (voice_pickup) — здесь его не дублировать.
         if pauza_derzhit "$CMD"; then
             if [ "$VOICE_HANDOFF" = 0 ]; then
                 delivery_mark kick_refused held "ts_список=$TS" "почему=пауза" "когда=$(date +%s.%N)"
+                razobrat_v_kartu "$TS"
             fi
-            say "стоит пауза — сообщение легло во входящие, смену не бужу"
-            ack "$CHAT" "Стоит пауза — я стою и работу не начинаю. Сообщение сохранил. Сниму паузу кнопкой «продолжить» в меню или словом «продолжай»."
+            say "входящие держатся ($HOLD_WORD) — сообщение легло во входящие и в разбор карты, смену не бужу"
+            pause_ack "$CHAT"
             persist_offset "$UPDATE_ID"
             continue
         fi
@@ -1283,7 +1393,22 @@ while true; do
                 ZhDUT=$(find "$INBOX" -maxdepth 1 -name '*.txt' 2>/dev/null | wc -l)
                 if [ "${ZhDUT:-0}" -gt 0 ]; then
                     say "пауза снята, во входящих ждёт $ZhDUT — бужу смену"
-                    agent_kick "Пауза снята. Во входящих $ZhDUT сообщени(е/я) владельца: посмотри $INBOX/ и продолжай."
+                    agent_kick "Пауза снята. Во входящих $ZhDUT сообщени(е/я) владельца, они уже заведены карточками: разбери накопленное в $INBOX/ и разложи по карте."
+                else
+                    say "пауза снята, входящие пусты — бужу смену"
+                    agent_kick "Пауза снята владельцем — работа идёт, паузу больше не поминай."
+                fi
+                persist_offset "$UPDATE_ID"
+                continue ;;
+            "rotate_now")
+                # Прямое слово владельца: потерять работу помощников — его
+                # решение, ворота помощников при --owner сторож не спрашивает.
+                if ROTATE_OUT=$( exec 3<&- 9>&-; bash "$PROJECT_DIR/harness/demons/session-warden.sh" --rotate-now --owner 2>&1 ); then
+                    ack "$CHAT" "Принял: меняю сессию сейчас, не дожидаясь помощников."
+                    say "владелец велел ротировать сейчас"
+                else
+                    ack "$CHAT" "Смену сессии запустить не удалось: $(grep -v '^[[:space:]]*$' <<<"$ROTATE_OUT" | tail -n1)"
+                    say "ротация по слову владельца не запущена: $ROTATE_OUT"
                 fi
                 persist_offset "$UPDATE_ID"
                 continue ;;
@@ -1332,8 +1457,22 @@ while true; do
             "hackathon_on")
                 if HACK_OUT=$(python3 "$HERE/write-key.py" HACKATHON_UNTIL 72 2>&1); then
                     HACK_UNTIL=$(konf_iz_fajla HACKATHON_UNTIL)
-                    ack "$CHAT" "Хакатон включён на 72 часа, до ${HACK_UNTIL/T/ }."
-                    say "владелец включил хакатон до $HACK_UNTIL"
+                    # Одного срока мало: приёмка и план запуска смотрят уровень
+                    # карточки. Текущую задачу называет прибор очереди, уровень
+                    # ставит hackathon.py — второго писателя карты нет.
+                    HACK_TASK=$(python3 "$HERE/work-queue.py" "$PROJECT_DIR/dev-map.yaml" --следующая 2>/dev/null \
+                        | sed -n 's/^СЛЕДУЮЩАЯ РАБОТА: \([^ ]*\) — .*/\1/p' | head -n1 || true)
+                    HACK_NOTE="задачи в работе нет, уровень никому не выставлен"
+                    if [ -n "$HACK_TASK" ]; then
+                        if python3 "$HERE/hackathon.py" --включить-задачу "$HACK_TASK" \
+                                --карта "$PROJECT_DIR/dev-map.yaml" >/dev/null 2>&1; then
+                            HACK_NOTE="задача $HACK_TASK переведена на уровень «хакатон»"
+                        else
+                            HACK_NOTE="задачу $HACK_TASK на уровень «хакатон» перевести не вышло"
+                        fi
+                    fi
+                    ack "$CHAT" "Хакатон включён на 72 часа, до ${HACK_UNTIL/T/ }; $HACK_NOTE."
+                    say "владелец включил хакатон до $HACK_UNTIL; $HACK_NOTE"
                 else
                     # Владельцу — строка отказа писателя («[запись-ключа] …»), иначе последняя непустая.
                     HACK_LAST=$(grep -m1 '^\[' <<<"$HACK_OUT" || true)
@@ -1367,6 +1506,30 @@ while true; do
                 else
                     ack "$CHAT" "Хакатон выключен."
                 fi
+                persist_offset "$UPDATE_ID"
+                continue ;;
+            # Режим скорости: ключ пишет штатный писатель (write-key.py), как у
+            # хакатона; журнал и состояние ведёт судья скорости, второго писателя нет.
+            "speed_slow"|"speed_medium"|"speed_fast"|"speed_ultra")
+                SPEED_VALUE="${CMD#speed_}"
+                if SPEED_OUT=$(python3 "$HERE/write-key.py" SPEED_MODE "$SPEED_VALUE" 2>&1); then
+                    # --выбран сразу пересчитывает состояние: ответ описывает уже новый режим,
+                    # а не прежний из последнего прохода по расписанию.
+                    python3 "$PROJECT_DIR/harness/demons/speed_mode.py" --выбран бот >/dev/null 2>&1 || true
+                    SPEED_TEXT=$(python3 "$PROJECT_DIR/harness/demons/speed_mode.py" --показать --коротко || true)
+                    ack "$CHAT" "${SPEED_TEXT:-Режим записан; судья скорости пока не ответил, увижу на ближайшей проверке.}"
+                    say "владелец выбрал режим скорости $SPEED_VALUE"
+                else
+                    SPEED_LAST=$(grep -m1 '^\[' <<<"$SPEED_OUT" || true)
+                    [ -n "$SPEED_LAST" ] || SPEED_LAST=$(grep -v '^[[:space:]]*$' <<<"$SPEED_OUT" | tail -n1 || true)
+                    ack "$CHAT" "Режим не изменён: писатель настроек отказал — ${SPEED_LAST:-без объяснения}"
+                    say "режим скорости $SPEED_VALUE не записан: ${SPEED_OUT:-писатель отказал}"
+                fi
+                persist_offset "$UPDATE_ID"
+                continue ;;
+            "speed")
+                SPEED_TEXT=$(python3 "$PROJECT_DIR/harness/demons/speed_mode.py" --показать || true)
+                ack "$CHAT" "${SPEED_TEXT:-Судья скорости не отвечает.}"
                 persist_offset "$UPDATE_ID"
                 continue ;;
             "panel_out")

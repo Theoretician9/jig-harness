@@ -64,6 +64,10 @@ STATE_MAX = 4_800   # токенов; всё, что не «сейчас», уе
 # раздел уехал записями памяти, файл стал 3 7xx — и потолок вернулся на место.
 # Подъём порога лечит симптом; лечит прополка, а она требовала его слова.
 ORDERS_MAX = 3_900
+# Личность агента грузится в каждую сессию первой (harness/self/): потолки
+# с небольшим запасом над замером 05.11.2026 (~2 500 и ~690 токенов), чтобы
+# среда не разрасталась молча.
+SELF_MAX = {"core.json": 3_000, "instance.yaml": 900}
 INDEX_MAX = 12_000  # индекс памяти грузится каждую сессию — та же болезнь, мягкий порог
 
 
@@ -145,6 +149,18 @@ def check_orders_size(repo: Path, r: Report) -> None:
         )
     if size >= 0.9 * ORDERS_MAX:
         назвать_прополку_без_владельца(orders, r)
+
+
+def check_self_size(repo: Path, r: Report) -> None:
+    """Файлы личности — часть каждой сессии, их рост платится каждым запуском."""
+    for имя, потолок in SELF_MAX.items():
+        файл = repo / "harness" / "self" / имя
+        if not файл.exists():
+            r.block(f"harness/self/{имя} не найден — на него смотрит @-include в CLAUDE.md")
+            continue
+        size = цена(файл)
+        if size > потолок:
+            r.block(f"harness/self/{имя} разросся: {size} токенов при потолке {потолок}.")
 
 
 # Длина цитаты, с которой дословное место дороже ссылки на запись памяти.
@@ -517,6 +533,7 @@ def оценить(repo: Path) -> "Report":
     check_package_memory(r)
     check_state_size(repo, r)
     check_orders_size(repo, r)
+    check_self_size(repo, r)
     check_single_memory(repo, r)
     check_memory_index(repo, r)
     check_devmap_size(repo, r)

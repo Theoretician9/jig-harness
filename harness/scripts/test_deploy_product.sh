@@ -40,6 +40,7 @@ TMUX_SESSION="net-takoj"
 AGENT_START_CMD="true"
 AUTONOMY="semi"
 HEARTBEAT_DIR="$STAND/zhurnal/hb"
+TG_CHAT_ID="4242"
 CONF
 
 for repo in "$HARNESS" "$PRODUCT"; do
@@ -73,17 +74,29 @@ run_deploy() {  # $@ — ключи deploy.sh; печатает вывод, ко
     printf '%s\n' "$VYVOD" | sed 's/^/      /' | tail -6
 }
 
-svezhee_da() {  # свежее «да» владельца и ожидание именно на выкат
-    python3 - "$STAND" <<'PY'
-import json, sys, time
-stand = sys.argv[1]
-ts = time.strftime("%Y-%m-%dT%H:%M:%S+05:00")
-with open(f"{stand}/zhurnal/confirmations.jsonl", "w", encoding="utf-8") as fh:
-    fh.write(json.dumps({"ts": ts, "text": "да", "message_id": "1",
-                         "kind": "any"}, ensure_ascii=False) + "\n")
-with open(f"{stand}/zhurnal/согласие.json", "w", encoding="utf-8") as fh:
-    json.dump({"ожидание": {"действие": "deploy", "ts": time.time()}}, fh,
-              ensure_ascii=False)
+# Ключи согласия ворота читают у машины; на стенде — из файлов окружения: без ключа стенда
+# выкат стенда судился бы по harness.conf машины. Журнал входящих есть всегда — без него
+# отзыв прочитать нечем, и это отказ.
+export HARNESS_OWNER_WORD_STEND=1 HARNESS_LOG_DIR="$STAND/zhurnal"
+: > "$STAND/zhurnal/inbox.jsonl"
+
+svezhee_da() {  # свежее «Да» кнопкой на предмет выката «<sha продукта> <realpath дерева>»
+    # Секунда паузы: строка журнала выкатов прошлого случая в ту же секунду погасила бы это «Да».
+    sleep 1
+    python3 - "$STAND/zhurnal" "$(git -C "$PRODUCT" rev-parse HEAD) $(readlink -f "$PRODUCT")" <<'PY'
+import datetime, json, sys
+log, target = sys.argv[1], sys.argv[2]
+# Метка — текущая секунда: строка журнала выкатов той же секунды гасит «Да» (начат ≥ нажатия).
+ts = datetime.datetime.now().astimezone().isoformat(timespec="seconds")
+data = {"nonce": "proba-vykat", "вид": "выкат", "цель": target, "message_id": 4000, "from_id": "4242"}
+# Живой порядок: просьба ask-consent не позже нажатия, нажатие — с from_id владельца стенда.
+with open(f"{log}/consent-requests.jsonl", "w", encoding="utf-8") as fh:
+    fh.write(json.dumps({"v": 1, "ts": ts, "src": "scripts/ask-consent.py", "event": "consent" + ".request",
+                         "outcome": "ok", "data": {"nonce": "proba-vykat", "вид": "выкат", "цель": target,
+                                                  "почему": "проба"}}, ensure_ascii=False) + "\n")
+with open(f"{log}/consent-buttons.jsonl", "w", encoding="utf-8") as fh:
+    fh.write(json.dumps({"v": 1, "ts": ts, "src": "проба", "event": "consent" + ".yes", "outcome": "ok",
+                         "data": data}, ensure_ascii=False) + "\n")
 PY
 }
 
@@ -114,7 +127,7 @@ conf "STACK_BUILD_CMD=\"echo sborka\"
 STACK_MIGRATE_CMD=\"echo migracii\"
 STACK_RELEASE_CMD=\"echo peresozdanie\"
 STACK_HEALTH_URL=\"$DEAD_URL\""
-rm -f "$STAND/zhurnal/согласие.json" "$STAND/zhurnal/confirmations.jsonl"
+rm -f "$STAND/zhurnal/согласие.json" "$STAND/zhurnal/confirmations.jsonl" "$STAND/zhurnal/consent-buttons.jsonl"
 run_deploy --план
 itog "0" "$RC" "план выходит нулём без согласия владельца"
 itog "да" "$(has "$VYVOD" "echo peresozdanie")" "план называет пересоздание служб"
@@ -300,9 +313,9 @@ run_copy() {  # $1 — каталог копии скриптов, дальше 
     printf '%s\n' "$VYVOD" | sed 's/^/      /' | tail -3
 }
 sborok() { grep -c '^sborka$' "$STAND/poryadok" 2>/dev/null || true; }
-soglasie_zhivo() {  # спросить ворота стенда, не тратя: дожило ли «да»
+soglasie_zhivo() {  # спросить ворота стенда: открывает ли ещё кнопка «Да»
     PATH="$FAKEBIN:$PATH" HARNESS_INSTALL_CONF="$STAND/install.conf" HARNESS_CONF="$STAND/harness.conf" \
-        timeout 60 python3 "$SCRIPTS_COPY/deploy_guard.py" --только-согласие --не-тратить 2>&1 \
+        timeout 60 python3 "$SCRIPTS_COPY/deploy_guard.py" --только-согласие 2>&1 \
         | grep -q "согласие владельца есть" && echo да || echo нет
 }
 
@@ -316,9 +329,9 @@ DEVMAP_AUDIT_DAYS=0
 CONFIRM_RETRY_SEC=-1"
 
 echo "── 10. БОЛЬНОЙ СЛУЧАЙ: одно «да» — один выкат; ключи ворот deploy.sh дальше не пропускает ──"
-# Ворота знают служебные ключи --вернуть-согласие, --только-согласие и
-# --не-тратить: ими зовут их другие двери. Пропусти deploy.sh их воротам, и
-# выкат идёт, а «да» остаётся целым или возвращается — выкатов сколько угодно.
+# Служебные ключи ворот (--только-согласие, прежние --вернуть-согласие и --не-тратить)
+# deploy.sh отказывает сам: пропусти он их воротам, выкат шёл бы мимо их суда. Кнопку
+# «Да» гасит строка журнала выкатов первого выката — второй на той же кнопке отказан.
 conf "$ODNO_DA_CONF"
 : > "$STAND/docker.log"; : > "$STAND/poryadok"
 svezhee_da
@@ -335,7 +348,7 @@ for kluchi in "--вернуть-согласие" "--только-согласи
     itog "да" "$(has "$VYVOD" "незнакомый ключ $pervyj")" "deploy.sh $kluchi: отказ называет «незнакомый ключ $pervyj»"
 done
 itog "1" "$(sborok)" "служебные ключи ворот не дали ни одной сборки сверх первой"
-itog "нет" "$(soglasie_zhivo)" "«да» после выката потрачено, а не возвращено"
+itog "нет" "$(soglasie_zhivo)" "«Да» после выката погашено журналом выкатов"
 sleep 1
 run_copy "$SCRIPTS_COPY"
 itog "1" "$RC" "второй выкат на том же «да» отказан"
@@ -354,7 +367,7 @@ itog "да" "$(soglasie_zhivo)" "отказ по ключу «да» не сжё
 echo "── 10в. БОЛЬНОЙ СЛУЧАЙ: --силой без «да» — отказ «нет согласия», --силой снимает только занятость ──"
 conf "$ODNO_DA_CONF"
 : > "$STAND/poryadok"
-rm -f "$STAND/zhurnal/confirmations.jsonl" "$STAND/zhurnal/согласие.json"
+rm -f "$STAND/zhurnal/confirmations.jsonl" "$STAND/zhurnal/согласие.json" "$STAND/zhurnal/consent-buttons.jsonl"
 sleep 1
 run_copy "$SCRIPTS_COPY" --силой
 itog "1" "$RC" "deploy.sh --силой без «да» — код 1"
@@ -380,6 +393,106 @@ itog "1" "$RC" "код 2 ворот — выкат отменён кодом 1"
 itog "да" "$(has "$VYVOD" "ворота отказали: незнакомый ключ --proba-zaglushki")" "причина названа словами ворот"
 itog "нет" "$(has "$VYVOD" "ворота: занято")" "отказ разбора не выдан за «занято»"
 itog "0" "$(sborok)" "после отказа ворот ни одной сборки"
+
+echo "── 12. hr.consent-buttons-doors: тег аннотированный на одобренном sha и строка журнала выкатов ──"
+# Кнопку «Да» на выкат гасит строка журнала выкатов (тег сессия удалила бы одной
+# командой); тег адресует ровно DEPLOY_SHA, а не HEAD на момент тега.
+conf "$ODNO_DA_CONF"
+: > "$STAND/poryadok"
+rm -f "$STAND/zhurnal/deploy-releases.jsonl"
+svezhee_da
+sleep 1
+SHA_DO=$(git -C "$PRODUCT" rev-parse HEAD)
+run_copy "$SCRIPTS_COPY"
+itog "0" "$RC" "выкат на свежем «да» выходит нулём"
+TEG=$(git -C "$PRODUCT" tag -l 'deploy-*' --sort=-refname | head -1)
+itog "tag" "$(git -C "$PRODUCT" cat-file -t "$TEG" 2>/dev/null)" "тег выката $TEG — аннотированный"
+itog "$SHA_DO" "$(git -C "$PRODUCT" rev-parse "$TEG^{commit}" 2>/dev/null)" "тег стоит на выкатываемом sha"
+STROKA=$(tail -n 1 "$STAND/zhurnal/deploy-releases.jsonl" 2>/dev/null)
+itog "$SHA_DO $(readlink -f "$PRODUCT") $TEG да" "$(printf '%s' "$STROKA" | python3 -c '
+import datetime, json, sys
+try:
+    z = json.loads(sys.stdin.read())
+    ts = "да" if z["v"] == 1 and z["event"] == "deploy.release" and datetime.datetime.fromisoformat(z["ts"]) else "нет"
+    print(z["data"]["цель"], z["data"]["тег"], ts)
+except Exception as e:
+    print("не разобрано:", type(e).__name__)')" "конверт журнала выкатов: data.цель «sha дерево», data.тег, читаемый ts"
+
+echo "── 13. тег не встал — выкат отменён до сборки, строки журнала нет ──"
+conf "$ODNO_DA_CONF"
+: > "$STAND/poryadok"
+svezhee_da
+sleep 1
+STROK_DO=$(grep -c . "$STAND/zhurnal/deploy-releases.jsonl" 2>/dev/null || echo 0)
+chmod a-w "$PRODUCT/.git/refs/tags"
+run_copy "$SCRIPTS_COPY"
+chmod u+w "$PRODUCT/.git/refs/tags"
+itog "1" "$RC" "неудача тега — код 1"
+itog "да" "$(has "$VYVOD" "не поставлен — выкат отменён до сборки")" "причина названа: тег не поставлен"
+itog "0" "$(sborok)" "до сборки не дошло"
+itog "$STROK_DO" "$(grep -c . "$STAND/zhurnal/deploy-releases.jsonl" 2>/dev/null || echo 0)" "строки журнала выкатов не прибавилось"
+
+echo "── 14. HEAD сдвинулся после ворот — выкат отменён до тега и сборки; ворота получили --выкат ──"
+KOPIYA_SDVIG="$STAND/scripts-sdvig"
+mkdir -p "$KOPIYA_SDVIG"
+cp "$HERE/deploy.sh" "$HERE/check-secrets.sh" "$KOPIYA_SDVIG/"
+cp "$HERE/deploy_guard.py" "$KOPIYA_SDVIG/deploy_guard_real.py"
+cp -r "$HERE/lib" "$KOPIYA_SDVIG/"
+printf 'import sys\nsys.exit(0)\n' > "$KOPIYA_SDVIG/fix-claude-mem-project.py"
+cat > "$KOPIYA_SDVIG/deploy_guard.py" <<'PY'
+# Ворота стенда: настоящие, а после их «да» в дерево продукта приходит коммит.
+import os, subprocess, sys
+with open(os.environ["PROBA_GATE_ARGV"], "a", encoding="utf-8") as fh:
+    fh.write(" ".join(sys.argv[1:]) + "\n")
+real = os.path.join(os.path.dirname(os.path.abspath(__file__)), "deploy_guard_real.py")
+done = subprocess.run([sys.executable, real, *sys.argv[1:]])
+if done.returncode == 0 and "--выкат" in sys.argv:
+    subprocess.run(["git", "-C", os.environ["PROBA_SHIFT_TREE"], "-c", "user.email=proba@stend",
+                    "-c", "user.name=проба", "commit", "-q", "--allow-empty", "-m", "коммит после ворот"])
+sys.exit(done.returncode)
+PY
+conf "$ODNO_DA_CONF"
+: > "$STAND/poryadok"
+svezhee_da
+sleep 1
+SHA_DO=$(git -C "$PRODUCT" rev-parse HEAD)
+TEGOV_DO=$(git -C "$PRODUCT" tag -l 'deploy-*' | grep -c .)
+: > "$STAND/gate-argv"
+VYVOD=$(PATH="$FAKEBIN:$PATH" DOCKER_JOURNAL="$STAND/docker.log" PROBA_GATE_ARGV="$STAND/gate-argv" \
+        PROBA_SHIFT_TREE="$PRODUCT" HARNESS_INSTALL_CONF="$STAND/install.conf" HARNESS_CONF="$STAND/harness.conf" \
+        timeout 300 bash "$KOPIYA_SDVIG/deploy.sh" 2>&1)
+RC=$?
+printf '%s\n' "$VYVOD" | sed 's/^/      /' | tail -3
+itog "1" "$RC" "HEAD сдвинут после ворот — код 1"
+itog "да" "$(has "$VYVOD" "HEAD сдвинулся или дерево изменилось после согласия")" "причина названа: HEAD сдвинулся"
+itog "0" "$(sborok)" "до сборки не дошло"
+itog "$TEGOV_DO" "$(git -C "$PRODUCT" tag -l 'deploy-*' | grep -c .)" "тег не поставлен"
+itog "да" "$(grep -qF -- "--выкат $PRODUCT $SHA_DO" "$STAND/gate-argv" && echo да || echo нет)" \
+     "ворота получили --выкат <дерево> <sha до ворот>"
+
+echo "── 15. HEAD сдвинулся во время сборки — откат на :previous, миграций и пересоздания нет ──"
+SDVIG_SBORKA="echo sborka >> $STAND/poryadok; git -C $PRODUCT -c user.email=proba@stend -c user.name=proba commit -q --allow-empty -m vo-vremya-sborki"
+conf "STACK_BUILD_CMD=\"$SDVIG_SBORKA\"
+STACK_BUILD_NOCACHE_CMD=\"$SDVIG_SBORKA\"
+$DUMP_LINE
+STACK_UP_CMD=\"echo otkat >> $STAND/poryadok\"
+STACK_IMAGES=\"proba-api\"
+STACK_MIGRATE_CMD=\"echo migracii >> $STAND/poryadok\"
+STACK_RELEASE_CMD=\"echo peresozdanie >> $STAND/poryadok\"
+STACK_HEALTH_CMD=\"true\"
+DEVMAP_AUDIT_DAYS=0
+CONFIRM_RETRY_SEC=-1"
+: > "$STAND/docker.log"; : > "$STAND/poryadok"
+svezhee_da
+sleep 1
+SHA_DO=$(git -C "$PRODUCT" rev-parse HEAD)
+run_copy "$SCRIPTS_COPY"
+TEG=$(git -C "$PRODUCT" tag -l 'deploy-*' --sort=-refname | head -1)
+itog "1" "$RC" "HEAD сдвинут во время сборки — код 1"
+itog "да" "$(has "$VYVOD" "HEAD сдвинулся во время сборки")" "причина названа: сдвиг во время сборки"
+itog "sborka damp" "$(order)" "после сдвига ни миграций, ни пересоздания"
+itog "да" "$(retagged)" "образ возвращён с :previous на :latest"
+itog "$SHA_DO" "$(git -C "$PRODUCT" rev-parse "$TEG^{commit}" 2>/dev/null)" "тег стоит на одобренном sha, не на новом HEAD"
 
 printf '\nВЫКАТ-ПРОДУКТА: путей %d, неудач %d\n' "$paths" "$fails"
 [ "$fails" -eq 0 ]

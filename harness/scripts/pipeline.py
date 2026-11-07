@@ -38,6 +38,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
 import config as конф                                     # noqa: E402
+import spec_review                                        # noqa: E402
 
 КОРЕНЬ = Path(__file__).resolve().parent.parent
 КОНФИГ = КОРЕНЬ / "harness" / "config" / "pipeline.yaml"
@@ -545,9 +546,8 @@ def состояние_задачи(id_задачи):
             есть = bool(спека) and (КОРЕНЬ / спека).exists()
             print(f"  спека: {'есть — ' + спека if есть else 'НЕТ (поле spec: в карточке)'}")
         elif шаг in ("ревью_спеки", "ревью спеки"):
-            путь = (КОРЕНЬ / спека) if спека else None
-            ревью = путь.with_name(путь.stem + "-REVIEW" + путь.suffix) if путь else None
-            print(f"  ревью спеки: {'есть — ' + str(ревью.relative_to(КОРЕНЬ)) if ревью and ревью.exists() else 'НЕТ'}")
+            ревью = spec_review.spec_review_path(КОРЕНЬ, id_задачи, спека)
+            print(f"  ревью спеки: {'есть — ' + str(ревью.relative_to(КОРЕНЬ)) if ревью else 'НЕТ'}")
         elif шаг == "тесты":
             print("  тесты: судит гейт check-tests-first по каждому коммиту")
         elif шаг in (настройки.get("шаги_приёмки") or ()):

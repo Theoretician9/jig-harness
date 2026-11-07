@@ -11,7 +11,8 @@
 # Почему не список запрещённых. Четыре правила «--dport N -j DROP» закрывают
 # четыре порта и молчат о пятом: любой новый контейнер со строкой `ports:`
 # снова торчит в интернет. Поэтому названо РАЗРЕШЁННОЕ (ключ
-# DOCKER_PORTS_ALLOWED в harness.conf — данные), а остальное закрыто.
+# DOCKER_PORTS_ALLOWED в harness.conf — данные; элемент «порт», «порт/tcp» или
+# «порт/udp»), а остальное закрыто.
 #
 # Правило «обратные пакеты» стоит ПЕРВЫМ, и это не украшение: без него глухой
 # DROP на входящем интерфейсе рубит ОТВЕТЫ на исходящие соединения контейнеров
@@ -49,17 +50,56 @@ vneshnij_interfejs() {
 
 # Печатает правила цепочки по порядку: хвост команды после «-A DOCKER-USER».
 # Чистая функция — её и судит самотест; постановка отделена от решения.
+# Элемент списка: «порт» (tcp), «порт/tcp» или «порт/udp». Всё остальное —
+# отказ ДО постановки: иначе iptables отказал бы уже после «-F», и цепочка
+# осталась бы пустой, то есть открытой настежь.
 pravila() {  # $1 = интерфейс, $2 = разрешённые порты через запятую
-    local iface="$1" spisok="${2:-}" port
+    local iface="$1" spisok="${2:-}" port proto elem
     [ -n "$iface" ] || { echo "не определён внешний интерфейс — закрывать нечего" >&2; return 1; }
     printf -- '-i %s -m conntrack --ctstate RELATED,ESTABLISHED -j RETURN\n' "$iface"
     # Разбор через read, а не «for ... in $(…)»: значение с пробелом рвётся молча.
-    while IFS= read -r port; do
-        [ -n "$port" ] || continue
-        printf -- '-i %s -p tcp --dport %s -j RETURN\n' "$iface" "$port"
+    while IFS= read -r elem; do
+        [ -n "$elem" ] || continue
+        port="${elem%%/*}"; proto=tcp
+        [ "$port" = "$elem" ] || proto="${elem#*/}"
+        case "$proto" in tcp|udp) ;; *)
+            echo "DOCKER_PORTS_ALLOWED: «$elem» — протокол должен быть tcp или udp" >&2; return 1 ;;
+        esac
+        if ! [[ "$port" =~ ^[0-9]+$ ]] || [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then
+            echo "DOCKER_PORTS_ALLOWED: «$elem» — порт должен быть числом 1..65535" >&2; return 1
+        fi
+        printf -- '-i %s -p %s --dport %s -j RETURN\n' "$iface" "$proto" "$port"
     done < <(printf '%s\n' "$spisok" | tr ',' '\n' | tr -d ' ')
     printf -- '-i %s -j DROP\n' "$iface"
     printf -- '-j RETURN\n'
+}
+
+# iptables -S сам дописывает «-m tcp»/«-m udp» перед --dport; намеченный текст
+# его не содержит, и без сглаживания сверка краснела бы на любом разрешении.
+snyat_modul_protokola() { sed -E 's/ -m (tcp|udp) / /'; }
+
+# Постановка в одну семью адресов. Если правило не встало ПОСЛЕ «-F», цепочка
+# пуста — открыто всё; поэтому при сбое ставится закрытый минимум (без
+# разрешений), и только потом отказ.
+postavit_semju() {  # $1 = iptables|ip6tables, $2 = правила, $3 = закрытый минимум
+    local semja="$1" spisok="$2" minimum="$3" pravilo
+    # shellcheck disable=SC2086
+    $POD_ROOT "$semja" -N "$CEPOCHKA" 2>/dev/null || true
+    # shellcheck disable=SC2086
+    $POD_ROOT "$semja" -F "$CEPOCHKA"
+    while IFS= read -r pravilo; do
+        [ -n "$pravilo" ] || continue
+        # shellcheck disable=SC2086
+        if ! $POD_ROOT "$semja" -A "$CEPOCHKA" $pravilo; then
+            echo "$semja: правило не встало («$pravilo») — ставлю закрытый минимум" >&2
+            $POD_ROOT "$semja" -F "$CEPOCHKA" || true
+            while IFS= read -r pravilo; do
+                # shellcheck disable=SC2086
+                $POD_ROOT "$semja" -A "$CEPOCHKA" $pravilo || true
+            done <<< "$minimum"
+            return 1
+        fi
+    done <<< "$spisok"
 }
 
 # ── самотест: правила судятся текстом, железо не трогается ─────────────────
@@ -101,6 +141,42 @@ if [ "${1:-}" = "--selftest" ]; then
     proba "БОЛЬНОЙ: нет интерфейса — отказ назван словом" "да" \
           "$(printf '%s' "$PRICHINA" | grep -q 'не определён внешний интерфейс' && echo да || echo нет)"
 
+    # udp: разбор протокола. Без суффикса — tcp, как было.
+    PU=$(pravila "proba0" "8080,15637/udp,9000/tcp")
+    proba "udp: порт с /udp ставится как -p udp" "1" \
+          "$(printf '%s\n' "$PU" | grep -c -- '-p udp --dport 15637 -j RETURN' || true)"
+    proba "udp: порт без суффикса остаётся tcp" "1" \
+          "$(printf '%s\n' "$PU" | grep -c -- '-p tcp --dport 8080 -j RETURN' || true)"
+    proba "udp: /tcp равен умолчанию" "1" \
+          "$(printf '%s\n' "$PU" | grep -c -- '-p tcp --dport 9000 -j RETURN' || true)"
+    proba "udp: в правиле не осталось «/»" "0" \
+          "$(printf '%s\n' "$PU" | grep -c -- '/' || true)"
+    # БОЛЬНОЙ: мусор отвергается ДО постановки, молча не принимается.
+    for MUSOR in "15637/sctp" "abc" "70000/udp" "0" "80/"; do
+        proba "БОЛЬНОЙ: мусор «$MUSOR» — отказ" "отказ" \
+              "$(pravila proba0 "$MUSOR" >/dev/null 2>&1 && echo принято || echo отказ)"
+    done
+    proba "БОЛЬНОЙ: отказ назван словом" "да" \
+          "$( { pravila proba0 "15637/sctp" 2>&1 >/dev/null || true; } | grep -q 'tcp или udp' && echo да || echo нет)"
+    # БОЛЬНОЙ: то, что iptables -S напечатает для udp, сверка обязана признать своим.
+    proba "БОЛЬНОЙ: вывод iptables -S с «-m udp» равен намеченному" "$(printf '%s\n' "$PU" | grep 15637)" \
+          "$(echo '-i proba0 -p udp -m udp --dport 15637 -j RETURN' | snyat_modul_protokola)"
+    # БОЛЬНОЙ: сбой постановки после «-F» не оставляет цепочку пустой.
+    STUB=$(mktemp); LOG=$(mktemp); trap 'rm -f "$STUB" "$LOG"' EXIT
+    cat > "$STUB" <<'STUB_KONEC'
+#!/usr/bin/env bash
+echo "$*" >> "$STUB_LOG"
+case "$*" in *"-p udp"*) exit 1 ;; esac
+exit 0
+STUB_KONEC
+    chmod +x "$STUB"
+    POD_ROOT="$STUB"; export STUB_LOG="$LOG"
+    MIN=$(pravila proba0 "")
+    postavit_semju iptables "$PU" "$MIN" 2>/dev/null && SBOJ=postavilos || SBOJ=otkaz
+    proba "БОЛЬНОЙ: сбой постановки — отказ, а не молчание" "otkaz" "$SBOJ"
+    proba "БОЛЬНОЙ: после сбоя цепочка закрыта (DROP среди поставленных после -F)" "да" \
+          "$(sed -n '/^-F/h;/^-F/!H;${x;p}' "$LOG" | grep -q -- '-j DROP' && echo да || echo нет)"
+
     [ "$ok" = 1 ] && { echo "самотест: всё зелено"; exit 0; }
     echo "самотест: есть красное"; exit 1
 fi
@@ -133,7 +209,7 @@ if [ "${1:-}" = "--проверить" ]; then
                    "$semja" "$(printf '%s' "$vyvod" | head -1)"
             exit 77
         fi
-        stoit="$(printf '%s\n' "$vyvod" | sed "/^-N /d;s|^-A $CEPOCHKA ||")"
+        stoit="$(printf '%s\n' "$vyvod" | sed "/^-N /d;s|^-A $CEPOCHKA ||" | snyat_modul_protokola)"
         if [ "$stoit" != "$SPISOK" ]; then
             printf '%s: правила не совпадают с намеченными\n' "$semja"
             bedy=1
@@ -186,16 +262,9 @@ fi
 # Цепочка принадлежит нам целиком: docker её создаёт и больше в неё не пишет,
 # поэтому чистка перед постановкой — не потеря чужого, а единственный способ
 # сделать повтор безвредным.
+MINIMUM="$(pravila "$IFACE" "")"
 for semja in iptables ip6tables; do
-    # shellcheck disable=SC2086
-    $POD_ROOT "$semja" -N "$CEPOCHKA" 2>/dev/null || true
-    # shellcheck disable=SC2086
-    $POD_ROOT "$semja" -F "$CEPOCHKA"
-    while IFS= read -r pravilo; do
-        [ -n "$pravilo" ] || continue
-        # shellcheck disable=SC2086
-        $POD_ROOT "$semja" -A "$CEPOCHKA" $pravilo
-    done <<< "$SPISOK"
+    postavit_semju "$semja" "$SPISOK" "$MINIMUM"
 done
 
 printf 'закрыто снаружи всё, кроме: %s (интерфейс %s)\n' "${RAZRESHENO:-ничего}" "$IFACE"

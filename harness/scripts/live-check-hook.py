@@ -40,8 +40,16 @@ import yaml
                          or КОРЕНЬ / "harness" / "config" / "live-check-state.yaml")
 ДАННЫЕ = pathlib.Path(os.environ.get("HARNESS_LIVE_CHECK_HOOKS")
                       or КОРЕНЬ / "harness" / "config" / "live-check-hooks.yaml")
+def _корень_следов() -> pathlib.Path:
+    """Корень следов — у общего загрузчика: умолчание внутри репозитория
+    отдавало весь вывод произвольной команды гиту."""
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent / "lib"))
+    import config as конф                                 # noqa: PLC0415
+    return pathlib.Path(конф.live_check_trace_root())
+
+
 СЛЕДЫ = pathlib.Path(os.environ.get("HARNESS_LIVE_CHECK_HOOK_TRACE_DIR")
-                     or КОРЕНЬ / ".tasks" / "hr.zhivaya-proverka-vseh-mehanizmov"
+                     or _корень_следов() / "hr.zhivaya-proverka-vseh-mehanizmov"
                      / "живьём-хуки")
 РАЗДЕЛИТЕЛЬ = "--- решение хука ---"
 ЦИТАТА_ЗНАКОВ = 12

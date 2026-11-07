@@ -51,7 +51,7 @@ legacy_writers:
   - {file: scripts/miss.py, card: hr.harness-detailed-logging, journals: ["пропуски"]}
   - {file: scripts/model.sh, card: hr.harness-detailed-logging, journals: [model-switch]}
   - {file: scripts/pre-commit-gate.sh, card: hr.harness-detailed-logging, journals: [gates]}
-  - {file: scripts/protected-delete.py, card: hr.harness-detailed-logging, journals: [inbox, "удаления-секретов", "удаления-спрошено"]}
+  - {file: scripts/protected-delete.py, card: hr.harness-detailed-logging, journals: ["удаления-секретов"]}
   - {file: scripts/spec_approval.py, card: hr.harness-detailed-logging, journals: ["спеки-владельцу"]}
   - {file: scripts/stack_freshness.py, card: hr.harness-detailed-logging, journals: ["stack-вопросы"]}
   - {file: scripts/tg-dispatcher.sh, card: hr.harness-detailed-logging, journals: [confirmations, inbox, "внимание"]}
@@ -98,12 +98,30 @@ journals:
     time_field: ts
     time_kind: tz
     event_from: confirmation.recorded
+  consent-buttons:
+    file: consent-buttons.jsonl
+    writers: [scripts/lib/consent_buttons.py]
+    time_field: ts
+    time_kind: tz
+    event_from: "field:event"
+  consent-requests:
+    file: consent-requests.jsonl
+    writers: [scripts/ask-consent.py]
+    time_field: ts
+    time_kind: tz
+    event_from: "field:event"
   db-drops:
     file: db-drops.jsonl
     writers: [scripts/drop-database.sh]
     time_field: ts
     time_kind: tz
     event_from: db.dropped
+  deploy-releases:
+    file: deploy-releases.jsonl
+    writers: [scripts/deploy.sh]
+    time_field: ts
+    time_kind: tz
+    event_from: deploy.release
   demon-spend:
     file: demon-spend.jsonl
     writers: [scripts/claude-demon.sh]
@@ -166,7 +184,7 @@ journals:
   rotation:
     file: rotation.jsonl
     task_infer: session
-    writers: [harness/demons/session-warden.sh, scripts/hooks/pre_compact_handover.sh]
+    writers: [harness/demons/session-warden.sh, scripts/hooks/pre_compact_handover.sh, scripts/hooks/rotation_queue_guard.py]
     time_field: ts
     time_kind: tz
     event_from: "field:event"
@@ -271,7 +289,7 @@ journals:
     min_daily: 1
   "вложенность":
     file: "вложенность.jsonl"
-    writers: [scripts/hooks/launch_plan_guard.py, scripts/launch-plan.py]
+    writers: [scripts/hooks/launch_plan_guard.py, scripts/launch-plan.py, scripts/map-from-message.py]
     time_field: ts
     time_kind: tz
     event_from: "field:event"
@@ -339,6 +357,12 @@ journals:
     time_kind: naive
     event_from: "field:событие"
     task_field: "задача"
+  self-sensors:
+    file: self-sensors.jsonl
+    writers: [scripts/self-sensors.py]
+    time_field: ts
+    time_kind: tz
+    event_from: sensors.daily
   "срок-входа":
     file: "срок-входа.jsonl"
     writers: [scripts/check-login-expiry.py]
@@ -367,7 +391,8 @@ journals:
     event_from: secret.deleted
   "удаления-спрошено":
     file: "удаления-спрошено.jsonl"
-    writers: [scripts/protected-delete.py]
+    writers: none
+    why: "журнал вопросов снят задачей hr.consent-buttons-doors: ответ даёт кнопка, писателя нет; файл остаётся читаемым историей"
     time_field: ts
     time_kind: epoch
     event_from: delete.asked
@@ -401,6 +426,12 @@ journals:
     time_field: ts
     time_kind: tz
     event_from: "field:event"
+  "ответы-в-канал":
+    file: "ответы-в-канал.jsonl"
+    writers: [scripts/hooks/channel_reply_guard.py, harness/demons/dispatcher-stall-watch.sh]
+    time_field: ts
+    time_kind: tz
+    event_from: "field:event"
   "уборка-docker":
     file: "уборка-docker.jsonl"
     writers: none
@@ -429,6 +460,30 @@ journals:
     time_kind: tz
     event_from: alert.waiting
     outcome_default: held
+  "режим-скорости":
+    file: "режим-скорости.jsonl"
+    writers: [harness/demons/speed_mode.py, harness/demons/session-warden.sh]
+    time_field: ts
+    time_kind: tz
+    event_from: "field:event"
+  process-runs:
+    file: process-runs.jsonl
+    writers: [scripts/run-background.sh]
+    time_field: ts
+    time_kind: tz
+    event_from: "field:event"
+  checks-slice:
+    file: checks-slice.jsonl
+    writers: [scripts/run-in-checks-slice.sh]
+    time_field: ts
+    time_kind: tz
+    event_from: "field:event"
+  process-load:
+    file: process-load.jsonl
+    writers: [scripts/process-dispatcher.py]
+    time_field: ts
+    time_kind: tz
+    event_from: "field:event"
   env-teardown:
     file: env-teardown.jsonl
     writers: none
@@ -436,3 +491,11 @@ journals:
     time_field: ts
     time_kind: tz
     event_from: env.teardown
+  resource-samples:
+    file: resource-samples.jsonl
+    kind: sample
+    writers: none
+    why: выборки переписываются целиком (tmp + os.replace) в harness/demons/resource_report.py, дозаписи нет — обход её не видит
+    time_field: ts
+    time_kind: epoch
+    event_from: resource.sample

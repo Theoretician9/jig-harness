@@ -41,6 +41,14 @@ import tempfile
 
 import yaml
 
+def _корень_следов() -> pathlib.Path:
+    """Корень следов — у общего загрузчика: умолчание внутри репозитория
+    отдавало весь вывод произвольной команды гиту."""
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent / "lib"))
+    import config as конф                                 # noqa: PLC0415
+    return pathlib.Path(конф.live_check_trace_root())
+
+
 КОРЕНЬ = pathlib.Path(os.environ.get("HARNESS_LIVE_CHECK_REPO")
                       or pathlib.Path(__file__).resolve().parent.parent)
 РЕЕСТР = pathlib.Path(os.environ.get("HARNESS_MECHANISMS")
@@ -55,7 +63,8 @@ import yaml
 # её следом, а в заготовке карты пакета такой карточки нет вовсе (та же находка
 # у обёртки, ревью 17.10). Свой каталог задачи задаётся переменной при зове.
 СЛЕДЫ = pathlib.Path(os.environ.get("HARNESS_LIVE_CHECK_TOOL_TRACE_DIR")
-                     or КОРЕНЬ / ".tasks" / "живая-проверка" / "живьём")
+                     or _корень_следов() / "живая-проверка"
+                     / "живьём")
 
 КЛАСС = "C2"
 # Приставка поля «живьём» у записей ЭТОГО прибора: по ней он отличает своё

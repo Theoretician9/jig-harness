@@ -219,6 +219,83 @@ tg_send() {  # $1 = текст владельцу, дальше доводы д�
 
 в_панели() { tmux display-message -p -t "$TMUX_SESSION" '#{pane_current_command}' 2>/dev/null || echo "нет-сессии"; }
 
+# Метка «перезагрузка начата» лежит там же, где флаги панели: туда пишет агент.
+REBOOT_MARK="${HARNESS_PANEL_STATE:-$PANEL_STATE_DIR}/reboot-started.json"
+BOOT_CHECK_TRACE_DIR="${BOOT_CHECK_TRACE_DIR:-${LIVE_CHECK_TRACE_ROOT:-$LOG_DIR/живая-проверка}/hr.reboot-in-rotation-window/живьём}"
+# Выше суммы пределов перечня: обёртка не должна убить именно красный случай.
+REBOOT_CHECK_TIMEOUT_SEC="${REBOOT_CHECK_TIMEOUT_SEC:-600}"
+
+# Итог перезагрузки в окне ротации говорит один носитель — boot_check.py; здесь
+# только зов и перевод его вывода в слова для владельца. Результат — в
+# BOOT_OUT, BOOT_RC (5 = докладывать нечего) и BOOT_TRACE.
+# Имя следа с датой и временем: общая обёртка пишет по одному файлу на имя, и
+# два прогона иначе затёрли бы друг друга.
+проверка_после_перезагрузки() { # $1 = пусто | --поздно
+    # Без метки (питание, паника) сравнивать ядру не с чем — зовём как руками, без --метка.
+    local stamp has_mark=""; stamp=$(date +%Y%m%d-%H%M%S)
+    [ ! -f "$REBOOT_MARK" ] || has_mark=1
+    BOOT_TRACE="$BOOT_CHECK_TRACE_DIR/scripts-boot_check.py-$stamp.log"
+    [ "${BOOT_TRACE:0:1}" = "/" ] || BOOT_TRACE="$PROJECT_DIR/$BOOT_TRACE"
+    BOOT_OUT=$(cd "$PROJECT_DIR" && HARNESS_LIVE_CHECK_TRACE_DIR="$BOOT_CHECK_TRACE_DIR" \
+               HARNESS_LIVE_CHECK_TIMEOUT="$REBOOT_CHECK_TIMEOUT_SEC" \
+               scripts/live-check.sh "scripts/boot_check.py-$stamp" -- \
+               python3 scripts/boot_check.py ${has_mark:+--метка "$REBOOT_MARK"} ${1:+"$1"})
+    BOOT_RC=$?
+}
+
+# Весть владельцу: итог словами, ниже только красное и непроверенное ИМЕНАМИ.
+# Двери (команды терминала) сюда не попадают — они уходят в карточку.
+весть_о_перезагрузке() {
+    local last head counts skipped
+    last=$(printf '%s\n' "$BOOT_OUT" | tail -1)
+    case "$BOOT_RC:$last" in
+        0:поднялся:*)
+            counts=$(printf '%s' "$last" | sed -E 's/^поднялся: ок ([0-9]+ из [0-9]+).*/\1/')
+            skipped=$(printf '%s' "$last" | sed -nE 's/.*; не проверено [0-9]+: (.*)/\1/p')
+            head="Сервер перезагружен при смене сессии: всё поднялось, ${counts}${skipped:+, не проверено: $skipped}." ;;
+        1:"НЕ ПОДНЯЛСЯ:"*)
+            head="Сервер перезагружен при смене сессии, но не всё поднялось: ${last##*: }." ;;
+        1:"перезагрузка не состоялась"*)
+            head="Перезагрузку при смене сессии не провёл: сервер так и не перезагрузился${last#перезагрузка не состоялась}. Сервер работает как прежде." ;;
+        *)
+            head="Сервер перезагружен при смене сессии, но проверка подъёма не дала итога (код $BOOT_RC). Подробности в следе: $BOOT_TRACE" ;;
+    esac
+    printf '%s\n' "$head"
+    printf '%s\n' "$BOOT_OUT" | sed -nE \
+        -e 's/^([^:]+): КРАСНЫЙ — .*/\1: не поднялось/p' \
+        -e 's/^([^:]+): не проверено — .*/\1: не проверено/p'
+}
+
+REBOOT_TOLD_STAMP="$LOG_DIR/sentinel.reboot-mark.told"
+время_метки() { python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8")).get("с", ""))' "$REBOOT_MARK" 2>/dev/null || true; }
+метка_уже_доложена() {
+    local at; at=$(время_метки)
+    [ -n "$at" ] && [ "$(cat "$REBOOT_TOLD_STAMP" 2>/dev/null)" = "$at" ]
+}
+запомнить_доклад_по_метке() { время_метки > "$REBOOT_TOLD_STAMP" 2>/dev/null || true; }
+
+# $1 = красное ли в прежнем докладе (1|0), $2 = его красные строки и протухшие метки.
+# Красное — карточка с дверями; весть уходит без --task, иначе карточка
+# получила бы текст без дверей.
+доложить_перезагрузку() {
+    local text first red="$1"
+    text=$(весть_о_перезагрузке)
+    first=${text%%$'\n'*}
+    [ -n "$2" ] && text="$text
+$2"
+    [ "$BOOT_RC" -ne 0 ] && { red=1; RC=1; }
+    say "boot_check (код $BOOT_RC): $BOOT_OUT"
+    if [ "$red" = 1 ]; then
+        if [ -f "$PROJECT_DIR/scripts/alert-task.py" ]; then
+            python3 "$PROJECT_DIR/scripts/alert-task.py" --key sentinel:start-red --title "$first" \
+                --text "$BOOT_OUT; след: $BOOT_TRACE" </dev/null >/dev/null 2>&1 || say "карточка sentinel:start-red: код $?"
+        fi
+    elif [ -f "$PROJECT_DIR/scripts/alert-task.py" ]; then
+        python3 "$PROJECT_DIR/scripts/alert-task.py" --resolve sentinel:start-red </dev/null >/dev/null 2>&1 || true
+    fi
+    tg_send "$text" --несмотря-на-лимит || RC=1
+}
+
 mkdir -p "$LOG_DIR" "$HEARTBEAT_DIR"
 RC=0
 
@@ -263,7 +340,8 @@ if [ "$(решение_по_метке "$age" "$CRON_STALE_MIN" "$(окно_cron
     # Независимо от cron: прогнать сторожа сессий сейчас же, своими руками.
     if [ -x "$PROJECT_DIR/harness/demons/session-warden.sh" ]; then
         say "запускаю session-warden сам, не дожидаясь cron"
-        SENTINEL_RESCUE=1 "$PROJECT_DIR/harness/demons/session-warden.sh" >> "$LOG_DIR/session-warden.log" 2>&1 || true
+        # Через обёртку: спасение из sentinel-boot при выключенном ключе не идёт (session-warden — исключение).
+        SENTINEL_RESCUE=1 "$PROJECT_DIR/scripts/run-background.sh" session-warden -- "$PROJECT_DIR/harness/demons/session-warden.sh" >> "$LOG_DIR/session-warden.log" 2>&1 || true
         ACTIONS="${ACTIONS:+$ACTIONS, }запустил сторожа сессий сам"
     fi
     сказать_раз cron "Демоны присмотра стояли: метка сторожа сессий была ${age} мин при пороге ${CRON_STALE_MIN} (служба cron: ${cron_state:-нет}). Сделал: ${ACTIONS:-ничего, чинить было нечем}. Если повторится — смотри $LOG_DIR/sentinel.log."
@@ -338,6 +416,29 @@ fi
 
 # ── 4. Обычный прогон на этом заканчивается ─────────────────────────────────
 if [ "${1:-}" != "--boot" ]; then
+    # --boot мог не стартовать или упасть: метка без доклада не должна молчать.
+    # Метку, которую итог не снимает (каталог только на чтение), докладываем один
+    # раз: помета лежит в LOG_DIR и названа временем метки, новая метка её не наследует.
+    if [ -f "$REBOOT_MARK" ] && ! метка_уже_доложена; then
+        проверка_после_перезагрузки --поздно
+        if [ "$BOOT_RC" -ne 5 ]; then
+            доложить_перезагрузку 0 ""
+            [ ! -f "$REBOOT_MARK" ] || запомнить_доклад_по_метке
+        fi
+    fi
+    # Залипшая sentinel:start-red: гасит только --boot, а в обычном круге его нет.
+    # Гасим лишь по свежей зелёной проверке, иначе красное скрыли бы.
+    # Метку ведёт только --boot и поздний путь выше: boot_check с --метка снимает её.
+    OPEN_KEYS=""
+    [ ! -f "$REBOOT_MARK" ] && [ -f "$PROJECT_DIR/scripts/alert-task.py" ] \
+        && OPEN_KEYS=$(python3 "$PROJECT_DIR/scripts/alert-task.py" --open </dev/null 2>/dev/null || true)
+    OPEN_KEYS=$(cut -f1 <<<"$OPEN_KEYS")
+    if grep -qxF sentinel:start-red <<<"$OPEN_KEYS"; then
+        проверка_после_перезагрузки
+        if [ "$BOOT_RC" -eq 0 ]; then
+            python3 "$PROJECT_DIR/scripts/alert-task.py" --resolve sentinel:start-red </dev/null >/dev/null 2>&1 || true
+        fi
+    fi
     touch "$HEARTBEAT_DIR/sentinel"
     exit "$RC"
 fi
@@ -373,6 +474,19 @@ case "$(в_панели)" in
         fi ;;
 esac
 
+BOOT_MARKED=0
+BOOT_LINE=""
+if [ -f "$REBOOT_MARK" ]; then
+    проверка_после_перезагрузки
+    [ "$BOOT_RC" -eq 5 ] || BOOT_MARKED=1
+else
+    # Внезапная перезагрузка: доклад прежний, к нему — итог подъёма систем.
+    проверка_после_перезагрузки
+    [ "$BOOT_RC" -eq 0 ] || RC=1
+    BOOT_LINE="
+подъём систем (boot_check, код $BOOT_RC): $(printf '%s\n' "$BOOT_OUT" | grep -E 'КРАСНЫЙ|^НЕ ПОДНЯЛСЯ' || printf '%s\n' "$BOOT_OUT" | tail -1)"
+fi
+
 проверка() { # $1=имя  $2=команда  → строка отчёта
     # В канал уходит последняя строка (владельцу нужен вердикт), но красный
     # вердикт без подробностей нечинибелен: полный вывод — в лог, рядом.
@@ -402,7 +516,7 @@ $(проверка "сторож сессий" "cd '$PROJECT_DIR' && bash harnes
 $(проверка "срок входа" "cd '$PROJECT_DIR' && python3 scripts/check-login-expiry.py")
 диск: $(df -h / | awk 'NR==2 {print $4" свободно из "$2}')
 память: $(free -h | awk 'NR==2 {print $7" доступно из "$2}')
-последний коммит: $(cd "$PROJECT_DIR" && git log --oneline -1 2>/dev/null)"
+последний коммит: $(cd "$PROJECT_DIR" && git log --oneline -1 2>/dev/null)$BOOT_LINE"
 
 # Метки демонов: называем только протухшие — здоровые владельцу не новость.
 # Порог у КАЖДОЙ метки свой — период из HEARTBEAT_PERIODS ×2, ровно как судит
@@ -427,6 +541,15 @@ done
 метки протухли (возраст больше периода ×2):$STALE"
 
 say "$REPORT"
+if [ "$BOOT_MARKED" = 1 ]; then
+    # Из прежнего доклада в канал идёт только красное и протухшее: зелёное
+    # повторяло бы перечень подъёма, оно остаётся в журнале выше.
+    old_red=0
+    { [ "$RC" -ne 0 ] || [[ "$REPORT" == *КРАСНЫЙ* ]]; } && old_red=1
+    доложить_перезагрузку "$old_red" "$(printf '%s\n' "$REPORT" | grep -E 'КРАСНЫЙ|^метки протухли' || true)"
+    touch "$HEARTBEAT_DIR/sentinel"
+    exit "$RC"
+fi
 # Красное в докладе — работа модели. Проверки считаются в подоболочках, и их
 # RC до сюда не доходит, поэтому красный вердикт ищется и в самом тексте.
 # Писателя может не быть (раскладка неполна) — сторож от этого не падает.

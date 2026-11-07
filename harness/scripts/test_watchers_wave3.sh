@@ -37,6 +37,9 @@
 # Имена переменных ЛАТИНИЦЕЙ.
 set -uo pipefail
 export LC_ALL=C.UTF-8 PYTHONDONTWRITEBYTECODE=1
+# Переменная TMUX указывает клиенту на сокет ЖИВОГО сервера, если тест
+# запущен из панели: без снятия любой голый tmux ушёл бы туда.
+unset TMUX TMUX_PANE
 
 HERE="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
@@ -73,7 +76,7 @@ T=$(mktemp -d)
 cleanup() {
     local d
     for d in "$T"/*/tmux; do
-        [ -d "$d" ] && TMUX_TMPDIR="$d" tmux kill-server 2>/dev/null
+        [ -d "$d" ] && env -u TMUX tmux -S "$d/tmux-$(id -u)/default" kill-server 2>/dev/null
     done
     rm -rf "$T"
 }
@@ -113,6 +116,9 @@ def tasks(map_path, key):
 
 def normalize(text, stand):
     text = text.replace(stand, "<СТЕНД>")
+    # Зелёный итог подъёма систем sentinel дописывает к докладу и без метки
+    # перезагрузки; эталон этой строки не знал. Красный итог не вырезается.
+    text = re.sub(r"\nподъём систем \(boot_check, код 0\): [^\n]*", "", text)
     # Минуты и секунды простоя считаются от часов прогона: эталон и
     # проверяемый идут друг за другом, и «45 мин» у одного — «46 мин» у другого.
     text = re.sub(r"\d+ мин", "N мин", text)
@@ -350,7 +356,7 @@ stand_env() {  # $1 = стенд
         "HARNESS_ACTIVE_LINE=harness" "HARNESS_DOSKA=$s/log/доска.json" \
         "HARNESS_PANEL_STATE=$s/panel" "CLAUDE_PROJECTS_DIR=$s/projects" \
         "HARNESS_TG_SEND=$s/tree/scripts/tg_send.sh" "HARNESS_ALERT_TASK=$s/tree/scripts/alert-task.py" \
-        "STAND_REAL_WRITER=$WRITER" "STAND_WRITER_MODE=$(cat "$s/mode")" "STAND_DIR=$s"
+        "AGENT_PROC_ROOT=$s/hb" "STAND_REAL_WRITER=$WRITER" "STAND_WRITER_MODE=$(cat "$s/mode")" "STAND_DIR=$s"
 }
 
 run_step() {  # $1 = стенд, $2 = шаг, дальше ПЕРЕМЕННАЯ=значение…, «--», доводы сторожа
@@ -503,6 +509,15 @@ import os, sys
 if os.environ.get("STAND_LOGIN") == "red":
     print("вход истекает: осталось 0 ч (стенд)"); sys.exit(1)
 print("вход жив: 300 ч (стенд)")
+PY
+    # Подъём систем зелёный: сценарий краснит доклад сроком входа, а не
+    # boot_check. Обёртка следа настоящая; вывод — дословная выдержка из следа
+    # живого boot_check без метки (03.11.2026).
+    cp "$HERE/live-check.sh" "$p/scripts/"
+    cat > "$p/scripts/boot_check.py" <<'PY'
+print("агент: ок — active")
+print("ядро: не проверено — метки нет, ядру не с чем сравниться")
+print("поднялся: ок 15 из 17; не проверено 2: продукт, ядро")
 PY
     printf 'SENTINEL_UNITS="stand-unit"\nBOOT_WAIT_SEC="0"\n' >> "$1/harness.conf"
 }
@@ -855,7 +870,7 @@ SENDERS_OUT="$(judge senders "$SENDERS_DATA" "$ROOT/scripts/check-owner-senders.
     "$DEMONS/acceptance-watch.sh" "$DEMONS/check-builder.sh" "$DEMONS/extensions-watch.sh" \
     "$DEMONS/memory-revision.sh" "$DEMONS/product-health.sh" "$DEMONS/sentinel.sh" \
     "$DEMONS/session-warden.sh" 2>&1)"
-case_check "owner-senders: ключи семи сторожей — восемь записей, все card" "записей 8, не card: -" \
+case_check "owner-senders: ключи семи сторожей — девять записей, все card" "записей 9, не card: -" \
     "$(sed -n 1p <<< "$SENDERS_OUT")"
 case_check "owner-senders: долга не осталось, debt_max 0" "долг 0, потолок 0" \
     "$(sed -n 2p <<< "$SENDERS_OUT")"

@@ -7,6 +7,9 @@ Claude Code. Пустой набор и мало данных — ОТКАЗ, а
 
   delivery-latency.py --окно "<от>" "<до>" [--критерий К-1|К-2|К-3|К-6 | --потери]
                       [--стенограммы <каталог>]
+  delivery-latency.py --без-ответа [--окно "<от>" "<до>"]   (без --окно — последние сутки)
+  delivery-latency.py --просрочено [--на "<момент>"]   (момент — местное время или «@<эпоха>»)
+  delivery-latency.py --просрочено --сетка "<от>" "<до>" [--порог <мин>]
   delivery-latency.py --след (--окно "<от>" "<до>" | --ворота) [--зазор <с>]
 
 Время в --окно местное: «ГГГГ-ММ-ДД ЧЧ:ММ[:СС]». Последняя непустая строка вывода —
@@ -26,6 +29,7 @@ import time
 from datetime import datetime
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "lib"))
+import channel_reply  # noqa: E402
 import config  # noqa: E402
 
 LEGAL_REFUSALS = {"пауза", "ротация", "лимит"}
@@ -33,8 +37,15 @@ MIN_N = 20          # меньше — судить рано
 WIDEN_DAYS = 3
 GATE_WINDOW_DAYS = 7
 GATE_YELLOW = 77  # код «жёлтый» ворот: виден, не зелёный, не красный
+SETTINGS = config.из_файла(config.путь_harness_conf())
+REPLY_HORIZON_SEC = channel_reply.reply_horizon_sec(SETTINGS)
 INF = float("inf")
 CODES = {"ПРОЙДЕН": 0, "ПРОВАЛ": 1, "ОТКАЗ": 2}
+
+
+def reply_within_sec():
+    """Срок ответа смены, сек."""
+    return int(SETTINGS.get("OWNER_REPLY_MAX_MIN") or 5) * 60
 
 
 def fmt(x):
@@ -471,6 +482,66 @@ def summary(marks, log_dir, lo, hi, transcripts):
     return verdict("сводка", "ПРОЙДЕН", "метки есть", len(stamps))
 
 
+def unanswered_report(log_dir, lo, hi, now):
+    """Доля сообщений владельца без ответа смены в срок — по правилу channel_reply."""
+    bad, total = channel_reply.unanswered_count(log_dir, lo, hi, reply_within_sec(), now)
+    share = f" ({100 * bad / total:.0f}%)" if total else ""
+    print(f"без ответа: {bad} из {total}{share}; срок ответа {reply_within_sec() // 60} мин")
+    return 0
+
+
+def parse_at(text):
+    """Момент --на: «ГГГГ-ММ-ДД ЧЧ:ММ[:СС]» местного времени либо «@<эпоха>»."""
+    if text.startswith("@"):
+        try:
+            return float(text[1:])
+        except ValueError:
+            pass
+    try:
+        return parse_local(text)
+    except SystemExit as exc:
+        print(exc.code, file=sys.stderr)
+        sys.exit(2)
+
+
+def message_text(log_dir, name):
+    for directory in channel_reply.message_dirs(log_dir):
+        try:
+            return (directory / name).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+    return ""
+
+
+def overdue_now(log_dir, now):
+    rows = channel_reply.overdue(log_dir, reply_within_sec(), now, REPLY_HORIZON_SEC)
+    for moment, name in rows:
+        text = " ".join(message_text(log_dir, name).split())[:60]
+        stamp = time.strftime("%H:%M:%S", time.localtime(moment))
+        print(f"{name[:-len('.txt')]}\t{stamp}\t{int((now - moment) // 60)}\t{text}")
+    word = "ПРОВАЛ" if rows else "ПРОЙДЕН"
+    return verdict("просрочено", word, f"просрочено сообщений {len(rows)}, срок {reply_within_sec() // 60} мин", len(rows))
+
+
+def overdue_grid(log_dir, lo, hi, within):
+    """Сетка в 1 мин: сработка — минута с новым файлом в наборе, эпизод — серия минут с непустым набором."""
+    messages, replies = channel_reply.owner_messages(log_dir), channel_reply.reply_times(log_dir)
+    seen, fired, episodes, in_episode = set(), 0, 0, False
+    minute = math.ceil(lo / 60) * 60
+    while minute <= hi:
+        current = {name for _, name in channel_reply.overdue_among(
+            log_dir, messages, replies, within, minute, REPLY_HORIZON_SEC)}
+        if current - seen:
+            fired += 1
+        if current and not in_episode:
+            episodes += 1
+        in_episode, seen = bool(current), current
+        minute += 60
+    inside = sum(1 for moment, _ in messages if lo <= moment <= hi)
+    print(f"ВЕРДИКТ сетка: сработок {fired}, эпизодов {episodes}, n={inside}")
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--окно", nargs=2, metavar=("ОТ", "ДО"), dest="window")
@@ -480,17 +551,32 @@ def main():
     ap.add_argument("--критерий", choices=["К-1", "К-2", "К-3", "К-6"], dest="criterion")
     ap.add_argument("--потери", action="store_true", dest="losses")
     ap.add_argument("--стенограммы", dest="transcripts")
+    ap.add_argument("--без-ответа", action="store_true", dest="unanswered")
+    ap.add_argument("--просрочено", action="store_true", dest="overdue")
+    ap.add_argument("--на", dest="at")
+    ap.add_argument("--сетка", nargs=2, metavar=("ОТ", "ДО"), dest="grid")
+    ap.add_argument("--порог", type=float, dest="threshold")
     args = ap.parse_args()
+    if args.overdue:
+        log_dir = os.environ.get("HARNESS_LOG_DIR") or config.log_dir()
+        if args.grid:
+            within = (args.threshold * 60) if args.threshold else reply_within_sec()
+            return overdue_grid(log_dir, parse_at(args.grid[0]), parse_at(args.grid[1]), within)
+        return overdue_now(log_dir, parse_at(args.at) if args.at else time.time())
     if args.gate and not args.trace:
         ap.error("--ворота работает только с --след")
-    if not args.window and not args.gate:
+    if not args.window and not args.gate and not args.unanswered:
         ap.error("нужен --окно (или --ворота вместе с --след)")
     now = time.time()
-    if args.window:
+    if args.unanswered and not args.window:
+        lo, hi = now - 86400, now
+    elif args.window:
         lo, hi = parse_local(args.window[0]), parse_local(args.window[1])
     else:
         lo, hi = now - GATE_WINDOW_DAYS * 86400, now
     log_dir = os.environ.get("HARNESS_LOG_DIR") or config.log_dir()
+    if args.unanswered:
+        return unanswered_report(log_dir, lo, hi, now)
     marks = Marks(os.path.join(log_dir, "доставка.jsonl"))
     if args.trace:
         code = criterion_trace(marks, lo, hi, args.gap, now)

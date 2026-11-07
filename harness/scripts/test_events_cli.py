@@ -54,6 +54,7 @@ ROOT = Path(__file__).resolve().parent.parent
 CLI = os.environ.get("HARNESS_EVENTS_CLI") or str(ROOT / "scripts" / "events.py")
 LIVE_EVENTS = Path("/var/log/harness/.events")
 TASK = "hr.harness-detailed-logging"
+ACK_REASON = "разобрано пробой"
 BUDGET = {"status": 150, "task": 400, "journals": 300, "lost": 200}
 SRC_GUARD = "scripts/hooks/guard_bash.py"
 
@@ -264,9 +265,12 @@ def line_with(text: str, *needles: str) -> str:
 
 
 def live_snapshot():
+    """След стенда в боевом .events, а не тишина каталога: туда пишет вся машина.
+    Разбор ACK_REASON оставляет только стенд. След в индексе не держится: следующий
+    стенд перестроил бы его, — утечку индекса ловят ответы CLI по числам стенда."""
     if not LIVE_EVENTS.exists():
         return ("нет",)
-    return tuple(sorted((p.name, p.stat().st_mtime_ns) for p in LIVE_EVENTS.rglob("*")))
+    return (LIVE_EVENTS / "lost.jsonl").read_text(encoding="utf-8", errors="replace").count(ACK_REASON)
 
 
 def live_modes() -> dict:
@@ -604,7 +608,7 @@ def main() -> int:
         check("lost: причина lock-timeout", True, "lock-timeout" in out)
         check("lost: причина short-write", True, "short-write" in out)
         before = (stand["state"] / "lost.jsonl").read_text(encoding="utf-8")
-        rc, out, err = run(stand, "lost", "--ack", "разобрано пробой")
+        rc, out, err = run(stand, "lost", "--ack", ACK_REASON)
         check("lost --ack: rc 0", 0, rc)
         after = (stand["state"] / "lost.jsonl").read_text(encoding="utf-8")
         check("lost --ack: прежние строки потерь не стёрты (дозапись)", True, after.startswith(before))

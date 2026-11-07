@@ -16,7 +16,9 @@ set -uo pipefail
 export LC_ALL=C.UTF-8
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-WATCHER="$HERE/../harness/demons/limit-watch.sh"
+# Дверь для мутаций: LIMIT_WATCH_UNDER_TEST — путь к испорченной копии сторожа
+# (копия лежит в дереве с scripts/lib: сторож берёт загрузчик конфига от себя).
+WATCHER="${LIMIT_WATCH_UNDER_TEST:-$HERE/../harness/demons/limit-watch.sh}"
 source "$HERE/lib/selftest_cases.sh"
 
 STAND=$(mktemp -d)
@@ -161,6 +163,56 @@ printf '%s blocked\n' "$(( $(date +%s) - 900 ))" > "$STAND/zhurnal/лимит-п
 zhurnal 1500 60
 progon
 case_check "лимит поверх «blocked» — владельцу сказано" "4" "$(skazano)"
+
+echo "── лимит снят: повторный заход devmap-selfheal по флагу, и только по нему ──"
+# Подставной демон карты лежит в проекте стенда: сторож зовёт его от
+# PROJECT_DIR, и боевой демон с боевым журналом недосягаем. Каждый запуск —
+# строка с LOG_DIR, которым его позвали.
+mkdir -p "$STAND/proekt/harness/demons"
+cat > "$STAND/proekt/harness/demons/devmap-selfheal.sh" <<STUB
+#!/usr/bin/env bash
+printf '%s\n' "\$LOG_DIR" >> "$STAND/devmap-zapuski.txt"
+STUB
+# Подставная обёртка: разбор доводов боевой run-background.sh, без её выключателя
+# (конфига у стенда нет, а боевая при пустом конфиге гасит запуск). Id пишется в
+# файл: заход мимо обёртки или под чужим именем — неудача.
+cat > "$STAND/proekt/scripts/run-background.sh" <<STUB
+#!/usr/bin/env bash
+[ "\${2:-}" = "--" ] || exit 2
+printf '%s\n' "\$1" >> "$STAND/obertka-zapuski.txt"
+shift 2
+exec "\$@"
+STUB
+chmod +x "$STAND/proekt/scripts/run-background.sh"
+RETRY_FLAG="$STAND/zhurnal/devmap/retry-after-limit"
+zapuski() { grep -c . "$STAND/devmap-zapuski.txt" 2>/dev/null || echo 0; }
+wait_zapusk() {  # демон уходит в фон: ждём его строку до 10 с
+    local i
+    for i in $(seq 1 20); do [ "$(zapuski)" -ge "$1" ] && return 0; sleep 0.5; done
+}
+# Метка стоит с прошлого случая; флага нет — ветка возобновления пройдена, демон не зван.
+rm -f "$RETRY_FLAG"
+zhurnal 30 3600
+progon
+sleep 2
+case_check "без флага: метка снята (ветка «лимит снят» пройдена)" \
+    "нет" "$([ -f "$STAND/zhurnal/лимит-подписки.состояние" ] && echo да || echo нет)"
+case_check "без флага: devmap-selfheal не запущен" "0" "$(zapuski)"
+zhurnal 1500 60
+progon
+case_check "лимит снова доказан — метка стоит" \
+    "да" "$([ -f "$STAND/zhurnal/лимит-подписки.состояние" ] && echo да || echo нет)"
+mkdir -p "$STAND/zhurnal/devmap"; : > "$RETRY_FLAG"
+zhurnal 30 3600
+progon
+wait_zapusk 1
+case_check "с флагом: devmap-selfheal запущен ровно один раз" "1" "$(zapuski)"
+case_check "с флагом: флаг повтора снят" "нет" "$([ -e "$RETRY_FLAG" ] && echo да || echo нет)"
+case_check "демон позван с LOG_DIR стенда, а не боевым" "$STAND/zhurnal" "$(head -1 "$STAND/devmap-zapuski.txt" 2>/dev/null)"
+case_check "демон пошёл через обёртку под своим id" "devmap-selfheal" "$(head -1 "$STAND/obertka-zapuski.txt" 2>/dev/null)"
+progon
+sleep 2
+case_check "следующий обход второго захода не даёт" "1" "$(zapuski)"
 
 printf '\nЛИМИТ-СТОРОЖ: путей %d, неудач %d\n' "$CASES_PATHS" "$CASES_FAILED"
 [ "$CASES_FAILED" -eq 0 ]

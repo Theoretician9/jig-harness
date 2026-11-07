@@ -415,6 +415,13 @@ class Панель(BaseHTTPRequestHandler):
             искать = (запрос.get("искать") or [""])[0]
             return self.ответить(200, vid.устройство(
                 state.устройство(искать), искать), "text/html")
+        if путь == "/processy":
+            if not вход().проверить(self.пропуск):
+                return self.ответить(401, {"беда": "нужен пропуск"})
+            params = {key: values[0] for key, values in urllib.parse.parse_qs(self.path.partition("?")[2]).items()}
+            return self.ответить(200, vid.processes_page(
+                state.processes(), params.get("okno", ""), params.get("klass", ""), params.get("vkl", ""),
+                params.get("sort", ""), params.get("q", "")), "text/html")
         if путь == "/nastrojki":
             if not вход().проверить(self.пропуск):
                 return self.ответить(401, {"беда": "нужен пропуск"})

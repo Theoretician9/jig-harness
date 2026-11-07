@@ -130,7 +130,10 @@ for файл in данные.get("оставить") or []:
 импорты = re.findall(r"^@(?:\./)?(.+)$",
                      (ПАКЕТ / "harness" / "CLAUDE.md").read_text(encoding="utf-8"), re.M)
 оставить = данные.get("оставить") or []
-битые = [и for и in импорты if f"harness/{и}" not in оставить]
+# CLAUDE.md кладётся в корень проекта: импорт «harness/self/…» уже назван от корня,
+# остальные («STATE.md») лежат рядом с самим файлом, в harness/.
+битые = [и for и in импорты
+         if (и if и.startswith("harness/") else f"harness/{и}") not in оставить]
 путь(not битые, f"каждый @-импорт CLAUDE.md пакета стоит в «оставить» ({len(импорты)}) {битые or ''}")
 
 print(f"ДАННЫЕ СБОРКИ: путей {путей}, неудач {неудач}")

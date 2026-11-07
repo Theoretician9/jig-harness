@@ -80,6 +80,10 @@ HERE = Path(__file__).resolve().parent
 MECHANISM = HERE / "tmp-sweep.py"
 STAND_PREFIX = "уборка-стенд-"
 HOME_PREFIX = "уборка-стенд-дом-"
+# Место вне /tmp для стендов, которых уборка касаться не вправе. Не $HOME: дом —
+# свойство хозяина машины, под чужим или пустым домом проба падала, не дойдя до
+# механизма.
+OUTSIDE_TMP = Path("/var/tmp")
 WASTE = "обновление-стенд-"
 UNKNOWN = "неизвестное-"
 QUARANTINE = ".уборка-карантин"
@@ -206,7 +210,7 @@ def force_remove(path: Path) -> None:
 def clean_stale_stands() -> int:
     """Стенды прежних прогонов, убитых SIGKILL: только свои, только старше 20 мин."""
     removed = 0
-    for base, prefix in (("/tmp", STAND_PREFIX), (str(Path.home()), HOME_PREFIX)):
+    for base, prefix in (("/tmp", STAND_PREFIX), (str(OUTSIDE_TMP), HOME_PREFIX)):
         for name in os.listdir(base):
             if not name.startswith(prefix):
                 continue
@@ -494,7 +498,7 @@ def case_t1_twenty_dead_waste():
 
 def case_t2_cli_root_substitution():
     """§7.2: TMP_SWEEP_ROOT без --selftest — код 2, «подмена корня вне стенда»,
-    ни обращения к держателям, ни журнала, стенд и копия в $HOME целы."""
+    ни обращения к держателям, ни журнала, стенд и копия вне /tmp целы."""
     mod()
     stand = new_stand()
     logs = stand / "лог"
@@ -510,7 +514,7 @@ def case_t2_cli_root_substitution():
     make_tree(open_dir / f"{WASTE}y", files=1)
     open_dir.chmod(0o755)
     (stand / "rel").mkdir()
-    home_copy = Path(tempfile.mkdtemp(prefix=HOME_PREFIX, dir=Path.home()))
+    home_copy = Path(tempfile.mkdtemp(prefix=HOME_PREFIX, dir=OUTSIDE_TMP))
     CREATED.append(home_copy)
     make_tree(home_copy / f"{WASTE}z", files=1)
     before_stand, before_home = tree_hash(stand), tree_hash(home_copy)
@@ -539,7 +543,7 @@ def case_t2e_check_root_form():
     sub = stand / "подстенд"
     sub.mkdir()
     to_stand.symlink_to(sub)
-    home_copy = Path(tempfile.mkdtemp(prefix=HOME_PREFIX, dir=Path.home()))
+    home_copy = Path(tempfile.mkdtemp(prefix=HOME_PREFIX, dir=OUTSIDE_TMP))
     CREATED.append(home_copy)
     for path in (str(to_tmp), str(stand), "", ".", "rel", str(home_copy)):
         reason = module.check_root(path, stand=False)
@@ -1014,7 +1018,7 @@ def case_t23_journal_form():
     assert result.returncode == 0, f"чистый журнал: код {result.returncode}"
     assert "нарушений 0" in result.stdout, f"чистый журнал: {result.stdout[-200:]}"
     with open(journal, "a", encoding="utf-8") as handle:
-        handle.write(json.dumps({**rows[0], "путь": str(Path.home() / "чужое")},
+        handle.write(json.dumps({**rows[0], "путь": str(OUTSIDE_TMP / "чужое")},
                                 ensure_ascii=False) + "\n")
     result = run_cli("--сверить-журнал", env=env)
     assert result.returncode == 1, f"строка вне /tmp: код {result.returncode}"
@@ -1125,18 +1129,45 @@ def case_lock_second_instance():
     expect_intact(entry, before)
 
 
+# Создатель временного имени: литеральный префикс Python-вызова или шаблона shell `mktemp`.
+# Шаблон с переменной (`/tmp/$MARK.XXXX`) имени не называет — его не берём.
+CREATOR_PATTERNS = (
+    re.compile(r"(?:mkdtemp|mkstemp|TemporaryDirectory|NamedTemporaryFile)"
+               r"\([^()]*?\bprefix\s*=\s*[\"']([^\"']+)[\"']"),
+    re.compile(r"mktemp\s+(?:-d\s+)?[\"']?(?:\$\{TMPDIR:-/tmp\}|/tmp)/([^\"'\s/$]+?)X{3,}"),
+    re.compile(r"mktemp\s+(?:-d\s+)?-t\s+[\"']?([^\"'\s/$]+?)X{3,}"),
+)
+# Пары «проект | пакет»: хуки и панель в пакете лежат иначе, чем в проекте.
+CREATOR_DIRS = ((HERE,), (HERE / "hooks", HERE.parent / "hooks"),
+                (HERE.parent / "harness" / "panel", HERE.parent / "panel"))
+
+
+def tree_creators() -> dict[str, list[str]]:
+    dirs = [next((d for d in pair if d.is_dir()), None) for pair in CREATOR_DIRS]
+    missing = [str(pair[0]) for pair, d in zip(CREATOR_DIRS, dirs) if d is None]
+    assert not missing, f"каталоги создателей не найдены: {missing}"
+    creators: dict[str, list[str]] = {}
+    for folder in dirs:
+        for source in sorted([*folder.glob("*.py"), *folder.glob("*.sh")]):
+            text = source.read_text(encoding="utf-8", errors="replace")
+            for pattern in CREATOR_PATTERNS:
+                for found in pattern.finditer(text):
+                    line = text.count("\n", 0, found.start()) + 1
+                    creators.setdefault(found[1], []).append(f"{source.relative_to(HERE.parent)}:{line}")
+    return creators
+
+
 def case_tr_registry():
-    """Р-2: каждый префикс отходов — ровно префикс mkdtemp какой-то пробы дерева;
+    """Р-2: каждый префикс отходов — ровно префикс временного каталога, который
+    создаёт код харнеса (mkdtemp/mkstemp/TemporaryDirectory/NamedTemporaryFile/
+    mktemp в scripts, хуках, панели); и обратно: каждый такой создатель записан в
+    отходы, защищено или не_отходы, а у записи не_отходы есть создатель;
     dognat/cdp — не отходы (дерево разбора конфликта); реестр не пуст."""
     cfg = load_cfg()
     waste = cfg.get("отходы_проб") or []
     assert waste, "реестр отходов пуст — проба ничего бы не судила"
-    creators: dict[str, list[str]] = {}
-    for probe in sorted(HERE.glob("test_*.py")):
-        text = probe.read_text(encoding="utf-8", errors="replace")
-        for prefix in re.findall(r"mkdtemp\(\s*prefix\s*=\s*[\"']([^\"']+)[\"']", text):
-            creators.setdefault(prefix, []).append(probe.name)
-    assert creators, "в дереве не найдено ни одного mkdtemp(prefix=…) проб"
+    creators = tree_creators()
+    assert creators, "в дереве не найдено ни одного создателя временного каталога"
     bad = [p for p in waste if p.startswith(("dognat", "cdp"))]
     assert not bad, f"в реестре отходов работа, а не отходы: {bad}"
     no_dash = [p for p in waste if not p.endswith("-")]
@@ -1146,6 +1177,12 @@ def case_tr_registry():
     assert WASTE in waste, f"{WASTE} — отход, на котором стоят пробы, не в реестре"
     assert not any(UNKNOWN.startswith(p) for p in waste), f"{UNKNOWN} попал в реестр"
     protected = cfg.get("защищено") or []
+    not_waste = cfg.get("не_отходы") or []
+    unregistered = [f"{p} ({creators[p][0]})" for p in sorted(creators)
+                    if not p.startswith((*waste, *protected)) and p not in not_waste]
+    assert not unregistered, f"создатель есть, записи в реестре нет: {unregistered}"
+    stale = [p for p in not_waste if p not in creators]
+    assert not stale, f"в не_отходы префиксы без создателя: {stale}"
     for name in ("claude-", "cc-socks", QUARANTINE):
         assert name in protected, f"«{name}» не в защищено"
     assert ".sql" in (cfg.get("похоже_на_данные") or []), "«.sql» не в похоже_на_данные"
@@ -1318,7 +1355,7 @@ def case_m1_switch_in_script():
     mod()
     stand = new_stand()
     bin_dir, mark = fake_sudo(stand)
-    home = Path(tempfile.mkdtemp(prefix=HOME_PREFIX, dir=Path.home()))
+    home = Path(tempfile.mkdtemp(prefix=HOME_PREFIX, dir=OUTSIDE_TMP))
     CREATED.append(home)
     logs = home / "лог"
     (logs / "locks" / "services").mkdir(parents=True)
@@ -1386,6 +1423,57 @@ def case_m2_word_prefixes():
     for entry in entries:
         expect_intact(entry, before[entry])
     assert not os.path.lexists(pair), "отход-пара не удалён — ход не шёл"
+
+
+PROBE_WASTE = "доставка-стенд-"
+
+
+def case_s1_probe_prefix_old_removed():
+    """Префикс пробы с создателем в коде, запись старше порога отходов — «удалить»."""
+    _, root, journal = stand_root()
+    entry = make_tree(root / f"{PROBE_WASTE}с1")
+    report, _ = run_sweep(root, journal=journal, now=time.time() + OLD)
+    decision = report.decisions.get(entry.name)
+    assert decision is not None and decision.action == "удалить" and decision.klass == "отходы", \
+        f"{entry.name} старше порога: решение {decision}, ждал отходы/удалить"
+    assert not os.path.lexists(entry), f"{entry.name} не удалён — ход не шёл"
+
+
+def case_s2_probe_prefix_young_kept():
+    """Тот же префикс, запись моложе порога отходов — «оставить», дерево цело."""
+    _, root, journal = stand_root()
+    entry = make_tree(root / f"{PROBE_WASTE}с2")
+    before = tree_hash(entry)
+    report, _ = run_sweep(root, journal=journal, now=time.time())
+    decision = report.decisions.get(entry.name)
+    assert decision is not None and decision.action == "оставить" and decision.klass == "отходы", \
+        f"{entry.name} моложе порога: решение {decision}, ждал отходы/оставить"
+    expect_intact(entry, before)
+
+
+def case_s3_mktemp_default_name_unknown():
+    """Имя `tmp.XXXXXXXXXX` (голый mktemp) любой давности — «неизвестное», цело."""
+    for label, shift in (("молодое", 0), ("старое", 365 * DAY)):
+        _, root, journal = stand_root()
+        entry = make_tree(root / "tmp.Ab3dE9fG1h")
+        before = tree_hash(entry)
+        report, _ = run_sweep(root, journal=journal, now=time.time() + shift)
+        decision = report.decisions.get(entry.name)
+        assert decision is not None and decision.klass == "неизвестное" \
+            and decision.action == "оставить", f"{label}: решение по tmp.* — {decision}"
+        expect_intact(entry, before)
+
+
+def case_s4_bare_word_prefix_unknown():
+    """Имя на «след-» без «проба-» — «неизвестное»: слово без создателя не отход."""
+    _, root, journal = stand_root()
+    entry = make_tree(root / "след-инцидента-с4")
+    before = tree_hash(entry)
+    report, _ = run_sweep(root, journal=journal, now=time.time() + 365 * DAY)
+    decision = report.decisions.get(entry.name)
+    assert decision is not None and decision.klass == "неизвестное" \
+        and decision.action == "оставить", f"решение по «след-»: {decision}"
+    expect_intact(entry, before)
 
 
 DEEP = 1200
@@ -1594,6 +1682,10 @@ CASES = [
     ("C1-исчезла", case_c1_vanished_after_rename),
     ("M1-выключатель", case_m1_switch_in_script),
     ("M2-слова", case_m2_word_prefixes),
+    ("S1-проба-старая", case_s1_probe_prefix_old_removed),
+    ("S2-проба-молодая", case_s2_probe_prefix_young_kept),
+    ("S3-tmp-точка", case_s3_mktemp_default_name_unknown),
+    ("S4-слово-след", case_s4_bare_word_prefix_unknown),
     ("M3-глубина-1200", case_m3_depth_1200),
     ("M4-неизвестное", case_m4_unknown_never_removed),
     ("m1-exe-mmap", case_m1_exe_and_mmap_holders),

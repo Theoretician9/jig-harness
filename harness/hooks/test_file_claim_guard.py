@@ -19,7 +19,11 @@
   * Bash: перенаправление `>`/`>>`, `tee`, `sed -i` заявляют путь; чтение — нет;
   * хук никогда не роняет запись: битый журнал, LOG_DIR-файл, битый вход,
     нечисловое окно — код 0, при внутренней ошибке — строка skipped;
-  * who-writes.py: живые заявки по журналу, `--count` — число занятых путей.
+  * who-writes.py: живые заявки по журналу, `--count` — число занятых путей;
+  * исключительный замок (FILE_CLAIM_EXCLUSIVE) на стенде из двух git-деревьев —
+    «проекта» и «пакета»: отказ кодом 2 чужой задаче, держатель — задача по метке
+    «Часть:» запуска, снятие коммитом обоих деревьев, дверь на один путь, «брошено»,
+    «без-заявки», цена (0 git-вызовов на обычном пути), само-ошибки хука.
 
 Механизм берётся рядом с пробой либо из HARNESS_FILE_CLAIM_GUARD (дверь для
 мутаций: копия с поломкой); команда — HARNESS_WHO_WRITES.
@@ -30,9 +34,11 @@ from __future__ import annotations
 import datetime as dt
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -42,6 +48,10 @@ JOURNAL = "заявки-на-файлы.jsonl"
 SRC = "scripts/hooks/file_claim_guard.py"
 CLAIM_EVENT = "file.claim"
 SHARED_REL = "harness/config/stand-shared.yaml"
+HC = "harness/config/harness.conf"
+MECH = "harness/config/mechanisms.yaml"
+LIB_FILES = ("config.py", "events.py", "launch_plan_lib.py", "patterns.py")
+LIB_DIR = HERE.parent / "lib"
 
 checked = failed = 0
 
@@ -59,15 +69,16 @@ def check(name: str, expected, actual) -> None:
 class Stand:
     """Свой каталог журналов, свой harness.conf, свой «пакет» — корень заявок."""
 
-    def __init__(self, base: Path, window_min: str = "7", shared: str = SHARED_REL):
+    def __init__(self, base: Path, window_min: str = "7", shared: str = SHARED_REL,
+                 exclusive: str = "harness/config/stand-exclusive.yaml"):
         self.base = base
         self.logs = base / "logs"
         self.logs.mkdir(parents=True, exist_ok=True)
         self.pkg = base / "pkg"
         self.pkg.mkdir(parents=True, exist_ok=True)
         self.conf = base / "harness.conf"
-        self.conf.write_text(f'FILE_CLAIM_MIN="{window_min}"\nFILE_CLAIM_SHARED="{shared}"\n',
-                             encoding="utf-8")
+        self.conf.write_text(f'FILE_CLAIM_MIN="{window_min}"\nFILE_CLAIM_SHARED="{shared}"\n'
+                             f'FILE_CLAIM_EXCLUSIVE="{exclusive}"\n', encoding="utf-8")
 
     def env(self) -> dict:
         return {**os.environ, "HARNESS_LOG_DIR": str(self.logs), "HARNESS_CONF": str(self.conf),
@@ -119,11 +130,11 @@ class Stand:
         return [r for r in self.rows(CLAIM_EVENT)
                 if agent is None or (r.get("data") or {}).get("агент") == agent]
 
-    def plant_claim(self, agent: str, rel: str, minutes_ago: float) -> None:
+    def plant_claim(self, agent: str, rel: str, minutes_ago: float, task: str = "hr.other") -> None:
         ts = (dt.datetime.now().astimezone() - dt.timedelta(minutes=minutes_ago)).isoformat(
             timespec="seconds")
         row = {"v": 1, "ts": ts, "src": SRC, "event": CLAIM_EVENT, "outcome": "ok",
-               "task": "hr.other", "task_from": "arg", "session": "s-old",
+               "task": task, "task_from": "arg", "session": "s-old",
                "data": {"путь": self.path(rel), "агент": agent, "тип": "harness-worker"}}
         with (self.logs / JOURNAL).open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(row, ensure_ascii=False) + "\n")
@@ -262,6 +273,475 @@ def judge_who_writes(tmp: Path) -> None:
           tuple(x.strip() if isinstance(x, str) else x for x in empty.who("--count")))
 
 
+# ───────────────────────── исключительный замок ─────────────────────────
+
+class TreeStand(Stand):
+    """«Проект» (с копией хука и scripts/lib) и «пакет» — два git-дерева с одним
+    исключительным файлом под одним относительным путём; свои журналы и conf."""
+
+    def __init__(self, base: Path, window_min: str = "7", package_git: bool = True,
+                 commit_files: tuple = (HC, MECH)):
+        super().__init__(base, window_min, exclusive=f"{HC} {MECH}")
+        self.proj = base / "proj"
+        self.transcripts = base / "transcripts"
+        for rel in ("harness/config", "scripts/hooks", "scripts/lib"):
+            (self.proj / rel).mkdir(parents=True, exist_ok=True)
+        shutil.copy(GUARD, self.proj / "scripts/hooks/file_claim_guard.py")
+        shutil.copy(WHO, self.proj / "scripts/who-writes.py")
+        for name in LIB_FILES:
+            shutil.copy(LIB_DIR / name, self.proj / "scripts/lib" / name)
+        (self.pkg / "harness/config").mkdir(parents=True, exist_ok=True)
+        self.bin_path = os.environ["PATH"]
+        for root, with_git in ((self.proj, True), (self.pkg, package_git)):
+            for rel in (HC, MECH):
+                (root / rel).write_text("# стенд\n", encoding="utf-8")
+            if with_git:
+                self.git(root, "init", "-q")
+                for rel in commit_files:
+                    self.commit(root, rel, ago_s=3600)
+
+    def env(self) -> dict:
+        return {**super().env(), "PATH": self.bin_path}
+
+    def git(self, root: Path, *args: str, date: str | None = None) -> None:
+        env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+               "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+        if date:
+            env.update(GIT_AUTHOR_DATE=date, GIT_COMMITTER_DATE=date)
+        subprocess.run(["git", "-C", str(root), *args], check=True, capture_output=True, env=env)
+
+    def commit(self, root: Path, rel: str, ago_s: float = 0) -> None:
+        moment = dt.datetime.now().astimezone() - dt.timedelta(seconds=ago_s)
+        self.git(root, "add", rel)
+        self.git(root, "commit", "-q", "-m", "c", date=moment.isoformat(timespec="seconds"))
+
+    def commit_both(self, rel: str) -> None:
+        for root in (self.proj, self.pkg):
+            self.commit(root, rel)
+
+    def dirty(self, rel: str = HC, where: tuple = ("proj", "pkg")) -> None:
+        for name in where:
+            root = self.proj if name == "proj" else self.pkg
+            with (root / rel).open("a", encoding="utf-8") as fh:
+                fh.write(f"# ханк {time.time()}\n")
+
+    def path(self, rel: str, where: str = "proj") -> str:
+        return str((self.proj if where == "proj" else self.pkg) / rel)
+
+    def launch(self, agent: str, label: str = "", parent_call: str = "", task: str = "-") -> str:
+        """Строка agent.launch и meta.json помощника; возвращает tool_use_id."""
+        call = f"toolu_{agent}"
+        row = {"v": 1, "ts": dt.datetime.now().astimezone().isoformat(timespec="seconds"),
+               "src": "scripts/hooks/agent_budget_guard.py", "event": "agent.launch",
+               "outcome": "ok", "task": task,
+               "data": {"вызов": call, "часть": label, "родитель": parent_call}}
+        with (self.logs / "вызовы-агентов.jsonl").open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+        meta = self.transcripts / "s-stand" / "subagents" / f"agent-{agent}.meta.json"
+        meta.parent.mkdir(parents=True, exist_ok=True)
+        meta.write_text(json.dumps({"toolUseId": call, "agentType": "harness-worker"}),
+                        encoding="utf-8")
+        return call
+
+    def part(self, agent: str, task: str) -> str:
+        return self.launch(agent, label=f"Часть: {task}#1")
+
+    def run(self, payload: dict, env: dict | None = None) -> tuple[int, str, str]:
+        payload = {"session_id": "s-stand", "cwd": str(self.proj),
+                   "transcript_path": str(self.transcripts / "s-stand.jsonl"), **payload}
+        proc = subprocess.run([sys.executable, str(self.proj / "scripts/hooks/file_claim_guard.py")],
+                              input=json.dumps(payload, ensure_ascii=False), capture_output=True,
+                              text=True, env=env or self.env(), timeout=30)
+        context = ""
+        if proc.stdout.strip():
+            context = json.loads(proc.stdout)["hookSpecificOutput"]["additionalContext"]
+        return proc.returncode, context, proc.stderr
+
+    def go(self, agent: str | None, rel: str = HC, where: str = "proj",
+           env: dict | None = None) -> tuple[int, str, str]:
+        payload = {"tool_name": "Edit", "tool_input": {"file_path": self.path(rel, where)}}
+        if agent:
+            payload.update(agent_id=agent, agent_type="harness-worker")
+        return self.run(payload, env)
+
+    def sh(self, agent: str, command: str) -> tuple[int, str, str]:
+        return self.run({"tool_name": "Bash", "tool_input": {"command": command},
+                         "agent_id": agent, "agent_type": "harness-worker"})
+
+    def door(self, rel: str, reason: str) -> subprocess.CompletedProcess:
+        return subprocess.run([sys.executable, str(self.proj / "scripts/hooks/file_claim_guard.py"),
+                               "--door", rel, reason], capture_output=True, text=True,
+                              env=self.env(), cwd=self.proj, timeout=30)
+
+    def refused(self) -> list:
+        return self.rows("file.claim.refused")
+
+    def who(self, *args: str) -> tuple[int, str]:
+        proc = subprocess.run([sys.executable, str(self.proj / "scripts/who-writes.py"), *args],
+                              capture_output=True, text=True, env=self.env(), timeout=30)
+        return proc.returncode, proc.stdout
+
+
+def held_stand(tmp: Path, name: str, **kwargs) -> TreeStand:
+    """Задача hr.A (помощник a1) уже писала в HC, ханки не закоммичены; b1 — hr.B."""
+    stand = TreeStand(tmp / name, **kwargs)
+    stand.part("a1", "hr.A")
+    stand.part("b1", "hr.B")
+    stand.go("a1")
+    stand.dirty()
+    return stand
+
+
+def judge_lock_sick_cases(tmp: Path) -> None:
+    stand = TreeStand(tmp / "s2")
+    stand.part("a1", "hr.A")
+    stand.part("b1", "hr.B")
+    code, context, _ = stand.go("a1")
+    check("С2: первая запись держателя на чистый файл — код 0", 0, code)
+    check("первая заявка на исключительный путь — напоминание «закоммить сразу»", True,
+          "закоммить свои строки" in context)
+    claim = stand.claims("a1")[0]
+    check("в заявке задача из метки запуска", "hr.A", claim.get("task"))
+    stand.dirty()
+    code, context, err = stand.go("b1")
+    check("С2: чужая задача в грязный общий конфиг — отказ, код 2", 2, code)
+    check("отказ пишется в stderr, stdout пуст", "", context)
+    check("отказ называет задачу держателя, помощника, тип и дверь", [True] * 4,
+          ["hr.A" in err, "a1" in err, "harness-worker" in err, "--door" in err])
+    refused = stand.refused()
+    check("строка file.claim.refused с видом «занято»", ["занято"],
+          [(r.get("data") or {}).get("вид") for r in refused])
+    check("отказанный заявки не пишет", 0, len(stand.claims("b1")))
+    check("после отказа держатель по-прежнему A: A пишет — код 0", 0, stand.go("a1")[0])
+
+    stand = held_stand(tmp, "s1")
+    stand.dirty(MECH)
+    stand.go("a1", MECH)
+    stand.dirty(MECH)
+    mech = stand.path(MECH)
+    check("С1: sed -i в чужой исключительный файл — отказ", 2,
+          stand.sh("b1", f"sed -i 's/a/b/' {mech}")[0])
+    check("С1: cat > путь <<EOF в чужой исключительный файл — отказ", 2,
+          stand.sh("b1", f"cat > {mech} <<EOF\nx\nEOF")[0])
+    check("Bash с несколькими путями: отказ по одному из них отказывает всё", 2,
+          stand.sh("b1", f"echo x > {stand.path('free.txt')}; echo y > {mech}")[0])
+
+
+def judge_lock_pair(tmp: Path) -> None:
+    stand = TreeStand(tmp / "pair")
+    stand.part("a1", "hr.A")
+    stand.part("b1", "hr.B")
+    stand.go("a1", HC, where="pkg")
+    stand.dirty()
+    check("пакетная пара: A пишет пакетный файл, B проектный — отказ", 2, stand.go("b1")[0])
+    time.sleep(1.1)
+    stand.commit(stand.proj, HC)
+    check("проект A закоммичен, пакет ещё нет — B всё равно отказ", 2, stand.go("b1")[0])
+    stand.commit(stand.pkg, HC)
+    check("оба дерева закоммичены — B проходит", 0, stand.go("b1")[0])
+
+
+def judge_lock_abandoned_and_unknown(tmp: Path) -> None:
+    stand = TreeStand(tmp / "abandoned", window_min="7")
+    stand.part("b1", "hr.B")
+    stand.plant_claim("a1", HC, minutes_ago=10, task="hr.A")
+    stand.dirty()
+    code, _, err = stand.go("b1")
+    check("брошено: заявка старше окна, файл грязный — отказ", 2, code)
+    check("брошено: вид в журнале", ["брошено"],
+          [(r.get("data") or {}).get("вид") for r in stand.refused()])
+    check("брошено: текст называет оркестратора", True, "оркестратор" in err)
+
+    stand = TreeStand(tmp / "no-claim")
+    stand.part("b1", "hr.B")
+    stand.dirty()
+    code, _, err = stand.go("b1")
+    check("без заявки: файл грязный, заявок нет — отказ", 2, code)
+    check("без заявки: вид «без-заявки»", ["без-заявки"],
+          [(r.get("data") or {}).get("вид") for r in stand.refused()])
+    check("без заявки: текст про дверь с причиной", True, "дверь с причиной" in err)
+
+    stand = TreeStand(tmp / "unknown")
+    stand.part("a1", "hr.A")
+    stand.go("a1")
+    stand.dirty()
+    code, _, err = stand.go("zz9")
+    check("неизвестный помощник (нет meta.json) против A — отказ", 2, code)
+    check("отказанный назван как «агент:<id>»", ["агент:zz9"],
+          [r.get("task") for r in stand.refused()])
+    stand = TreeStand(tmp / "unknown-holder")
+    stand.part("a1", "hr.A")
+    stand.go("zz9")
+    stand.dirty()
+    code, _, err = stand.go("a1")
+    check("держатель — неизвестный помощник: A отказ, держатель назван", (2, True),
+          (code, "агент:zz9" in err))
+
+
+def judge_lock_shift(tmp: Path) -> None:
+    stand = held_stand(tmp, "shift-vs-a")
+    code, _, err = stand.go(None)
+    check("смена против держателя A — отказ", (2, True), (code, "hr.A" in err))
+
+    stand = TreeStand(tmp / "a-vs-shift")
+    stand.part("a1", "hr.A")
+    stand.go(None)
+    stand.dirty()
+    code, _, err = stand.go("a1")
+    check("A против держателя «смена» — отказ", (2, True), (code, "смена" in err))
+    row = stand.claims()[0]
+    check("строка заявки смены: task=смена, data.агент=-", ("смена", "-"),
+          (row.get("task"), (row.get("data") or {}).get("агент")))
+    sys.path.insert(0, str(LIB_DIR))
+    import launch_plan_lib
+    check("launch_plan_lib не считает смену помощником", None, launch_plan_lib.agent_id(row))
+    sys.path.pop(0)
+
+
+def judge_lock_same_task_and_parent(tmp: Path) -> None:
+    stand = held_stand(tmp, "same-task")
+    stand.part("a2", "hr.A")
+    stand.launch("a3", label="Часть: hr.A#2")
+    code, _, err = stand.go("a2")
+    check("второй помощник той же задачи — код 0, без отказа", (0, 0), (code, len(stand.refused())))
+
+    stand = TreeStand(tmp / "parent")
+    manager = stand.launch("m1", label="Часть: hr.A#0")
+    stand.launch("c1", label="", parent_call=manager, task="hr.card")
+    stand.part("b1", "hr.B")
+    stand.go("c1")
+    stand.dirty()
+    check("помощник без метки: задача — метка запуска родителя, не поле task", "hr.A",
+          stand.claims("c1")[0].get("task"))
+    check("задача родителя совпала с A — код 0", 0, stand.go("m1")[0])
+    code, _, err = stand.go("b1")
+    check("чужая задача против держателя по родителю — отказ с hr.A", (2, True),
+          (code, "hr.A" in err))
+
+    stand = TreeStand(tmp / "label-vs-task")
+    stand.launch("a1", label="Часть: hr.A#1", task="-")
+    stand.launch("b1", label="", task="hr.card")
+    stand.go("a1")
+    check("метка hr.A при task=«-»: держатель по метке", "hr.A", stand.claims("a1")[0].get("task"))
+    stand.go("b1")
+    check("нет метки и родителя: «агент:id», а не task карты", "агент:b1",
+          stand.claims("b1")[0].get("task"))
+
+
+def judge_lock_release(tmp: Path) -> None:
+    stand = held_stand(tmp, "release")
+    time.sleep(1.1)
+    stand.commit_both(HC)
+    code, _, _ = stand.go("b1")
+    check("снятие коммитом проекта и пакета: B пишет — код 0", 0, code)
+    check("заявка B с задачей hr.B", "hr.B", stand.claims("b1")[0].get("task"))
+    stand.dirty()
+    check("старая заявка A не мешает B при новой грязи", 0, stand.go("b1")[0])
+    check("A после коммита стала чужой: отказ «занято»", 2, stand.go("a1")[0])
+
+    stand = held_stand(tmp, "partial")
+    time.sleep(1.1)
+    stand.commit_both(HC)
+    time.sleep(1.1)
+    stand.dirty()
+    stand.go("b1")
+    check("частичный коммит: граница отсекла заявки, последняя A — B «без-заявки»", ["без-заявки"],
+          [(r.get("data") or {}).get("вид") for r in stand.refused()])
+    check("частичный коммит: A пишет — код 0", 0, stand.go("a1")[0])
+    stand.go("b1")
+    check("после записи A держатель назван: B «занято»", ["без-заявки", "занято"],
+          [(r.get("data") or {}).get("вид") for r in stand.refused()])
+
+    stand = TreeStand(tmp / "old-episode")
+    stand.part("a1", "hr.A")
+    stand.plant_claim("a1", HC, minutes_ago=120, task="hr.A")
+    stand.dirty()
+    time.sleep(1.1)
+    stand.commit_both(HC)
+    time.sleep(1.1)
+    stand.dirty()
+    code, _, err = stand.go("a1")
+    check("своя заявка до предпоследнего коммита — не хвост: «без-заявки»", (2, ["без-заявки"]),
+          (code, [(r.get("data") or {}).get("вид") for r in stand.refused()][-1:]))
+
+    stand = TreeStand(tmp / "own-agent")
+    stand.part("a1", "hr.A")
+    stand.plant_claim("a1", HC, minutes_ago=3, task="-")
+    stand.dirty()
+    check("старая заявка того же агента с task=«-» — своя, код 0", 0, stand.go("a1")[0])
+
+
+def judge_lock_refresh_and_junk(tmp: Path) -> None:
+    for minutes_ago, expected in ((4, 2), (2, 1)):
+        stand = TreeStand(tmp / f"half-window-{minutes_ago}", window_min="7")
+        stand.part("a1", "hr.A")
+        stand.plant_claim("a1", HC, minutes_ago=minutes_ago, task="hr.A")
+        stand.dirty()
+        check(f"держатель пишет, его заявка {minutes_ago} мин при окне 7: код 0", 0, stand.go("a1")[0])
+        check(f"заявка держателя старше половины окна освежается ({minutes_ago} мин)", expected,
+              len(stand.claims("a1")))
+
+    stand = held_stand(tmp, "junk")
+    stand.dirty()
+    with (stand.logs / JOURNAL).open("a", encoding="utf-8") as fh:
+        fh.write('мусор\n{не json\n[1]\n"строка"\n{"ts": 5}\n{"ts": "не время"}\n')
+    code, _, err = stand.go("b1")
+    check("мусорные строки журнала не ломают разбор соседних: B «занято», держатель A", (2, True),
+          (code, "hr.A" in err))
+    check("мусор в журнале: A пишет — код 0", 0, stand.go("a1")[0])
+
+
+def judge_lock_script_writes(tmp: Path) -> None:
+    stand = held_stand(tmp, "script")
+    reading = (f"python3 - <<'EOF'\nimport yaml\n"
+               f"print(yaml.safe_load(open('{HC}').read()))\nEOF")
+    code, _, _ = stand.sh("b1", reading)
+    check("здоровый: python читает исключительный путь — пропуск без заявки", (0, 0),
+          (code, len(stand.claims("b1"))))
+    check("здоровый: cat и grep пути — пропуск", 0,
+          stand.sh("b1", f"cat {HC} | grep x; grep -n y {HC}")[0])
+    writing_c = f"python3 -c \"from pathlib import Path; Path('{HC}').write_text('x')\""
+    check("больной: python3 -c пишет в путь чужой задачи — отказ", 2, stand.sh("b1", writing_c)[0])
+    writing_doc = (f"python3 - <<'EOF'\nimport yaml\n"
+                   f"yaml.safe_dump({{}}, open('{stand.path(HC, 'pkg')}', 'w'))\nEOF")
+    check("больной: here-doc python пишет пакетный путь чужой задачи — отказ", 2,
+          stand.sh("b1", writing_doc)[0])
+    check("держатель пишет python-ом в свой путь — код 0", 0, stand.sh("a1", writing_c)[0])
+
+
+def judge_lock_door(tmp: Path) -> None:
+    stand = held_stand(tmp, "door")
+    check("короткая причина двери: код 1", 1, stand.door(HC, "мало").returncode)
+    check("короткая причина: двери нет", False, (stand.logs / "file-claim.door").exists())
+    check("дверь не открыта — отказ", 2, stand.go("b1")[0])
+    check("дверь открыта: код 0", 0, stand.door(HC, "срочная правка, держатель молчит").returncode)
+    code, _, _ = stand.go("b1")
+    check("дверь пропускает B", 0, code)
+    gate = [r for r in stand.claims("b1") if (r.get("data") or {}).get("дверь")]
+    check("пропуск по двери — строка с data.дверь и причиной", ["срочная правка, держатель молчит"],
+          [(r.get("data") or {}).get("дверь") for r in gate])
+    check("строка открытия двери в журнале", 1, len(stand.rows("file.claim.door")))
+    stand.go("a1", MECH)
+    stand.dirty(MECH)
+    check("дверь на другой путь не пропускает", 2, stand.go("b1", MECH)[0])
+    door = stand.logs / "file-claim.door"
+    door.write_text(json.dumps({"путь": MECH, "почему": "просроченная дверь тест",
+                                "до": int(time.time()) - 5}), encoding="utf-8")
+    check("пропуск B по двери не делает его держателем: A при закрытой двери — код 0", 0,
+          stand.go("a1")[0])
+    check("просроченная дверь не пропускает", 2, stand.go("b1", MECH)[0])
+    check("дверь на путь вне FILE_CLAIM_EXCLUSIVE: код 1", 1,
+          stand.door("src/app.py", "причина достаточной длины").returncode)
+
+
+def judge_lock_not_exclusive(tmp: Path) -> None:
+    stand = TreeStand(tmp / "plain")
+    stand.part("a1", "hr.A")
+    stand.part("b1", "hr.B")
+    stand.go("a1", "src/app.py")
+    code, context, _ = stand.go("b1", "src/app.py")
+    check("не исключительный путь с чужой заявкой: код 0 и предупреждение", (0, True),
+          (code, "a1" in context))
+    stand.go("a1", SHARED_REL)
+    code, context, _ = stand.go("b1", SHARED_REL)
+    check("общий (SHARED) путь: предупреждение, не отказ", (0, True), (code, "общий файл" in context))
+
+
+def judge_lock_never_breaks(tmp: Path) -> None:
+    stand = TreeStand(tmp / "nogit")
+    stand.part("b1", "hr.B")
+    env = {**stand.env(), "PATH": str(tmp)}
+    code, _, _ = stand.go("b1", env=env)
+    check("нет git в стенде: код 0", 0, code)
+    check("нет git: строка skipped", True, any(r.get("outcome") == "skipped" for r in stand.rows()))
+
+    stand = TreeStand(tmp / "bad-meta")
+    stand.part("b1", "hr.B")
+    (stand.transcripts / "s-stand/subagents/agent-b1.meta.json").write_text("{не json", encoding="utf-8")
+    check("битый meta.json: код 0", 0, stand.go("b1")[0])
+    check("битый meta.json: строка skipped", True,
+          any(r.get("outcome") == "skipped" for r in stand.rows()))
+
+    stand = TreeStand(tmp / "bad-launch")
+    stand.part("b1", "hr.B")
+    with (stand.logs / "вызовы-агентов.jsonl").open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps({"ts": dt.datetime.now().astimezone().isoformat(),
+                             "event": "agent.launch", "data": "не словарь"}) + "\n")
+    check("битая строка запуска: код 0, соседние строки разобраны", (0, "hr.B"),
+          (stand.go("b1")[0], stand.claims("b1")[0].get("task")))
+    check("битая строка запуска замок не выключает: skipped нет", False,
+          any(r.get("outcome") == "skipped" for r in stand.rows()))
+
+    stand = TreeStand(tmp / "bad-journal")
+    stand.part("b1", "hr.B")
+    (stand.logs / JOURNAL).write_text("мусор\n{не json\n", encoding="utf-8")
+    check("битый журнал заявок, файл чист: код 0", 0, stand.go("b1")[0])
+
+    stand = TreeStand(tmp / "clean")
+    stand.part("b1", "hr.B")
+    check("чистый файл без заявок: код 0", (0, 0), (stand.go("b1")[0], len(stand.refused())))
+
+
+def judge_lock_no_package(tmp: Path) -> None:
+    stand = TreeStand(tmp / "no-pkg", package_git=False)
+    stand.part("a1", "hr.A")
+    stand.part("b1", "hr.B")
+    stand.go("a1")
+    stand.dirty(HC, where=("proj",))
+    check("пакета нет (не репозиторий): замок по проекту — отказ", 2, stand.go("b1")[0])
+
+    stand = TreeStand(tmp / "not-in-head", commit_files=(HC,))
+    stand.part("b1", "hr.B")
+    code, _, _ = stand.go("b1", MECH)
+    check("файла нет в HEAD проекта: код 0", 0, code)
+    check("файла нет в HEAD: строка skipped", True,
+          any(r.get("outcome") == "skipped" for r in stand.rows()))
+
+
+def judge_lock_cost(tmp: Path) -> None:
+    stand = TreeStand(tmp / "cost")
+    stand.part("a1", "hr.A")
+    counter = tmp / "git-calls"
+    wrapper = tmp / "gitbin"
+    wrapper.mkdir()
+    (wrapper / "git").write_text(f'#!/bin/sh\necho x >> {counter}\nexec {shutil.which("git")} "$@"\n')
+    (wrapper / "git").chmod(0o755)
+    stand.bin_path = f"{wrapper}:{os.environ['PATH']}"
+    stand.go(None, "src/plain.py")
+    stand.go("a1", "src/plain.py")
+    check("обычный путь у смены и помощника: 0 вызовов git", False, counter.exists())
+    stand.go("a1")
+    check("живость счётчика: исключительный путь зовёт git", True, counter.exists())
+
+
+def judge_lock_who_writes(tmp: Path) -> None:
+    stand = TreeStand(tmp / "who-lock", window_min="7")
+    stand.plant_claim("a1", HC, minutes_ago=10, task="hr.A")
+    stand.plant_claim("b1", MECH, minutes_ago=2, task="hr.B")
+    stand.dirty(HC)
+    stand.dirty(MECH)
+    code, out = stand.who()
+    check("who-writes показывает задачу держателя", True, "hr.A" in out and "hr.B" in out)
+    brosheno = [line for line in out.splitlines() if "hr.A" in line]
+    check("who-writes: заявка старше окна — «брошено»", True,
+          bool(brosheno) and "брошено" in brosheno[0])
+    fresh = [line for line in out.splitlines() if "hr.B" in line]
+    check("who-writes: свежая — «держит до коммита»", True,
+          bool(fresh) and "держит до коммита" in fresh[0])
+    check("who-writes --count: оба пути", "2", stand.who("--count")[1].strip())
+    time.sleep(1.1)
+    stand.commit_both(HC)
+    check("who-writes: закоммиченный путь никого не держит", True, "hr.A" not in stand.who()[1])
+
+    stand = TreeStand(tmp / "who-orphan")
+    check("who-writes: чистый путь без заявок — «заявок нет»", True, "нет" in stand.who()[1])
+    stand.dirty(HC)
+    out = stand.who()[1]
+    check("who-writes: грязный путь без заявок назван «ханки без заявки»", True,
+          f"{HC}  — ханки без заявки (держатель неизвестен)" in out)
+    check("who-writes --count считает путь без заявки", "1", stand.who("--count")[1].strip())
+
+
 def main() -> int:
     for name, path in (("механизма", GUARD), ("команды who-writes", WHO)):
         if not path.exists():
@@ -277,6 +757,12 @@ def main() -> int:
         judge_bash(tmp)
         judge_never_breaks(tmp)
         judge_who_writes(tmp)
+        for judge in (judge_lock_sick_cases, judge_lock_pair, judge_lock_abandoned_and_unknown,
+                      judge_lock_shift, judge_lock_same_task_and_parent, judge_lock_release,
+                      judge_lock_refresh_and_junk, judge_lock_script_writes, judge_lock_door,
+                      judge_lock_not_exclusive, judge_lock_never_breaks,
+                      judge_lock_no_package, judge_lock_cost, judge_lock_who_writes):
+            judge(tmp)
     print(f"SELFTEST: {'зелёный' if not failed else 'КРАСНЫЙ'} ({checked} случаев, неудач {failed})")
     return 1 if failed else 0
 

@@ -162,6 +162,9 @@ fi
 проверка "глубина автоматом" python3 scripts/test_depth_automatic.py
 проверка "задание и метка" python3 scripts/check-job-and-mark.py
 проверка "метка-самотест" python3 scripts/check-job-and-mark.py --selftest
+проверка "сборка system-jobs" python3 scripts/build-system-jobs.py --check
+# Библиотека процессов ↔ демоны, хуки, крон, юниты systemd (живая машина тоже).
+проверка "библиотека процессов" python3 scripts/check-process-library.py
 проверка "реестр стека" python3 scripts/check-stack-registry.py
 проверка "реестр стека-самотест" python3 scripts/check-stack-registry.py --selftest
 проверка "кто зовёт"      python3 scripts/check-who-calls.py
@@ -196,6 +199,8 @@ fi
 # а не про здоровье машины. В воротах стоит её САМОТЕСТ: механизм, судящий о
 # доказанности, обязан быть доказан сам.
 проверка "приёмка-самотест" python3 scripts/acceptance.py --selftest
+# Ускорение мутаций не смеет превратить «нечем проверить» в «всё поймано».
+проверка "ускорение мутаций" python3 scripts/test_mutation_speed.py
 # Оболочка ночному агенту закрыта не списком инструментов, а режимом прав:
 # живая проба 11.09.2026 показала, что --allowedTools настройки проекта
 # перекрывают. Гейт следит, чтобы флаг стоял в КАЖДОМ вызове агента.
@@ -208,7 +213,11 @@ fi
 проверка "процессы агента"  python3 scripts/test_agent_processes.py
 проверка "одна смена"       python3 scripts/test_one_shift.py
 проверка "потеря сокета"    bash scripts/test_warden_socket_loss.sh
+проверка "изоляция tmux"    python3 scripts/check-tmux-isolation.py
+проверка "изоляция-самотест" python3 scripts/check-tmux-isolation.py --selftest
+проверка "уборка не гасит окно" bash scripts/test_tmux_isolation.sh
 проверка "дверь данных"   python3 scripts/test_data_delete_door.py
+проверка "слово у двери удаления" python3 scripts/test_protected_delete_word.py
 проверка "живая проверка" python3 scripts/build-live-check-list.py --проверить
 # Список файлов сверке подаётся ЯВНО. БОЛЬНОЙ СЛУЧАЙ 12.08.2026: без него
 # скрипт читал stdin ворот, а тот в сессии агента открыт и молчит — ворота
@@ -225,6 +234,7 @@ for SKIP_PATH in ${GATES_SKIP_PATHS:-./.git/*}; do
 done
 проверка "кириллица"      bash -c 'find . -name "*.sh" '"$SKIP_ARGS"' -print0 | xargs -0 python3 scripts/check-cyrillic-in-names.py'
 проверка "секрет в логах" python3 scripts/check-secret-in-logs.py
+проверка "секрет в логах: ключи" python3 scripts/test_secret_in_logs_keys.py
 # Журналы харнеса: писатели и демоны (G1), реестр ↔ код (G2), диск → реестр (G2),
 # потеря без разбора и тишина при работе сессии (G3).
 проверка "журналы: писатели"   python3 scripts/check-event-writers.py
@@ -302,6 +312,7 @@ done
 # Канбан: снимок доски, её страницы в панели и приём комментариев с карточки.
 проверка "снимок доски"   python3 scripts/test_build_board.py
 проверка "очередь по статусам" python3 scripts/test_work_queue.py
+проверка "очередь по важности" python3 scripts/test_queue_importance.py
 проверка "доска панели"   python3 harness/panel/test_task_board.py
 проверка "приём комментариев" python3 scripts/test_comments_intake.py
 проверка "шаги пайплайна" python3 scripts/test_write_step.py
@@ -323,7 +334,9 @@ done
 проверка "мутации до принятия" python3 scripts/test_mutations_before_accept.py
 проверка "писатели карты в библиотеке" python3 scripts/test_map_writers_library.py
 проверка "снятие из карты"  python3 scripts/test_archive_map.py
+проверка "дубли в карте"  python3 scripts/test_weed_duplicates.py
 проверка "донос тревог sentinel" python3 scripts/test_sentinel_drain.py
+проверка "сторож меток: стенд" python3 scripts/test_heartbeat_watch_alerts.py
 проверка "писатель карты lib" python3 scripts/test_cards_lib.py
 # Ежемесячная ревизия: данные (области и пороги) и порции с курсором.
 # Область с маской, под которую не попадает ни один файл, читала бы пустоту и
@@ -403,6 +416,7 @@ done
 проверка "лимит-сторож"   bash scripts/test_limit_watch.sh
 проверка "тишина-лимита"  bash scripts/test_limit_silence.sh
 проверка "хеш-деревья"    bash scripts/test_tg_send_commit_trees.sh
+проверка "статус-формат"  python3 scripts/test_status_report.py
 проверка "дверь-сторожа"  bash scripts/test_warden_channel_door.sh
 # Смена сессии без написанной передачи невозможна (владелец 18.10.2026).
 проверка "дверь-ротации"  bash scripts/test_warden_handover_gate.sh
@@ -410,9 +424,15 @@ done
 проверка "модель-шага"    python3 scripts/hooks/test_model_guard.py
 # Потолок помощников на задачу по уровню глубины (pipeline.yaml → помощники).
 проверка "потолок-помощников" python3 scripts/hooks/test_agent_budget_guard.py
+проверка "конец-помощника"   python3 scripts/hooks/test_agent_finish_log.py
 # Заявка помощника на файл и предупреждение о чужой (FILE_CLAIM_* в harness.conf).
 проверка "заявка-на-файл" python3 scripts/hooks/test_file_claim_guard.py
 проверка "роли помощников" python3 scripts/hooks/test_lead_role_guard.py
+# План запуска помощников: код решает роль и число исполнителей (правила вложенности, 30.10.2026).
+проверка "план запуска"   python3 scripts/test_launch_plan.py
+проверка "сторож плана"   python3 scripts/hooks/test_launch_plan_guard.py
+проверка "поле главы"     python3 scripts/test_nesting_chapter_field.py
+проверка "метка части"    python3 scripts/hooks/test_agent_budget_part_label.py
 проверка "носитель-хуков" python3 scripts/test_live_check_hook.py
 проверка "носитель-входящих" python3 scripts/test_live_check_inbox.py
 проверка "отправители"    python3 scripts/check-owner-senders.py
@@ -523,6 +543,8 @@ done
 проверка "хакатон: меню" bash scripts/test_hackathon_menu.sh
 проверка "маска секретов" bash scripts/test_check_secrets_mask.sh
 проверка "секреты под маской" python3 scripts/test_security_secrets_masked.py
+проверка "скорость: судья" python3 scripts/test_speed_mode.py
+проверка "скорость: сторож" bash scripts/test_warden_speed.sh
 
 # Самотесты живут врозь от гейтов: они долгие, и на каждом коммите не нужны.
 # Список явный — искать «кто понимает --selftest» грепом значило бы решать
@@ -546,6 +568,7 @@ if [ "${1:-}" = "--всё" ]; then
                 harness/demons/memory-revision.sh \
                 harness/demons/stack-watch.sh \
                 harness/demons/update-watch.sh \
+                harness/demons/nightly-mutations.sh \
                 harness/demons/tokens-collector.sh scripts/tg-dispatcher.sh \
                 scripts/start-agent.sh scripts/capability.sh \
                 scripts/handover-check.sh scripts/check-secrets.sh \
@@ -557,9 +580,6 @@ if [ "${1:-}" = "--всё" ]; then
     done
     # Свежесть стека: замер и гейт реестра (Ф1); пробы сводки и демона идут через stack-watch.sh выше.
     проверка "свежесть стека" python3 scripts/stack_freshness.py --selftest
-    # Проверка самих проверок: «самотест зелёный» значит лишь, что код согласован
-    # со своим тестом. Мутационная проба портит механизм и требует красного.
-    проверка "мутации"        bash scripts/mutation-probe.sh
     # Обратный ход ревизии: у каждого правила — механизм, прибор и свежий след.
     # Строка без механизма важнее любой находки осмотра (замечание М-1).
     проверка "покрытие"       python3 scripts/invariant-coverage.py
@@ -567,8 +587,16 @@ if [ "${1:-}" = "--всё" ]; then
     # хозяина. Гоняет каждую лёгкую проверку трижды — 9 минут на 126 проверок,
     # поэтому только здесь, за флагом --всё. Законное — данные
     # harness/config/host-independence.yaml.
-    проверка "хозяин машины"  python3 scripts/check-host-independence.py
+    # Только у нашей установки (HOST_INDEPENDENCE_CHECK=1): копиям проверка
+    # незачем. Блоком `if`, а не `&&` в строку: запись через && выпадает из
+    # разбора СТРОКА_ПРОВЕРКИ, и данные прибора разошлись бы с воротами.
+    # Второй круг гоняет только изменённое с метки — см. check-host-independence.py.
+    if [ "${HOST_INDEPENDENCE_CHECK:-0}" = "1" ]; then
+        проверка "хозяин машины"  python3 scripts/check-host-independence.py
+    fi
     проверка "хозяин-самотест" python3 scripts/check-host-independence.py --selftest
+    # Какой круг берёт прибор и что выключает ключ судит свой стенд, поэтому и у копий.
+    проверка "хозяин-круг" python3 scripts/test_host_independence_scope.py
     # Ф5 ревизии: установка с нуля доказывается прогоном, а не памятью. Около
     # двух минут: поднимает свой контейнер, ставит харнес, судит по следам.
     проверка "установка с нуля" bash scripts/install-probe.sh
@@ -587,6 +615,15 @@ if [ "${1:-}" = "--всё" ]; then
     # Работа помощников — это работа (25.10.2026): судья, сторож целиком, дверь
     # канала и limit-watch на стенде. Своя tmux-сессия — за --всё.
     проверка "работа помощников" bash scripts/test_warden_subagent_work.sh
+    # Лимит подписки держится — сторож в панель молчит (30.10.2026): единый судья
+    # и сторож целиком на записанном хвосте транскрипта. Своя tmux-сессия — за --всё.
+    проверка "тишина в лимите" bash scripts/test_warden_limit_silence.sh
+    # Пульс сторожа слышен владельцу (03.11.2026): судья лимита не держит ложную метку,
+    # сторож сам шлёт статус, «молчу» пишется в лог с причиной. Своя tmux-сессия — за --всё.
+    проверка "пульс сторожа" bash scripts/test_warden_pulse.sh
+    # Уборка стендов проб диспетчера (04.11.2026): прерванная проба не оставляет
+    # диспетчеров-сирот. Гоняет пять проб с настоящим диспетчером — минуты, за --всё.
+    проверка "уборка стендов проб" bash scripts/test_probe_stand_sweep.sh
     # Третье состояние гейта (жёлтый, код 77) — механизм обкатки: без него
     # новый гейт обязан молчать, а краснящий зря — отключают.
     проверка "жёлтый в pre-commit" bash scripts/pre-commit-gate.sh --selftest-yellow
@@ -618,10 +655,17 @@ if [ "${1:-}" = "--всё" ]; then
     проверка "ночной-предел"    bash scripts/test_nightly_gates_ceiling.sh
     # Правка ночного демона на ходу не роняет прогон; выход без итога назван, ~15 с.
     проверка "ночной-правка"    bash scripts/test_nightly_gates_live_edit.sh
+    # Мутации идут отдельным недельным запуском со своим пределом; проба на стенде, ~1 минута.
+    проверка "ночные-мутации"  bash scripts/test_nightly_mutations.sh
+    # Замок и очередь недельного прогона: флаг .want, ожидание, весть «не стартовал»; стенд, доли минуты.
+    проверка "замок-мутаций"  bash scripts/test_nightly_mutations_lock.sh
+    # Пределы самой пробы: таймаут запуска, мягкая остановка, выпавшие записи; настоящий прибор на стенде, ~10 с.
+    проверка "пределы-мутаций"  bash scripts/test_mutation_probe_limits.sh
     проверка "тревога-диска"    python3 scripts/test_disk_report.py
     проверка "уборка /tmp"      python3 scripts/test_tmp_sweep.py
     проверка "коммит карты"     bash scripts/test_devmap_selfheal.sh
     проверка "stop-хук"         bash scripts/hooks/test_stop_reminder.sh
+    проверка "ответ в канал"    bash scripts/hooks/test_channel_reply_guard.sh
     проверка "вид работы"       bash scripts/test_model_for.sh
     проверка "имена-задачи"     python3 scripts/test_check_file_names.py
     проверка "спутник отказов"  python3 scripts/test_inbox_digest.py
@@ -632,6 +676,48 @@ if [ "${1:-}" = "--всё" ]; then
     проверка "одобрение-спеки"  python3 scripts/test_spec_approval_forms.py
     проверка "набор-памяти"     python3 scripts/test_memory_to_package.py
     проверка "отправители-ход"  python3 scripts/test_owner_senders.py
+    проверка "сводка ресурсов"  python3 scripts/test_resource_report.py
+    # Пробы, которых не звал никто: без строки здесь «кто зовёт» и «население кода»
+    # краснят, а проба выглядит живой. Окно перезагрузки идёт ~8 минут, прочие — до 2,5.
+    проверка "порог ревизии памяти" bash scripts/test_memory_revision_threshold.sh
+    проверка "страж: решение"   python3 scripts/test_sentinel_resolve.py
+    проверка "квитанции принял" bash scripts/test_ack_receipts.sh
+    проверка "очередь ротации"  python3 scripts/hooks/test_rotation_queue_guard.py
+    проверка "рестарт при помощниках" python3 scripts/hooks/test_guard_bash_restart_helpers.py
+    проверка "окно перезагрузки" bash scripts/test_server_restart_window.sh
+    проверка "ротация ждёт помощников" bash scripts/test_warden_rotation_waits_helpers.sh
+    проверка "сервер поднялся"  python3 scripts/test_boot_check.py
+    проверка "страж после перезагрузки" python3 scripts/test_sentinel_after_restart.py
+    проверка "журналы реестра"  bash scripts/test_check_registry_logs.sh
+    проверка "уборка диска-самотест" bash scripts/test_disk_cleanup_selftest.sh
+    проверка "пауза копит"      bash scripts/test_dispatcher_pause_accumulate.sh
+    проверка "замок живой проверки" python3 scripts/test_live_check_flock.py
+    проверка "карта из сообщения" python3 scripts/test_map_from_message_chapter.py
+    проверка "ночь сломана: гашение" bash scripts/test_nightly_gates_broken_resolve.sh
+    проверка "пинок окна"       bash scripts/test_pane_kick_confirm.sh
+    проверка "лимит одним числом" bash scripts/test_warden_limit_one_number.sh
+    # Паспорта этих проб обещают ворота: без строки здесь обещание пусто. Секунды
+    # соло — от 1 до 180 (кнопка согласия), поэтому только за флагом --всё.
+    проверка "библиотека-гейт"  python3 scripts/test_process_library_gate.py
+    проверка "библиотека процессов-проба" python3 scripts/test_process_library.py
+    проверка "сборка расписания" python3 scripts/test_build_system_jobs.py
+    проверка "служба проверок"  python3 scripts/test_checks_service.py
+    проверка "согласие кнопкой" python3 scripts/test_consent_button_only.py
+    проверка "двери согласия"   python3 scripts/test_consent_doors.py
+    проверка "признаки просьбы" python3 scripts/test_consent_ask_signs.py
+    проверка "полосы очереди"   python3 scripts/test_work_queue_lanes.py
+    проверка "страница процессов" python3 harness/panel/test_processes_page.py
+    проверка "сводка сторожа меток" python3 scripts/test_heartbeat_held_line.py
+    проверка "след вне репозитория" python3 scripts/test_live_check_trace_outside_repo.py
+    проверка "карта: три исхода" python3 scripts/test_map_from_message_three_outcomes.py
+    проверка "шаг мутаций"      python3 scripts/test_mutations_step.py
+    проверка "показ диспетчера" python3 scripts/test_process_dispatcher_v2.py
+    проверка "ревью спеки"      python3 scripts/test_spec_review.py
+    проверка "суть спеки"       python3 scripts/test_spec_human_block.py
+    проверка "фоновая обёртка"  bash scripts/test_run_background.sh
+    проверка "порт после смены" bash scripts/test_shift_leftover_port.sh
+    проверка "пинок сторожа"    bash scripts/test_warden_kick.sh
+    проверка "начало сторожа"   bash scripts/test_warden_pane_flag.sh
     for f in scripts/work-queue.py scripts/compare-with-package.py \
                 scripts/download_attachment.py scripts/orders.py \
                 scripts/check-cyrillic-in-names.py \

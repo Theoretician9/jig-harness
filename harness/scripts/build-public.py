@@ -12,6 +12,9 @@
 * Обезличиваются только документы (*.md). В коде наш путь стоит УМОЛЧАНИЕМ
   (`${PROJECT_DIR:-/var/www/…}`), и подстановка туда другого литерала даёт
   путь, которого нет ни у кого: это дефект пакета, он лечится причиной.
+* Архив и хэш берутся от ОДНОГО явного sha (`--коммит`, иначе HEAD, прочитанный
+  один раз) и без подмены объектов: `git replace` подменял содержимое под тем же
+  sha, который видел владелец, а HEAD между архивом и хэшем мог сдвинуться.
 * Значения паспорта читаются строго из файла (config.из_файла): тому, кто судит
   установку, окружение не хозяин.
 * Каталог сборки ОПОЗНАЁТСЯ по метке .публичная-сборка, и без метки непустой
@@ -22,7 +25,7 @@
   доверять доводу.
 
 Запуск:
-  python3 scripts/build-public.py [--пакет DIR] [--куда DIR]
+  python3 scripts/build-public.py [--пакет DIR] [--куда DIR] [--коммит SHA]
                                        [--паспорт FILE] [--конфиг FILE] [--данные FILE]
   python3 scripts/build-public.py --selftest
 """
@@ -99,12 +102,21 @@ def опознать_цель(куда: str) -> Path:
     return цель
 
 
-def архив_пакета(пакет: Path, куда: Path) -> str:
-    """Развернуть git archive HEAD пакета в каталог. Отдаёт короткий хэш."""
+def архив_пакета(пакет: Path, куда: Path, коммит: str | None = None) -> str:
+    """Развернуть git archive коммита пакета в каталог. Отдаёт короткий хэш."""
     if not (пакет / ".git").exists():
         raise Отказ(f"пакет {пакет} — не git-репозиторий, собирать нечего")
-    архив = subprocess.run(["git", "-C", str(пакет), "archive", "HEAD"],
-                           capture_output=True, timeout=120)
+    среда = dict(os.environ, GIT_NO_REPLACE_OBJECTS="1")
+
+    def git(*доводы: str) -> subprocess.CompletedProcess:
+        return subprocess.run(["git", "-C", str(пакет), *доводы], capture_output=True,
+                              env=среда, timeout=120)
+
+    найден = git("rev-parse", "--verify", f"{коммит or 'HEAD'}^{{commit}}")
+    if найден.returncode != 0:
+        raise Отказ(f"коммита {коммит or 'HEAD'} в пакете нет")
+    sha = найден.stdout.decode().strip()
+    архив = git("archive", sha)
     if архив.returncode != 0:
         raise Отказ("git archive пакета не прошёл: "
                     + архив.stderr.decode("utf-8", "ignore").strip())
@@ -113,9 +125,7 @@ def архив_пакета(пакет: Path, куда: Path) -> str:
     if распаковка.returncode != 0:
         raise Отказ("распаковка архива не прошла: "
                     + распаковка.stderr.decode("utf-8", "ignore").strip())
-    хэш = subprocess.run(["git", "-C", str(пакет), "rev-parse", "--short", "HEAD"],
-                         capture_output=True, text=True, timeout=30)
-    return хэш.stdout.strip()
+    return git("rev-parse", "--short", sha).stdout.decode().strip()
 
 
 def замены(данные: dict, паспорт: dict) -> list:
@@ -308,13 +318,13 @@ def цитаты_владельца(паспорт: dict) -> set[str]:
     return {ц.strip() for ц in _ЦИТАТА.findall(текст)}
 
 
-def собрать(пакет: Path, куда: str, данные: dict, паспорт: dict) -> dict:
+def собрать(пакет: Path, куда: str, данные: dict, паспорт: dict, коммит: str | None = None) -> dict:
     """Собрать дерево. Путь назначения — СТРОКОЙ: Path("") молча становится «.»."""
     цель = опознать_цель(куда)
 
     with tempfile.TemporaryDirectory(prefix="публичная-сборка-") as врем:
         дерево = Path(врем)
-        хэш = архив_пакета(пакет, дерево)
+        хэш = архив_пакета(пакет, дерево, коммит)
 
         # Маска, не снявшая ничего, — отказ, как и пропавший файл из «оставить».
         # Молчаливый no-op здесь опаснее ошибки: данные обещают, что след не
@@ -455,7 +465,7 @@ def main() -> int:
             return 1
 
     try:
-        итог = собрать(пакет, куда, данные, паспорт)
+        итог = собрать(пакет, куда, данные, паспорт, довод("--коммит"))
     except Отказ as отказ:
         print(f"[сборка] ОТКАЗ: {отказ}", file=sys.stderr)
         return отказ.код

@@ -75,6 +75,9 @@ turns red.
 - Tests before code, and the new probe must be RED before the fix.
 - For every probe ask: which breakage leaves it green? Prove liveness with a
   mutation of a COPY (the probe's env-var door), never of the live file.
+  For a task at level хакатон (`глубина.уровень: хакатон`) while the mode is
+  active, do not run probe mutations in work: they go to the debt card
+  `<id>-prod-debt` and the night.
 - A probe creates its own condition (own temp dir, own port, own log dir); a
   list it judges is taken by PARSING the subject — an empty list is a failure.
 - Edit YAML/JSON data by inserting text at an anchor; count records before and

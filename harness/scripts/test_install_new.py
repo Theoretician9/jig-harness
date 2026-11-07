@@ -1135,29 +1135,48 @@ def скрипты_живых_правок():
 
 def стенд_проекта(models_text=МОДЕЛИ_СТЕНД):
     корень = Path(_tempfile.mkdtemp(prefix="доставка-стенд-"))
-    (корень / "scripts").mkdir()
-    for скрипт in {"scripts/write-step.py", *скрипты_живых_правок()}:
-        shutil.copy(КОРЕНЬ / скрипт, корень / скрипт)
+    # lib — раньше скриптов правок: команда правки бывает и в scripts/lib.
     shutil.copytree(КОРЕНЬ / "scripts" / "lib", корень / "scripts" / "lib",
                     ignore=shutil.ignore_patterns("__pycache__"))
+    for скрипт in {"scripts/write-step.py", *скрипты_живых_правок()}:
+        shutil.copy(КОРЕНЬ / скрипт, корень / скрипт)
     (корень / "harness" / "config").mkdir(parents=True)
     (корень / "harness" / "config" / "pipeline.yaml").write_text(ШАГ_ПУЛЬТ, encoding="utf-8")
     (корень / "harness" / "config" / "models.yaml").write_text(models_text, encoding="utf-8")
+    shutil.copy(доустановка.ДАННЫЕ, корень / "harness" / "config" / "system-jobs.yaml")
+    # wrap-crontab читает расписание из библиотеки процессов, не из system-jobs.yaml.
+    for имя in ("process-library.yaml", "process-library.json"):
+        shutil.copy(КОРЕНЬ / "harness" / "config" / имя, корень / "harness" / "config" / имя)
     (корень / "логи").mkdir()
+    # Правка wrap-crontab без --вход читает и ПИШЕТ crontab: стенду — свой.
+    (корень / "bin").mkdir()
+    заглушка = корень / "bin" / "crontab"
+    заглушка.write_text(
+        '#!/bin/sh\n'
+        f'echo "$@" >> "{корень}/crontab-called"\n'
+        f'if [ "$1" = "-" ]; then cat > "{корень}/crontab"; exit 0; fi\n'
+        f'[ -f "{корень}/crontab" ] && exec cat "{корень}/crontab"\n'
+        'echo "no crontab" >&2; exit 1\n', encoding="utf-8")
+    заглушка.chmod(0o755)
     return корень
 
 
 def применить(правки, корень):
     import os
-    было = os.environ.get("LOG_DIR")
+    # Заглушка crontab стенда первой в PATH, PROJECT_DIR снят: правка не дотянется
+    # ни до живого crontab, ни до строк настоящего проекта.
+    было = {имя: os.environ.get(имя) for имя in ("LOG_DIR", "PATH", "PROJECT_DIR")}
     os.environ["LOG_DIR"] = str(корень / "логи")
+    os.environ["PATH"] = f"{корень / 'bin'}:{было['PATH'] or ''}"
+    os.environ.pop("PROJECT_DIR", None)
     try:
         return доустановка.применить_живые_правки(правки, корень, корень / "логи" / "доставлено.json")
     finally:
-        if было is None:
-            os.environ.pop("LOG_DIR", None)
-        else:
-            os.environ["LOG_DIR"] = было
+        for имя, значение in было.items():
+            if значение is None:
+                os.environ.pop(имя, None)
+            else:
+                os.environ[имя] = значение
 
 
 def шаги_стенда(корень):
@@ -1477,6 +1496,328 @@ try:
             путь_плохо("без репозитория доустановка что-то поставила")
 except Exception as error:     # noqa: BLE001
     путь_плохо(f"хуки git: {type(error).__name__}: {error}")
+
+print("── выключатель фоновых: строки крона (hr.process-dispatcher §Б.3) ──")
+# Владелец 05.11 погасил крон, закомментировав строки «#ВЫКЛ-0511». Признак
+# «стоит» не видел комментариев, и следующая доустановка дописала бы все строки
+# рабочими — выключенное включилось бы обновлением. Чужие строки не трогаем.
+P = "/srv/проба"
+LOGS = "/var/log/проба"
+BACKUP = {"имя": "backup", "расписание": "0 4 * * *",
+          "команда": "harness/demons/backup.sh", "журнал": "backup.log"}
+DISK = {"имя": "disk-cleanup", "расписание": "0 3 * * *",
+        "команда": "harness/demons/disk-cleanup.sh", "журнал": "disk-cleanup.log"}
+DISK_PRESSURE = {"имя": "disk-pressure", "расписание": "40 * * * *",
+                 "команда": "harness/demons/disk-cleanup.sh --по-давлению", "журнал": "disk-cleanup.log"}
+FOREIGN = "0 1 * * *  /home/владелец/своё-личное.sh   # поставил владелец\n"
+
+
+def live_lines(text: str) -> list:
+    return [line for line in text.splitlines() if line.strip() and not line.lstrip().startswith("#")]
+
+
+def commented_backup_not_added():
+    before = (FOREIGN + f"#ВЫКЛ-0511 0 4 * * *  {P}/harness/demons/backup.sh "
+              f">>{LOGS}/backup.log 2>&1\n")
+    after = доустановка.дополнить_расписание(before, [BACKUP], P, LOGS)
+    return after == before, f"дописано: {after[len(before):]!r}"
+
+
+случай("БОЛЬНОЙ СЛУЧАЙ: «#ВЫКЛ-0511 … backup.sh» — выключенное владельцем не дописано рабочим",
+       commented_backup_not_added)
+
+
+def bare_hash_not_added():
+    before = f"# 0 4 * * *  {P}/harness/demons/backup.sh >>{LOGS}/backup.log 2>&1\n"
+    after = доустановка.дополнить_расписание(before, [BACKUP], P, LOGS)
+    return after == before, f"дописано: {after[len(before):]!r}"
+
+
+случай("строка под голым «#» без метки тоже считается стоящей", bare_hash_not_added)
+
+
+def pressure_comment_is_not_plain():
+    before = (f"#ВЫКЛ-0511 40 * * * *  {P}/harness/demons/disk-cleanup.sh --по-давлению "
+              f">>{LOGS}/disk-cleanup.log 2>&1\n")
+    after = доустановка.дополнить_расписание(before, [DISK, DISK_PRESSURE], P, LOGS)
+    added = live_lines(after)
+    ok = (after.startswith(before) and len(added) == 1
+          and re.search(r"disk-cleanup\.sh\s*>>", added[0]) and "--по-давлению" not in added[0])
+    return bool(ok), f"рабочие строки после: {added}"
+
+
+случай("БОЛЬНОЙ СЛУЧАЙ: только «#ВЫКЛ-0511 … disk-cleanup.sh --по-давлению» — "
+       "disk-cleanup без довода дописан (сравнение командой целиком, не подстрокой)",
+       pressure_comment_is_not_plain)
+
+
+def wrapped_line_stands():
+    before = (FOREIGN + f"0 4 * * *  {P}/scripts/run-background.sh backup -- "
+              f"{P}/harness/demons/backup.sh >>{LOGS}/backup.log 2>&1\n"
+              f"#ВЫКЛ-0511 0 3 * * *  {P}/scripts/run-background.sh disk-cleanup -- "
+              f"{P}/harness/demons/disk-cleanup.sh >>{LOGS}/disk-cleanup.log 2>&1\n")
+    after = доустановка.дополнить_расписание(before, [BACKUP, DISK], P, LOGS)
+    return after == before, f"дописано: {after[len(before):]!r}"
+
+
+случай("обёрнутая строка (и обёрнутая под «#ВЫКЛ-0511») стоит по id обёртки — дубля нет",
+       wrapped_line_stands)
+
+
+def added_line_is_wrapped():
+    after = доустановка.дополнить_расписание(FOREIGN, [BACKUP], P, LOGS)
+    added = live_lines(after[len(FOREIGN):])
+    want = (f"0 4 * * * {P}/scripts/run-background.sh backup -- {P}/harness/demons/backup.sh "
+            f">>{LOGS}/backup.log 2>&1")
+    return [" ".join(a.split()) for a in added] == [want], f"дописано: {added}"
+
+
+случай("недостающее задание дописано через обёртку run-background.sh <id> --", added_line_is_wrapped)
+
+
+def wrap_edit_in_data():
+    edits = {e.get("id"): e for e in доустановка.прочитать_живые_правки()}
+    edit = edits.get("обёртка-крона-2026-11") or {}
+    commands = " ".join(edit.get("команды") or [])
+    return "process_library.py wrap-crontab" in commands, f"правка: {edit or 'нет в данных'}"
+
+
+случай("живая правка обёртка-крона-2026-11 стоит в данных и зовёт wrap-crontab", wrap_edit_in_data)
+
+
+def run_wrap(text: str) -> tuple:
+    """wrap-crontab на файлах стенда. Живой crontab недосягаем: в PATH стоит
+    заглушка crontab, которая отказывает и оставляет след."""
+    import os
+    import subprocess
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        (tmp / "bin").mkdir()
+        stub = tmp / "bin" / "crontab"
+        stub.write_text(f'#!/bin/sh\necho "$@" >> "{tmp}/crontab-called"\nexit 1\n', encoding="utf-8")
+        stub.chmod(0o755)
+        (tmp / "install.conf").write_text(f'PROJECT_DIR="{P}"\nLOG_DIR="{tmp}"\n', encoding="utf-8")
+        (tmp / "harness.conf").write_text('OTHER_KEY="1"\n', encoding="utf-8")
+        (tmp / "in").write_text(text, encoding="utf-8")
+        env = {**os.environ, "PATH": f"{tmp / 'bin'}:{os.environ.get('PATH', '')}", "PROJECT_DIR": P,
+               "LOG_DIR": str(tmp), "HARNESS_HOME": str(tmp), "HARNESS_INSTALL_CONF": str(tmp / "install.conf"),
+               "HARNESS_CONF": str(tmp / "harness.conf")}
+        done = subprocess.run([sys.executable, "-I", str(КОРЕНЬ / "scripts" / "lib" / "process_library.py"),
+                               "wrap-crontab", "--вход", str(tmp / "in"), "--выход", str(tmp / "out")],
+                              env=env, capture_output=True, text=True, timeout=60)
+        out = (tmp / "out").read_text(encoding="utf-8") if (tmp / "out").exists() else None
+        called = (tmp / "crontab-called").exists()
+    return done.returncode, out, called, (done.stdout + done.stderr)[-300:]
+
+
+WRAP_IN = (FOREIGN
+           + f"0 4 * * *  {P}/harness/demons/backup.sh >>{LOGS}/backup.log 2>&1\n"
+           + f"#ВЫКЛ-0511 40 * * * *  {P}/harness/demons/disk-cleanup.sh --по-давлению "
+             f">>{LOGS}/disk-cleanup.log 2>&1\n"
+           + "*/7 * * * *  /opt/чужое/harness/demons/backup.sh >>/tmp/чужое.log 2>&1\n")
+
+
+def wrap_own_line():
+    rc, out, called, said = run_wrap(WRAP_IN)
+    if out is None:
+        return False, f"выхода нет, код {rc}: {said}"
+    lines = out.splitlines()
+    want = f"0 4 * * * {P}/scripts/run-background.sh backup -- {P}/harness/demons/backup.sh >>{LOGS}/backup.log 2>&1"
+    wrapped = [" ".join(l.split()) for l in lines if "run-background.sh backup" in l and not l.startswith("#")]
+    bare = [l for l in lines if not l.startswith("#") and f"{P}/harness/demons/backup.sh" in l
+            and "run-background.sh" not in l]
+    return (rc == 0 and wrapped == [want] and not bare and not called,
+            f"код {rc}, обёрнуто {wrapped}, осталось голых {bare}, живой crontab зван {called}: {said}")
+
+
+случай("БОЛЬНОЙ СЛУЧАЙ: необёрнутая своя строка — живая правка wrap-crontab её обернула", wrap_own_line)
+
+
+def wrap_keeps_foreign():
+    rc, out, _called, said = run_wrap(WRAP_IN)
+    if out is None:
+        return False, f"выхода нет, код {rc}: {said}"
+    foreign_in = [l for l in WRAP_IN.splitlines(keepends=True) if f"{P}/" not in l]
+    foreign_out = [l for l in out.splitlines(keepends=True) if f"{P}/" not in l]
+    comment_in = [l for l in WRAP_IN.splitlines() if l.startswith("#")]
+    comment_out = [l for l in out.splitlines() if l.startswith("#")]
+    return (foreign_out == foreign_in and len(comment_out) == len(comment_in)
+            and len(out.splitlines()) == len(WRAP_IN.splitlines()),
+            f"чужие было {foreign_in}, стало {foreign_out}; комментариев {len(comment_in)}→{len(comment_out)}")
+
+
+случай("wrap-crontab: чужие строки байт в байт те же, комментарий остался комментарием", wrap_keeps_foreign)
+
+
+def wrap_idempotent():
+    _rc, once, _c, said = run_wrap(WRAP_IN)
+    if once is None:
+        return False, f"первого выхода нет: {said}"
+    _rc, twice, _c, said = run_wrap(once)
+    return twice == once, f"второй прогон изменил текст: {said}"
+
+
+случай("wrap-crontab повторно ничего не меняет", wrap_idempotent)
+
+
+def library_jobs() -> tuple:
+    """Задания с расписанием РАЗБОРОМ данных: раздел процессы: библиотеки, а пока
+    расписание туда не переехало (часть А2) — задания system-jobs.yaml."""
+    import yaml
+    config_dir = КОРЕНЬ / "harness" / "config"
+    library = yaml.safe_load((config_dir / "process-library.yaml").read_text(encoding="utf-8")) or {}
+    found = [{"имя": name, **entry} for name, entry in (library.get("процессы") or {}).items()
+             if isinstance(entry, dict) and entry.get("расписание")]
+    if found:
+        return found, "process-library.yaml"
+    data = yaml.safe_load((config_dir / "system-jobs.yaml").read_text(encoding="utf-8")) or {}
+    return list(data.get("задания") or []), "system-jobs.yaml"
+
+
+def checks_service_ids() -> tuple:
+    """id с признаком «запуск: служба-проверок» РАЗБОРОМ обоих файлов библиотеки:
+    YAML (расписание) и JSON (свойства). Таймер их гонит, строки крона им нельзя."""
+    import yaml
+    config_dir = КОРЕНЬ / "harness" / "config"
+    library = yaml.safe_load((config_dir / "process-library.yaml").read_text(encoding="utf-8")) or {}
+    from_yaml = {name for name, entry in (library.get("процессы") or {}).items()
+                 if isinstance(entry, dict) and entry.get("запуск") == "служба-проверок"}
+    registry = json.loads((config_dir / "process-library.json").read_text(encoding="utf-8"))
+    from_json = {entry.get("id") for entry in registry.get("процессы") or []
+                 if entry.get("запуск") == "служба-проверок"}
+    return from_yaml, from_json
+
+
+def cron_lines_all_wrapped():
+    spec_ = importlib.util.spec_from_file_location("process_library_probe",
+                                                   КОРЕНЬ / "scripts" / "lib" / "process_library.py")
+    library = importlib.util.module_from_spec(spec_)
+    spec_.loader.exec_module(library)
+    jobs_, source = library_jobs()
+    if not jobs_:
+        return False, f"список заданий из {source} пуст — судить нечего"
+    # Служба потока проверок (спека §Г.1) обязана быть: ноль признаков — разбор сломан, а не «всё в кроне».
+    service_yaml, service_json = checks_service_ids()
+    if not service_yaml or service_yaml != service_json:
+        return False, (f"признак служба-проверок: YAML {sorted(service_yaml)}, JSON {sorted(service_json)} — "
+                       "пуст или файлы библиотеки разошлись")
+    conf = {job["если_задан"]: "задан" for job in jobs_ if job.get("если_задан")}
+    lines = library.cron_lines(P, LOGS, conf)
+    lines = lines.splitlines() if isinstance(lines, str) else list(lines)
+    got = sorted(" ".join(l.split()) for l in lines if l.strip())
+    cron_jobs = [j for j in jobs_ if j["имя"] not in service_yaml]
+    want = sorted(" ".join(f"{j['расписание']}  {P}/scripts/run-background.sh {j['имя']} -- "
+                           f"{P}/{j['команда']} >>{LOGS}/{j['журнал']} 2>&1".split()) for j in cron_jobs)
+    leaked = sorted(i for i in service_yaml if any(f"/run-background.sh {i} " in g for g in got))
+    missing = [w for w in want if w not in got][:3]
+    extra = [g for g in got if g not in want][:3]
+    return got == want and not leaked, (f"заданий {len(jobs_)} ({source}), службы {len(service_yaml)}, "
+                                        f"строк {len(got)}; служба в кроне {leaked}; нет {missing}; лишние {extra}")
+
+
+случай("cron_lines: каждое задание вне службы проверок — одна строка через run-background.sh, у службы строк нет",
+       cron_lines_all_wrapped)
+
+
+import contextlib
+
+print("── служба потока проверок: доустановка не возвращает строки в крон (§Г.1, находка 1 ревью) ──")
+# После переключения строки пяти id убраны из crontab, их гонят таймеры. Доустановка
+# строила добавку по каждому заданию мимо cron_lines и вернула бы их: двойной запуск,
+# крон вне среза. Данные — живые задания разбором; машина подменена: crontab пуст и
+# пишется в память, конфиг пуст, проект и метки — временные, хуки и переезды заглушены.
+def run_main_on_empty_cron(argv: list) -> tuple:
+    written = {}
+
+    class Accepted:
+        returncode = 0
+        stdout = stderr = ""
+
+    saved_run = доустановка.subprocess.run
+
+    def run_into_memory(command, *args, **kwargs):
+        if list(command[:2]) == ["crontab", "-"]:
+            written["cron"] = kwargs.get("input", "")
+            return Accepted()
+        return saved_run(command, *args, **kwargs)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        conf = tmp / "harness.conf"
+        conf.write_text("", encoding="utf-8")
+        (tmp / "proj").mkdir()
+        stubs = {"subprocess.run": run_into_memory, "HARNESS_CONF": str(conf),
+                 "_расписание_сейчас": lambda: "",
+                 "прочитать_живые_правки": lambda *a, **k: [],
+                 "донести_память": lambda *a, **k: [],
+                 "_назвать_задержанные": lambda *a, **k: None,
+                 "stale_artifacts_report": lambda *a, **k: "",
+                 "install_git_hooks": lambda *a, **k: [],
+                 "переселить_метки": lambda *a, **k: [],
+                 "перенести_файлы": lambda *a, **k: [],
+                 "конф_модуль.heartbeat_dir": lambda: tmp / "hb"}
+        saved = {}
+        for name, value in stubs.items():
+            owner_name, _, attr = name.rpartition(".")
+            owner = getattr(доустановка, owner_name) if owner_name else доустановка
+            saved[name] = (owner, attr, getattr(owner, attr))
+            setattr(owner, attr, value)
+        saved_project = os.environ.get("PROJECT_DIR")
+        os.environ["PROJECT_DIR"] = str(tmp / "proj")
+        out = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+                code = доустановка.main(argv)
+        finally:
+            for owner, attr, value in saved.values():
+                setattr(owner, attr, value)
+            if saved_project is None:
+                os.environ.pop("PROJECT_DIR", None)
+            else:
+                os.environ["PROJECT_DIR"] = saved_project
+    return code, written.get("cron", ""), out.getvalue()
+
+
+def service_jobs_split() -> tuple:
+    """(id службы, ждущие строки задания) РАЗБОРОМ: задания доустановки без ключа
+    `если_задан` (конфиг стенда пуст) минус id с признаком."""
+    service_yaml, service_json = checks_service_ids()
+    names = {job["имя"] for job in доустановка.прочитать_данные()[0]}
+    plain = {job["имя"] for job in доустановка.прочитать_данные()[0] if not job.get("если_задан")}
+    return service_yaml, service_json, names, plain - service_yaml
+
+
+def main_skips_service_ids():
+    service, service_json, names, want = service_jobs_split()
+    if not service or service != service_json or not service <= names:
+        return False, (f"судить нечего: признак YAML {sorted(service)}, JSON {sorted(service_json)}, "
+                       f"не в заданиях доустановки {sorted(service - names)}")
+    code, cron, said = run_main_on_empty_cron([])
+    got = {m.group(1) for m in re.finditer(r"run-background\.sh (\S+) -- ", cron)}
+    leaked = sorted(got & service)
+    return (code == 0 and not leaked and got == want,
+            f"код {code}; служба дописана в крон {leaked}; нет {sorted(want - got)[:5]}; "
+            f"лишние {sorted(got - want - service)[:5]}; {said[-200:]!r}")
+
+
+случай("БОЛЬНОЙ СЛУЧАЙ: crontab без строк службы — main не дописывает пять id, прочие дописывает",
+       main_skips_service_ids)
+
+
+def show_does_not_count_service():
+    service, service_json, names, want = service_jobs_split()
+    if not service or service != service_json or not service <= names:
+        return False, f"судить нечего: признак {sorted(service)} / {sorted(service_json)}"
+    code, cron, said = run_main_on_empty_cron(["--показать"])
+    number = re.search(r"заданий не хватает: (\d+)", said)
+    return (code == 0 and number is not None and int(number.group(1)) == len(want) and not cron,
+            f"код {code}; «не хватает» {number.group(1) if number else 'нет строки'}, ждали {len(want)} "
+            f"(без {len(service)} id службы); crontab писан {bool(cron)}")
+
+
+случай("--показать: строки службы не считаются «заданий не хватает»", show_does_not_count_service)
+
 
 print(f"ДОУСТАНОВКА: путей {путей}, неудач {неудач}")
 if неудач:

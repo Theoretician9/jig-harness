@@ -34,6 +34,7 @@
 """
 from __future__ import annotations
 
+import fcntl
 import os
 import pathlib
 import shutil
@@ -49,24 +50,24 @@ import yaml
                       or КОРЕНЬ / "harness" / "config" / "live-check-sick-cases.yaml")
 СОСТОЯНИЕ = pathlib.Path(os.environ.get("HARNESS_LIVE_CHECK_STATE")
                          or КОРЕНЬ / "harness" / "config" / "live-check-state.yaml")
+def _корень_следов() -> pathlib.Path:
+    """Корень следов — у общего загрузчика: умолчание внутри репозитория
+    отдавало весь вывод произвольной команды гиту."""
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent / "lib"))
+    import config as конф                                 # noqa: PLC0415
+    return pathlib.Path(конф.live_check_trace_root())
+
+
 СЛЕДЫ = pathlib.Path(os.environ.get("HARNESS_LIVE_CHECK_SICK_TRACE_DIR")
-                     or КОРЕНЬ / ".tasks" / "hr.zhivaya-proverka-vseh-mehanizmov"
+                     or _корень_следов() / "hr.zhivaya-proverka-vseh-mehanizmov"
                      / "живьём-больные")
 # След, которому в гите не место. Гейты секретов доказываются ТЕМ, что они
 # запрещают: вывод несёт значение, похожее на ключ, и гейт секретов отказывает
 # коммиту — правильно отказывает. Подчищать чужой вывод руками нельзя, он тогда
 # перестаёт быть чужим; значит такой след живёт вне дерева, и случай говорит об
 # этом ключом «след_наружу».
-def _каталог_журналов() -> pathlib.Path:
-    """Каталог журналов машины — у общего загрузчика, а не строкой в коде:
-    зашитый путь работает на одной машине (гейт «корень установки»)."""
-    sys.path.insert(0, str(КОРЕНЬ / "scripts" / "lib"))
-    import config as конф                                 # noqa: PLC0415
-    return pathlib.Path(конф.log_dir())
-
-
 СЛЕДЫ_НАРУЖУ = pathlib.Path(os.environ.get("HARNESS_LIVE_CHECK_SICK_TRACE_OUT")
-                            or _каталог_журналов() / "живая-проверка")
+                            or _корень_следов())
 
 
 def больные_случаи() -> dict:
@@ -227,13 +228,19 @@ def судить(копия: pathlib.Path, механизм: str, случай: 
 
 
 def записать(поля_по_механизму: dict) -> None:
-    данные = yaml.safe_load(СОСТОЯНИЕ.read_text(encoding="utf-8")) or {}
-    сост = данные.setdefault("проверено", {})
-    for механизм, поля in поля_по_механизму.items():
-        сост.setdefault(механизм, {}).update(поля)
-    СОСТОЯНИЕ.write_text(
-        yaml.dump(данные, allow_unicode=True, sort_keys=False, width=100),
-        encoding="utf-8")
+    # замок по соседнему файлу: сам yaml заменяется через replace, на нём замок бы терялся
+    with open(СОСТОЯНИЕ.with_name(СОСТОЯНИЕ.name + ".lock"), "w") as замок:
+        fcntl.flock(замок, fcntl.LOCK_EX)
+        данные = yaml.safe_load(СОСТОЯНИЕ.read_text(encoding="utf-8")) or {}
+        сост = данные.setdefault("проверено", {})
+        for механизм, поля in поля_по_механизму.items():
+            сост.setdefault(механизм, {}).update(поля)
+        # временный файл рядом + replace: читатель без замка не увидит половину файла
+        врем = СОСТОЯНИЕ.with_name(f"{СОСТОЯНИЕ.name}.{os.getpid()}.tmp")
+        врем.write_text(
+            yaml.dump(данные, allow_unicode=True, sort_keys=False, width=100),
+            encoding="utf-8")
+        os.replace(врем, СОСТОЯНИЕ)
 
 
 def main() -> int:

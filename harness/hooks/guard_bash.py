@@ -16,17 +16,53 @@
 """
 import datetime
 import fnmatch
+import glob
+import hashlib
 import json
 import os
 import pathlib
 import re
+import shlex
 import subprocess
 import sys
 import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "lib"))
-import config as конф                                     # noqa: E402
-import owner_word as слово_вл                             # noqa: E402
+
+
+def _аварийный_сторож(беда: Exception) -> int:
+    """Судья согласия не импортируется: двери закрыты, остальное идёт.
+
+    Код выхода 1 харнес читает как «хук упал, команду пускаем» — отменяет только 2, поэтому
+    без этого блока битый импорт выключал бы сторожа целиком. Здесь только стандартная
+    библиотека и свои шаблоны: от упавших модулей ничего не зависит. Шаблоны шире основных —
+    ложное закрытие лечится правкой файла инструментом Edit, а он не Bash.
+    """
+    try:
+        cmd = (json.loads(sys.stdin.read()).get("tool_input") or {}).get("command") or ""
+    except Exception:
+        cmd = ""
+    двери = re.compile(
+        r"git\s+(?:-\S+\s+(?:\S+\s+)?)*(?:push|filter-branch|filter-repo|rebase)\b"
+        r"|git\s+(?:-\S+\s+)*commit\b[^;&|\n]*--amend"
+        r"|\bfilter-(?:branch|repo)\b|deploy\.sh\b|publish\.sh\b|drop-database\.sh\b"
+        r"|protected-delete(?:\.py)?\b|\bdropdb\b"
+        r"|\brm\s+[^;&|\n]*(?:\bdata\b|\bbackups?\b|\bsecrets\b)")
+    if двери.search(cmd):
+        sys.stderr.write(f"судья согласия не импортируется ({беда!r}): дверь закрыта; "
+                         "почини файл инструментом Edit\n")
+        return 2
+    sys.stderr.write(f"сторож: судья согласия не импортируется ({беда!r}); дверные команды "
+                     "закрыты, остальные идут. Почини файл инструментом Edit\n")
+    return 0
+
+
+try:
+    import config as конф                                 # noqa: E402
+    import owner_word as слово_вл                         # noqa: E402
+    import door_subjects                                  # noqa: E402
+except Exception as _беда_импорта:
+    sys.exit(_аварийный_сторож(_беда_импорта))
 
 CONF_PATH = конф.путь_install_conf()
 HARNESS_CONF_PATH = конф.путь_harness_conf()
@@ -585,7 +621,7 @@ def ротация_ведётся_сторожем(now: float | None = None) -> 
 
 # В-2: нагрузка bash -c '...' / sh -c "..." — команда, разбирается рекурсивно.
 SHELL_C = re.compile(
-    _CMD_POS + _PRE + _BIN + r"(?:bash|sh|dash|zsh)\s+(?:-\S+\s+)*-\w*c\s+('[^']*'|\"[^\"]*\"|\S+)",
+    _CMD_POS + _PRE + _BIN + r"(?:bash|sh|dash|zsh|su)\s+(?:-\S+\s+)*-\w*c\s+('[^']*'|\"[^\"]*\"|\S+)",
     re.MULTILINE,
 )
 
@@ -652,8 +688,9 @@ def _statement_around(cmd: str, pos: int) -> str:
     return _strip_comment(cmd[start:end])
 
 
-def rm_protected_target(cmd: str) -> str | None:
-    """Путь из rm-с-рекурсией, задевающий каталог данных/бэкапов, или None."""
+def rm_protected_targets(cmd: str) -> list[str]:
+    """ВСЕ пути из rm, задевающие каталог данных/бэкапов: дверь судит каждый."""
+    найденные = []
     for m in RM_CMD.finditer(cmd):
         tokens = _strip_comment(m.group(1)).split()
         paths = [t for t in tokens if not t.startswith("-")]
@@ -661,31 +698,606 @@ def rm_protected_target(cmd: str) -> str | None:
         # так же безвозвратно, как «rm -rf .../secrets». Улика приёмки 11.08.2026:
         # сторож молча пропустил удаление файла с токеном бота внутри
         # SECRETS_DIR — правило спрашивало про глагол, а И-1 про потерю данных.
-        for t in paths:
-            if _protected_component(t):
-                return t.strip("'\"")
+        найденные += [t.strip("'\"") for t in paths if _protected_component(t)]
         if not paths:
             # rm без явных целей — их подаёт stdin (find ... | xargs rm -rf, В-2):
             # смотрим пути в операторе с этим rm (П-10) — источник целей слева
             # от конвейера, а комментарии и соседние команды уже отрезаны.
             for t in re.split(r"""[\s'"]+""", _statement_around(cmd, m.start())):
                 if not t.startswith("-") and _protected_component(t):
-                    return t
-    return None
+                    найденные.append(t)
+    return найденные
 
 
-def find_delete_target(cmd: str) -> str | None:
-    """Путь из find ... -delete, задевающий каталог данных/бэкапов, или None (В-2)."""
+def find_delete_targets(cmd: str) -> list[str]:
+    """ВСЕ пути из find ... -delete, задевающие каталог данных/бэкапов."""
+    найденные = []
     for m in FIND_CMD.finditer(cmd):
         # комментарий отрезается той же резкой, что у rm (П-10): «# ... -delete»
         # в хвосте — рассказ про удаление, не удаление
         tokens = [t.strip("'\"") for t in _strip_comment(m.group(1)).split()]
         if "-delete" not in tokens:
             continue
-        for t in tokens:
-            if not t.startswith("-") and _protected_component(t):
-                return t
+        найденные += [t for t in tokens if not t.startswith("-") and _protected_component(t)]
+    return найденные
+
+
+# ── Защита по ПУТИ, а не по глаголу (перепроверка 03.11.2026, дыры 1 и 2) ───
+# Прежнее правило судило ИМЯ компонента пути и два глагола; путь из
+# PROTECTED_PATHS и SECRETS_DIR уходили mv, shred, truncate, `: >`, cp /dev/null, dd, rsync
+# --delete, git clean. Здесь один разбор команды на звенья и одна проверка
+# «цель внутри защищённого пути» (realpath: ~, .. и симлинки учтены). Список
+# путей — данные: ключ PROTECTED_PATHS в harness.conf, плюс SECRETS_DIR и
+# BACKUP_DIR из конфигов установки (второй копией в другом месте они разъехались бы).
+_ПЕРЕХОДЫ = {";", ";;", "&&", "||", "|", "|&", "&", "(", ")"}
+_ПЕРЕНАПРАВЛЕНИЯ_ВЫВОДА = {">", ">>", ">|", "&>", "&>>"}
+_ПЕРЕНАПРАВЛЕНИЯ_МИМО = {"<", "<<", "<<<", "<<-", "<&", ">&"}
+_ОБЁРТКИ = {"sudo", "env", "command", "nohup", "time", "exec", "nice", "ionice",
+            "timeout", "stdbuf", "setsid", "flock", "busybox"}
+_ОБЁРТКА_ФЛАГ_СО_ЗНАЧЕНИЕМ = {"-u", "-g", "-h", "-p", "-C", "-D", "-R", "-T", "-U"}
+# У timeout -s/-k берут значение, а у sudo -s — нет: набор флагов судится по обёртке.
+_ФЛАГ_СО_ЗНАЧЕНИЕМ_У = {"timeout": _ОБЁРТКА_ФЛАГ_СО_ЗНАЧЕНИЕМ | {"-s", "-k"}}
+# Слова оболочки перед командой звена: «{ rm …; }», «then rm …».
+_СЛОВА_ПЕРЕД_КОМАНДОЙ = {"{", "then", "do", "else", "elif", "if", "while", "until", "!"}
+_ПРИСВАИВАНИЕ = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
+# Разрушающий глагол внутри нагрузки docker run (её текст склеен из аргументов).
+_РАЗРУШАЮЩИЙ_ВНУТРИ = re.compile(
+    r"(?:^|[\s;&|(])(?:rm|mv|shred|truncate|dd|unlink)(?=\s|$)|-delete\b"
+    r"|rsync\s[^;&|]*--delete|git\s[^;&|]*\bclean\b")
+_СЛОВО_ДВЕРИ_ДАННЫХ = "HARNESS_DATA_DELETE_WHY"
+_ПОДАНО_В_ОБРАБОТАНО = "обработано"      # данные: имя каталога прочитанных входящих
+
+
+def _без_переводов_строк(текст: str) -> str:
+    """Перевод строки ВНЕ кавычек — граница команд; shlex иначе съел бы его как пробел."""
+    итог, кавычка, экран = [], None, False
+    for с in текст:
+        if экран:
+            итог.append(с)
+            экран = False
+            continue
+        if с == "\\" and кавычка != "'":
+            итог.append(с)
+            экран = True
+            continue
+        if кавычка is None and с == "\n":
+            итог.append(" ; ")
+            continue
+        if кавычка is None and с in "\"'":
+            кавычка = с
+        elif с == кавычка:
+            кавычка = None
+        итог.append(с)
+    return "".join(итог)
+
+
+def _звенья(cmd: str) -> list[dict]:
+    """Звенья команды: argv без обёрток, присваивания-префиксы, перенаправления, каталог.
+
+    Каталог ведётся по `cd`: «cd /var/www/chuzhoj-proekt && git clean -fdx» судится по месту
+    запуска, а не по каталогу хука. Не разобрали (кавычки не сошлись) — звеньев нет:
+    оболочка такую команду тоже не выполнит.
+    """
+    лексер = shlex.shlex(_без_переводов_строк(heredoc_вырезан(cmd)), posix=True,
+                         punctuation_chars=True)
+    лексер.whitespace_split = True
+    лексер.commenters = ""
+    try:
+        токены = list(лексер)
+    except ValueError:
+        return []
+    куски, текущий = [], []
+    for т in токены:
+        if т in _ПЕРЕХОДЫ:
+            куски.append(текущий)
+            текущий = []
+        else:
+            текущий.append(т)
+    куски.append(текущий)
+    итог, каталог = [], os.getcwd()
+    for кусок in куски:
+        argv, пишет, env, i = [], [], {}, 0
+        while i < len(кусок):
+            т = кусок[i]
+            if т in _ПЕРЕНАПРАВЛЕНИЯ_ВЫВОДА and i + 1 < len(кусок):
+                пишет.append(кусок[i + 1])
+                i += 2
+            elif т in _ПЕРЕНАПРАВЛЕНИЯ_МИМО:
+                i += 2
+            else:
+                argv.append(т)
+                i += 1
+        while argv:
+            голова = argv[0]
+            if _ПРИСВАИВАНИЕ.match(голова):
+                имя, _, значение = голова.partition("=")
+                env[имя] = значение
+                argv = argv[1:]
+            elif голова in _СЛОВА_ПЕРЕД_КОМАНДОЙ:
+                argv = argv[1:]
+            elif os.path.basename(голова) in _ОБЁРТКИ:
+                обёртка = os.path.basename(голова)
+                со_значением = _ФЛАГ_СО_ЗНАЧЕНИЕМ_У.get(обёртка, _ОБЁРТКА_ФЛАГ_СО_ЗНАЧЕНИЕМ)
+                argv = argv[1:]
+                while argv and (argv[0].startswith("-") or re.fullmatch(r"\d+[smhd]?", argv[0])):
+                    argv = argv[2:] if argv[0] in со_значением else argv[1:]
+                if обёртка == "flock" and argv:
+                    argv = argv[1:]     # файл замка — позиционный аргумент
+            else:
+                break
+        if argv and argv[0] in ("cd", "pushd") and len(argv) > 1:
+            каталог = _реальный_путь(argv[1], каталог)
+        итог.append({"argv": argv, "пишет": пишет, "env": env, "каталог": каталог})
+    return итог
+
+
+def _реальный_путь(токен: str, каталог: str) -> str:
+    путь = os.path.expandvars(os.path.expanduser(токен))
+    if not os.path.isabs(путь):
+        путь = os.path.join(каталог, путь)
+    return os.path.realpath(путь)
+
+
+def _реальные_пути(токен: str, каталог: str) -> list[str]:
+    """Путь токена; со знаками шаблона — все найденные (пусто найдено — сам токен)."""
+    if any(с in токен for с in "*?["):
+        найденные = glob.glob(os.path.expanduser(
+            токен if os.path.isabs(токен) else os.path.join(каталог, токен)))
+        if найденные:
+            return [os.path.realpath(п) for п in найденные]
+    return [_реальный_путь(токен, каталог)]
+
+
+def _впервые_за_сутки(корень: str, установка: dict) -> bool:
+    """Метка-файл на корень и день, создаётся атомарно: след не чаще раза в сутки.
+
+    Сторож зовёт это на каждую команду; без метки журнал растёт на тысячи строк
+    в день и тонет в нём настоящее падение сторожа. Сбой метки не мешает сторожу:
+    след тогда просто пишется.
+    """
+    имя = f".root-ignored-{hashlib.sha1(корень.encode()).hexdigest()}-{time.strftime('%Y%m%d')}"
+    логи = установка.get("LOG_DIR", "")
+    if not логи.startswith(("/", "~")):
+        return True
+    try:
+        os.close(os.open(os.path.join(os.path.expanduser(логи), имя),
+                         os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
+    except FileExistsError:
+        return False
+    except OSError:
+        return True
+    return True
+
+
+def _защищённые_корни() -> list[str]:
+    установка = read_conf()
+    корни, над_рабочим = door_subjects.protected_roots(установка, конф.из_файла(конф.путь_harness_conf()))
+    # Корень над рабочим местом игнорируем, но не молча: иначе защита исчезла бы без следа.
+    for к in над_рабочим:
+        if _впервые_за_сутки(к, установка):
+            log_fail_open("корень защиты проигнорирован: над рабочим местом", к)
+    return корни
+
+
+def _внутри(путь: str, корень: str) -> bool:
+    return путь == корень or путь.startswith(корень.rstrip(os.sep) + os.sep)
+
+
+def _не_флаги(argv: list[str]) -> list[str]:
+    return [а for а in argv if not (а.startswith("-") and len(а) > 1)]
+
+
+def _голова_find(argv: list[str]) -> list[str]:
+    """Корни обхода find: слова до первого выражения."""
+    корни = []
+    for а in argv[1:]:
+        if а in ("-H", "-L", "-P"):
+            continue
+        if а.startswith("-") or а in ("(", "!"):
+            break
+        корни.append(а)
+    return корни
+
+
+def _git_очистка(argv: list[str], каталог: str) -> str | None:
+    """Каталог, который чистит `git clean` (не сухой прогон), или None."""
+    i, место = 1, каталог
+    while i < len(argv) and argv[i].startswith("-"):
+        if argv[i] == "-C" and i + 1 < len(argv):
+            место = _реальный_путь(argv[i + 1], место)
+            i += 1
+        elif argv[i] == "-c":
+            i += 1
+        i += 1
+    if argv[i:i + 1] != ["clean"]:
+        return None
+    флаги = [а for а in argv[i + 1:] if а.startswith("-")]
+    сухой = any(ф == "--dry-run" or (not ф.startswith("--") and "n" in ф) for ф in флаги)
+    return None if сухой else место
+
+
+def _тома_docker(argv: list[str]) -> list[str]:
+    """Хост-пути записываемых привязок -v/--volume/--mount; `:ro` не считается."""
+    итог = []
+    for i, а in enumerate(argv):
+        if а in ("-v", "--volume") and i + 1 < len(argv):
+            значение = argv[i + 1]
+        elif а.startswith("--volume="):
+            значение = а.split("=", 1)[1]
+        elif а.startswith("-v") and len(а) > 2:
+            значение = а[2:]
+        else:
+            continue
+        части = значение.split(":")
+        if len(части) > 2 and "ro" in части[2].split(","):
+            continue
+        if части[0].startswith(("/", "~")):
+            итог.append(части[0])
+    return итог
+
+
+def _имена_мимо(argv: list[str], корни: list[str]) -> bool:
+    """Все -name/-iname отбирают имена, которых нет среди корней и их детей."""
+    шаблоны = [argv[i + 1].lower() for i, а in enumerate(argv[:-1]) if а in ("-name", "-iname")]
+    if not шаблоны:
+        return False
+    имена = {os.path.basename(к).lower() for к in корни}
+    for к in корни:
+        try:
+            имена.update(и.lower() for и in os.listdir(к))
+        except OSError:
+            pass
+    return not any(fnmatch.fnmatchcase(и, ш) for и in имена for ш in шаблоны)
+
+
+def _атомарная_запись(аргументы: list[str], каталог: str) -> bool:
+    """`mv X.tmp новая_цель` внутри одного защищённого корня ничего не затирает.
+
+    Так пишется новый секрет: генератор кладёт значение во временный файл рядом
+    и переименовывает. Источник может ещё не существовать (его создаёт соседнее
+    звено), цель обязана не существовать — перезапись остаётся отказом.
+    """
+    if len(аргументы) != 2:
+        return False
+    источник, цель = (_реальный_путь(т, каталог) for т in аргументы)
+    корни = [к for к in _защищённые_корни() if _внутри(источник, к) and _внутри(цель, к)]
+    return bool(корни) and источник.endswith(".tmp") and not os.path.isdir(источник) \
+        and not os.path.lexists(цель)
+
+
+def _разрушаемое(звено: dict) -> list[tuple[str, bool, str]]:
+    """Что звено разрушает: [(путь, ещё_и_предки, глагол)].
+
+    «Предки» — цель-родитель защищённого пути (rm -rf sample-21) уносит его так же,
+    как сам путь. Только у источников: целью mv служит каталог, куда кладут.
+    """
+    argv, каталог = звено["argv"], звено["каталог"]
+    итог: list[tuple[str, bool, str]] = []
+
+    def добавить(токены, предки, глагол):
+        for т in токены:
+            итог.extend((п, предки, глагол) for п in _реальные_пути(т, каталог))
+
+    # Перенаправление в СУЩЕСТВУЮЩИЙ файл стирает его; новый файл (генератор
+    # пароля пишет ключ впервые) — свободен.
+    for т in звено["пишет"]:
+        if not т.startswith("/dev/"):
+            итог.extend((п, False, ">") for п in _реальные_пути(т, каталог) if os.path.isfile(п))
+    if not argv:
+        return итог
+    имя, аргументы = os.path.basename(argv[0]), _не_флаги(argv[1:])
+    if имя in ("rm", "shred", "unlink"):
+        добавить(аргументы, True, имя)
+    elif имя == "mv":
+        if not _атомарная_запись(аргументы, каталог):
+            добавить(аргументы[:-1], True, имя)
+            добавить(аргументы[-1:], False, имя)
+    elif имя in ("cp", "install", "ln") and аргументы:
+        итог.extend((п, False, имя) for п in _реальные_пути(аргументы[-1], каталог)
+                    if os.path.isfile(п))
+    elif имя == "tee" or (имя == "sed" and any(
+            re.match(r"-[A-Za-z]*i|--in-place", а) for а in argv[1:])):
+        итог.extend((п, False, имя) for т in аргументы for п in _реальные_пути(т, каталог)
+                    if os.path.isfile(п))
+    elif имя == "truncate":
+        добавить(аргументы, False, имя)
+    elif имя == "dd":
+        добавить([а[3:] for а in argv[1:] if а.startswith("of=")], False, имя)
+    elif имя == "rsync" and аргументы and any(а.startswith("--delete") for а in argv):
+        добавить(аргументы[-1:], False, "rsync --delete")
+    elif имя == "find":
+        удаляет = "-delete" in argv or any(
+            argv[i] in ("-exec", "-execdir", "-ok") and i + 1 < len(argv)
+            and os.path.basename(argv[i + 1]) in ("rm", "mv", "shred", "unlink", "truncate")
+            for i in range(len(argv)))
+        if удаляет:
+            корни = _защищённые_корни()
+            for т in _голова_find(argv):
+                for п in _реальные_пути(т, каталог):
+                    # Корень обхода вне защищённого и фильтр по имени, которому
+                    # не отвечает ничто защищённое, — ничего защищённого не заденет.
+                    if not any(_внутри(п, к) for к in корни) and _имена_мимо(argv, корни):
+                        continue
+                    итог.append((п, True, "find"))
+    elif имя == "git":
+        место = _git_очистка(argv, каталог)
+        if место:
+            итог.append((место, False, "git clean"))
+    elif имя == "docker" and "run" in argv and _РАЗРУШАЮЩИЙ_ВНУТРИ.search(" ".join(argv)):
+        добавить(_тома_docker(argv), True, "docker run -v … (разрушающий глагол внутри)")
+    return итог
+
+
+# Цели, на которые «Да» кнопкой открыло дверь в этой команде. След пишет main ДО ответа
+# «пропустить»: одно «Да» — одна попытка (owner_word.ПОГАШЕНИЕ читает этот след).
+ПРОПУЩЕНО_КНОПКОЙ: dict[str, str] = {}
+
+
+def _кнопка_на_цель(есть_причина: bool, цель: str) -> tuple[dict | None, str]:
+    """Дверь данных: «Да» КНОПКОЙ на realpath цели (owner_word.судить_кнопкой) плюс причина в команде.
+
+    Возвращает (запись или None, беда). Причина без кнопки — это агент, разрешивший себе сам;
+    кнопка без причины — потерянный след: нужны оба условия. Текст владельца дверь не открывает.
+    """
+    if not есть_причина:
+        return None, ""
+    предмет = os.path.realpath(цель)
+    открыто, причина = слово_вл.судить_кнопкой("удаление", предмет, pathlib.Path(read_conf()["LOG_DIR"]))
+    if not открыто:
+        return None, причина
+    ПРОПУЩЕНО_КНОПКОЙ[предмет] = причина
+    return {"файл": причина}, ""
+
+
+def _как_просить(корень: str) -> str:
+    """Готовая просьба кнопки: хук-дверь сама не просит. Имя файла в секретах бывает ключом (И-3) — в отказе только корень."""
+    return ("  Кнопку просит оркестратор: python3 scripts/ask-consent.py --вид удаление --предмет-двери "
+            f"<полный путь цели под {корень}> --почему …")
+
+
+# Двери-скрипты необратимого: имя → «опасен ли зов с такими аргументами». Безвредны проверка,
+# самотест и сухой прогон; у deploy_guard.py опасна только просьба кнопки.
+def _кроме(*безвредные: str):
+    return lambda аргументы: not any(а in безвредные for а in аргументы)
+
+
+ДВЕРИ_СКРИПТЫ = {"ask-consent.py": _кроме(), "deploy.sh": _кроме("--проверка"),
+                 "publish.sh": _кроме("--проверка"), "drop-database.sh": _кроме("--selftest"),
+                 "protected-delete.py": _кроме("--сухо", "--selftest"),
+                 "deploy_guard.py": lambda аргументы: "--просить" in аргументы}
+_ИНТЕРПРЕТАТОР = re.compile(r"python[\d.]*|bash|sh")
+КЛЮЧ_СТЕНДА_В_КОМАНДЕ = re.compile(r"(?<!\w)" + слово_вл.КЛЮЧ_СТЕНДА + r"\s*=")
+ДВЕРЬ_ПО_ИМЕНИ = re.compile(r"(?<![\w-])(?:" + "|".join(re.escape(и) for и in ДВЕРИ_СКРИПТЫ)
+                            + r")(?!\w)")
+ПОМОЩНИК: bool = False      # во входе хука непустой agent_id: зовёт помощник, не оркестратор
+
+
+def _зов_двери(cmd: str) -> list[tuple[str, list[str]]]:
+    """Звенья, зовущие дверь-скрипт: (имя скрипта, его аргументы)."""
+    найдено = []
+    for звено in _звенья(cmd):
+        argv = звено["argv"]
+        if not argv:
+            continue
+        if os.path.basename(argv[0]) in ДВЕРИ_СКРИПТЫ:
+            найдено.append((os.path.basename(argv[0]), argv[1:]))
+        elif _ИНТЕРПРЕТАТОР.fullmatch(os.path.basename(argv[0])):
+            # Флаги интерпретатора (python3 -u, bash -x) скрипт не сдвигают: он первый .py/.sh.
+            at = next((i for i, а in enumerate(argv) if i and а.endswith((".py", ".sh"))), None)
+            if at and os.path.basename(argv[at]) in ДВЕРИ_СКРИПТЫ:
+                найдено.append((os.path.basename(argv[at]), argv[at + 1:]))
+    return найдено
+
+
+def двери_только_оркестратору(cmd: str, видимое: str) -> str | None:
+    """Причина отказа: помощник зовёт необратимую дверь либо команда ставит ключ стенда у двери."""
+    if ПОМОЩНИК:
+        for имя, аргументы in _зов_двери(cmd):
+            if ДВЕРИ_СКРИПТЫ[имя](аргументы):
+                return ("необратимые двери и просьба кнопки — только сессия оркестратора (И-2): "
+                        f"помощник зовёт {имя}")
+    if КЛЮЧ_СТЕНДА_В_КОМАНДЕ.search(видимое) and ДВЕРЬ_ПО_ИМЕНИ.search(видимое):
+        return (f"ключ стенда {слово_вл.КЛЮЧ_СТЕНДА} у двери — только внутри пробы: из команды он "
+                "подменил бы журнал кнопок и открыл необратимое без владельца")
     return None
+
+
+def необратимое_в(cmd: str) -> bool:
+    """Ловит ли команду хоть одна необратимая дверь. Кнопок не читает и сети не трогает: зовётся, когда сторож упал."""
+    видимое = кавычки_погашены(heredoc_вырезан(cmd))
+    if any(необратимое_в(нагрузка) for нагрузка in nested_shell_payloads(cmd)):
+        return True
+    return bool(GIT_PUSH.search(видимое) or DEPLOY_SH.search(видимое) or RMI_PREVIOUS.search(видимое)
+                or ДВЕРЬ_ПО_ИМЕНИ.search(видимое) or _зов_двери(cmd)
+                or защищённая_цель(cmd, _закрыто)
+                or дверь_данных_по_имени(cmd, rm_protected_targets, видимое, _закрыто)
+                or дверь_данных_по_имени(cmd, find_delete_targets, видимое, _закрыто))
+
+
+def _закрыто(есть_причина: bool, цель: str) -> tuple[dict | None, str]:
+    """Судья предразбора: «закрыто» без чтения журнала — нужно лишь узнать, есть ли дверь в команде."""
+    return None, "предразбор"
+
+
+def _след_пропуска() -> str | None:
+    """Записать след пропущенных целей в удаления-секретов.jsonl. None — записан, иначе причина."""
+    if not ПРОПУЩЕНО_КНОПКОЙ:
+        return None
+    когда = datetime.datetime.now().astimezone().isoformat(timespec="seconds")
+    try:
+        with open(os.path.join(read_conf()["LOG_DIR"], слово_вл.ЖУРНАЛ_УДАЛЕНИЙ), "a", encoding="utf-8") as fh:
+            for файл, причина in ПРОПУЩЕНО_КНОПКОЙ.items():
+                fh.write(json.dumps({"ts": когда, "файл": файл, "источник": "guard_bash", "слово": причина[:200]},
+                                    ensure_ascii=False) + "\n")
+    except OSError as беда:
+        return f"след пропуска не записан: {беда}"
+    return None
+
+
+def дверь_данных_по_имени(cmd: str, правило_все, видимое: str, судья=_кнопка_на_цель) -> tuple[str, str] | None:
+    """Дверь удаления данных для правил по ИМЕНИ (rm, find -delete).
+
+    Судит КАЖДУЮ цель каждого звена: причина обязана стоять в звене цели, а кнопка — стоять на
+    именно эту цель; иначе «Да» про a/data открыло бы b/secrets.
+    Возвращает (цель, беда) первой не открытой цели или None.
+    """
+    судимые = set()
+    for звено in ЗВЕНЬЯ_КОМАНДЫ.split(cmd):
+        for цель in правило_все(звено):
+            судимые.add(цель)
+            совпало = ПРИЧИНА_ДАННЫХ.search(звено)
+            слово, беда = судья(bool(совпало), цель)
+            if not (совпало and слово):
+                return цель, беда
+            причина = next(г for г in совпало.groups() if г)
+            log_fail_open("дверь: удаление данных",
+                          f"{цель} | {причина} | кнопка: {слово['файл']} | {видимое[:160]}")
+    # цель, которую правило видит только в целой команде, звена не имеет — двери нет
+    return next(((ц, "") for ц in правило_все(cmd) if ц not in судимые), None)
+
+
+def защищённая_цель(cmd: str, судья=_кнопка_на_цель) -> tuple[str, str, str] | None:
+    """Первая цель, которую дверь не открыла: (путь, глагол, беда двери) или None."""
+    корни = _защищённые_корни()
+    if not корни:
+        return None
+    for звено in _звенья(cmd):
+        for путь, предки, глагол in _разрушаемое(звено):
+            if any(_внутри(путь, к) or (предки and _внутри(к, путь)) for к in корни):
+                причина = звено["env"].get(_СЛОВО_ДВЕРИ_ДАННЫХ, "").strip()
+                слово, беда = судья(bool(причина), путь)
+                # И-3: имя файла в защищённом каталоге само бывает ключом доступа,
+                # в отказ уходит корень, а не путь к файлу.
+                показ = next((к for к in корни if _внутри(путь, к)), путь)
+                беда = беда.replace(путь, показ)
+                if слово:
+                    log_fail_open("дверь: удаление данных",
+                                  f"{путь} | {причина} | кнопка: {слово['файл']} | {глагол}")
+                    continue
+                return показ, глагол, беда
+    return None
+
+
+def _файл_согласий(путь: str, логи: str) -> bool:
+    """Журналы, которым верят ворота согласия и дверь данных, и сырые входящие.
+
+    Журнал кнопок и следы удалений и сносов тоже носители: первый открывает дверь,
+    вторые гасят её — вырезанная строка следа воскресила бы использованное «да».
+    Журнал запросов — источник цели, которую владелец видит в сообщении.
+    """
+    входящие = os.path.join(логи, "inbox")
+    return (путь in (os.path.join(логи, "confirmations.jsonl"), os.path.join(логи, "inbox.jsonl"),
+                     os.path.join(логи, "consent-buttons.jsonl"),
+                     os.path.join(логи, "consent-requests.jsonl"),
+                     os.path.join(логи, "удаления-секретов.jsonl"),
+                     os.path.join(логи, слово_вл.ЖУРНАЛ_СНОСОВ),
+                     os.path.join(логи, "deploy-releases.jsonl"))
+            or (путь.endswith(".txt") and os.path.dirname(путь) in (
+                входящие, os.path.join(входящие, _ПОДАНО_В_ОБРАБОТАНО))))
+
+
+_ПИСАТЕЛЬ_КНОПОК = re.compile(r"(?<!\w)consent_buttons(?!\w)")
+_ПИСАЮЩИЕ_ВЫЗОВЫ = re.compile(r"(?<!\w)(record_sent|judge|append_row|main|runpy)(?!\w)")
+
+
+def запуск_писателя_кнопок(cmd: str) -> bool:
+    """Команда пускает python на запись в consent-buttons.jsonl мимо диспетчера?
+
+    Команды sent/judge модуля пишут «отправлено» и «да» по данным со stdin: из
+    сессии это та же подделка нажатия, что запись в журнал руками. Чтение и
+    --help свободны. Импорт модуля и вызов его функций из -c/heredoc ловится по
+    имени модуля плюс имени пишущей функции в тексте команды.
+    """
+    if not _ПИСАТЕЛЬ_КНОПОК.search(cmd):
+        return False
+    for звено in _звенья(cmd):
+        argv = звено["argv"]
+        if not argv or not re.fullmatch(r"python[\d.]*", os.path.basename(argv[0])):
+            continue
+        скрипт = any(os.path.basename(а) in ("consent_buttons.py", "consent_buttons") for а in argv[1:])
+        if скрипт and any(а in ("sent", "judge") for а in argv[1:]):
+            return True
+    # звенья heredoc не видят: тело вырезано, поэтому текст команды смотрим целиком
+    питон = re.search(r"(?<![\w/.-])python[\d.]*(?![\w.-])|/python[\d.]*(?![\w.-])", cmd)
+    return bool(питон and _ПИСАЮЩИЕ_ВЫЗОВЫ.search(cmd)
+                and re.search(r"import\s+consent_buttons|from\s+consent_buttons|-c\b|<<", cmd))
+
+
+def _каталог_согласий(путь: str, логи: str) -> bool:
+    входящие = os.path.join(логи, "inbox")
+    return путь in (входящие, os.path.join(входящие, _ПОДАНО_В_ОБРАБОТАНО))
+
+
+def запись_в_журнал_согласий(cmd: str) -> str | None:
+    """Путь, в который команда пишет согласия или входящие, или None.
+
+    Дверей нет: законный писатель один — диспетчер канала, и он пишет своим
+    процессом, хук его не видит. Из оболочки сессии строка «да» владельца могла
+    быть только подделкой. Чтение и перенос прочитанного inbox/X.txt →
+    inbox/обработано/ (так смена отмечает сообщение) свободны.
+    """
+    логи = os.path.realpath(read_conf()["LOG_DIR"])
+    входящие = os.path.join(логи, "inbox")
+    прочитанные = os.path.join(входящие, _ПОДАНО_В_ОБРАБОТАНО)
+    for звено in _звенья(cmd):
+        argv, каталог = звено["argv"], звено["каталог"]
+        цели = [п for т in звено["пишет"] for п in _реальные_пути(т, каталог)]
+        if argv:
+            имя, аргументы = os.path.basename(argv[0]), _не_флаги(argv[1:])
+            куда = аргументы[-1:]
+            if имя in ("tee", "truncate"):
+                куда = аргументы
+            elif имя == "sed" and any(re.match(r"-[A-Za-z]*i|--in-place", а) for а in argv[1:]):
+                куда = аргументы
+            elif имя == "dd":
+                куда = [а[3:] for а in argv[1:] if а.startswith("of=")]
+            elif имя == "mv":
+                источники = [п for т in аргументы[:-1] for п in _реальные_пути(т, каталог)]
+                приёмники = _реальные_пути(аргументы[-1], каталог) if аргументы else []
+                отметка_прочитанного = bool(источники) and all(
+                    os.path.dirname(п) == входящие and п.endswith(".txt") for п in источники
+                ) and all(п.startswith(os.path.join(входящие, _ПОДАНО_В_ОБРАБОТАНО))
+                          for п in приёмники)
+                if not отметка_прочитанного:
+                    цели += [п for п in источники if _файл_согласий(п, логи)
+                             and os.path.dirname(п) != прочитанные]
+                куда = [] if отметка_прочитанного else аргументы[-1:]
+            elif имя in ("rm", "unlink"):
+                снесённое = [п for т in аргументы for п in _реальные_пути(т, каталог)]
+                цели += [п for п in снесённое if п == входящие or (
+                    _файл_согласий(п, логи) and os.path.dirname(п) != прочитанные)]
+                куда = []
+            elif имя not in ("cp", "install", "rsync", "ln"):
+                куда = []
+            цели += [п for т in куда for п in _реальные_пути(т, каталог)]
+        for п in цели:
+            if п == входящие or _файл_согласий(п, логи) or (argv and os.path.basename(argv[0]) in (
+                    "cp", "mv", "install", "rsync", "ln") and _каталог_согласий(п, логи)):
+                return п
+    return None
+
+
+# Значимые куски имён журналов, из которых судья читает согласие. Дописка ловится по куску:
+# путь, собранный из переменной или склеенный в python, буквально не равен имени журнала.
+_КУСОК_ЖУРНАЛА = r"(?:consent-butto|consent-reque|inbox\.json|confirmations\.json)"
+# Кусок ищется в ИМЕНИ файла (последняя часть пути): каталог с таким куском в названии не журнал.
+_ИМЯ_С_КУСКОМ = (r"(?:[^\s;&|]*/)?[^\s/;&|]*" + _КУСОК_ЖУРНАЛА
+                 + r"[^\s/;&|'\"]*(?=[\s;&|'\")]|$)")
+_ДОПИСКА_В_ЖУРНАЛ = re.compile(
+    r">>?[ \t]*['\"]?" + _ИМЯ_С_КУСКОМ
+    + r"|\btee\b[^;&|\n]*?\s['\"]?" + _ИМЯ_С_КУСКОМ
+    + r"|\bsed\s+-\S*i[^;&|\n]*?\s['\"]?" + _ИМЯ_С_КУСКОМ
+    + r"|\b(?:truncate|dd)\b[^;&|\n]*?[\s=]['\"]?" + _ИМЯ_С_КУСКОМ)
+_ПИСЬМО_PYTHON = re.compile(r"open\([^)]*['\"][wax]|\.write(?:_text|_bytes)?\(|\bos\.(?:write|truncate)\(")
+
+
+def дописка_в_журнал_по_куску(cmd: str) -> bool:
+    """Команда пишет в журнал согласия, названный лишь куском имени? Чтение (cat/grep/tail) свободно."""
+    if not re.search(_КУСОК_ЖУРНАЛА, cmd):
+        return False
+    if _ДОПИСКА_В_ЖУРНАЛ.search(cmd):
+        return True
+    return bool(re.search(r"python[\d.]*", cmd) and _ПИСЬМО_PYTHON.search(cmd))
 
 
 # Гнездо tmux: каталог /tmp/tmux-<uid> держит сокет ЖИВОГО сервера агента. Снести
@@ -694,8 +1306,20 @@ def find_delete_target(cmd: str) -> str | None:
 # исключением только claude-*, rm -rf /tmp/tmux-<uid>, find /tmp -name 'tmux-*'
 # -delete). Префикс тот же, что в «защищено» tmp-sweep.yaml (проба сверяет).
 ПРЕФИКС_ГНЕЗДА = "tmux-"
-# Образцы имён внутри гнезда: по ним судим, выберет ли find гнездо или сокет в нём.
-ОБРАЗЦЫ_ГНЕЗДА_ИМЯ = (ПРЕФИКС_ГНЕЗДА + "1004", "default")
+
+
+def _образцы_гнезда() -> tuple[str, str]:
+    """Имена гнезда агента и сокета в нём: по ним судим, выберет ли шаблон или find их.
+
+    uid — того, под кем идёт сторож: хук работает от пользователя агента, а
+    номер у каждой установки свой. Дверь HARNESS_OWN_UID — для проб, как в
+    deploy_guard: второго пользователя на машине заказчика проба не заведёт.
+    """
+    из_среды = os.environ.get("HARNESS_OWN_UID", "")
+    uid = из_среды if из_среды.isdigit() else str(os.getuid())
+    return ПРЕФИКС_ГНЕЗДА + uid, "default"
+
+
 _ШАБЛОН_СИМВОЛЫ = re.compile(r"[*?\[]")
 FIND_ЧЕРЕЗ_XARGS = re.compile(r"^\s*\|\s*xargs\b[^;&|]*\brm\b")
 # mv уносит гнездо так же, как rm (сервер теряет сокет), unlink — тот же rm сокета.
@@ -764,6 +1388,7 @@ def _отказ_гнезда(цель: str, причина: str) -> str:
 def гнездо_tmux_под_ножом(cmd: str) -> str | None:
     """Текст отказа, если команда удалит гнездо tmux или может его задеть, или None."""
     текст = heredoc_вырезан(cmd)
+    образцы = _образцы_гнезда()
     for m in ГЛАГОЛ_СНОСА.finditer(текст):
         доводы = [x.strip("'\"") for x in _strip_comment(m.group(2)).split()
                   if not x.startswith("-")]
@@ -777,7 +1402,7 @@ def гнездо_tmux_под_ножом(cmd: str) -> str | None:
                 return _отказ_гнезда(t, "удаление всего /tmp задевает и гнездо tmux.")
             первый = путь.split("/")[2]
             if _ШАБЛОН_СИМВОЛЫ.search(первый):
-                if fnmatch.fnmatchcase(ОБРАЗЦЫ_ГНЕЗДА_ИМЯ[0], первый):
+                if fnmatch.fnmatchcase(образцы[0], первый):
                     return _отказ_гнезда(t, "шаблон захватывает гнездо tmux, а что он "
                                             "снесёт, заранее не видно.")
             elif первый.startswith(ПРЕФИКС_ГНЕЗДА) and _гнездо_живое(путь):
@@ -804,20 +1429,21 @@ def гнездо_tmux_под_ножом(cmd: str) -> str | None:
                     return _отказ_гнезда(корень, "в этом гнезде слушает живой сервер tmux.")
             elif путь in ("/", "/tmp"):
                 # find печатает путь от корня, как он написан: по нему и судим -path.
-                гнездо = корень.rstrip("/") + ("/" if путь == "/tmp" else "/tmp/") + ОБРАЗЦЫ_ГНЕЗДА_ИМЯ[0]
-                if not _выборка_обходит_гнездо(токены, (гнездо, гнездо + "/default")):
+                гнездо = корень.rstrip("/") + ("/" if путь == "/tmp" else "/tmp/") + образцы[0]
+                if not _выборка_обходит_гнездо(токены, образцы, (гнездо, гнездо + "/default")):
                     return _отказ_гнезда(корень, "find по /tmp удаляет найденное, и выборка "
                                                  "не исключает гнездо tmux.")
     return None
 
 
-def _выборка_обходит_гнездо(токены: list[str], образцы_пути: tuple[str, str]) -> bool:
+def _выборка_обходит_гнездо(токены: list[str], образцы_имени: tuple[str, str],
+                             образцы_пути: tuple[str, str]) -> bool:
     """Выбор find не заденет гнездо: исключено по имени, назван другой шаблон или только файлы."""
     положительные = []
     for i, т in enumerate(токены[:-1]):
         if т not in ("-name", "-iname", "-path", "-wholename", "-ipath"):
             continue
-        образцы = образцы_пути if "path" in т else ОБРАЗЦЫ_ГНЕЗДА_ИМЯ
+        образцы = образцы_пути if "path" in т else образцы_имени
         задевает = any(fnmatch.fnmatch(о, токены[i + 1]) for о in образцы)
         if i > 0 and токены[i - 1] in ("!", "-not"):
             if задевает:
@@ -890,7 +1516,41 @@ def кавычки_погашены(текст: str) -> str:
     return "".join(итог)
 
 
-def deploy_gate_busy(действие: str = "deploy") -> str | None:
+_ПУШ_С_ХЭШЕМ = re.compile(r"[0-9a-f]{40}:refs/heads/[^\s:]+")
+
+
+def пуш_одним_звеном(cmd: str) -> tuple[str, str, str] | None:
+    """(удалённый, refspec, репо), если ВСЯ команда — `git [-C dir] push <удалённый> <40-hex>:refs/heads/<ветка>`.
+
+    Кнопка судится только такой команде: любая приставка (окружение, обёртка, флаг,
+    второе звено) меняет то, что уйдёт, а предмет, показанный владельцу, считается
+    по хэшу из команды. У прочих команд предмета нет: ворота закрыты, кнопку просят через ask-consent.py.
+    """
+    лексер = shlex.shlex(cmd.strip(), posix=True, punctuation_chars=True)
+    лексер.whitespace_split = True
+    лексер.commenters = ""
+    try:
+        токены = list(лексер)
+    except ValueError:
+        return None
+    каталог = os.getcwd()
+    if токены[:2] == ["git", "-C"] and len(токены) > 2:
+        if re.search(r"[$`*?\[]", токены[2]):
+            return None
+        каталог = _реальный_путь(токены[2], каталог)
+        токены = ["git", *токены[3:]]
+    if len(токены) != 4 or токены[:2] != ["git", "push"] or токены[2].startswith("-"):
+        return None
+    if not _ПУШ_С_ХЭШЕМ.fullmatch(токены[3]):
+        return None
+    return токены[2], токены[3], os.path.realpath(каталог)
+
+
+# Меньше таймаута хука (.claude/settings.json) на целых 5 с: отказ обязан дойти до сессии.
+ПРЕДЕЛ_ВОРОТ_СЕК = 10
+
+
+def deploy_gate_busy(действие: str = "deploy", пуш: tuple[str, str, str] | None = None) -> str | None:
     """Спросить ворота. Возвращает причину «занято» или None (путь свободен).
 
     `действие` — «push» либо «deploy»: у отправки в репозиторий и у выката
@@ -898,22 +1558,25 @@ def deploy_gate_busy(действие: str = "deploy") -> str | None:
     Улика 03.09.2026: хук звал ворота БЕЗ действия, они считали всё выкатом, и
     push встал при разрешении, данном словами «на гит отправляй, да».
 
-    Ворот нет (нет конфига, нет PROJECT_DIR, нет скрипта) или ворота сломаны —
-    отвечаем None: fail-open, сломанные ворота не имеют права останавливать работу.
+    `пуш` — предмет кнопки (см. пуш_одним_звеном); без него ворот-кнопки нет, и отказ называет команду просьбы.
+
+    FAIL-CLOSED: ворот нет (нет конфига, нет PROJECT_DIR, нет скрипта), они упали или не
+    ответили в срок — это ОТКАЗ с причиной «ворота не ответили», а не пропуск: выкат и пуш
+    необратимы, и молчащие ворота не разрешение. Предел 10 с — меньше 15 с хука из
+    .claude/settings.json, иначе хук убьют раньше, чем он ответит.
     """
     project_dir = read_conf().get("PROJECT_DIR", "")
     if not project_dir:
-        return None
+        return "ворота не ответили: PROJECT_DIR не прочитан из install.conf"
     guard = os.path.join(project_dir, "scripts", "deploy_guard.py")
     if not os.path.isfile(guard):
-        return None
+        return f"ворота не ответили: нет скрипта {guard}"
     try:
-        p = subprocess.run(["python3", guard, "--действие", действие],
-                           capture_output=True, text=True, timeout=15)
+        p = subprocess.run(["python3", guard, "--действие", действие, *(["--пуш", *пуш] if пуш else [])],
+                           capture_output=True, text=True, timeout=ПРЕДЕЛ_ВОРОТ_СЕК)
     except Exception as e:
-        # fail-open: ошибка самих ворот — не повод блокировать; след — в лог
-        log_fail_open("сломанные ворота deploy_guard", repr(e))
-        return None
+        log_fail_open("сломанные ворота deploy_guard: отказ", repr(e))
+        return f"ворота не ответили: {e!r}"
     if p.returncode != 0:
         return (p.stdout + p.stderr).strip() or "ворота ответили «занято» без пояснения"
     return None
@@ -1116,6 +1779,126 @@ def session_suicide(cmd: str) -> str | None:
         if PANE_QUIT_PAYLOAD.search(m.group(1)) and _hits_agent_session(m.group(1)):
             return "в панель агента подаётся команда выхода"
     return None
+
+
+# Помощники живут внутри процесса claude смены: остановка юнита, перезагрузка
+# машины и выход смены обрывают их работу вместе с токенами. Судья «идёт ли
+# помощник» один на харнес — stall-in-log.py --работа --shift; второго
+# определения здесь нет.
+AGENT_UNIT = "harness-agent"
+HELPERS_PROBE_TIMEOUT_SEC = 10          # хук ограничен 15 с, остаток — на остальные правила
+RESTART_VERBS = ("restart", "stop", "kill", "try-restart", "reload-or-restart", "condrestart")
+POWER_VERBS = ("reboot", "poweroff", "halt", "kexec")
+SERVICE_VERBS = ("restart", "stop", "force-reload")
+POWER_COMMAND = re.compile(
+    _POS + r"(?P<cmd>reboot|poweroff|halt|shutdown|systemctl|service)(?![\w./-])(?P<args>[^;&|\n)]*)",
+    re.MULTILINE)
+HELPERS_STOP_TEXT = (
+    "Слово владельца 02.11: перезапуск при работающих помощниках запрещён. "
+    "Дождись их окончания (уведомление придёт само). Перезапуск агента делает смена сама, "
+    "после конца помощников (R-19). Если он нужен сейчас — законная дверь: слово владельца "
+    "в канале с названием перезапуска («перезапусти агента»).")
+
+
+class HelpersUnknown(Exception):
+    """Судья помощников не ответил: незнание не разрешение."""
+
+
+def restart_kind(command: str, args: str) -> str | None:
+    """Что именно оборвёт помощников в этой команде, или None."""
+    words = [w.strip("\"'").removesuffix(".service") for w in args.split()]
+    plain = [w for w in words if not w.startswith("-")]
+    if command in ("reboot", "poweroff", "halt"):
+        return command
+    if command == "shutdown":
+        return None if "-c" in words else "shutdown"
+    if command == "systemctl" and plain:
+        if plain[0] in POWER_VERBS:
+            return f"systemctl {plain[0]}"
+        if plain[0] in RESTART_VERBS and AGENT_UNIT in plain[1:]:
+            return f"systemctl {plain[0]} {AGENT_UNIT}"
+    if command == "service" and len(plain) >= 2 and plain[0] == AGENT_UNIT and plain[1] in SERVICE_VERBS:
+        return f"service {AGENT_UNIT} {plain[1]}"
+    return None
+
+
+OWNER_ROTATE = re.compile(r"session-warden\.sh\b[^;&|\n]*--rotate-now\s+--owner\b")
+
+
+def restart_in_command(видимое: str, cmd: str) -> str | None:
+    """Команда перезапуска/остановки, убивающая помощников. Аргументы берутся из
+    строки с теми же смещениями, что у «видимого» (heredoc вырезан), но с
+    кавычками: юнит в кавычках в видимой версии погашен."""
+    if OWNER_ROTATE.search(видимое):
+        return "session-warden.sh --rotate-now --owner"
+    без_heredoc = heredoc_вырезан(cmd)
+    for m in POWER_COMMAND.finditer(видимое):
+        kind = restart_kind(m.group("cmd"), без_heredoc[m.start("args"):m.end("args")])
+        if kind:
+            return kind
+    return None
+
+
+def probe_shift_helpers() -> dict | None:
+    """Помощники СМЕНЫ глазами прибора. None — транскрипта смены нет, судить нечего;
+    HelpersUnknown — прибор упал, завис или молчит (R-12)."""
+    here = pathlib.Path(__file__).resolve().parent
+    tool = next((p for p in (here.parent / "stall-in-log.py", here.parent / "scripts" / "stall-in-log.py")
+                 if p.is_file()), None)
+    if tool is None:
+        raise HelpersUnknown("прибора stall-in-log.py рядом нет")
+    try:
+        done = subprocess.run([sys.executable, str(tool), "--работа", "--shift"], capture_output=True,
+                              text=True, timeout=HELPERS_PROBE_TIMEOUT_SEC)
+    except subprocess.TimeoutExpired:
+        raise HelpersUnknown(f"прибор не ответил за {HELPERS_PROBE_TIMEOUT_SEC} с")
+    if done.returncode == 1 and not done.stderr.strip():
+        return None             # «транскрипта смены нет» прибор говорит молча; падение шумит в stderr
+    if done.returncode != 0:
+        raise HelpersUnknown(f"прибор ответил кодом {done.returncode}: {(done.stderr or '').strip()[:200]}")
+    rows = [line.split("\t") for line in done.stdout.splitlines()]
+    counts = {r[0]: r[1] for r in rows if len(r) == 2}
+    if not (counts.get("помощников", "").isdigit() and counts.get("зависших", "").isdigit()):
+        raise HelpersUnknown("ответ прибора не разобран: нет строк «помощников» и «зависших»")
+    return {"running": int(counts["помощников"]), "hung": int(counts["зависших"]),
+            "rows": [r for r in rows if len(r) >= 5 and r[0] in ("помощник", "зависший")]}
+
+
+def helpers_block_reason() -> str | None:
+    """Почему сейчас нельзя обрывать помощников, или None."""
+    try:
+        state = probe_shift_helpers()
+    except HelpersUnknown as беда:
+        return (f"Не удалось узнать, идут ли помощники ({беда}). Незнание не разрешение: "
+                "оборвать помощников вслепую нельзя.")
+    if state is None or not (state["running"] or state["hung"]):
+        return None
+    hung = [f"помощник «{r[4]}» молчит {r[2]} мин — похоже, завис" for r in state["rows"] if r[0] == "зависший"]
+    running = [f"«{r[4]}» (идёт {r[3]} мин)" for r in state["rows"] if r[0] == "помощник"]
+    parts = []
+    if running:
+        parts.append(f"Перезапуск оборвёт идущих помощников ({state['running']}): {', '.join(running)} — "
+                     "их работа и токены пропадут.")
+    parts += [h + "." for h in hung]
+    return " ".join(parts)
+
+
+def restart_while_helpers(видимое: str, cmd: str) -> str | None:
+    """Причина отказа перезапуска при помощниках, или None. Дверь — слово владельца."""
+    if not restart_in_command(видимое, cmd):
+        return None
+    reason = helpers_block_reason()
+    if not reason:
+        return None
+    try:
+        word = слово_вл.разрешение(ОКНО_СЛОВА_МИН, pathlib.Path(read_conf()["LOG_DIR"]),
+                                   слово_вл.это_разрешение_перезапуска)
+    except слово_вл.НетНосителя as беда:
+        return f"{reason}\n{HELPERS_STOP_TEXT}\nСлово владельца прочитать не смогли — дверь закрыта: {беда}"
+    if word:
+        log_fail_open("дверь: перезапуск при помощниках", f"слово владельца: {word['файл']} | {видимое[:160]}")
+        return None
+    return f"{reason}\n{HELPERS_STOP_TEXT}"
 
 
 # Прогон тестов — только фоном. Указание владельца 23.08.2026: «механизм не
@@ -1587,6 +2370,10 @@ def check(cmd: str, вложенная: bool = False, предел_снаруж�
     # иначе журнал отмен назовёт вложенную команду вместо той, что отменена.
     ПРОВЕРЯЕМАЯ = cmd
 
+    запрет_двери = двери_только_оркестратору(cmd, видимое)
+    if запрет_двери:
+        return deny(запрет_двери)
+
     if TELEGRAM_CHANNEL.search(cmd) or TELEGRAM_MCP.search(cmd):
         return deny(
             "Телеграм-канал в этом запуске отберёт getUpdates: Telegram допускает\n"
@@ -1605,60 +2392,21 @@ def check(cmd: str, вложенная: bool = False, предел_снаруж�
     if COMPOSE_RESTART.search(видимое):
         return deny(
             "«docker compose restart» НЕ пересобирает образ — правка не доедет до\n"
-            "прода, и проверка покажет старое поведение. Нужно:\n"
-            "  docker compose up -d --build <сервис по имени из compose-файла>\n"
-            "Деплой целиком — ./scripts/deploy.sh"
+            "прода, и проверка покажет старое поведение. Деплой — ./scripts/deploy.sh"
         )
 
     if RMI_PREVIOUS.search(видимое):
-        # Честная дверь. Случай 28.09.2026: владелец велел снять продукт с
-        # сервера целиком («Надо все с сервера очистить полносттю»), и снимок
-        # отката охранял то, чего на диске больше нет — отменять было нечего,
-        # а законного пути исполнить его слово у сторожа не было. Дверь узкая:
-        # открывается ПРИЧИНОЙ, написанной в самой команде (образец —
-        # HARNESS_PIPELINE_FORCE), и каждый проход оставляет след: дверь без
-        # следа неотличима от дыры.
-        # Причина ищется в ПОЛНОМ тексте команды: «видимое» — это команда с
-        # вырезанным содержимым кавычек (правила не должны ловить рассказ о
-        # команде), а причина как раз в кавычках и живёт.
-        совпало = ПРИЧИНА_PREVIOUS.search(cmd)
-        # Причина в команде — это ОБЪЯВЛЕНИЕ намерения, а не разрешение: её
-        # пишет сам агент. Разрешение даёт владелец, и ищется оно там же, где
-        # его ищет соседняя дверь (protected-delete.py) — во входящих, с тем же
-        # окном свежести. Ревью кода 28.09.2026 (C-1): один класс необратимых
-        # действий не может иметь два разных порога, и слабейший стоял на И-2.
-        # Три исхода, а не два: «журнал входящих прочитать не смогли» — это
-        # ОТКАЗ двери, а не «владелец промолчал». Причина уходит в текст отказа
-        # целиком: дверь, молчащая о том, почему она закрыта, неотличима от
-        # сломанной ([[unreadable-source-turns-check-green]]).
-        беда_носителя = ""
-        слово = None
-        if совпало:
-            try:
-                слово = слово_вл.разрешение(ОКНО_СЛОВА_МИН,
-                                            pathlib.Path(read_conf()["LOG_DIR"]))
-            except слово_вл.НетНосителя as беда:
-                беда_носителя = str(беда)
-        if совпало and слово:
-            причина_previous = next(г for г in совпало.groups() if г)
-            log_fail_open("дверь: удаление :previous",
-                          f"{причина_previous} | слово владельца: {слово['файл']} "
-                          f"| {видимое[:160]}")
-        else:
-            return deny(
-                ("Слово владельца ПРОЧИТАТЬ НЕ СМОГЛИ — дверь закрыта: "
-                 f"{беда_носителя}\n" if беда_носителя else "") +
-                "Удаление образа «:previous» — это снос страховки выката (И-2):\n"
-                "именно на него откатывается deploy.sh при мёртвом health, и\n"
-                "пересобрать его нечем — прежнего кода в образе уже нет.\n"
-                "Снимок обновляется сам при следующем выкате; если снести нужно\n"
-                "НАРОЧНО — это необратимо, спроси владельца. Дверь открывают ДВА\n"
-                "условия разом, и одного мало:\n"
-                "  1) его свежее слово об удалении во входящих (как у\n"
-                "     protected-delete.py — глагол и названный предмет);\n"
-                "  2) причина в самой команде, она уходит в след:\n"
-                "     HARNESS_PREVIOUS_DELETE_WHY='<его слово>' docker rmi …:previous"
-            )
+        # Дверь закрыта наглухо. Образ — не путь: «Да» кнопкой привязано к realpath, а погасить
+        # использованное «Да» на образ можно только через docker. Текстом владельца дверь
+        # не открывается никогда (слово 05.11.2026), кнопки на образ нет — беклог.
+        return deny(
+            "Удаление образа «:previous» — это снос страховки выката (И-2):\n"
+            "именно на него откатывается deploy.sh при мёртвом health, и\n"
+            "пересобрать его нечем — прежнего кода в образе уже нет.\n"
+            "Снимок обновляется сам при следующем выкате. Дверь закрыта наглухо:\n"
+            "кнопки «Да» на образ нет, а текст владельца необратимое не открывает.\n"
+            "Снести образ нарочно владелец может руками на сервере."
+        )
 
     # Живой учёт заказчика — только чтение (слово владельца 29.09.2026).
     # Ищем в ПОЛНОМ тексте команды, а не в «видимом»: адрес и метод почти всегда
@@ -1789,62 +2537,83 @@ def check(cmd: str, вложенная: bool = False, предел_снаруж�
             "Выполни содержимое явно (например, psql -c '...') или через deploy.sh."
         )
 
-    target = rm_protected_target(cmd)
-    if target:
+    журнал = запись_в_журнал_согласий(cmd)
+    if журнал:
+        return deny(
+            f"Запись в журнал согласий или входящих ({журнал}) — инвариант И-1/И-3:\n"
+            "ворота публикации и дверь удаления данных верят этим файлам как слову\n"
+            "владельца, а из оболочки сессии строку «да» можно только подделать.\n"
+            "Писать туда вправе один процесс — диспетчер канала. Двери нет.\n"
+            "Читать можно свободно; прочитанное входящее переносится целиком:\n"
+            "  mv <LOG_DIR>/inbox/<имя>.txt <LOG_DIR>/inbox/обработано/"
+        )
+
+    if дописка_в_журнал_по_куску(cmd):
+        return deny(
+            "Дописка в журнал согласия или входящих (по имени журнала в команде) — инвариант\n"
+            "И-1/И-3: судья верит этим файлам как слову владельца, а из оболочки сессии\n"
+            "запись можно только подделать. Писать туда вправе диспетчер канала и ask-consent.\n"
+            "Читать (cat, grep, tail) можно свободно."
+        )
+
+    if запуск_писателя_кнопок(cmd):
+        return deny(
+            "Запуск consent_buttons.py sent/judge (или его функций из python) — инвариант\n"
+            "И-1/И-3: эти команды пишут «отправлено» и «да» в consent-buttons.jsonl по\n"
+            "данным со stdin, а дверь удаления верит этому файлу как нажатию владельца.\n"
+            "Из сессии это подделка нажатия; зовёт их только диспетчер канала.\n"
+            "Читать модуль и звать --help можно свободно."
+        )
+
+    защита = защищённая_цель(cmd)
+    if защита:
+        путь, глагол, беда = защита
+        return deny(
+            (f"Кнопки «Да» нет: {беда}\n" if беда else "") +
+            f"«{глагол}» нацелен на защищённый путь ({путь}) — инвариант И-1:\n"
+            "Чужие проекты, секреты и копии (ключ PROTECTED_PATHS в harness.conf,\n"
+            "SECRETS_DIR и BACKUP_DIR из install.conf) из сессии не стираются,\n"
+            "не переносятся и не перезаписываются — любым глаголом, не только rm.\n"
+            "Чтение, cp ИЗ защищённого и создание новых файлов свободны.\n"
+            "Судьбу данных решает владелец, и дверь открывают ДВА условия разом:\n"
+            "  1) его «Да» КНОПКОЙ на этот путь (текст не засчитывается);\n"
+            "  2) причина в самой команде, она уходит в след:\n"
+            "     HARNESS_DATA_DELETE_WHY='<его слово>' <команда>\n"
+            + _как_просить(путь)
+        )
+
+    отказ = дверь_данных_по_имени(cmd, rm_protected_targets, видимое)
+    if отказ:
+        target, беда_носителя = отказ
         # Честная дверь — ДВА условия разом, как у удаления образа отката:
         # причина в самой команде (объявление намерения, его пишет агент) и
         # свежее слово владельца во входящих с НАЗВАННЫМ предметом (разрешение,
         # его даёт владелец). Одного мало: причина без слова — это агент,
         # разрешивший себе сам; слово без причины — потерянный след.
-        # Звено с целью ищем сами: причина обязана быть в НЁМ, а не где-то в
-        # той же строке (находка ревью 15.10.2026, major).
-        звено_цели = next(
-            (з for з in ЗВЕНЬЯ_КОМАНДЫ.split(cmd) if rm_protected_target(з) == target),
-            "")
-        совпало_данные = ПРИЧИНА_ДАННЫХ.search(звено_цели)
-        беда_носителя = ""
-        слово = None
-        if совпало_данные:
-            try:
-                слово = слово_вл.разрешение(ОКНО_СЛОВА_МИН,
-                                            pathlib.Path(read_conf()["LOG_DIR"]))
-            except слово_вл.НетНосителя as беда:
-                беда_носителя = str(беда)
-        # ЦЕЛЬ ОБЯЗАНА БЫТЬ НАЗВАНА. Находка ревью безопасности 15.10.2026
-        # (critical): дверь принимала любое его сообщение с глаголом и
-        # предметом и цель `rm` ни с чем не сверяла — живые строки «доступ к
-        # серверу у меня удаленный» и «Что за мусор?» открывали удаление
-        # /var/lib/harness/secrets, то есть ключа канала с ним самим. Путь —
-        # признак однозначный: случайно в бытовой фразе он не появляется.
-        if слово and not слово_вл.цель_названа(слово["текст"], target):
-            слово = None
-            беда_носителя = (f"в его слове не назван путь, под которым лежит "
-                             f"цель «{target}»")
-        if совпало_данные and слово:
-            причина_данных = next(г for г in совпало_данные.groups() if г)
-            log_fail_open("дверь: удаление данных",
-                          f"{target} | {причина_данных} | слово владельца: "
-                          f"{слово['файл']} | {видимое[:160]}")
-        else:
-            return deny(
-                ("Слово владельца ПРОЧИТАТЬ НЕ СМОГЛИ — дверь закрыта: "
-                 f"{беда_носителя}\n" if беда_носителя else "") +
-                f"«rm» нацелен на данные/бэкапы/секреты ({target}) — инвариант И-1:\n"
-                "данные, бэкапы и секреты из сессии не удаляются — ни каталогом (-r),\n"
-                "ни отдельным файлом. Чистить можно временные и сборочные каталоги.\n"
-                "Судьбу данных решает владелец, и дверь открывают ДВА условия разом:\n"
-                "  1) его свежее слово об удалении во входящих — с глаголом и\n"
-                "     НАЗВАННЫМ предметом («Удали копии базы из /var/www/<продукт>»);\n"
-                "  2) причина в самой команде, она уходит в след:\n"
-                "     HARNESS_DATA_DELETE_WHY='<его слово>' rm -rf <путь>"
-            )
-
-    target = find_delete_target(cmd)
-    if target:
         return deny(
+            (f"Кнопки «Да» нет: {беда_носителя}\n" if беда_носителя else "") +
+            f"«rm» нацелен на данные/бэкапы/секреты ({target}) — инвариант И-1:\n"
+            "данные, бэкапы и секреты из сессии не удаляются — ни каталогом (-r),\n"
+            "ни отдельным файлом. Чистить можно временные и сборочные каталоги.\n"
+            "Судьбу данных решает владелец, и дверь открывают ДВА условия разом:\n"
+            "  1) его «Да» КНОПКОЙ на эту цель (текст не засчитывается);\n"
+            "  2) причина в самой команде, она уходит в след:\n"
+            "     HARNESS_DATA_DELETE_WHY='<его слово>' rm -rf <путь>\n"
+            + _как_просить(target)
+        )
+
+    отказ = дверь_данных_по_имени(cmd, find_delete_targets, видимое)
+    if отказ:
+        target, беда_носителя = отказ
+        return deny(
+            (f"Кнопки «Да» нет: {беда_носителя}\n" if беда_носителя else "") +
             f"«find ... -delete» нацелен на каталог данных/бэкапов ({target}) —\n"
             "инвариант И-1: то же уничтожение, что rm -r, только другим глаголом.\n"
-            "Судьбу данных решает владелец явно."
+            "Судьбу данных решает владелец, и дверь — та же, что у rm:\n"
+            "  1) его «Да» КНОПКОЙ на эту цель (текст не засчитывается);\n"
+            "  2) причина в самой команде, она уходит в след:\n"
+            "     HARNESS_DATA_DELETE_WHY='<его слово>' find <путь> -delete\n"
+            + _как_просить(target)
         )
 
     гнездо = гнездо_tmux_под_ножом(cmd)
@@ -1852,7 +2621,12 @@ def check(cmd: str, вложенная: bool = False, предел_снаруж�
         return deny(гнездо)
 
     suicide = session_suicide(cmd)
-    if suicide and not ротация_ведётся_сторожем():
+    if suicide and ротация_ведётся_сторожем():
+        # Исключение «ротацию ведёт сторож» держится, пока тот же судья не видит помощников.
+        stop = helpers_block_reason()
+        if stop:
+            return deny(f"{stop}\n{HELPERS_STOP_TEXT}")
+    elif suicide:
         return deny(
             f"Сессия завершается мимо ротации ({suicide}). Выход и подъём смены —\n"
             "одно действие, и делает его сторож: выйти самому значит остановить\n"
@@ -1861,6 +2635,10 @@ def check(cmd: str, вложенная: bool = False, предел_снаруж�
             "  harness/demons/session-warden.sh --rotate-now\n"
             "Он завершит сессию, поднимет преемника и подтвердит приём."
         )
+
+    helpers_stop = restart_while_helpers(видимое, cmd)
+    if helpers_stop:
+        return deny(helpers_stop)
 
     if DOCKER_CP_IN.search(видимое):
         return deny(
@@ -1882,17 +2660,18 @@ def check(cmd: str, вложенная: bool = False, предел_снаруж�
             "жди следующего прогона сторожа, он сам снимет тревогу."
         )
 
-    if GIT_PUSH.search(видимое) or DEPLOY_SH.search(видимое):
-        # Отправка в репозиторий и выкат спрашиваются РАЗНО: предмет согласия
-        # у них свой, и выкат вдобавок перезапускает стек, а push — нет.
-        busy = deploy_gate_busy("push" if GIT_PUSH.search(видимое)
-                                and not DEPLOY_SH.search(видимое) else "deploy")
+    # Отправка в репозиторий и выкат спрашиваются РАЗНО: предмет согласия
+    # у них свой, и выкат вдобавок перезапускает стек, а push — нет. В составной
+    # команде судится каждая совпавшая дверь: «да» на выкат пуш не открывает.
+    двери = (["push"] if GIT_PUSH.search(видимое) else []) + (["deploy"] if DEPLOY_SH.search(видимое) else [])
+    for действие in двери:
+        busy = deploy_gate_busy(действие, пуш_одним_звеном(cmd) if действие == "push" else None)
         if busy:
             return deny(
-                "Ворота деплоя (scripts/deploy_guard.py) ответили «занято» —\n"
-                "git push / deploy.sh сейчас нельзя:\n"
+                "Ворота деплоя (scripts/deploy_guard.py) не пропустили —\n"
+                "git push / deploy.sh сейчас нельзя (занято, нет кнопки «Да» или ворота не ответили):\n"
                 f"  {busy}\n"
-                "Дождись освобождения ворот и повтори охраняемое действие."
+                "Текст владельца дверь не открывает: нужна кнопка «Да» в Telegram."
             )
 
     имя = имя_кириллицей(кавычки_погашены(heredoc_вырезан(cmd)))
@@ -1957,17 +2736,28 @@ def main() -> int:
         return 0
     if payload.get("tool_name") != "Bash":
         return 0
-    global СЕССИЯ
+    global СЕССИЯ, ПОМОЩНИК
     СЕССИЯ = str(payload.get("session_id") or "")
+    ПОМОЩНИК = bool(payload.get("agent_id"))
     cmd = (payload.get("tool_input") or {}).get("command") or ""
     try:
-        return check(cmd)
+        код = check(cmd)
     except Exception as e:
-        # упал сам сторож — команда проходит (fail-open), но падение видно в логе
-        # Через ту же дверь, что и журнал отмен: соседний путь (битый JSON) вход
-        # не пишет вовсе — «в нём бывают токены», а здесь оговорка терялась.
+        # Упал сам сторож. Обратимое проходит (fail-open), падение видно в логе — через ту же
+        # дверь, что и журнал отмен. НЕОБРАТИМОЕ — ОТКАЗ: упавший сторож не разрешение.
+        # Предразбор зовётся только здесь: журнала и сети не трогает, а сломанный — тоже отказ.
         log_fail_open("исключение внутри сторожа", f"{e!r}; команда: {без_тайн(cmd[:200])}")
-        return 0
+        try:
+            необратимо = необратимое_в(cmd)
+        except Exception:
+            необратимо = True
+        return deny(f"сторож упал на необратимом: {e!r}") if необратимо else 0
+    if код == 0:
+        # След пропуска rm — ДО ответа «пропустить»: не записан — отказ, иначе «Да» не гасилось бы.
+        беда = _след_пропуска()
+        if беда:
+            return deny(беда)
+    return код
 
 
 if __name__ == "__main__":

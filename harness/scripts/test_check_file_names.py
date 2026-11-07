@@ -100,6 +100,29 @@ def main() -> int:
             итог(вышло.returncode == ждём, имя,
                  f"код {вышло.returncode}, ждали {ждём}: {вышло.stderr.strip()[:160]}")
 
+        # Журналы согласия: из них судья читает «Да» владельца, и правка их инструментом —
+        # подделка (безопасность hr.consent-buttons-doors, F1). Файлы существуют: правило
+        # судит запись в журнал, а не рождение имени. Сосед того же каталога — свободен.
+        логи = Path(стенд) / "log"
+        логи.mkdir()
+        for имя in ("consent-buttons.jsonl", "consent-requests.jsonl", "inbox.jsonl", "other.jsonl"):
+            (логи / имя).write_text("", encoding="utf-8")
+        журналы = [
+            ("Write", "file_path", "consent-buttons.jsonl", 2, "Write в журнал кнопок — отказ"),
+            ("Edit", "file_path", "consent-buttons.jsonl", 2, "Edit журнала кнопок — отказ"),
+            ("Edit", "file_path", "consent-requests.jsonl", 2, "Edit журнала просьб — отказ"),
+            ("NotebookEdit", "notebook_path", "inbox.jsonl", 2, "NotebookEdit журнала входящих — отказ"),
+            ("Edit", "file_path", "other.jsonl", 0, "контроль: Edit соседнего журнала — пропущен"),
+        ]
+        for инструмент, поле, имя_журнала, ждём, имя in журналы:
+            нагрузка = json.dumps({"tool_name": инструмент,
+                                   "tool_input": {поле: str(логи / имя_журнала)}})
+            вышло = subprocess.run([sys.executable, str(ПОДСУДНЫЙ), "--hook"],
+                                   input=нагрузка, capture_output=True, text=True,
+                                   cwd=стенд, timeout=60)
+            итог(вышло.returncode == ждём, f"журнал согласия: {имя}",
+                 f"код {вышло.returncode}, ждали {ждём}: {вышло.stderr.strip()[:160]}")
+
     print(f"\nвсего путей: {всего}, неудач: {плохо}")
     return 1 if плохо else 0
 

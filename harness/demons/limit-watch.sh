@@ -57,8 +57,9 @@ TRANSCRIPT=$(find "$PROJECT_TRANSCRIPTS" -mindepth 1 -maxdepth 1 -name '*.jsonl'
              -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2- || true)
 [ -n "$TRANSCRIPT" ] || { : >"$HEARTBEAT_DIR/limit-watch"; exit 0; }
 
-# Факт берётся общим прибором — тем же, что зовёт session-warden.
-LIMIT_MIN=$(python3 "$PROJECT_DIR/scripts/limit-in-log.py" "$TRANSCRIPT" 2>/dev/null || true)
+# Факт берётся общим судьёй — тем же, что зовёт session-warden (limit_active):
+# «<1>\t<сброс>\t<подъём>\t<был отказ 429>» либо пусто, когда лимит не держится.
+LIMIT_JUDGE=$(python3 "$PROJECT_DIR/scripts/limit-in-log.py" --действует "$TRANSCRIPT" --метка --с-отказом 2>/dev/null) || LIMIT_JUDGE=""
 : >"$HEARTBEAT_DIR/limit-watch"
 
 # Пауза владельца гасит и этот прибор: он шлёт владельцу «работа встала» и
@@ -93,11 +94,19 @@ else
     WORK_AGE_MIN=$(printf '%s\n' "$JUDGE_OUT" | awk -F'\t' '$1 == "работа_мин" { print $2; exit }')
 fi
 [ -n "$WORK_AGE_MIN" ] || WORK_AGE_MIN=10080
-LIMIT_FRESH_MIN="${LIMIT_FRESH_MIN:-5}"
 
-# Свежий ли отказ. Пусто — отказов в журнале нет вовсе.
+# Лимит держится, пока впереди названный срок (судья); без срока — прежнее
+# правило: отказ моложе LIMIT_FRESH_MIN. Работу помощника после старого отказа
+# без срока судья главной не видит, и «держится» по нему гасило бы возобновление.
+LIMIT_FRESH_MIN="${LIMIT_FRESH_MIN:-5}"
+LIMIT_MIN=$(python3 "$PROJECT_DIR/scripts/limit-in-log.py" "$TRANSCRIPT" 2>/dev/null || true)
 SVEZHIJ_OTKAZ=0
 [ -n "$LIMIT_MIN" ] && [ "$LIMIT_MIN" -le "$LIMIT_FRESH_MIN" ] && SVEZHIJ_OTKAZ=1
+OTKAZ_BYL=$SVEZHIJ_OTKAZ
+if [ -n "$(printf '%s' "$LIMIT_JUDGE" | cut -f2)" ]; then
+    SVEZHIJ_OTKAZ=1
+    [ "$(printf '%s' "$LIMIT_JUDGE" | cut -f4)" = 1 ] && OTKAZ_BYL=1
+fi
 
 # ── возобновление: тоже СРАЗУ, а не на ближайшем десятиминутном обходе ──────
 # Симметрия обязательна: сказать «работа встала» за минуту и молчать десять
@@ -130,6 +139,16 @@ if $MARK --стоит-ли && [ "$WORK_AGE_MIN" -lt "$LIMIT_SAY_MIN" ] \
     if [ -z "$SNYATO" ]; then
         say "метку снять не вышло или её не было — о возобновлении молчу"
         exit 0
+    fi
+    # Лимит снят: ночной devmap-selfheal, упёршийся в него, оставил флаг — заходим
+    # ещё раз сейчас, а не через сутки. Флаг снимается ДО запуска: иначе следующий обход дал бы
+    # второй прогон. 9>&- — дескриптор лока сторожа демону не отдаётся.
+    RETRY_FLAG="$LOG_DIR/devmap/retry-after-limit"
+    if [ -e "$RETRY_FLAG" ]; then
+        rm -f "$RETRY_FLAG"
+        say "лимит снят — повторный заход devmap-selfheal"
+        setsid nohup "$PROJECT_DIR/scripts/run-background.sh" devmap-selfheal -- bash "$PROJECT_DIR/harness/demons/devmap-selfheal.sh" \
+            >>"$LOG_DIR/devmap-selfheal.log" 2>&1 9>&- </dev/null &
     fi
     DOWN_MIN=$(printf '%s' "$SNYATO" | cut -f1)
     POVOD=$(printf '%s' "$SNYATO" | cut -f2)
@@ -198,12 +217,10 @@ if $MARK --стоит-ли; then
     fi
 fi
 
-[ -n "$LIMIT_MIN" ] || exit 0
-
-# Отказ должен быть СВЕЖИМ: прошедший лимит («был час назад», а смена уже
-# работает) поднял бы тревогу на ровном месте — сигнал без различения
-# здорового и больного состояния (память: signal-without-distinction).
-[ "$SVEZHIJ_OTKAZ" -eq 1 ] || exit 0
+# Лимит должен ДЕРЖАТЬСЯ и быть доказан отказом: прошедший лимит («был час
+# назад», а смена уже работает) поднял бы тревогу на ровном месте — сигнал без
+# различения здорового и больного состояния (память: signal-without-distinction).
+[ "$OTKAZ_BYL" -eq 1 ] || exit 0
 
 # И смена должна МОЛЧАТЬ: отказ субагента при живой работе смены — не остановка.
 [ "$WORK_AGE_MIN" -ge "$LIMIT_SAY_MIN" ] || exit 0
@@ -220,7 +237,7 @@ fi
 # resetsAt) и кладётся В МЕТКУ: слова владельцу собирает её судья, поэтому у
 # двух сторожей не может быть двух разных первых сообщений. 17.10.2026 первым
 # проснулся этот, ежеминутный, и владелец получил сообщение БЕЗ времени.
-SBROS_UNIX=$(python3 "$PROJECT_DIR/scripts/limit-in-log.py" --сброс-числом "$TRANSCRIPT" 2>/dev/null) || SBROS_UNIX=""
+SBROS_UNIX=$(printf '%s' "$LIMIT_JUDGE" | cut -f2)
 POSTAVLENO=0
 python3 "$PROJECT_DIR/scripts/limit_mark.py" --поставить limit ${SBROS_UNIX:+--сброс "$SBROS_UNIX"} || POSTAVLENO=$?
 if [ "$POSTAVLENO" -eq 1 ]; then
@@ -230,7 +247,7 @@ if [ "$POSTAVLENO" -ne 0 ]; then
     say "метку лимита поставить не вышло (код $POSTAVLENO) — владельцу не пишу: иначе скажу то же самое через минуту"
     exit 1
 fi
-say "лимит доказан: отказ 429 ${LIMIT_MIN} мин назад, смена молчит ${WORK_AGE_MIN} мин, сброс ${SBROS_UNIX:-неизвестен} — говорю владельцу"
+say "лимит доказан: отказ 429 ${LIMIT_MIN:-давно} мин назад, смена молчит ${WORK_AGE_MIN} мин, сброс ${SBROS_UNIX:-неизвестен} — говорю владельцу"
 # Слова — у судьи метки: владельцу нужен час обновления, а не признак отказа.
 # Ключ «--несмотря-на-лимит» обязателен: метка уже стоит, и дверь канала
 # придержала бы ровно то единственное сообщение, которое владелец ждёт.

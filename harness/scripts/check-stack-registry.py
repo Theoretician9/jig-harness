@@ -129,7 +129,12 @@ def check_part_shape(part):
             except re.error as error:
                 problems.append(f"часть {name}: образец не компилируется ({error})")
     door = part.get("установка") if isinstance(part.get("установка"), dict) else {}
-    if door.get("дверь", "нет") != "нет":
+    kind = door.get("дверь", "нет")
+    if kind == "окно-ротации":
+        # Ставит не установщик, а сторож окна ротации: argv нет, но ключ и причина обязательны.
+        problems += [f"часть {name}: установка.{key} обязателен для двери окно-ротации"
+                     for key in ("ключ", "причина") if not door.get(key)]
+    elif kind != "нет":
         problems += argv_problems(name, "установка.argv", door.get("argv"))
         problems += argv_problems(name, "установка.после", door.get("после"))
     return problems
@@ -179,7 +184,19 @@ def selftest():
         if got != expected:
             failed += 1
             print(f"  ПРОВАЛ {title}: расхождений {got}, ждали {expected}")
-    print(f"check-stack-registry --selftest: случаев {len(cases)}, неудач {failed}")
+    shape = {"имя": "перезагрузка", "чьё": "машина", "критичность": "высокая", "свежая": {"источник": "перезагрузка"},
+             "текущая": {"команда": ["uname", "-r"]}, "безопасность": "перезагрузка", "задевает": [], "риск": "r"}
+    door = {"дверь": "окно-ротации", "ключ": "AUTO_REBOOT_IN_ROTATION", "причина": "сама при смене сессии"}
+    shape_cases = [("окно-ротации с ключом", dict(shape, установка=door), 0),
+                   ("окно-ротации без ключа", dict(shape, установка={k: v for k, v in door.items() if k != "ключ"}), 1),
+                   ("окно-ротации без причины", dict(shape, установка={k: v for k, v in door.items() if k != "причина"}), 1),
+                   ("дверь npm без argv", dict(shape, установка={"дверь": "npm"}), 2)]
+    for title, part, expected in shape_cases:
+        got = len(check_part_shape(part))
+        if got != expected:
+            failed += 1
+            print(f"  ПРОВАЛ {title}: замечаний {got}, ждали {expected}")
+    print(f"check-stack-registry --selftest: случаев {len(cases) + len(shape_cases)}, неудач {failed}")
     return 1 if failed else 0
 
 

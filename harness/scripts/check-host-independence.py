@@ -27,17 +27,31 @@
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 import re
 import shlex
 import subprocess
 import sys
+import tempfile
+import time
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
+import config as конф                                     # noqa: E402
 
 КОРЕНЬ = Path(__file__).resolve().parent.parent
 ВОРОТА = КОРЕНЬ / "scripts" / "gates.sh"
 ДАННЫЕ = КОРЕНЬ / "harness" / "config" / "host-independence.yaml"
 НЕ_ПРИМЕНИМО = 77
+ПОЛНЫЙ, ИЗМЕНЁННЫЕ = "полный", "изменённые"
+ИМЯ_МЕТКИ = "host-independence-full.json"
+СУТКИ = 86400
+СРОК_ПО_УМОЛЧАНИЮ = 7
+ПРИБОР = {"scripts/check-host-independence.py", "harness/config/host-independence.yaml"}
+# Файл в тексте пробы: путь или голое имя. Расширения — те, что пробы зовут.
+УПОМИНАНИЕ = re.compile(r"[\w./-]+\.(?:py|sh|yaml|yml|json|conf)\b")
+ИМПОРТ = re.compile(r"^\s*(?:import|from)\s+([A-Za-z_]\w*)", re.M)
 
 СТРОКА_ПРОВЕРКИ = re.compile(r'^\s*проверка\s+"([^"]+)"\s+(.+?)\s*$')
 # Что подменяем: имя хозяина, его дом, машина и активное направление работы.
@@ -77,9 +91,9 @@ def прогон(слова: list[str], окружение: dict | None, чис�
                + слова) if чистое else слова
     среда = None if чистое else {**os.environ, **(окружение or {})}
     try:
-        итог = subprocess.run(команда, capture_output=True, text=True,
-                              timeout=потолок, cwd=str(КОРЕНЬ), env=среда,
-                              stdin=subprocess.DEVNULL)
+        итог = subprocess.run(команда, stdout=subprocess.DEVNULL,
+                              stderr=subprocess.DEVNULL, timeout=потолок,
+                              cwd=str(КОРЕНЬ), env=среда, stdin=subprocess.DEVNULL)
         return итог.returncode
     except subprocess.TimeoutExpired:
         return -9
@@ -110,9 +124,13 @@ def объявленное(путь_данных: Path) -> tuple[dict, dict, int
     return судят, тяжёлые, потолок, ""
 
 
-def находки(путь_ворот: Path, судят: dict, тяжёлые: dict,
-            потолок: int) -> tuple[list[str], int, int]:
-    """Беды, число проверенных и число законных расхождений."""
+def находки(путь_ворот: Path, судят: dict, тяжёлые: dict, потолок: int,
+            круг: list | None = None) -> tuple[list[str], int, int]:
+    """Беды, число проверенных и число законных расхождений.
+
+    Данные сверяются со ВСЕМИ воротами, а гоняется только `круг` (None — все):
+    запись о проверке вне круга не устарела.
+    """
     беды: list[str] = []
     проверено = 0
     законных = 0
@@ -121,8 +139,9 @@ def находки(путь_ворот: Path, судят: dict, тяжёлые: 
         if имя not in имена:
             беды.append(f"{ДАННЫЕ.name}: запись устарела — проверки «{имя}» "
                         "в воротах нет")
-    всего = len([1 for имя, _ in проверки(путь_ворот) if имя not in тяжёлые])
-    for имя, слова in проверки(путь_ворот):
+    круг = проверки(путь_ворот) if круг is None else круг
+    всего = len([1 for имя, _ in круг if имя not in тяжёлые])
+    for имя, слова in круг:
         if имя in тяжёлые:
             continue
         проверено += 1
@@ -148,20 +167,178 @@ def находки(путь_ворот: Path, судят: dict, тяжёлые: 
     return беды, проверено, законных
 
 
-def отчёт(путь_ворот: Path, путь_данных: Path) -> int:
+def _git(корень: Path, *аргументы: str) -> str | None:
+    """Вывод git или None: любой сбой git толкуется как «считать нечем»."""
+    try:
+        итог = subprocess.run(["git", *аргументы], cwd=str(корень), capture_output=True,
+                              timeout=60, stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return итог.stdout.decode("utf-8", "replace") if итог.returncode == 0 else None
+
+
+def прочитать_метку(путь_метки: Path) -> tuple[str, float] | None:
+    """(sha, ts) метки или None, если метки нет или она негодна."""
+    try:
+        метка = json.loads(Path(путь_метки).read_text(encoding="utf-8"))
+        sha, ts = метка["sha"], метка["ts"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    # sha уходит аргументом git: только шестнадцатеричное, чтобы не стать опцией.
+    if not isinstance(sha, str) or not re.fullmatch(r"[0-9a-f]{7,64}", sha):
+        return None
+    if isinstance(ts, bool) or not isinstance(ts, (int, float)):
+        return None
+    return sha, ts
+
+
+def write_mark(путь_метки: Path, корень: Path, сейчас: float) -> bool:
+    """Метка чистого полного круга: HEAD и время. False — HEAD узнать не удалось."""
+    sha = _git(корень, "rev-parse", "HEAD")
+    if not sha:
+        return False
+    путь_метки = Path(путь_метки)
+    путь_метки.parent.mkdir(parents=True, exist_ok=True)
+    # Через временный файл: оборванная запись оставила бы негодную метку.
+    врем = путь_метки.with_name(путь_метки.name + ".tmp")
+    врем.write_text(json.dumps({"sha": sha.strip(), "ts": сейчас}), encoding="utf-8")
+    os.replace(врем, путь_метки)
+    return True
+
+
+def _изменённые_файлы(корень: Path, sha: str) -> set[str] | None:
+    """Файлы, изменённые с коммита метки: коммиты, рабочее дерево и новые файлы."""
+    правлено = _git(корень, "diff", "--name-only", "--no-renames", "-z", sha, "--")
+    новые = _git(корень, "ls-files", "--others", "--exclude-standard", "-z")
+    if правлено is None or новые is None:
+        return None
+    return {п for п in (правлено + новые).split("\0") if п}
+
+
+def _замыкание(начало: set[str], корень: Path, по_имени: dict) -> set[str]:
+    """Файлы, на которые проба опирается: упоминания в тексте, шаг за шагом.
+
+    Ворота в замыкание не входят: их изменения ловятся по строкам проверок, а
+    через них замыкание расползлось бы на каждую проверку.
+    """
+    увидели, очередь = set(начало), list(начало)
+    while очередь:
+        try:
+            текст = (корень / очередь.pop()).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        найденное: set[str] = set()
+        for слово in УПОМИНАНИЕ.findall(текст):
+            найденное |= ({слово} if (корень / слово).is_file()
+                          else по_имени.get(слово.rsplit("/", 1)[-1], set()))
+        for модуль in ИМПОРТ.findall(текст):
+            найденное |= по_имени.get(f"{модуль}.py", set())
+        for файл in найденное - увидели - {"scripts/gates.sh"}:
+            увидели.add(файл)
+            очередь.append(файл)
+    return увидели
+
+
+def _проверяется_у_изменённых(корень: Path, правлено: set[str]) -> str:
+    """Тексты поля «проверяется» у механизмов реестра, чей файл изменён."""
+    try:
+        import yaml
+        текст = (корень / "harness" / "config" / "mechanisms.yaml").read_text(encoding="utf-8")
+        записи = (yaml.safe_load(текст) or {}).get("механизмы") or []
+    except Exception:                                    # noqa: BLE001 — реестр чужой
+        return ""
+    return "\n".join(str(з.get("проверяется") or "") for з in записи
+                     if isinstance(з, dict) and з.get("файл") in правлено)
+
+
+def _строки_на_метке(корень: Path, sha: str, путь_ворот: Path) -> set | None:
+    """Проверки ворот, какими они были на коммите метки; None — не прочитать."""
+    прежние = _git(корень, "show", f"{sha}:{os.path.relpath(путь_ворот, корень)}")
+    if прежние is None:
+        return None
+    with tempfile.TemporaryDirectory() as врем:
+        копия = Path(врем) / "gates.sh"
+        копия.write_text(прежние, encoding="utf-8")
+        return {(имя, tuple(слова)) for имя, слова in проверки(копия)}
+
+
+def choose_circle(путь_ворот: Path, путь_метки: Path, корень: Path, сейчас: float,
+                  срок_суток: float) -> tuple[str, list, str]:
+    """(режим, проверки, причина): полный круг или только изменённое с метки.
+
+    Всякая неясность — полный круг: пропущенная проба молчит о зависимости от
+    машины, а лишний прогон только стоит времени.
+    """
+    все = проверки(путь_ворот)
+    метка = прочитать_метку(путь_метки)
+    if метка is None:
+        return ПОЛНЫЙ, все, "метки чистого полного круга нет или она негодна"
+    sha, ts = метка
+    if сейчас - ts >= срок_суток * СУТКИ:
+        return ПОЛНЫЙ, все, f"полному кругу больше {срок_суток:g} сут."
+    правлено = _изменённые_файлы(корень, sha)
+    if правлено is None:
+        return ПОЛНЫЙ, все, "git не назвал изменённого с метки"
+    if ПРИБОР & правлено:
+        return ПОЛНЫЙ, все, "изменился сам прибор или его данные"
+    были = _строки_на_метке(корень, sha, путь_ворот)
+    if были is None:
+        return ПОЛНЫЙ, все, "ворот на метке не прочитать"
+    файлы = _git(корень, "ls-files", "-z", "--cached", "--others", "--exclude-standard")
+    по_имени: dict = {}
+    for файл in filter(None, (файлы or "").split("\0")):
+        по_имени.setdefault(файл.rsplit("/", 1)[-1], set()).add(файл)
+    от_механизмов = _проверяется_у_изменённых(корень, правлено)
+    круг = []
+    for имя, слова in все:
+        начало = {с for с in слова if (корень / с).is_file()}
+        if ((имя, tuple(слова)) not in были
+                or _замыкание(начало, корень, по_имени) & правлено
+                or any(файл in от_механизмов for файл in начало)):
+            круг.append((имя, слова))
+    return ИЗМЕНЁННЫЕ, круг, f"с метки изменено файлов: {len(правлено)}"
+
+
+def срок_полного_круга() -> float:
+    """Срок из harness.conf СТРОГО: конфиг() без аргумента читает install.conf."""
+    сырое = конф.из_файла(конф.путь_harness_conf()).get("HOST_INDEPENDENCE_FULL_DAYS", "")
+    try:
+        срок = float(сырое)
+    except ValueError:
+        return СРОК_ПО_УМОЛЧАНИЮ
+    return срок if срок > 0 else СРОК_ПО_УМОЛЧАНИЮ
+
+
+def путь_метки_по_умолчанию() -> Path:
+    return Path(os.environ.get("HOST_INDEPENDENCE_MARK")
+                or Path(конф.log_dir()) / ИМЯ_МЕТКИ)
+
+
+def отчёт(путь_ворот: Path, путь_данных: Path, путь_метки: Path | None = None) -> int:
+    """Без пути метки круг всегда полный и метка не пишется (так зовёт самотест)."""
     судят, тяжёлые, потолок, беда = объявленное(путь_данных)
     if беда:
         print(f"[хозяин машины] ПЛОХО {беда}")
         return 1
-    if not проверки(путь_ворот):
+    все = проверки(путь_ворот)
+    if not все:
         print(f"[хозяин машины] НЕ ПРИМЕНИМО: в {путь_ворот.name} "
               "не найдено ни одной проверки — мерить нечем")
         return НЕ_ПРИМЕНИМО
-    беды, проверено, законных = находки(путь_ворот, судят, тяжёлые, потолок)
+    режим, круг, причина = ПОЛНЫЙ, все, "метка не запрошена"
+    if путь_метки is not None:
+        режим, круг, причина = choose_circle(
+            путь_ворот, путь_метки, КОРЕНЬ, time.time(), срок_полного_круга())
+    print(f"[хозяин машины] режим «{режим}»: {причина}; "
+          f"проверок в круге {len(круг)} из {len(все)}")
+    беды, проверено, законных = находки(путь_ворот, судят, тяжёлые, потолок, круг)
     if not беды:
-        print(f"[хозяин машины] чисто: прогнано {проверено} проверок, "
+        итог = "чисто" if круг else "изменённых нет"
+        print(f"[хозяин машины] {итог}: прогнано {проверено} проверок, "
               f"необъявленных зависимостей 0, законных {законных}, "
               f"тяжёлых пропущено {len(тяжёлые)}")
+        if режим == ПОЛНЫЙ and путь_метки is not None:
+            write_mark(путь_метки, КОРЕНЬ, time.time())
         return 0
     for б in беды:
         print(f"[хозяин машины] ПЛОХО {б}")
@@ -272,6 +449,12 @@ def селфтест() -> int:
         проба(прогон(["bash", str(долгая)], None, False, 1) == -9,
               "не дождались прогона — отдельный код, не успех")
 
+        # Прибор судит только код: вывод проверки бывает оборван посреди буквы.
+        битая = двор / "bitaya.sh"
+        битая.write_text("#!/bin/bash\nprintf '\\321x'\nexit 3\n", encoding="utf-8")
+        проба(прогон(["bash", str(битая)], None, False, 20) == 3,
+              "вывод не в UTF-8 — код проверки, а не падение прибора")
+
     print(f"SELFTEST: {'зелёный' if ok else 'КРАСНЫЙ'} ({путей} путей, "
           "первым — больной случай «проверка зелена только в доме хозяина»)")
     return 0 if ok else 1
@@ -280,7 +463,7 @@ def селфтест() -> int:
 def главная(аргументы: list[str]) -> int:
     if аргументы[:1] == ["--selftest"]:
         return селфтест()
-    return отчёт(ВОРОТА, ДАННЫЕ)
+    return отчёт(ВОРОТА, ДАННЫЕ, путь_метки_по_умолчанию())
 
 
 if __name__ == "__main__":

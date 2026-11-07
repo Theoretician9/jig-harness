@@ -240,7 +240,7 @@ else:
 # F-gen-02: битый реестр устройства обязан давать «нет данных», а не падение
 # внутри обработчика (ревью корректности 11.09.2026: страница отвечала
 # закрытым соединением, а журнал оставался пуст).
-битый = Path(tempfile.mkdtemp(prefix="битое-")) / "mechanisms.yaml"
+битый = Path(tempfile.mkdtemp(prefix="проба-битое-")) / "mechanisms.yaml"
 битый.write_text("механизмы:\n  - файл: [не\n", encoding="utf-8")
 os.environ["HARNESS_USTROJSTVO"] = str(битый)
 ответ = state.устройство()
@@ -253,7 +253,7 @@ else:
 # Состояние обновлений: «проверок ещё не было» и «есть новая версия» — разные
 # строки, а не одинаковая пустота (§4 спеки обновления).
 import os as _os2
-_врем_обн = Path(tempfile.mkdtemp(prefix="обновления-"))
+_врем_обн = Path(tempfile.mkdtemp(prefix="проба-обновления-"))
 _os2.environ["LOG_DIR"] = str(_врем_обн)
 _os2.environ["PANEL_STATE_DIR_LOGS"] = str(_врем_обн)
 _лог_обн = _врем_обн / "update-watch.log"
@@ -405,7 +405,7 @@ else:
 # И экран не имеет права умереть целиком из-за одной кривой записи: без поля
 # «вид» страница обязана НАЗВАТЬ беду словами (F-gen-02), а не закрыть
 # соединение. Путь зелёный сегодня — стоит сторожем при правке групп.
-_без_вида = Path(tempfile.mkdtemp(prefix="без-вида-")) / "mechanisms.yaml"
+_без_вида = Path(tempfile.mkdtemp(prefix="проба-без-вида-")) / "mechanisms.yaml"
 _запись_без_вида = {к: v for к, v in ЗАПИСИ_ПРОБЫ[0].items() if к != "вид"}
 _без_вида.write_text(
     yaml.safe_dump({"механизмы": [_запись_без_вида]}, allow_unicode=True),
@@ -424,7 +424,7 @@ else:
 # переименование подписи оставляло владельца без чисел молча.
 import json as _json
 
-_расход_дом = Path(tempfile.mkdtemp(prefix="расход-"))
+_расход_дом = Path(tempfile.mkdtemp(prefix="проба-расход-"))
 (_расход_дом / "tokens-daily.json").write_text(_json.dumps({
     "дата": "2026-09-13", "шагов": 1046, "контекст на шаг": 366054,
     "доля попаданий кэша": 0.995}, ensure_ascii=False), encoding="utf-8")

@@ -15,9 +15,10 @@
 #   1. ИМЯ. Удаляется только база с префиксом DROPPABLE_DB_PREFIX. Боевая
 #      база физически не может быть названа в аргументе — опечатка отбивается
 #      раньше, чем что-либо произойдёт.
-#   2. СОГЛАСИЕ. В $LOG_DIR/confirmations.jsonl должна лежать запись владельца
-#      свежее CONFIRM_MAX_AGE_MIN (её пишет tg-dispatcher на «да»/«ок»/
-#      «подтверждаю»). Нет записи — нет действия (решение владельца 08.08.2026).
+#   2. СОГЛАСИЕ. В $LOG_DIR/consent-buttons.jsonl должно лежать нажатое «Да» кнопкой
+#      на ЭТУ базу (его пишет tg-dispatcher), свежее срока кнопки. Текст владельца дверь
+#      не открывает. Нет кнопки — ворота сами просят её у владельца (слово владельца
+#      05.11.2026: «любое „да“ — кнопками»).
 #   3. ДАМП. Перед удалением снимается pg_dump в $BACKUP_DIR и проверяется на
 #      непустоту. И-1 требует свежий бэкап перед необратимым — здесь он
 #      делается прямо сейчас, поэтому операция перестаёт быть необратимой.
@@ -54,23 +55,17 @@ DB_ADMIN_USER="${DB_ADMIN_USER:-postgres}"
 say() { printf '%s  %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"; }
 
 # ── ворота 2: согласие владельца — ЧУЖИМ правилом, не своим ─────────────────
-# Прежде здесь жила своя копия правила образца до 20.08: список из четырёх слов
-# без предмета, без отрицаний, без расхода. Комментарий над ней утверждал
-# «читает тем же правилом, что ворота выката» — а правила разошлись в обе
-# стороны (ревью 11.09.2026): «моё да» ворота выката принимали, а эта дверь
-# нет; и наоборот — ЛЮБОЕ «да», сказанное за час на любой вопрос, открывало
-# удаление базы, потому что предмета копия не проверяла вовсе.
-#
-# Теперь правило ОДНО и живёт в deploy_guard.py: там же предмет согласия,
-# расход («одно да — одно действие») и отзыв. Комментарий о единственности,
-# не подкреплённый вызовом, — это просьба помнить, а не механизм.
-consent() {
-    local guard="${PROJECT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}/scripts/deploy_guard.py"
-    if [ ! -r "$guard" ]; then
-        say "ворот согласия нет на месте ($guard) — удаление без них не делаю"
+# Правило ОДНО и живёт в deploy_guard.py (owner_word.судить_кнопкой): предмет согласия,
+# срок, расход («одно да — одно действие»: гасит его след db-drops.jsonl) и отзыв.
+# Комментарий о единственности, не подкреплённый вызовом, — это просьба помнить, а не
+# механизм. --просить: нет кнопки — ворота просят её сами; каталог журналов — явно.
+consent() { # $1=база
+    local scripts="${PROJECT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}/scripts"
+    if [ ! -r "$scripts/deploy_guard.py" ]; then
+        say "ворот согласия нет на месте ($scripts/deploy_guard.py) — удаление без них не делаю"
         return 1
     fi
-    HARNESS_LOG_DIR="$LOG_DIR" python3 "$guard" --действие dropdb --только-согласие
+    HARNESS_LOG_DIR="$LOG_DIR" python3 "$scripts/deploy_guard.py" --действие dropdb --база "$1" --только-согласие --просить
 }
 
 drop_db() {
@@ -91,9 +86,9 @@ drop_db() {
     esac
     [ -n "$DB_ADMIN_EXEC" ] || { echo "убрать-базу: DB_ADMIN_EXEC не задан в harness.conf — нечем ходить в СУБД"; return 1; }
 
-    if ! ok=$(consent); then
-        echo "убрать-базу: нет согласия владельца свежее $CONFIRM_MAX_AGE_MIN мин в $LOG_DIR/confirmations.jsonl (И-1)."
-        echo "  Спроси в канале и дождись ответа «да» — диспетчер запишет его сам."
+    if ! ok=$(consent "$db"); then
+        echo "убрать-базу: нет согласия владельца — нужна кнопка «Да» в Telegram, текст не засчитывается (И-1)."
+        printf '%s\n' "$ok" | sed 's/^/  /'
         return 1
     fi
     say "$ok"
@@ -126,7 +121,7 @@ drop_db() {
     fi
     say "база «$db» удалена, дамп остался в $dump"
     printf '{"ts":"%s","база":"%s","дамп":"%s","согласие":"%s"}\n' \
-        "$(date -Is)" "$db" "$dump" "${ok//\"/}" >> "$LOG_DIR/db-drops.jsonl"
+        "$(date -Is)" "$db" "$dump" "$(printf '%s' "${ok//\"/}" | tr '\n' ' ')" >> "$LOG_DIR/db-drops.jsonl"
 }
 
 # ── самотест: своя база, все исходы ─────────────────────────────────────────
@@ -138,53 +133,72 @@ if [ "${1:-}" = "--selftest" ]; then
     T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
     PROBE="${DROPPABLE_DB_PREFIX}самотест_$$"
     LOG_DIR="$T"; BACKUP_DIR="$T/backup"
-    : > "$T/confirmations.jsonl"
+    # Журнал кнопок — свой каталог $T: подмена каталога разрешена только ключом стенда.
+    export HARNESS_OWNER_WORD_STEND=1
+    : > "$T/inbox.jsonl"
+
+    # «Да» кнопкой, как его пишет диспетчер: «отправлено» и решение с одним nonce.
+    button_press() { # $1=consent.yes|consent.no $2=база
+        local nonce="selftest$RANDOM$RANDOM" ts
+        ts=$(date -Is)
+        printf '{"v":1,"ts":"%s","src":"selftest","event":"consent.sent","outcome":"ok","data":{"nonce":"%s","вид":"снос-базы","цель":"%s","message_id":4242,"from_id":null}}\n' \
+            "$ts" "$nonce" "$2" >> "$T/consent-buttons.jsonl"
+        printf '{"v":1,"ts":"%s","src":"selftest","event":"%s","outcome":"ok","data":{"nonce":"%s","вид":"снос-базы","цель":"%s","message_id":4242,"from_id":777000}}\n' \
+            "$ts" "$1" "$nonce" "$2" >> "$T/consent-buttons.jsonl"
+    }
+    db_still_there() {
+        $DB_ADMIN_EXEC psql -U "$DB_ADMIN_USER" -d postgres -tAc \
+            "select 1 from pg_database where datname = '$PROBE'" | grep -q 1
+    }
 
     $DB_ADMIN_EXEC psql -U "$DB_ADMIN_USER" -d postgres -q -c "CREATE DATABASE \"$PROBE\"" \
         || { echo "САМОТЕСТ ПРОВАЛЕН: не удалось завести пробную базу"; exit 1; }
 
-    if drop_db "$PROBE" >/dev/null 2>&1; then
+    REFUSAL_TEXT=$(drop_db "$PROBE" 2>&1) && {
         echo "САМОТЕСТ ПРОВАЛЕН: база удалена БЕЗ согласия владельца — ворота И-1 не держат"
         exit 1
-    fi
-    $DB_ADMIN_EXEC psql -U "$DB_ADMIN_USER" -d postgres -tAc \
-        "select 1 from pg_database where datname = '$PROBE'" | grep -q 1 \
-        || { echo "САМОТЕСТ ПРОВАЛЕН: отказ отказом, а база исчезла"; exit 1; }
+    }
+    db_still_there || { echo "САМОТЕСТ ПРОВАЛЕН: отказ отказом, а база исчезла"; exit 1; }
+    grep -q "кнопк" <<< "$REFUSAL_TEXT" \
+        || { echo "САМОТЕСТ ПРОВАЛЕН: отказ не называет кнопку: ${REFUSAL_TEXT:0:160}"; exit 1; }
+    # Дверь сама просит кнопку: ровно один запрос этого вида на эту базу, повтор не плодит.
+    drop_db "$PROBE" >/dev/null 2>&1 || true
+    [ "$(grep -c "\"цель\": *\"$PROBE\"" "$T/consent-requests.jsonl" 2>/dev/null || true)" = 1 ] \
+        || { echo "САМОТЕСТ ПРОВАЛЕН: запрос кнопки на базу не один"; exit 1; }
 
-    # Не ответ на вопрос — не согласие: сырой файл очереди и запись журнала без
-    # вида открывали удаление без всякого вопроса (Ф-5, Ф-7). Отказ обязан быть
-    # и при уже заданном вопросе, а база — на месте.
-    mkdir -p "$T/inbox/обработано"
-    printf '1. да удаляй\n4. да\n' > "$T/inbox/обработано/selftest.txt"
-    printf '{"ts":"%s","text":"да, удалить копии","message_id":"selftest-raw"}\n' \
-        "$(date -Is)" >> "$T/confirmations.jsonl"
+    # Текст владельца не открывает: слово «да» в журнале входящих базу не сносит.
+    printf '{"ts":"%s","message_id":"selftest-raw","chat_id":"selftest","text":"да, удаляй"}\n' \
+        "$(date -Is)" >> "$T/inbox.jsonl"
     if drop_db "$PROBE" >/dev/null 2>&1; then
-        echo "САМОТЕСТ ПРОВАЛЕН: база удалена по сырой очереди или записи без вида — не ответ на вопрос"
+        echo "САМОТЕСТ ПРОВАЛЕН: база удалена по тексту владельца — открывает только кнопка"
         exit 1
     fi
-    $DB_ADMIN_EXEC psql -U "$DB_ADMIN_USER" -d postgres -tAc \
-        "select 1 from pg_database where datname = '$PROBE'" | grep -q 1 \
-        || { echo "САМОТЕСТ ПРОВАЛЕН: отказ отказом, а база исчезла"; exit 1; }
+    db_still_there || { echo "САМОТЕСТ ПРОВАЛЕН: отказ отказом, а база исчезла"; exit 1; }
 
-    # Чужое имя при живом согласии — тоже отказ: ворота имени и ворота
+    # Чужое имя при живой кнопке — тоже отказ: ворота имени и ворота
     # согласия должны держать по отдельности, иначе одно прикрывает другое.
-    # Согласие — ответ видом any ПОСЛЕ вопроса (его задал отказ выше); метка
-    # ответа в секундах, пауза кладёт её строго позже вопроса.
     sleep 1.1
-    printf '{"ts":"%s","text":"да","kind":"any","message_id":"selftest"}\n' "$(date -Is)" >> "$T/confirmations.jsonl"
+    button_press consent.yes "postgres"
     if drop_db "postgres" >/dev/null 2>&1; then
         echo "САМОТЕСТ ПРОВАЛЕН: удалена база без пробного префикса"
         exit 1
     fi
+    # «Да» на другую базу эту не открывает.
+    button_press consent.yes "${DROPPABLE_DB_PREFIX}другая"
+    if drop_db "$PROBE" >/dev/null 2>&1; then
+        echo "САМОТЕСТ ПРОВАЛЕН: «Да» на другую базу открыло эту"
+        exit 1
+    fi
+    button_press consent.yes "$PROBE"
 
     drop_db "$PROBE" >/dev/null || { echo "САМОТЕСТ ПРОВАЛЕН: с согласием удаление не прошло"; exit 1; }
     ls "$T/backup/$PROBE-"*.sql >/dev/null 2>&1 \
         || { echo "САМОТЕСТ ПРОВАЛЕН: дампа перед удалением нет"; exit 1; }
     grep -q "\"база\":\"$PROBE\"" "$T/db-drops.jsonl" \
         || { echo "САМОТЕСТ ПРОВАЛЕН: событие не записано в db-drops.jsonl"; exit 1; }
-    echo "САМОТЕСТ ПРОЙДЕН: без согласия — отказ и база цела; сырая очередь и запись"
-    echo "без вида — отказ; чужое имя — отказ;"
-    echo "с согласием — дамп снят, база удалена, событие записано"
+    echo "САМОТЕСТ ПРОЙДЕН: без кнопки — отказ, база цела, кнопка запрошена один раз; текст"
+    echo "владельца — отказ; чужое имя и «Да» на другую базу — отказ;"
+    echo "с кнопкой «Да» — дамп снят, база удалена, событие записано"
     exit 0
 fi
 

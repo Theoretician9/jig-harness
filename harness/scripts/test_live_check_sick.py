@@ -35,19 +35,25 @@ from __future__ import annotations
 import hashlib
 import os
 import pathlib
+import shutil
 import subprocess
 import sys
 import tempfile
 
 import yaml
 
-КОРЕНЬ = pathlib.Path(__file__).resolve().parent.parent
+СКРИПТЫ = pathlib.Path(__file__).resolve().parent
+sys.path.insert(0, str(СКРИПТЫ / "lib"))
+import config as _конфиг  # noqa: E402
+
+# Корень установки, а не parent.parent: в пакете скрипты лежат в harness/scripts.
+КОРЕНЬ = pathlib.Path(_конфиг.корень_дерева(__file__))
 # Путь прибора — через окружение: мутационная проба подсовывает КОПИЮ
 # испорченного прибора, и без этой двери проба судила бы боевой файл, то
 # есть оставалась зелёной на любой мутации (поймано прогоном 17.10.2026:
 # три мутации из трёх не покраснели).
 ПРОГОН = pathlib.Path(os.environ.get("HARNESS_LIVE_CHECK_SICK_TOOL")
-                      or КОРЕНЬ / "scripts" / "live-check-sick.py")
+                      or СКРИПТЫ / "live-check-sick.py")
 БОЕВЫЕ = (КОРЕНЬ / "harness" / "config" / "live-check-state.yaml",
           КОРЕНЬ / "harness" / "config" / "live-check-sick-cases.yaml")
 
@@ -94,7 +100,7 @@ def случай(имя: str, условие: bool, пояснение: str = ""
 
 def двор(случаи: dict) -> pathlib.Path:
     """Свой git-репозиторий с «гейтом», обёрткой и данными больных случаев."""
-    путь = pathlib.Path(tempfile.mkdtemp(prefix="больной-"))
+    путь = pathlib.Path(tempfile.mkdtemp(prefix="проба-больной-"))
     (путь / "scripts").mkdir()
     (путь / "src").mkdir()
     # git не хранит ПУСТЫЕ каталоги: без этого файла «src/» до клона не доезжает,
@@ -107,7 +113,10 @@ def двор(случаи: dict) -> pathlib.Path:
     # Обёртка — ТА ЖЕ, что в бою: свою копию писать нельзя, иначе проба судит
     # выдумку, а не механизм ([[comparing-two-implementations-turns-tautological]]).
     (путь / "scripts" / "live-check.sh").write_text(
-        (КОРЕНЬ / "scripts" / "live-check.sh").read_text(), encoding="utf-8")
+        (СКРИПТЫ / "live-check.sh").read_text(), encoding="utf-8")
+    # Обёртка читает корень следов через загрузчик конфига — ему нужна lib.
+    shutil.copytree(СКРИПТЫ / "lib", путь / "scripts" / "lib",
+                    ignore=shutil.ignore_patterns("__pycache__"))
     (путь / "harness" / "config" / "live-check-sick-cases.yaml").write_text(
         yaml.dump({"больные_случаи": случаи}, allow_unicode=True), encoding="utf-8")
     (путь / "harness" / "config" / "live-check-state.yaml").write_text(

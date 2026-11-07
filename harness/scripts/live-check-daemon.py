@@ -27,6 +27,7 @@
 from __future__ import annotations
 
 import datetime
+import fcntl
 import os
 import pathlib
 import re
@@ -42,8 +43,16 @@ import yaml
                          or КОРЕНЬ / "harness" / "config" / "live-check-state.yaml")
 КЛАССЫ = pathlib.Path(os.environ.get("HARNESS_LIVE_CHECK_CLASSES")
                       or КОРЕНЬ / "harness" / "config" / "live-check-classes.yaml")
+def _корень_следов() -> pathlib.Path:
+    """Корень следов — у общего загрузчика: умолчание внутри репозитория
+    отдавало весь вывод произвольной команды гиту."""
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent / "lib"))
+    import config as конф                                 # noqa: PLC0415
+    return pathlib.Path(конф.live_check_trace_root())
+
+
 СЛЕДЫ = pathlib.Path(os.environ.get("HARNESS_LIVE_CHECK_DAEMON_TRACE_DIR")
-                     or КОРЕНЬ / ".tasks" / "hr.zhivaya-proverka-vseh-mehanizmov"
+                     or _корень_следов() / "hr.zhivaya-proverka-vseh-mehanizmov"
                      / "живьём-демоны")
 # Расписание читается командой, а в пробе — файлом: своё расписание пробе нужно,
 # а живое `crontab -l` править ради проверки нельзя.
@@ -604,13 +613,19 @@ def демоны_класса() -> list[str]:
 
 
 def записать(поля_по_механизму: dict) -> None:
-    данные = yaml.safe_load(СОСТОЯНИЕ.read_text(encoding="utf-8")) or {}
-    сост = данные.setdefault("проверено", {})
-    for механизм, поля in поля_по_механизму.items():
-        сост.setdefault(механизм, {}).update(поля)
-    СОСТОЯНИЕ.write_text(
-        yaml.dump(данные, allow_unicode=True, sort_keys=False, width=100),
-        encoding="utf-8")
+    # замок по соседнему файлу: сам yaml заменяется через replace, на нём замок бы терялся
+    with open(СОСТОЯНИЕ.with_name(СОСТОЯНИЕ.name + ".lock"), "w") as замок:
+        fcntl.flock(замок, fcntl.LOCK_EX)
+        данные = yaml.safe_load(СОСТОЯНИЕ.read_text(encoding="utf-8")) or {}
+        сост = данные.setdefault("проверено", {})
+        for механизм, поля in поля_по_механизму.items():
+            сост.setdefault(механизм, {}).update(поля)
+        # временный файл рядом + replace: читатель без замка не увидит половину файла
+        врем = СОСТОЯНИЕ.with_name(f"{СОСТОЯНИЕ.name}.{os.getpid()}.tmp")
+        врем.write_text(
+            yaml.dump(данные, allow_unicode=True, sort_keys=False, width=100),
+            encoding="utf-8")
+        os.replace(врем, СОСТОЯНИЕ)
 
 
 def main() -> int:

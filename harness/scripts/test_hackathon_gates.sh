@@ -280,8 +280,12 @@ ts = time.strftime("%Y-%m-%dT%H:%M:%S+05:00")
 with open(f"{stand}/zhurnal/confirmations.jsonl", "w", encoding="utf-8") as fh:
     fh.write(json.dumps({"ts": ts, "text": "да", "message_id": "1", "kind": "any"},
                         ensure_ascii=False) + "\n")
+# Голое «да» засчитывается только НОВЕЕ вопроса ворот (решение смены 04.11:
+# «да» до вопроса или в ту же секунду не считается). Метка «да» усечена до
+# секунды, поэтому вопрос кладётся минутой раньше — как в жизни, где ответ
+# владельца всегда приходит после вопроса.
 with open(f"{stand}/zhurnal/согласие.json", "w", encoding="utf-8") as fh:
-    json.dump({"ожидание": {"действие": "deploy", "ts": time.time()}}, fh, ensure_ascii=False)
+    json.dump({"ожидание": {"действие": "deploy", "ts": time.time() - 60}}, fh, ensure_ascii=False)
 PY
 }
 VYVOD=""

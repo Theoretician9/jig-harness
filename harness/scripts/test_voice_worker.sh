@@ -21,7 +21,7 @@
 #
 # Стенд: свой LOG_DIR и каталог паузы, Bot API на своём порту, tmux — подделка первой
 # в PATH, наружный https закрыт (https_proxy в никуда): ни Telegram, ни whisper не
-# зовутся. Процессы стенда помечены PROBA_STAMP и убиваются по метке.
+# зовутся. Процессы стенда находятся по пути стенда в окружении и убиваются по нему.
 #
 #   bash scripts/test_voice_worker.sh [--случай диспетчер|прибор|код]
 # Код возврата: 0 — зелёная, 1 — красная. Последняя строка — итог с числом путей.
@@ -52,25 +52,48 @@ want() { [ -z "$ONLY" ] || [ "$ONLY" = "$1" ]; }
 source "$KOREN/scripts/lib/selftest_cases.sh"
 
 T=$(mktemp -d /tmp/proba-voice-worker-XXXXXX)
+echo $$ > "$T/owner"
 STAMP="proba-voice-worker-$$"
 PATHS_JUDGED=0
 PIDS_KILL=()
-kill_stamped() {  # $1 = метка; процессы стенда находятся по окружению, не по имени
-    local f pid
-    for f in /proc/[0-9]*/environ; do
-        pid="${f#/proc/}"; pid="${pid%/environ}"
-        [ "$pid" = "$$" ] && continue
-        grep -qaF -- "PROBA_STAMP=$1" "$f" 2>/dev/null && kill -KILL "$pid" 2>/dev/null
+# Процессы стенда находятся по окружению: у каждого есть значение с путём стенда
+# (PATH, HARNESS_PANEL_STATE, PROBA_STAND), а командная строка диспетчера метки не несёт.
+sweep_stand() {  # $@ = каталоги стендов со слешем; печатает число убитых
+    local f pid n=0 k pat=()
+    [ $# -gt 0 ] || { echo 0; return; }
+    for f in "$@"; do pat+=(-e "=$f"); done
+    # Диспетчер живёт, пока проход до него не дошёл, и порождает потомков уже после
+    # снимка /proc: проходы повторяются, пока очередной не убьёт никого.
+    while :; do
+        k=0
+        for f in /proc/[0-9]*/environ; do
+            pid="${f#/proc/}"; pid="${pid%/environ}"
+            [ "$pid" = "$$" ] && continue
+            grep -qaF "${pat[@]}" "$f" 2>/dev/null && kill -KILL "$pid" 2>/dev/null && k=$((k+1))
+        done
+        n=$((n + k)); [ "$k" -gt 0 ] || break
     done
-    return 0
+    echo "$n"
 }
 cleanup() {
     local p
     for p in "${PIDS_KILL[@]}"; do kill -KILL -- "-$p" 2>/dev/null; kill -KILL "$p" 2>/dev/null; done
-    kill_stamped "$STAMP"
+    sweep_stand "$T/" >/dev/null
     if [ -n "${PROBA_KEEP:-}" ]; then echo "стенд оставлен (PROBA_KEEP): $T"; else rm -rf "$T"; fi
 }
 trap cleanup EXIT
+# Стенды прогонов, убитых KILL-ом (ловушка не сработала). Живой хозяин — это
+# параллельный прогон той же пробы: его стенд не трогаем.
+DEAD=()
+for d in /tmp/proba-voice-worker-*/; do
+    owner=$(cat "$d/owner" 2>/dev/null)
+    [ -n "$owner" ] && kill -0 "$owner" 2>/dev/null && continue
+    DEAD+=("$d")
+done
+LEFT=$(sweep_stand "${DEAD[@]}")
+if [ "$LEFT" -gt 0 ]; then
+    echo "убрано процессов от прерванных прогонов: $LEFT"
+fi
 
 wait_for() {  # $1 = предел, остальное — условие
     local end=$(( $(date +%s) + $1 )); shift
@@ -265,7 +288,7 @@ PYEOF
         : > "$S/tmux-calls"; : > "$S/acks"; : > "$S/served"; : > "$S/tr-log"
         printf '000:СТЕНДОВЫЙ' > "$S/token"   # не-секрет: подставной Bot API стенда
         port=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')
-        python3 "$T/api.py" "$port" "$S/acks" "$S/api.ready" "$S/updates.json" "$S/served" > "$S/api.out" 2>&1 &
+        PROBA_STAND="$T/" python3 "$T/api.py" "$port" "$S/acks" "$S/api.ready" "$S/updates.json" "$S/served" > "$S/api.out" 2>&1 &
         PIDS_KILL+=($!); disown $!
         wait_for 10 test -e "$S/api.ready" || { d_bad "Bot API не поднялся"; return; }
         cat > "$S/install.conf" <<EOF
@@ -286,7 +309,7 @@ EOF
             HARNESS_PANEL_STATE="$S/panel" python3 "$PAUSE_PY" --идёт-ли \
                 || { echo "ПРОБА: pause.py не поставил паузу на стенде — проверять нечего"; exit 1; }
         }
-        stand_env env -u HARNESS_LOG_DIR PROBA_STAMP="$STAMP-$name" PROBA_TMUX_LOG="$S/tmux-calls" \
+        stand_env env -u HARNESS_LOG_DIR PROBA_TMUX_LOG="$S/tmux-calls" \
             PROBA_TR_LOG="$S/tr-log" \
             HARNESS_DOWNLOAD_PY="$T/dl.py" HARNESS_TRANSCRIBE_PY="$T/tr.py" \
             https_proxy="http://127.0.0.1:9" HTTPS_PROXY="http://127.0.0.1:9" no_proxy="127.0.0.1,localhost" \
@@ -301,7 +324,7 @@ EOF
     d_stop() {
         sleep 1.5   # фоновые метки дописываются
         kill -KILL -- "-$DPID" 2>/dev/null; kill -KILL "$DPID" 2>/dev/null
-        kill_stamped "$STAMP-$1"
+        sweep_stand "$S/" >/dev/null
         case_check "СТЕНД ($1): сбоев стенда нет" "0" "$D_STAND_BAD"
         [ "$D_STAND_BAD" = 0 ] || tail -5 "$S/log/tg-dispatcher.log" 2>/dev/null | sed 's/^/    /'
     }

@@ -8,9 +8,10 @@
   `comments-intake.py --доставлено T` — строка доставки T в тот журнал.
 Диспетчер на каждую строку зовёт `agent_kick "<пинок>"`, затем отмечает.
 
-Главное правило: текст комментария НЕ попадает в $LOG_DIR/inbox — оттуда
-ворота выката (`deploy_guard._из_очереди`) и одобрение спеки
-(`spec_approval.слова_владельца`) берут слова владельца.
+Главное правило: текст комментария НЕ становится согласием. Он не попадает в
+$LOG_DIR/inbox — оттуда одобрение спеки (`spec_approval.слова_владельца`) берёт
+слова владельца — и не открывает ворота выката: их судит только кнопка «Да»
+(`deploy_guard.нет_согласия`).
 
 Всё на своих временных каталогах (LOG_DIR, PANEL_STATE_DIR, конфиги): боевой
 журнал и живая панель не трогаются.
@@ -18,6 +19,7 @@
 Прогон:
     python3 scripts/test_comments_intake.py
 """
+import datetime
 import importlib.util
 import json
 import os
@@ -68,8 +70,16 @@ with tempfile.TemporaryDirectory() as tmp:
     (inbox / "обработано").mkdir(parents=True)
     panel_state.mkdir()
     (root / "дом").mkdir()
+    # Предмет выката и владелец стенда: ворота считают предмет из дерева PROJECT_DIR.
+    OWNER = "4242"
+    project = root / "проект"
+    project.mkdir()
+    subprocess.run(["git", "-C", str(project), "init", "-q"], check=True)
+    subprocess.run(["git", "-C", str(project), "-c", "user.email=proba@stend", "-c", "user.name=проба",
+                    "commit", "-q", "--allow-empty", "-m", "стенд"], check=True)
     (root / "install.conf").write_text(
-        f'LOG_DIR="{logs}"\nPANEL_STATE_DIR="{panel_state}"\n', encoding="utf-8")
+        f'LOG_DIR="{logs}"\nPANEL_STATE_DIR="{panel_state}"\n'
+        f'PROJECT_DIR="{project}"\nTG_CHAT_ID="{OWNER}"\nAUTONOMY="semi"\n', encoding="utf-8")
     (root / "harness.conf").write_text("CONFIRM_MAX_AGE_MIN=60\n", encoding="utf-8")
     env = dict(os.environ,
                HARNESS_HOME=str(root / "дом"),
@@ -77,6 +87,7 @@ with tempfile.TemporaryDirectory() as tmp:
                HARNESS_CONF=str(root / "harness.conf"),
                LOG_DIR=str(logs),
                HARNESS_LOG_DIR=str(logs),
+               HARNESS_OWNER_WORD_STEND="1",
                PANEL_STATE_DIR=str(panel_state))
     os.environ.update(env)
     delivered = logs / "panel-comments-delivered.jsonl"
@@ -211,9 +222,9 @@ with tempfile.TemporaryDirectory() as tmp:
         path_bad(f"битая заявка: код {code}, вывод {lines[:2]}")
 
     # ── главное: комментарий «да, выкатывай» не становится согласием ────────
-    # Ворота выката и одобрение спеки читают слова владельца из inbox/. Если
-    # приём положит туда текст комментария, пропуск панели (веб) станет
-    # согласием на выкат мимо канала (контракт, Б1).
+    # Одобрение спеки читает слова владельца из inbox/, ворота выката — кнопку.
+    # Если приём положит текст комментария в их носитель, пропуск панели (веб)
+    # станет согласием на выкат мимо канала (контракт, Б1).
     inbox_before = files_under(inbox)
     t_deploy = f"{time.time() - 5:.9f}"
     put_claim(t_deploy, "hr.proba", "да, выкатывай")
@@ -231,31 +242,44 @@ with tempfile.TemporaryDirectory() as tmp:
     approval = load("spec_approval_proba", HERE / "spec_approval.py")
 
     # Проба обязана уметь видеть согласие — иначе «не нашли» ничего не стоит.
-    # Контроль: тот же текст, положенный во входящие ДРУГОГО каталога, ворота
-    # находят.
+    # Контроль в ДРУГОМ каталоге: тот же текст во входящих видит одобрение, а
+    # кнопку «Да» на предмет выката с парной просьбой — ворота.
     control = root / "контроль"
     (control / "inbox").mkdir(parents=True)
     (control / "inbox" / "1791999999.txt").write_text("да, выкатывай", encoding="utf-8")
+    (control / "inbox.jsonl").write_text("", encoding="utf-8")
+    subject, subject_trouble = guard._предмет("deploy")
+    pressed = (datetime.datetime.now().astimezone()
+               - datetime.timedelta(seconds=30)).isoformat(timespec="seconds")
+    button = {"nonce": "n", "вид": "выкат", "цель": subject, "message_id": 5}
+    for journal, event, data in (
+            ("consent-requests.jsonl", "consent.request", {**button, "почему": "проба"}),
+            ("consent-buttons.jsonl", "consent.yes", {**button, "from_id": OWNER})):
+        (control / journal).write_text(json.dumps(
+            {"v": 1, "ts": pressed, "src": "проба", "event": event, "outcome": "ok", "data": data},
+            ensure_ascii=False) + "\n", encoding="utf-8")
     real_log_dir = guard.LOG_DIR
     guard.LOG_DIR = control
     os.environ["HARNESS_LOG_DIR"] = str(control)
     try:
-        sees_guard = any("выкатывай" in r["text"] for r in guard._из_очереди(time.time(), []))
+        sees_guard = guard.нет_согласия("deploy") is None
         sees_approval = any("выкатывай" in r["текст"] for r in approval.слова_владельца(0))
     finally:
         guard.LOG_DIR = real_log_dir
         os.environ["HARNESS_LOG_DIR"] = str(logs)
     if sees_guard and sees_approval:
-        path_ok("контроль: «да, выкатывай» во входящих ворота и одобрение видят")
+        path_ok("контроль: кнопку на выкат ворота видят, «да, выкатывай» во входящих видит одобрение")
     else:
-        path_bad(f"контроль слеп: ворота {sees_guard}, одобрение {sees_approval}")
+        path_bad(f"контроль слеп: ворота {sees_guard} (предмет {subject_trouble or 'посчитан'}), "
+                 f"одобрение {sees_approval}")
 
-    found_guard = [r["text"] for r in guard._из_очереди(time.time(), [])
-                   if "выкатывай" in r["text"]]
-    if printed and not found_guard and guard.LOG_DIR == logs:
-        path_ok("БОЛЬНОЙ СЛУЧАЙ: deploy_guard._из_очереди согласия из комментария не находит")
+    # Судим причину, а не только отказ: закрыто должно быть тем, что записи о кнопке
+    # нет вовсе, а не посторонней бедой стенда.
+    refusal = guard.нет_согласия("deploy") or ""
+    if printed and "кнопки «Да» на этот предмет нет" in refusal and guard.LOG_DIR == logs:
+        path_ok("БОЛЬНОЙ СЛУЧАЙ: ворота выката после комментария закрыты: кнопки «Да» нет")
     else:
-        path_bad(f"ворота выката: комментарий доставлен {printed}, нашли {found_guard}, "
+        path_bad(f"ворота выката: комментарий доставлен {printed}, ответ {refusal[:120]!r}, "
                  f"каталог {guard.LOG_DIR}")
 
     found_approval = [r["текст"] for r in approval.слова_владельца(0)

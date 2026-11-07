@@ -609,7 +609,7 @@ class Env:
 def build_env():
     install = config.конфиг()
     conf = dict(config.из_файла(config.путь_harness_conf()))
-    for key in ("OWNER_TZ", "STACK_NEIGHBOURS"):
+    for key in ("OWNER_TZ", "STACK_NEIGHBOURS", "AUTO_REBOOT_IN_ROTATION"):
         conf[key] = os.environ.get(key) or conf.get(key, "")
     owner_tz = conf["OWNER_TZ"]
     if owner_tz:
@@ -730,12 +730,15 @@ def item_line(number, row, part):
     return line
 
 
-def outside_line(row, part, neighbours):
+def outside_line(row, part, neighbours, conf=None):
     days = row["суток_отставания"]
     waiting = f" ждёт {days} {plural(days, 'сутки', 'суток', 'суток')}" if days else " ждёт"
     touches = [n for item in part.get("задевает", []) for n in (neighbours if item == "$STACK_NEIGHBOURS" else [item])]
     effect = f"задевает {' и '.join(touches)}" if touches else part.get("риск", "")
-    return f"Вне номеров: {row['имя']}{waiting} ({row['текущая']} → {row['свежая']}), {effect} — решаешь ты."
+    door = part.get("установка") or {}
+    own = door.get("дверь") == "окно-ротации" and (conf or {}).get(door.get("ключ", ""), "") == "1"
+    decision = "встанет сама при ближайшей смене сессии без помощников" if own else "решаешь ты"
+    return f"Вне номеров: {row['имя']}{waiting} ({row['текущая']} → {row['свежая']}), {effect} — {decision}."
 
 
 def long_unknown(measurement, now):
@@ -754,7 +757,7 @@ def events_lines(events):
     return [f"Обновлено мимо двери: {len(events)} частей — {names}."]
 
 
-def summary_text(measurement, parts, deferred, week, neighbours, env_now, out_of_band=False, only=None):
+def summary_text(measurement, parts, deferred, week, neighbours, env_now, out_of_band=False, only=None, conf=None):
     numbered, outside = rows_for_summary(measurement, parts, deferred)
     if only is not None:
         numbered = [r for r in numbered if r["имя"] in only]
@@ -765,7 +768,7 @@ def summary_text(measurement, parts, deferred, week, neighbours, env_now, out_of
     lines += [item_line(i, r, parts[r["имя"]]) for i, r in enumerate(shown, 1)]
     if rest > 0:
         lines.append(f"Отстало ещё {rest}, в список не влезли.")
-    lines += [outside_line(r, parts[r["имя"]], neighbours) for r in outside]
+    lines += [outside_line(r, parts[r["имя"]], neighbours, conf) for r in outside]
     lines += events_lines(measurement.get("события", []))
     if not out_of_band:
         silent = long_unknown(measurement, env_now)
@@ -881,7 +884,8 @@ def command_summary(env):
     if held:
         print(f"отложено: {held}")
         return 3
-    text, items = summary_text(measurement, parts, deferred, week, env.neighbours, now, kind == "out_of_band", only)
+    text, items = summary_text(measurement, parts, deferred, week, env.neighbours, now, kind == "out_of_band", only,
+                               env.ctx.conf)
     write_json_atomic(env.stack_dir / "сводка-готова.json",
                       {"неделя": week, "пункты": items, "текст": text, "вне_очереди": kind == "out_of_band"})
     print(f"шлю: {week}" + (" вне_очереди" if kind == "out_of_band" else ""))
@@ -1054,11 +1058,38 @@ def selftest():
     return code
 
 
+def command_reboot(env):
+    """Нужна ли перезагрузка и какое ядро ждём: слово и код для сторожа окна ротации (0 нужна, 1 не нужна, 3 неизвестно)."""
+    registry = load_registry(env.registry_path)
+    if isinstance(registry, Broken):
+        print(f"неизвестно: {registry.reason}")
+        return 3
+    part = next((p for p in registry.parts if p["свежая"]["источник"] == "перезагрузка"), None)
+    if part is None:
+        print("неизвестно: в реестре нет части с источником «перезагрузка»")
+        return 3
+    current = read_current(part, env.ctx)
+    if not isinstance(current, Current) or not current.version:
+        print(f"неизвестно: {getattr(current, 'reason', 'текущее ядро не прочитано')}")
+        return 3
+    latest = source_reboot(part, current.version, env.ctx)
+    if isinstance(latest, Unknown):
+        print(f"неизвестно: {latest.reason}")
+        return 3
+    if not latest.newer:
+        print("не нужна")
+        return 1
+    # Одно reboot-required без нового ядра: ждём то же ядро, что сейчас.
+    expected = latest.version if numeric_key(latest.version) > numeric_key(current.version) else current.version
+    print(f"нужна: {expected}")
+    return 0
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Свежесть стека харнеса")
     for flag, dest in (("--замер", "measure"), ("--печать", "show"), ("--сводка", "summary"),
                        ("--отправлено", "sent"), ("--ответы", "answers"), ("--вне-очереди", "oob"),
-                       ("--selftest", "selftest")):
+                       ("--selftest", "selftest"), ("--перезагрузка", "reboot")):
         parser.add_argument(flag, dest=dest, action="store_true")
     parser.add_argument("--неделя", dest="week", type=int)
     parser.add_argument("--сказано", dest="said")
@@ -1067,6 +1098,8 @@ def main(argv=None):
         return selftest()
     env = build_env()
     try:
+        if args.reboot:
+            return command_reboot(env)
         if args.said is not None:
             return command_said(env, args.said)
         if args.sent:

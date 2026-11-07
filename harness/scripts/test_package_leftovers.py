@@ -76,6 +76,9 @@ def healthy_stand(base: Path) -> tuple[Path, Path]:
     # Файл есть только в пакете, но код зовёт его по имени — живой (как
     # logrotate-harness, который кладёт в /etc установщик).
     write(pkg / "harness/config/rotate-conf", "weekly\n")
+    # Каталог в config — не файл конфига: без него счёт «файлов конфига» в
+    # приговоре не отличает файлы от каталогов.
+    (pkg / "harness/config/schemas").mkdir(parents=True)
     write(pkg / "harness/scripts/layout.sh",
           "#!/usr/bin/env bash\ncp \"$HERE/config/rotate-conf\" /etc/x\n")
     write(prj / "scripts/layout.sh",

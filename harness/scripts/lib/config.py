@@ -122,6 +122,18 @@ def из_файла(путь: str) -> dict:
         return {}     # файла нет — пустой словарь (гейт не падает)
 
 
+# Заголовки блоков статуса и запасной потолок: их делят сборщик (status-report.py)
+# и сторож канала (check-channel-messages.py), чтобы они не расходились.
+STATUS_HEADERS = ("✅ СДЕЛАНО", "🔄 ДЕЛАЕТСЯ", "⏭ ДАЛЬШЕ")
+STATUS_FALLBACK_CEILING = 1400
+
+
+def status_ceiling(values: dict) -> int:
+    """Потолок статуса из ключа STATUS_STRUCT_MAX_CHARS; ключа нет — запасной."""
+    raw = str(values.get("STATUS_STRUCT_MAX_CHARS") or "")
+    return int(raw) if raw.isdigit() and int(raw) > 0 else STATUS_FALLBACK_CEILING
+
+
 def конфиг(путь: str | None = None) -> dict:
     """KEY="value" → словарь. HARNESS_INSTALL_CONF переопределяет путь."""
     путь = путь or путь_install_conf()
@@ -178,6 +190,14 @@ def switched_off_marks(jobs: list, values: dict) -> set:
 
 def log_dir() -> str:
     return конфиг()["LOG_DIR"]
+
+
+def live_check_trace_root() -> str:
+    """Корень следов живой проверки: весь вывод произвольной команды не должен
+    лежать в репозитории. Ключ пуст — каталог под LOG_DIR."""
+    return (os.environ.get("LIVE_CHECK_TRACE_ROOT")
+            or из_файла(путь_harness_conf()).get("LIVE_CHECK_TRACE_ROOT")
+            or os.path.join(log_dir(), "живая-проверка"))
 
 
 def heartbeat_dir() -> str:

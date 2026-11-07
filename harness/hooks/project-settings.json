@@ -1,5 +1,6 @@
 {
   "$comment": "Хуки проекта (взято из UNIFIED/templates/hooks/project-settings.json; добавлен PreCompact). Лежат в репозитории, а не в настройках пользователя: они про этот проект, версионируются вместе с ним и переносятся вместе с ним. Скрипты — scripts/hooks/; параметры установки скрипты берут из /etc/harness/install.conf. Каждый хук закрывает грабли, которые уже случались. defaultMode=bypassPermissions (В-6): владелец видит только Telegram, интерактивные подтверждения оболочки некому нажимать; опасное отсекает guard_bash. session_state.sh на source=compact печатает короткий блок «после компакта» (В-1: stdout PreCompact модель не видит), на resume — обычный отчёт состояния (В-6).",
+  "statusLine": {"type": "command", "command": "python3 $CLAUDE_PROJECT_DIR/scripts/statusline_limits.py"},
   "permissions": {
     "defaultMode": "bypassPermissions"
   },
@@ -102,6 +103,37 @@
             "timeout": 15
           }
         ]
+      },
+      {
+        "matcher": "SendMessage",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 $CLAUDE_PROJECT_DIR/scripts/hooks/agent_budget_guard.py",
+            "timeout": 5
+          }
+        ]
+      },
+      {
+        "matcher": "Agent|Task|SendMessage",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 $CLAUDE_PROJECT_DIR/scripts/hooks/rotation_queue_guard.py",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 $CLAUDE_PROJECT_DIR/scripts/hooks/agent_finish_log.py",
+            "timeout": 5
+          }
+        ]
       }
     ],
     "Stop": [
@@ -110,6 +142,11 @@
           {
             "type": "command",
             "command": "$CLAUDE_PROJECT_DIR/scripts/hooks/stop_reminder.sh",
+            "timeout": 20
+          },
+          {
+            "type": "command",
+            "command": "python3 $CLAUDE_PROJECT_DIR/scripts/hooks/channel_reply_guard.py",
             "timeout": 20
           }
         ]

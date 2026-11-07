@@ -24,6 +24,7 @@ harness.conf, умолчание 1200).
     python3 scripts/weed-the-map.py            # что уехало бы (ничего не меняет)
     python3 scripts/weed-the-map.py --прополоть
     python3 scripts/weed-the-map.py --проверить  # гейт: сверх потолка нет
+    python3 scripts/weed-the-map.py --дубли     # отчёт о дублях карточек (только читает)
     python3 scripts/weed-the-map.py --selftest
 """
 from __future__ import annotations
@@ -166,6 +167,88 @@ def записать_подробности(вынесено: dict[str, str]) ->
     return "".join(строки)
 
 
+# Дубли. Одно сообщение владельца автомат разбивает на N карточек с общим
+# `источник: inbox:<id>`; сырая близость summary бесполезна — автомат пишет в
+# каждую карточку один шаблон, поэтому слова, частые на карте, из неё вычёркиваются.
+ЧАСТОЕ_ДОЛЯ = 0.08
+ЧАСТОЕ_МИНИМУМ = 2
+ПОРОГ_TITLE = 0.3
+ПОРОГ_SUMMARY = 0.5
+СЛОВО = re.compile(r"\w{3,}")
+
+
+def слова(текст: str) -> set[str]:
+    return set(СЛОВО.findall(текст.lower()))
+
+
+def жаккар(а: set, б: set) -> float:
+    return len(а & б) / len(а | б) if а | б else 0.0
+
+
+def все_карточки(карта: dict) -> list[dict]:
+    return [т for линия in карта.get("lines") or [] for т in линия.get("tasks") or []]
+
+
+def шаблонные_слова(тексты: list[set[str]]) -> set[str]:
+    """Слова, встречающиеся в большем числе карточек, чем доля или минимум."""
+    предел = max(ЧАСТОЕ_МИНИМУМ, ЧАСТОЕ_ДОЛЯ * len(тексты))
+    частота: dict[str, int] = {}
+    for набор in тексты:
+        for слово in набор:
+            частота[слово] = частота.get(слово, 0) + 1
+    return {с for с, ч in частота.items() if ч > предел}
+
+
+def inbox(карта_задачи: dict) -> str:
+    источник = str(карта_задачи.get("источник") or "")
+    return источник if источник.startswith("inbox:") else ""
+
+
+def битые_ссылки(карточки_: list[dict]) -> list[tuple[str, str]]:
+    известные = {т["id"] for т in карточки_}
+    return [(т["id"], т["дубль_из"]) for т in карточки_
+            if т.get("дубль_из") and т["дубль_из"] not in известные]
+
+
+def пары_дублей(живые: list[dict]) -> list[tuple[str, str, str]]:
+    """[(id1, id2, довод)] — общий inbox и близкие title либо summary без шаблона.
+
+    Уже помеченные (`дубль_из`/`слито_из`) слиты, повторно не предлагаются.
+    """
+    кандидаты = [т for т in живые if inbox(т) and not (т.get("дубль_из") or т.get("слито_из"))]
+    сводки = [слова(str(т.get("summary") or "")) for т in живые]
+    шаблон = шаблонные_слова(сводки)
+    чистые = {т["id"]: сводка - шаблон for т, сводка in zip(живые, сводки)}
+    итог = []
+    for i, а in enumerate(кандидаты):
+        for б in кандидаты[i + 1:]:
+            if inbox(а) != inbox(б):
+                continue
+            jt = жаккар(слова(str(а.get("title") or "")), слова(str(б.get("title") or "")))
+            js = жаккар(чистые[а["id"]], чистые[б["id"]])
+            if jt >= ПОРОГ_TITLE or js >= ПОРОГ_SUMMARY:
+                итог.append((а["id"], б["id"], f"общий источник {inbox(а)}; "
+                             f"J(title)={jt:.2f}, J(summary без шаблона)={js:.2f}"))
+    return итог
+
+
+def отчёт_о_дублях(текст: str) -> int:
+    import yaml
+    все = все_карточки(yaml.safe_load(текст) or {})
+    # Беклог владелец не трогает — не просматривается, но как цель ссылки существует.
+    живые = [т for т in все if т.get("status") != "беклог"]
+    print(f"[дубли карты] просмотрено карточек: {len(живые)}")
+    ошибки = битые_ссылки(все)
+    for id_, цель in ошибки:
+        print(f"[дубли карты] ОШИБКА: {id_} дубль_из {цель} — такой карточки нет")
+    найденные = пары_дублей(живые)
+    for а, б, довод in найденные:
+        print(f"[дубли карты] пара: {а} {б} — {довод}")
+    if not найденные:
+        print("[дубли карты] дублей нет")
+    return 1 if ошибки else 0
+
+
 def самотест() -> int:
     образец = '''milestones:
   - id: m1
@@ -217,6 +300,8 @@ def самотест() -> int:
 def main() -> int:
     if "--selftest" in sys.argv:
         return самотест()
+    if "--дубли" in sys.argv:
+        return отчёт_о_дублях(КАРТА.read_text(encoding="utf-8"))
     предел = потолок()
     текст = КАРТА.read_text(encoding="utf-8")
     длинные = находки(текст, предел)

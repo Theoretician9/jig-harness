@@ -28,17 +28,23 @@ from __future__ import annotations
 
 import os
 import pathlib
+import shutil
 import subprocess
 import sys
 import tempfile
 
 import yaml
 
-КОРЕНЬ = pathlib.Path(__file__).resolve().parent.parent
+СКРИПТЫ = pathlib.Path(__file__).resolve().parent
+sys.path.insert(0, str(СКРИПТЫ / "lib"))
+import config as _конфиг  # noqa: E402
+
+# Корень установки, а не parent.parent: в пакете скрипты лежат в harness/scripts.
+КОРЕНЬ = pathlib.Path(_конфиг.корень_дерева(__file__))
 # Путь прибора — из окружения, если задан: так мутационный прогон подсовывает
 # ИСПОРЧЕННУЮ копию и требует красного ([[probe-loads-the-live-mechanism]]).
 ПРИБОР = pathlib.Path(os.environ.get("HARNESS_LIVE_CHECK_C2_TOOL")
-                      or КОРЕНЬ / "scripts" / "live-check-tool.py")
+                      or СКРИПТЫ / "live-check-tool.py")
 
 хорошо = 0
 плохо = 0
@@ -119,7 +125,10 @@ def двор(*, команды: dict | None = None, классы: dict | None = 
     # Обёртка следа нужна прибору настоящая: след пишет ОНА, и проба судит её
     # шапку. Копируется, а не подменяется заглушкой.
     (путь / "scripts" / "live-check.sh").write_bytes(
-        (КОРЕНЬ / "scripts" / "live-check.sh").read_bytes())
+        (СКРИПТЫ / "live-check.sh").read_bytes())
+    # Обёртка читает корень следов через загрузчик конфига — ему нужна lib.
+    shutil.copytree(СКРИПТЫ / "lib", путь / "scripts" / "lib",
+                    ignore=shutil.ignore_patterns("__pycache__"))
     return путь
 
 

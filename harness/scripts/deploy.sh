@@ -13,7 +13,7 @@
 # врать, будто что-то выкатил.
 #
 # Порядок (менять нельзя, каждый шаг стоит на случившемся отказе):
-#   лок (flock, до ворот — К-3) → ворота → тег → снимок образов → сборка →
+#   лок (flock, до ворот — К-3) → ворота → тег и запись в журнал выкатов → снимок образов → сборка →
 #   ДАМП БАЗЫ → миграции → health циклом → (при провале — откат на :previous) →
 #   снимок карты → reload прокси.
 #
@@ -33,6 +33,7 @@ set -euo pipefail
 
 # ── конфиги ─────────────────────────────────────────────────────────────────
 source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/lib/config.sh"
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/lib/events.sh"
 INSTALL_CONF="${HARNESS_INSTALL_CONF:-$(konf_koren)/install.conf}"
 HARNESS_CONF="${HARNESS_CONF:-$(konf_koren)/harness.conf}"
 [ -r "$INSTALL_CONF" ] || { echo "deploy: нет $INSTALL_CONF — установка не завершена (01-SPEC §0)"; exit 1; }
@@ -43,7 +44,7 @@ HARNESS_CONF="${HARNESS_CONF:-$(konf_koren)/harness.conf}"
 # Путь берётся по РЕАЛЬНОМУ файлу (readlink -f): pre-commit подключён в
 # .git/hooks симлинком, и dirname дал бы .git/hooks, где библиотеки нет.
 # Поймано первым же коммитом после правки, 12.09.2026.
-konf_zagruzit PROJECT_DIR LOG_DIR TMUX_SESSION SECRETS_DIR AGENT_START_CMD DOCKER_SWEEP_ENABLED DOCKER_CACHE_KEEP_GB
+konf_zagruzit PROJECT_DIR LOG_DIR TMUX_SESSION SECRETS_DIR AGENT_START_CMD DOCKER_SWEEP_ENABLED
 # harness.conf несёт секцию STACK_*; без него продукт заведомо не задан.
 : "${PROJECT_DIR:?в install.conf пуст PROJECT_DIR}" "${LOG_DIR:?пуст LOG_DIR}"
 
@@ -147,11 +148,13 @@ fi
 # ── 0в. Дерево продукта чистое? ─────────────────────────────────────────────
 # Образ собирается из РАБОЧЕГО дерева, а тег ставится на HEAD: незакоммиченная
 # правка уехала бы на прод непроверенной, и тег адресовал бы не то, что
-# поехало (И-4). Выкатывается только закоммиченное.
+# поехало (И-4). Выкатывается только закоммиченное. Чистота судится тем же кодом,
+# что считает предмет кнопки: assume-unchanged, skip-worktree и неотслеженные файлы
+# прячут правку от голого `status --porcelain`.
 TREE_DIRTY=""
 if git -C "$PRODUCT_TREE" rev-parse --git-dir >/dev/null 2>&1; then
-    TREE_DIRTY=$(git -C "$PRODUCT_TREE" status --porcelain 2>&1) \
-        || TREE_DIRTY="git status не ответил: $TREE_DIRTY"
+    TREE_DIRTY=$(python3 "$SCRIPT_DIR/lib/door_subjects.py" грязь "$PRODUCT_TREE" 2>&1) \
+        || TREE_DIRTY="git не ответил: $TREE_DIRTY"
 fi
 TREE_NOTE="чисто"
 [ -z "$TREE_DIRTY" ] || TREE_NOTE="НЕЗАКОММИЧЕНО $(printf '%s\n' "$TREE_DIRTY" | wc -l) — выкат откажет"
@@ -177,8 +180,8 @@ if [ "${1:-}" = "--план" ]; then
 fi
 
 # Свои ключи deploy.sh разбирает сам, ДО лока и ворот. Служебные ключи ворот
-# (--вернуть-согласие, --только-согласие, --не-тратить) зовут другие двери;
-# пропусти их deploy.sh, и выкат шёл бы без траты «да» или возвращал бы его.
+# (--только-согласие, --просить) ставит сам скрипт; пропусти их из командной строки, и
+# просьба кнопки ушла бы от чужого имени.
 GATE_FORCE=""
 for key in "$@"; do
     [ "$key" = "--силой" ] || { say "незнакомый ключ $key; известны: --силой, --план — выкат отменён"; exit 1; }
@@ -189,6 +192,16 @@ if [ -n "$TREE_DIRTY" ]; then
     say "ОШИБКА: в $PRODUCT_TREE незакоммиченные правки — выкатывается только закоммиченное, выкат отменён до ворот:"
     printf '%s\n' "$TREE_DIRTY" | head -10 | sed 's/^/    /' | tee -a "$DEPLOY_LOG"
     exit 1
+fi
+
+# ── 0г2. Какой коммит выкатывается: фиксируется ДО ворот ────────────────────
+# Ворота судят кнопку по этому дереву и sha; тег, сборка и сверка ниже — по нему же.
+DEPLOY_SHA=""
+GATE_SUBJECT=()
+if git -C "$PRODUCT_TREE" rev-parse --git-dir >/dev/null 2>&1; then
+    DEPLOY_SHA=$(GIT_NO_REPLACE_OBJECTS=1 git -C "$PRODUCT_TREE" rev-parse HEAD) \
+        || { say "ОШИБКА: HEAD дерева $PRODUCT_TREE не прочитан — выкат отменён до ворот"; exit 1; }
+    GATE_SUBJECT=(--выкат "$PRODUCT_TREE" "$DEPLOY_SHA")
 fi
 
 # ── 0д. Docker доступен? ────────────────────────────────────────────────────
@@ -237,7 +250,8 @@ printf '%s\nвыкат deploy.sh, начат %s\n' "$$" "$(date -Is)" > "$DEPLOY
 # ── 1б. Ворота: не катить поверх идущей работы ──────────────────────────────
 # 04.08 выкат перезапустил воркер и убил чужую сборку (улика в deploy_guard.py).
 GATE_RC=0
-GATE_OUT=$(python3 "$SCRIPT_DIR/deploy_guard.py" $GATE_FORCE 2>&1) || GATE_RC=$?
+# --просить: нет кнопки — ворота сами просят её у владельца; каталог журналов передаётся явно.
+GATE_OUT=$(HARNESS_LOG_DIR="$LOG_DIR" python3 "$SCRIPT_DIR/deploy_guard.py" --просить $GATE_FORCE ${GATE_SUBJECT[@]+"${GATE_SUBJECT[@]}"} 2>&1) || GATE_RC=$?
 printf '%s\n' "$GATE_OUT"
 # Код 2 — ворота не поняли ключи (будущий ключ, не прошедший разбор выше):
 # «занято» тут было бы ложью о причине.
@@ -245,18 +259,7 @@ if [ "$GATE_RC" = 2 ]; then
     say "ворота отказали: $(printf '%s\n' "$GATE_OUT" | tail -1) — выкат отменён"
     exit 1
 fi
-[ "$GATE_RC" = 0 ] || { say "ворота: занято — выкат отменён"; exit 1; }
-# Разрешение владельца ИЗРАСХОДОВАНО проходом ворот, а выкат ещё впереди.
-# Упадём дальше — вернём его: иначе владелец тратит «да» на действие, которого
-# не было, и просить приходится второй раз (так публикация уже чинилась
-# 12.09.2026; тот же дефект жил и здесь). Ловушка снимается в самом конце.
-VERNUT_SOGLASIE=1
-vernut_soglasie_pri_otkaze() {
-    [ "${VERNUT_SOGLASIE:-0}" = 1 ] || return 0
-    python3 "$SCRIPT_DIR/deploy_guard.py" --действие deploy \
-        --вернуть-согласие 2>&1 | sed 's/^/    /' || true
-}
-trap vernut_soglasie_pri_otkaze EXIT
+[ "$GATE_RC" = 0 ] || { say "ворота не пустили (занято или нет кнопки «Да» владельца) — выкат отменён"; exit 1; }
 
 # ── 1а. Секреты не едут в прод (И-3: check-secrets и в pre-commit, и здесь) ──
 # Дубль не лишний: pre-commit можно обойти (--no-verify), деплой — нельзя.
@@ -271,10 +274,35 @@ if python3 "$SCRIPT_DIR/hackathon.py" --активен --карта "$PROJECT_DI
     bash "$SCRIPT_DIR/gates.sh" --хакатон || { say "быстрые ворота хакатона красные — выкат отменён"; exit 1; }
 fi
 
+# ── 1в. Выкатывается тот коммит, что одобрен ────────────────────────────────
+# Между DEPLOY_SHA и этим местом прошли замок, секреты и, возможно, ворота хакатона:
+# коммит, пришедший за это время, уехал бы под согласием на другой sha.
+tree_head() { GIT_NO_REPLACE_OBJECTS=1 git -C "$PRODUCT_TREE" rev-parse HEAD 2>/dev/null || true; }
+if [ -n "$DEPLOY_SHA" ]; then
+    NOW_DIRTY=$(python3 "$SCRIPT_DIR/lib/door_subjects.py" грязь "$PRODUCT_TREE" 2>&1) || NOW_DIRTY="git не ответил: $NOW_DIRTY"
+    if [ "$(tree_head)" != "$DEPLOY_SHA" ] || [ -n "$NOW_DIRTY" ]; then
+        say "HEAD сдвинулся или дерево изменилось после согласия — выкат отменён (одобрен ${DEPLOY_SHA:0:8}, сейчас $(tree_head | cut -c1-8))"
+        exit 1
+    fi
+fi
+
 # ── 2. Тег выката: каждая выкатка адресуема ─────────────────────────────────
+# Тег обязателен и ставится на DEPLOY_SHA явно, а не на HEAD. Рядом пишется журнал
+# выкатов: по нему гасится кнопка «Да» (тег сессия удалила бы одной командой, журнал
+# охраняет сторож). Не встал тег или запись — выкат отменён до сборки, ловушка
+# вернёт текстовое «да».
 TAG="deploy-$(date +%Y%m%d-%H%M%S)"
-if git rev-parse --git-dir >/dev/null 2>&1; then
-    git tag "$TAG" 2>/dev/null && say "тег: $TAG" || say "тег не поставлен (повтор в ту же секунду?) — не блокирует"
+if [ -n "$DEPLOY_SHA" ]; then
+    git -C "$PRODUCT_TREE" -c user.name=harness-deploy -c user.email=deploy@localhost \
+        tag -a "$TAG" -m "выкат $TAG" "$DEPLOY_SHA" \
+        || { say "ОШИБКА: тег $TAG не поставлен — выкат отменён до сборки"; exit 1; }
+    RELEASE_LOG="${HARNESS_LOG_DIR:-$LOG_DIR}/deploy-releases.jsonl"
+    HARNESS_TASK=- HARNESS_LOG_DIR="${HARNESS_LOG_DIR:-$LOG_DIR}" harness_event deploy-releases scripts/deploy.sh \
+        deploy.release ok "цель=$DEPLOY_SHA $(readlink -f "$PRODUCT_TREE")" "тег=$TAG"
+    # harness_event всегда код 0: что запись легла, видно только по самой строке
+    tail -n 1 "$RELEASE_LOG" 2>/dev/null | grep -qF "\"$TAG\"" \
+        || { say "ОШИБКА: запись в журнал выкатов не сделана — выкат отменён до сборки"; exit 1; }
+    say "тег: $TAG"
 else
     say "репозиторий не инициализирован — тег пропущен"
 fi
@@ -368,6 +396,15 @@ name_db_restore() {
         say "восстановление руками (решение владельца): pg_restore -U ${DB_ADMIN_USER:-<DB_ADMIN_USER не задан>} -d ${DB_ADMIN_USER:-<DB_ADMIN_USER не задан>} --clean $DB_DUMP"
     fi
 }
+
+# ── 4в. Сборка шла минуты: коммит за это время — не тот, что одобрен ─────────
+# Образы уже пересобраны, службы ещё нет: путь отката тот же, что у упавших миграций.
+if [ -n "$DEPLOY_SHA" ] && [ "$(tree_head)" != "$DEPLOY_SHA" ]; then
+    say "HEAD сдвинулся во время сборки (одобрен ${DEPLOY_SHA:0:8}, сейчас $(tree_head | cut -c1-8)) — выкат отменён, службы не пересоздавались"
+    restore_images
+    name_db_restore
+    exit 1
+fi
 
 # ── 5. Миграции ─────────────────────────────────────────────────────────────
 if [ -n "${STACK_MIGRATE_CMD:-}" ]; then
@@ -494,13 +531,5 @@ else
     say "STACK_PROXY_RELOAD_CMD пуст — прокси не задан (честно пропущено)"
 fi
 
-# ── 9. Кэш сборки после выката ──────────────────────────────────────────────
-# Выкат уже состоялся и ворота пройдены, поэтому шаг их не обходит (И-2) и не фатален.
-# Кэш новой сборки остаётся (keep-storage), старый уходит; без выключателя ход сухой.
-SWEEP_FLAG="--dry-run"; [ "${DOCKER_SWEEP_ENABLED:-0}" = 1 ] && SWEEP_FLAG="--разрешено"
-python3 "$SCRIPT_DIR/docker-sweep.py" --после-выката "$SWEEP_FLAG" --кэш-гб "${DOCKER_CACHE_KEEP_GB:-2}" --журнал "$LOG_DIR/уборка-docker.jsonl" --метки "$LOG_DIR/уборка-docker-метки.json" || say "уборка кэша сборки не отработала (выкат не затронут)"
-
 # Итоговая строка не приукрашивает: что не прошло — названо (И-4).
-# Выкат СОСТОЯЛСЯ — согласие потрачено по делу, возвращать нечего.
-VERNUT_SOGLASIE=0
 say "deploy ok: тег $TAG, health 200, $MAP_NOTE"

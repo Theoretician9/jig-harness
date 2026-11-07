@@ -47,18 +47,21 @@ fi
 want() { [ -z "$ONLY" ] || [ "$ONLY" = "$1" ]; }
 
 source "$KOREN/scripts/lib/selftest_cases.sh"
+source "$KOREN/scripts/lib/stand_sweep.sh"
 
 T=$(mktemp -d /tmp/proba-delivery-trace-XXXXXX)
+echo $$ > "$T/owner"
 STAMP="proba-delivery-trace-$$"
 PATHS_JUDGED=0
 PIDS_KILL=()
 cleanup() {
-    local p
+    local p n
     for p in "${PIDS_KILL[@]}"; do kill -KILL -- "-$p" 2>/dev/null; kill -KILL "$p" 2>/dev/null; done
-    pkill -KILL -f "^$STAMP" 2>/dev/null
+    n=$(sweep_stand "$T/"); [ "$n" = 0 ] || echo "убрано процессов стенда при выходе: $n" >&2
     if [ -n "${PROBA_KEEP:-}" ]; then echo "стенд оставлен (PROBA_KEEP): $T"; else rm -rf "$T"; fi
 }
 trap cleanup EXIT
+sweep_dead_stands /tmp/proba-delivery-trace-
 
 wait_for() {  # $1 = предел, остальное — условие
     local end=$(( $(date +%s) + $1 )); shift
@@ -207,7 +210,7 @@ PYEOF
         : > "$DS/tmux-calls"; : > "$DS/acks"
         printf '000:СТЕНДОВЫЙ' > "$DS/token"   # не-секрет: подставной Bot API стенда
         port=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')
-        python3 "$T/api.py" "$port" "$DS/acks" "$DS/api.ready" "$DS/updates.json" "$mode" "$delay" > "$DS/api.out" 2>&1 &
+        PROBA_STAND="$T/" python3 "$T/api.py" "$port" "$DS/acks" "$DS/api.ready" "$DS/updates.json" "$mode" "$delay" > "$DS/api.out" 2>&1 &
         PIDS_KILL+=($!); disown $!
         wait_for 10 test -e "$DS/api.ready" || { d_bad "Bot API не поднялся"; return; }
         cat > "$DS/install.conf" <<EOF
@@ -302,8 +305,8 @@ PYEOF
     d_start drop "921:сообщение пробы при лежащем канале" drop 0
     d_finish 30; d_reached "лежащий канал"
     case_check "(г) толчок отдан, хотя «принял» не ушёл" "да" "$(le "$(mk kick_delay "$DJ" 921)" 4)"
-    case_check "(г) в журнале диспетчера «ack не ушёл»" "да" \
-        "$(grep -qF 'ack не ушёл' "$DS/log/tg-dispatcher.log" 2>/dev/null && echo да || echo нет)"
+    case_check "(г) в журнале диспетчера «квитанция на … не ушла»" "да" \
+        "$(grep -qE 'квитанция на [^ ]+ не ушла: ' "$DS/log/tg-dispatcher.log" 2>/dev/null && echo да || echo нет)"
 
     # (д) живые пути оставляют след: текст, команда, текст на паузе — сверка ПРОЙДЕН.
     echo "— (д) след живых путей: текст и команда, затем пауза"

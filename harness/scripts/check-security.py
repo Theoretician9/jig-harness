@@ -80,7 +80,8 @@ def git(root, *args) -> str | None:
     """Вывод git либо None: ненулевой код — это «не прочитано»."""
     try:
         done = subprocess.run(["git", "-c", "core.quotepath=false", "-C", str(root), *args],
-                              capture_output=True, text=True, timeout=SERVICE_TIMEOUT)
+                              capture_output=True, encoding="utf-8", errors="replace",
+                              timeout=SERVICE_TIMEOUT)  # битый байт в чужом журнале не должен ронять гейт
     except (OSError, subprocess.SubprocessError):
         return None
     return done.stdout if done.returncode == 0 else None

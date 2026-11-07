@@ -3,6 +3,8 @@
 Project name and code directory are config data: `PROJECT_NAME` / `PROJECT_DIR`
 in `/etc/harness/install.conf`.
 
+@harness/self/core.json
+@harness/self/instance.yaml
 @STATE.md
 @./память/ORDERS.md
 @./память/MEMORY.md
@@ -44,10 +46,18 @@ Each one is held by code, not by memory.
 
 ## Channel rules (the owner cannot see your terminal)
 
-1. **Acknowledge within 30 seconds**: "got it, doing X" — then work. Incoming
-   messages arrive as files in `$LOG_DIR/inbox/`; check the directory at the
+1. **The "got it" receipt is the dispatcher's, not yours**: it sends it within
+   seconds for every message (`delivery.ack`, checked by `check-ack-receipts.py`).
+   Answer on substance within 30 seconds: a question or consent gets the answer,
+   work gets a short "doing X". Incoming messages arrive as files in `$LOG_DIR/inbox/`; check the directory at the
    start of a turn and at every checkpoint, move what you read to
    `$LOG_DIR/inbox/обработано/`.
+1a. **Check on the project, live, before you answer.** Before replying to a
+   human, and above all before saying "there is none / I cannot / not installed",
+   verify on the project itself (a command, a file, a process). Memory
+   (`память/MEMORY.md`, `память/ORDERS.md`, `STATE.md`) is a pointer to where to
+   look, not proof; if memory and the project disagree, trust the project and
+   fix the record.
 2. **A rule from the owner goes to memory, not into the turn.** Any message
    that sets a rule ("always", "never", "I told you", "I don't want") is
    copied VERBATIM into `память/ORDERS.md` — that file is loaded into every
@@ -64,7 +74,8 @@ Each one is held by code, not by memory.
    "waiting for your check", not "done".
 7. **Short and regular.** The channel gets the RESULT and NUMBERS, not your
    train of thought. Self-analysis goes to the log and to memory. Report at
-   every checkpoint: a pulse matters more than volume.
+   every checkpoint: a pulse matters more than volume. A status goes out with
+   `bash scripts/tg_send.sh --статус` (built by `status-report.py`).
 8. **How to talk** is a document, not a habit: `память/TONE.md`, written by an
    agent from a measurement of the owner's own speech. The channel guard reads
    its length limits FROM that file.
@@ -87,6 +98,8 @@ consent means no action.
   before code → code → gates → review → deploy → live smoke → closing. Key
   steps are led by skills; a skill call is logged by a HOOK, so gates count
   machine records only.
+  Hackathon level: steps from pipeline.yaml `шаги.хакатон`, mutations
+  deferred to the debt card.
 - **Surgical edits**: do not improve the neighbourhood; every line traces back
   to the request.
 - **Tests are mandatory**, coverage must not degrade; a green test is not
@@ -165,6 +178,7 @@ Bans are enforced by `scripts/hooks/guard_bash.py`, not by your memory.
 | Place | Purpose |
 |---|---|
 | `CLAUDE.md` | rules and invariants (this file, generated) |
+| `harness/self/` | the agent's identity: `core.json` is shared by all copies, `instance.yaml` is this copy's role |
 | `STATE.md` | what is true right now; session entry point |
 | `память/ORDERS.md` | the owner's standing instructions in their own words |
 | `память/MEMORY.md` | memory index + trigger table, loaded every session |
@@ -182,7 +196,7 @@ Bans are enforced by `scripts/hooks/guard_bash.py`, not by your memory.
 ## What is watching (built from the registry)
 
 <!-- AUTO:mechanisms -->
-395 mechanisms are registered in `harness/config/mechanisms.yaml` (gates — 323, daemons — 33, skills — 19, hooks — 20). Each one names what it does, when it runs, what breaks without it and the command that proves it works. The registry is data: `python3 scripts/check-registry.py` fails when the code and the registry disagree.
+502 mechanisms are registered in `harness/config/mechanisms.yaml` (gates — 420, daemons — 40, skills — 19, hooks — 23). Each one names what it does, when it runs, what breaks without it and the command that proves it works. The registry is data: `python3 scripts/check-registry.py` fails when the code and the registry disagree.
 <!-- /AUTO -->
 
 ---

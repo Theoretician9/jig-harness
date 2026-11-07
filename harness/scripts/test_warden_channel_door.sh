@@ -22,7 +22,7 @@ source "$HERE/lib/selftest_cases.sh"
 WARDEN="${HARNESS_SESSION_WARDEN:-$HERE/../harness/demons/session-warden.sh}"
 STAND=$(mktemp -d)
 trap 'rm -rf "$STAND"' EXIT
-mkdir -p "$STAND/proekt/scripts" "$STAND/bin"
+mkdir -p "$STAND/proekt/scripts" "$STAND/bin" "$STAND/zhurnal1"
 
 CURL_LOG="$STAND/curl.log"
 CHAT_STENDA=100500          # не-секрет: выдуманный номер чата стенда
@@ -56,7 +56,9 @@ call_wrapper() {  # $1 = код двери; печатает «код обёрт
     : > "$CURL_LOG"
     # Оболочка стенда — как у живого демона (`set -euo pipefail`): под другими
     # флагами судилась бы не та дверь.
-    DOOR_CODE="$1" PROJECT_DIR="$STAND/proekt" TG_CHAT_ID="$CHAT_STENDA" \
+    # LOG_DIR обязателен: без него `set -u` роняет обёртку на строке вложения,
+    # и отказ двери «проходит» пробу, не дойдя до ветки, которую она судит.
+    DOOR_CODE="$1" PROJECT_DIR="$STAND/proekt" LOG_DIR="$STAND/zhurnal1" TG_CHAT_ID="$CHAT_STENDA" \
     TG_TOKEN_FILE="$STAND/klyuch" STAND_CURL_LOG="$CURL_LOG" \
     PATH="$STAND/bin:$PATH" \
         bash -c 'set -euo pipefail; say() { :; }; source "$1"; tg_send "весть стенда" --не-досылать' \
@@ -76,6 +78,10 @@ echo "── БОЛЬНОЙ СЛУЧАЙ: отказ двери уходил п�
 # отказе делает правила канала пустыми. Отказ — недоставка (код обёртки 1),
 # прямой curl остаётся только там, где двери нет физически.
 case_check "дверь ОТКАЗАЛА (код 1) — curl не зовём, обёртка отвечает недоставкой" "1;0" "$(call_wrapper 1)"
+# Условие создано: обёртка дошла до вложения, а не упала раньше — иначе «1;0»
+# выше зелен и без ветки отказа.
+case_check "условие создано — после отказа текстом обёртка готовила вложение" \
+    "да" "$(grep -qs 'весть стенда' "$STAND"/zhurnal1/весть-сторожа-* && echo да || echo нет)"
 chmod -x "$STAND/proekt/scripts/tg_send.sh"
 case_check "двери нет (не исполняется) — запасной curl зовём" "0;1" "$(call_wrapper 0)"
 chmod +x "$STAND/proekt/scripts/tg_send.sh"

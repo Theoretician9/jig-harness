@@ -33,8 +33,10 @@ DISPATCHER="$KOREN/scripts/tg-dispatcher.sh"
 [ -r "$DISPATCHER" ] || { echo "ПРОБА: нет диспетчера $DISPATCHER"; exit 1; }
 
 source "$KOREN/scripts/lib/selftest_cases.sh"
+source "$KOREN/scripts/lib/stand_sweep.sh"
 
 T=$(mktemp -d /tmp/proba-hackathon-menu-XXXXXX)
+echo $$ > "$T/owner"
 S="$T/stand"
 OWNER=777000
 STRANGER=555111
@@ -44,11 +46,14 @@ PID_API=""
 PID_DISP=""
 
 pribrat() {
+    local n
     [ -n "$PID_DISP" ] && { kill -KILL -- "-$PID_DISP" 2>/dev/null; kill -KILL "$PID_DISP" 2>/dev/null; }
     [ -n "$PID_API" ] && kill "$PID_API" 2>/dev/null
+    n=$(sweep_stand "$T/"); [ "$n" = 0 ] || echo "убрано процессов стенда при выходе: $n" >&2
     rm -rf "$T"
 }
 trap pribrat EXIT
+sweep_dead_stands /tmp/proba-hackathon-menu-
 
 wait_for() {  # $1 = предел в секундах, остальное — условие
     local limit=$1; shift
@@ -154,7 +159,7 @@ server.serve_forever()
 PYEOF
 
 port=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')
-python3 "$T/api.py" "$port" "$S/updates.jsonl" "$S/acks" "$S/api.ready" > "$S/api.out" 2>&1 &
+PROBA_STAND="$T/" python3 "$T/api.py" "$port" "$S/updates.jsonl" "$S/acks" "$S/api.ready" > "$S/api.out" 2>&1 &
 PID_API=$!
 wait_for 10 test -e "$S/api.ready" \
     || { echo "ПРОБА: Bot API стенда не поднялся на порту $port"; cat "$S/api.out"; exit 1; }
@@ -179,7 +184,10 @@ HACKATHON_UNTIL=""
 EOF
 cp "$KOREN/harness/config/switches.yaml" "$S/switches.yaml"
 
+# Направление карты задаёт стенд («над всем»): иначе прибор очереди брал бы
+# HARNESS_ACTIVE_LINE хозяина и не видел задачу стендовой карты.
 PROBA_DIR="$S" PATH="$T/bin:$PATH" HARNESS_PANEL_STATE="$S/panel" PANEL_STATE_DIR="$S/panel" \
+HARNESS_ACTIVE_LINE="" \
 HARNESS_INSTALL_CONF="$S/install.conf" HARNESS_CONF="$S/harness.conf" LOG_DIR="$S/log" \
 PANEL_NO_SUDO=1 HARNESS_PERECLUCHATELI="$S/switches.yaml" TG_API_BASE="http://127.0.0.1:$port" \
     setsid nohup bash "$DISPATCHER" > "$S/dispatcher.out" 2>&1 < /dev/null &
@@ -251,6 +259,8 @@ case_check "срок записан моментом ISO с поясом в ка
 CLOCK=$(clock_re "$UNTIL")
 case_check "ответ владельцу называет конец срока (${CLOCK:-срока нет})" да \
     "$(yes_no wait_for "$WAIT_S" answer_has "${CLOCK:-НЕТ-СРОКА}")"
+case_check "без карты ответ честно: задачи в работе нет" да \
+    "$(yes_no wait_for "$WAIT_S" answer_has 'задачи в работе нет')"
 [ "$CASES_FAILED" != "$F0" ] && show_stand
 
 # ═══ 6. статус при включённом режиме ═══════════════════════════════════════
@@ -294,6 +304,44 @@ case_check "ответ «не включён»" да "$(yes_no wait_for "$WAIT_S
 case_check "строка ключа не изменилась" "$LINE_BEFORE" "$(key_line)"
 case_check "отказ — одна строка, без трассы" нет "$(yes_no answer_has '⏎|Traceback')"
 mv "$S/switches.yaml.good" "$S/switches.yaml"
+[ "$CASES_FAILED" != "$F0" ] && show_stand
+
+# ═══ 10. кнопка даёт уровень текущей задаче, а не только срок ═══════════════
+# Карта стенда своя: на боевую карту проба не смотрит. Пока карты нет, ответ
+# честно говорит «задачи в работе нет» (раздел 5 это уже прошёл без карты).
+echo "— «включи хакатон», в карте есть задача в работе"
+F0=$CASES_FAILED
+cat > "$S/project/dev-map.yaml" <<'MAPEOF'
+version: 1
+queue: []
+layers:
+  - { id: infra, label: "Инфра", color: "#5aa06a" }
+lines:
+  - id: core
+    layer: infra
+    name: "Ядро"
+    tasks:
+      - id: hr.menu-wip
+        status: wip
+        title: "Задача в работе"
+        summary: "Стендовая"
+      - id: hr.menu-plan
+        status: plan
+        title: "Другая"
+        summary: "Стендовая"
+MAPEOF
+sed -i -E 's|^HACKATHON_UNTIL=.*$|HACKATHON_UNTIL=""|' "$S/harness.conf"
+send "$OWNER" "включи хакатон"
+case_check "ответ называет задачу, получившую уровень" да \
+    "$(yes_no wait_for "$WAIT_S" answer_has 'hr\.menu-wip.*хакатон')"
+level_of() { python3 -c 'import sys,yaml
+d=yaml.safe_load(open(sys.argv[1],encoding="utf-8"))
+t={x["id"]:x for l in d["lines"] for x in l["tasks"]}
+print((t.get(sys.argv[2]) or {}).get("глубина",{}).get("уровень","-"))' "$S/project/dev-map.yaml" "$1"; }
+case_check "карта: у задачи в работе уровень «хакатон»" "хакатон" "$(level_of hr.menu-wip)"
+case_check "карта: у чужой задачи уровня нет" "-" "$(level_of hr.menu-plan)"
+case_check "карта: заведён долг «довести до продакшна»" да \
+    "$(yes_no grep -q 'id: hr.menu-wip-prod-debt' "$S/project/dev-map.yaml")"
 [ "$CASES_FAILED" != "$F0" ] && show_stand
 
 [ "$CASES_FAILED" = 0 ] && { echo "ПРОБА ЗЕЛЁНАЯ: $CASES_PATHS путей"; exit 0; }

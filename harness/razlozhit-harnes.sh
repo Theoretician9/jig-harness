@@ -6,6 +6,7 @@
 #   demons/  -> $PROJECT_DIR/harness/demons/   (их ждёт crontab из 01-SPEC-УСТАНОВКА §9)
 #   config/harness.conf -> /etc/harness/harness.conf (если ещё нет — не затирает живой)
 #   CLAUDE.md, STATE.md, память/, dev-map.yaml, шаблоны-задач/, skills/ -> $PROJECT_DIR/
+#   self/core.json -> $PROJECT_DIR/harness/self/ (всегда); self/instance.yaml — только если у цели его нет
 # Идемпотентен: повторный запуск обновляет код, НЕ трогает живые данные
 # (STATE.md, память/, dev-map.yaml копируются только если их ещё нет — они живут у агента).
 # Чем проверяется: --selftest раскладывает во временный каталог и сверяет дерево.
@@ -679,6 +680,75 @@ PY
   collect < <(forbid_texts "$out" "дверь укладки:" "раскладка завершена")
   collect < <(snapshot_diff "$C/до" "$C/после")
   case_result "о)" "в пакете нет skills-src → раскладка остановлена до двери, путь назван, проект не тронут" ${bad[@]+"${bad[@]}"}
+
+  # ══ self: личность агента harness/self/ — случаи self-а…self-г ═════════════
+  # core.json — общее ядро, затирается всегда; instance.yaml — роль этой копии,
+  # живые данные: кладётся шаблоном пакета только когда у цели его нет.
+  SELF_CORE="$HERE/self/core.json"
+  SELF_INSTANCE="$HERE/self/instance.yaml"
+  self_temps() {  # $1=проект → остатки временных файлов двери в harness/self/
+    find "$1/harness/self" -maxdepth 1 -name '.*' \( -name '*-tmp' -o -name '*.tmp' \) -printf '%f\n' 2>/dev/null || true
+  }
+
+  # self-а) живой instance не затёрт. Ловит: instance.yaml кладётся безусловно;
+  #   группа self не раскладывается (core.json остаётся испорченным).
+  C=$(new_case self-a); P="$C/proj"; bad=()
+  # mkdir: без группы self у основы каталога нет — подготовка не должна ронять самотест
+  mkdir -p "$P/harness/self"
+  printf 'МОЙ\n' > "$P/harness/self/instance.yaml"
+  printf '\nиспорчено\n' >> "$P/harness/self/core.json"
+  rc=0; out=$(run_stand "$C/install.conf" "$C/harness.conf" 2>&1) || rc=$?
+  [[ $rc -eq 0 ]] || bad+=("код $rc (ждали 0): $(tail -2 <<<"$out" | tr '\n' ' ')")
+  cmp -s "$P/harness/self/core.json" "$SELF_CORE" || bad+=("core.json не равен пакетному байт в байт")
+  [[ "$(cat "$P/harness/self/instance.yaml" 2>/dev/null || echo нет файла)" == "МОЙ" ]] \
+    || bad+=("instance.yaml не «МОЙ»: $(head -c 80 "$P/harness/self/instance.yaml" 2>/dev/null | tr '\n' ' ' || echo нет файла)")
+  case_result "self-а)" "живой instance.yaml «МОЙ» цел, испорченный core.json заменён пакетным" ${bad[@]+"${bad[@]}"}
+
+  # self-б) цель без harness/self/: оба файла появляются, равны пакетным.
+  #   Ловит: группа self не раскладывается; instance.yaml не кладётся новой цели.
+  C=$(new_case self-b); P="$C/proj"; bad=()
+  rm -rf "$P/harness/self"
+  rc=0; out=$(run_stand "$C/install.conf" "$C/harness.conf" 2>&1) || rc=$?
+  [[ $rc -eq 0 ]] || bad+=("код $rc (ждали 0): $(tail -2 <<<"$out" | tr '\n' ' ')")
+  cmp -s "$P/harness/self/core.json" "$SELF_CORE" || bad+=("core.json нет или не равен пакетному")
+  cmp -s "$P/harness/self/instance.yaml" "$SELF_INSTANCE" || bad+=("instance.yaml нет или не равен шаблону пакета")
+  case_result "self-б)" "цель без harness/self/ → core.json и instance.yaml появились, равны пакетным" ${bad[@]+"${bad[@]}"}
+
+  # self-в) нетронутая копия шаблона instance.yaml переживает две повторные
+  #   раскладки подряд. Ловит: существующий instance.yaml выпал из плана — опись
+  #   видит прежнюю запись с тем же blob и снимает его («снято 1»), а следующая
+  #   раскладка кладёт шаблон заново (потому и две подряд, и проверка после каждой).
+  C=$(new_case self-c); P="$C/proj"; bad=()
+  cmp -s "$P/harness/self/instance.yaml" "$SELF_INSTANCE" \
+    || bad+=("у проекта-основы instance.yaml не равен шаблону — нетронутая копия не воспроизведена")
+  for pass in 1 2; do
+    rc=0; out=$(run_stand "$C/install.conf" "$C/harness.conf" 2>&1) || rc=$?
+    [[ $rc -eq 0 ]] || bad+=("раскладка $pass: код $rc (ждали 0)")
+    summary=$(grep -m1 '^опись: в описи ' <<<"$out" || true)
+    grep -qE '^опись: в описи [0-9]+; снято 0;' <<<"$summary" \
+      || bad+=("раскладка $pass: нет «снято 0»: ${summary:-строки описи нет}")
+    cmp -s "$P/harness/self/instance.yaml" "$SELF_INSTANCE" \
+      || bad+=("раскладка $pass: instance.yaml $( [[ -f "$P/harness/self/instance.yaml" ]] && echo изменён || echo снят )")
+  done
+  case_result "self-в)" "нетронутый шаблон instance.yaml: две раскладки подряд — «снято 0», файл на месте" ${bad[@]+"${bad[@]}"}
+
+  # self-г) источник = цель (instance.yaml есть): байты, размер и права прежние,
+  #   временных файлов рядом нет. Ловит: дверь пишет прямо в цель (усечение
+  #   источника), теряет режим или бросает .layout-tmp.
+  C=$(new_case self-d); P="$C/proj"; bad=()
+  inst="$P/harness/self/instance.yaml"
+  mkdir -p "$P/harness/self"
+  printf 'роль: своя копия\nзаметки: живые\n' > "$inst"
+  chmod 640 "$inst"
+  st_before=$(stat -c '%s %a' "$inst"); blob_before=$(git hash-object "$inst")
+  rc=0; out=$(run_stand "$C/install.conf" "$C/harness.conf" 2>&1) || rc=$?
+  [[ $rc -eq 0 ]] || bad+=("код $rc (ждали 0): $(tail -2 <<<"$out" | tr '\n' ' ')")
+  st_after=$(stat -c '%s %a' "$inst" 2>/dev/null || echo нет файла)
+  [[ "$st_after" == "$st_before" ]] || bad+=("размер/права: $st_before → $st_after")
+  [[ "$(git hash-object "$inst" 2>/dev/null || true)" == "$blob_before" ]] || bad+=("байты instance.yaml изменились")
+  temps=$(self_temps "$P")
+  [[ -z "$temps" ]] || bad+=("временные файлы в harness/self/: $(tr '\n' ' ' <<<"$temps")")
+  case_result "self-г)" "источник = цель: instance.yaml побайтно и по правам прежний, временных рядом нет" ${bad[@]+"${bad[@]}"}
 
   # ══ Ф-б: опись раскладки <проект>/.layout-manifest — случаи фб-а…фб-и ══════
   # Опись судится здесь своим разбором байт, не модулем описи: самотест не верит
@@ -2679,6 +2749,15 @@ fi
 # смену — восстановлено из git. Эталон всегда доступен рядом:
 # harness/CLAUDE.md.
 polozhit_fajl harness-top "$HERE"/CLAUDE.md "$PROJECT_DIR/harness/CLAUDE.md"
+# Личность агента: ссылки @harness/self/* из CLAUDE.md без этих файлов битые.
+# core.json — общее ядро копий, затирается всегда. instance.yaml — роль ЭТОЙ
+# копии, живые данные: кладётся шаблоном пакета только когда у цели его нет.
+polozhit_fajl self "$HERE/self/core.json" "$PROJECT_DIR/harness/self/core.json"
+if [[ -f "$PROJECT_DIR/harness/self/instance.yaml" ]]; then
+  echo "  harness/self/instance.yaml — роль этой копии, не трогаю"
+else
+  polozhit_fajl self "$HERE/self/instance.yaml" "$PROJECT_DIR/harness/self/instance.yaml"
+fi
 # главы UNIFIED — нормативная база: агент читает их и пересобирает скилы.
 # Ищем рядом с пакетом (STARTER-PACKAGE/../UNIFIED или внутри пакета).
 UNIFIED_SRC=""

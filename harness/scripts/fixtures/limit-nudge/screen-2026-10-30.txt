@@ -1,0 +1,45 @@
+● Agent "Правка главной спеки, итерация 7" failed: Agent terminated early due to an API error: You've hit your session limit · resets 5:30pm (Asia/Qostanay) (error type
+rate_limit, HTTP 429, request id req_011CgYKpbakBjC4iYo3h1yUt, model sent to the API: claude-opus-5-5)
+  ⎿ You've hit your session limit · resets 5:30pm (Asia/Qostanay)
+
+✻ Sautéed for 24m 48s · done 4:30 PM
+
+> [сторож сессий] Владельцу нет отчёта 31 минут, а работа идёт. Дай короткий статус в канал: что сделано числом, что делаешь сейчас. Без разбора своих действий — он идёт в
+  журнал.
+
+● Usage limit reached again · continuing automatically at 5:30pm · esc to cancel
+  ⎿ You've hit your session limit · resets 5:30pm (Asia/Qostanay)
+
+✻ Brewed for 1s · done 4:40 PM
+
+> Работы не видно 51 минут. СЛЕДУЮЩАЯ РАБОТА: hr.скачай-видео-по-ссылке-https — начата Заблокирована она — бери следующую по порядку (work-queue.py --порядок), и так до
+  следующего блокера.
+
+● Usage limit reached again · continuing automatically at 5:30pm · esc to cancel
+  ⎿ You've hit your session limit · resets 5:30pm (Asia/Qostanay)
+
+✻ Brewed for 1s · done 5:00 PM
+
+> Работы не видно 61 минут. СЛЕДУЮЩАЯ РАБОТА: hr.скачай-видео-по-ссылке-https — начата Заблокирована она — бери следующую по порядку (work-queue.py --порядок), и так до
+  следующего блокера.
+
+● Usage limit reached again · continuing automatically at 5:30pm · esc to cancel
+  ⎿ You've hit your session limit · resets 5:30pm (Asia/Qostanay)
+
+✻ Churned for 1s · done 5:10 PM
+
+> Работы не видно 71 минут. СЛЕДУЮЩАЯ РАБОТА: hr.скачай-видео-по-ссылке-https — начата Заблокирована она — бери следующую по порядку (work-queue.py --порядок), и так до
+  следующего блокера.
+
+● Usage limit reached again · continuing automatically at 5:30pm · esc to cancel
+  ⎿ You've hit your session limit · resets 5:30pm (Asia/Qostanay)
+
+✻ Brewed for 1s · done 5:20 PM
+
+> [сторож сессий] Если лимит подписки обновился — продолжай работу с того места, где остановился: сверься с STATE.md и docs/handover/, проверь $LOG_DIR/inbox/ и скажи владельцу,
+  что работа возобновилась.
+
+● Usage limit reached again · continuing automatically at 5:30pm · esc to cancel
+  ⎿ You've hit your session limit · resets 5:30pm (Asia/Qostanay)
+
+✻ Baked for 0s · done 5:20 PM

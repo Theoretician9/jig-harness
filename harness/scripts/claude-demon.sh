@@ -114,6 +114,13 @@ POTOK_KAT="$LOG_DIR/demon-stream"
 RASHOD="$LOG_DIR/demon-spend.jsonl"
 mkdir -p "$POTOK_KAT"
 
+# Свой id сессии на каждый вызов и строка о нём ДО вызова: разрешитель токенов
+# по ней узнаёт, чей это вызов модели (транскрипт головной сессии называется id).
+SESSION_ID="$(uuidgen)"
+DOVODY=(--session-id "$SESSION_ID" "${DOVODY[@]}")
+jq -nc --arg d "$DEMON" --arg s "$SESSION_ID" --arg w "$(date -Iseconds)" \
+    '{event: "demon.start", "демон": $d, session_id: $s, "когда": $w}' >>"$RASHOD"
+
 VYVOD_FAJL="$(mktemp)"
 OSHIBKI_FAJL="$(mktemp)"
 SUD_FAJL="$(mktemp)"

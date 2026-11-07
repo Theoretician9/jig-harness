@@ -92,6 +92,37 @@ with tempfile.TemporaryDirectory() as врем:
     судить("мёртвый номер — протухший лок, как было (rc 0)",
            (код, "держатель мёртв" in ответ), (0, True))
 
+    # БОЛЬНОЙ СЛУЧАЙ 30.10.2026 (LXC, соседний проект): lxcfs подменяет /proc/uptime
+    # временем жизни КОНТЕЙНЕРА, а старт в /proc/<pid>/stat считается от загрузки
+    # ХОСТА — живой держатель выходил «моложе лока», и любой лок звался
+    # протухшим. Условие создаётся здесь: /proc/uptime отвечает как lxcfs.
+    import importlib.util
+    os.environ["HARNESS_LOG_DIR"] = str(двор)
+    spec = importlib.util.spec_from_file_location("ворота_под_пробой", ПРИБОР)
+    прибор = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(прибор)
+    прежнее_чтение = pathlib.Path.read_text
+
+    def как_lxcfs(путь, *a, **k):
+        return "100.00 100.00\n" if str(путь) == "/proc/uptime" else прежнее_чтение(путь, *a, **k)
+
+    # Та же подмена у долгих работ: возраст выходил отрицательным, и долгий
+    # прогон под LXC занятостью не считался. Работа своя, с именем pytest.
+    работа = subprocess.Popen(["bash", "-c", "exec -a pytest sleep 60"], cwd=str(КОРЕНЬ),
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    time.sleep(0.3)
+    прибор.ДОЛГО_СЕК = 0
+    pathlib.Path.read_text = как_lxcfs
+    try:
+        моложе = прибор._процесс_моложе(живой, time.time())
+        долгие = прибор.долгие_процессы()
+    finally:
+        pathlib.Path.read_text = прежнее_чтение
+        работа.terminate()
+    судить("LXC: /proc/uptime контейнера — живой держатель не «моложе лока»", моложе, False)
+    судить("LXC: /proc/uptime контейнера — долгая работа видна занятостью",
+           any(с.startswith(f"процесс {работа.pid}:") for с in долгие), True)
+
     отвязанный.terminate()
 
 print(f"ИТОГ: плохих {плохо}")

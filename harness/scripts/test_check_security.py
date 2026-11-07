@@ -541,6 +541,49 @@ def case_line_in_task_report():
     assert "app/db.py:3\t" in out, f"в отчёте не app/db.py:3: {out}"
 
 
+# ── круг 3: битый UTF-8 в выводе git ────────────────────────────────────────
+# Байт \xd0 — начало двухбайтовой кириллической буквы без второго байта:
+# строгое чтение вывода git падает на нём UnicodeDecodeError.
+BROKEN = b"# \xd0\n"
+
+
+def staged_with_bytes(files):
+    """--staged по индексу стенда; имена и тела файлов — БАЙТЫ (put пишет
+    только UTF-8, а битый байт и в имени, и в теле должен дойти до git)."""
+    root = make_repo()
+    log = tmp_dir("безопасность-лог-")
+    for name, body in files.items():
+        with open(os.fsencode(root) + b"/" + name, "wb") as handle:
+            handle.write(body)
+    git(root, "add", "-A")
+    code, out = cli(["--staged"], root, {"LOG_DIR": str(log)})
+    assert "Traceback" not in out and "UnicodeDecodeError" not in out, f"гейт упал: {out}"
+    return code, out
+
+
+def case_broken_byte_with_finding():
+    code, out = staged_with_bytes({b"run.py": BROKEN + b"subprocess.run(c, shell=True)\n"})
+    assert code == 0, (code, out)
+    assert "shell-input\trun.py:2\t" in out, f"нет находки shell-input на строке 2: {out}"
+
+
+def case_broken_byte_clean():
+    code, out = staged_with_bytes({b"note.py": BROKEN + b"x = 1\n"})
+    assert code == 0, (code, out)
+    assert "задето классов 0, находок 0" in out, out
+
+
+def case_broken_byte_in_file_name():
+    """Битый байт в ИМЕНИ файла: при core.quotepath=false git печатает его сырым
+    в строках-заголовках diff («diff --git», «+++ b/…»). Нарушение в соседнем
+    файле обязано найтись. (В название hunk-а «@@ … @@ def …» битый байт не
+    попадает: git обрезает его там на первом неверном байте.)"""
+    code, out = staged_with_bytes({b"a\xd0.py": b"x = 1\n",
+                                   b"run.py": b"y = 2\nsubprocess.run(c, shell=True)\n"})
+    assert code == 0, (code, out)
+    assert "shell-input\trun.py:2\t" in out, f"нет находки shell-input на строке 2: {out}"
+
+
 def run_case(name, func, *args):
     try:
         func(*args)
@@ -609,6 +652,11 @@ def main():
     run_case("M3 вставка в середину файла — номер по hunk-у", case_line_in_middle_hunk)
     run_case("M3 marker-no-reason — строка файла", case_line_of_marker_without_reason)
     run_case("M3 --task: json и отчёт «файл:строка» верны", case_line_in_task_report)
+    run_case("B1 --staged: битый байт и shell=True — без Traceback, находка shell-input",
+             case_broken_byte_with_finding)
+    run_case("B2 --staged: битый байт без нарушения — находок 0", case_broken_byte_clean)
+    run_case("B3 --staged: битый байт в имени файла diff — соседнее нарушение найдено",
+             case_broken_byte_in_file_name)
 
     for path in _CLEANUP:
         shutil.rmtree(path, ignore_errors=True)

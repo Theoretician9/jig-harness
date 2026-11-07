@@ -27,7 +27,7 @@ import sys
 ЕСТЬ_SET_E = re.compile(r'^set -[a-z]*e', re.M)
 ПРИСВАИВАНИЕ = re.compile(r'^\s*(?:local\s+|export\s+)?[A-Za-z_][A-Za-z_0-9]*=\$\(')
 ОПАСНЫЕ = re.compile(r'\|\s*(grep|pgrep|fuser)\b')
-ЗАПАСНОЙ_ИСХОД = re.compile(r'\|\|\s*(true|echo|:)\b')
+ЗАПАСНОЙ_ИСХОД = re.compile(r'\|\|\s*((true|echo|:)\b|[A-Za-z_][A-Za-z_0-9]*=)')
 # Вторая форма того же отказа: команда стоит САМА ПО СЕБЕ, её код никто не
 # читает. `git grep -q` под set -e уронил check-secrets молча (11.09.2026).
 # Внутри if/while/until/elif, после && и ||, с ведущим «!» код читается —
@@ -99,6 +99,10 @@ def самотест():
          "grep в условии while — законно"),
         ("set -euo pipefail\ngrep -q x f && echo нашлось\n", 0,
          "код читает && — законно"),
+        ("set -euo pipefail\nCHANGED=$(cat x | grep -oP 'a') \\\n    || CHANGED=UNREADABLE\n", 0,
+         "запасной исход — присваивание после || — здоров"),
+        ("set -euo pipefail\nCHANGED=$(cat x | grep -oP 'a')\nCHANGED=UNREADABLE\n", 1,
+         "БОЛЬНОЙ СЛУЧАЙ 3: присваивание есть, но без || — не запасной исход"),
     ]
     ok = True
     for текст, ждём, зачем in случаи:

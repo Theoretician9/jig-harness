@@ -15,8 +15,9 @@ LOG_DIR, свой PANEL_STATE_DIR, свой harness.conf. Живая карта 
 без своего LOG_DIR писал бы в боевой (контракт, Б12).
 
 Судья (`judge`) — свежая копия модуля гейта, у которой подменено ровно то, что
-зовёт git: модуль цены отдаёт признаки коммитов из таблицы теста. Остальное —
-НАСТОЯЩИЕ функции гейта (`долг_задачи`, `шаги_для_задачи`, `корень_бумаг`,
+считает цену по git: модуль цены отдаёт признаки коммитов из таблицы теста. Шаг
+«мутации» судится настоящей историей: корень фикстуры — свой git с коммитом
+механизма. Остальное — НАСТОЯЩИЕ функции гейта (`долг_задачи`, `шаги_для_задачи`, `корень_бумаг`,
 `беды_в_двух_корнях`, `spec_approval.беды_одобрения`): доска и гейт обязаны
 говорить одно, а сверка с переписанной копией гейта зеленела бы всегда.
 Корень гейта (`КОРЕНЬ`) переставлен на каталог фикстуры — значит снимок обязан
@@ -33,6 +34,7 @@ import io
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import traceback
@@ -216,6 +218,29 @@ papers("t.named", "t-named", ["спека", "ревью_спеки", "контр
 put("docs/plans/общий-план.md")
 put(".tasks/t.allpapers/журнал.md", LONG)
 (LOGS / "inbox" / "обработано" / f"{SOURCE_ID}.txt").write_text(LONG, encoding="utf-8")
+
+
+def git_root(*args: str) -> str:
+    done = subprocess.run(["git", "-C", str(ROOT), "-c", "user.name=p", "-c", "user.email=p@p",
+                           *args], check=True, capture_output=True, text=True)
+    return done.stdout.strip()
+
+
+# Шаг «мутации» читает историю git корня бумаг (acceptance.mutation_paper_debts),
+# а не признаки цены, поэтому механизм задачи здесь — настоящий коммит с Dev-Map.
+# t.done тронула механизм без бумаги: её долг мутаций назовёт сам гейт.
+MECHANISM = "scripts/mechanism.txt"
+MUTATION_TABLE = "harness/config/probe-mutations.yaml"
+GREEN_PAPER_TASKS = ("t.test1", "t.obych", "t.approval2", "t.allpapers")
+put(MECHANISM)
+put(MUTATION_TABLE, yaml.safe_dump({"пробы": {"scripts/probe.txt": {"механизм": MECHANISM, "мутация": "s/а/б/"}}},
+                                   allow_unicode=True))
+git_root("init", "-q")
+git_root("add", MECHANISM, MUTATION_TABLE)
+git_root("commit", "-qm", "механизм\n\n" + "\n".join(f"Dev-Map: {t}" for t in (*GREEN_PAPER_TASKS, "t.done")))
+for task_id in GREEN_PAPER_TASKS:
+    put(f".tasks/{task_id}/мутации.log",
+        f"коммит {git_root('rev-parse', 'HEAD')}\n--- {MECHANISM}\nпокраснели как надо 1, дыр 0\n")
 
 # Журнал одобрений спек: у одних задач слово владельца есть, у t.approval2
 # спека отправлена, но слова нет, у t.approval не отправлена вовсе.
@@ -601,13 +626,12 @@ if isinstance(board, dict):
           f"неполные шаги: {[s for s in steps.values() if not step_keys <= set(s)]}")
     check(steps.get("тесты", {}).get("есть", False) is None,
           "«тесты» машиной не судятся: есть = null", f"тесты: {steps.get('тесты')}")
-    check(all(steps.get(k, {}).get("есть") is True for k in ALL_PAPERS if k != "мутации"),
+    check(all(steps.get(k, {}).get("есть") is True for k in ALL_PAPERS),
           "положенные бумаги отмечены «есть»", f"шаги: {steps}")
-    # Мутации отложены до приёмки: в wip их не просят (иначе колонка wip-задачи
-    # прыгала бы на «мутации»), после test — просят (см. t.test1 и t.done).
-    check(steps.get("мутации", {}).get("есть") is None
-          and "не положен" in str(steps.get("мутации", {}).get("почему")),
-          "wip: мутации приёмки не требуются — «не положен этой задаче»", f"мутации wip: {steps.get('мутации')}")
+    # Пульт держит мутации шагом ДО test (шаги_приёмки пусты): wip-задаче шаг положен,
+    # и судит его бумага гейта, а не «не положен». Долг без бумаги — строка t.done.
+    check(str(steps.get("мутации", {}).get("путь", "")).endswith(".tasks/t.allpapers/мутации.log"),
+          "wip: мутации — шаг до test, зелёная бумага задачи засчитана", f"мутации wip: {steps.get('мутации')}")
     check(str(steps.get("спека", {}).get("путь", "")).endswith("docs/specs/t-all.md"),
           "путь спеки — тот, что назвал гейт", f"путь спеки: {steps.get('спека')}")
     named = {s.get("шаг"): s for s in (by_id.get("t.named") or {}).get("шаги") or []}.get("план", {})
@@ -715,7 +739,6 @@ check(mode == 0o640, "права board.json 0640", f"права board.json {oct(
 # дереве, журналы и состояние вне дерева, час. Совпал — снимок не собирается,
 # но «снято» и метка обновляются: панель судит возраст снимка, сторож — метку.
 print("── отпечаток входов ──")
-import subprocess  # noqa: E402
 
 FP = TMP / "fp-repo"
 FP.mkdir()

@@ -2,6 +2,9 @@
 """Пробы плана запуска помощников (scripts/launch-plan.py) — до кода.
 
 Спека: docs/specs/2026-10-29-правила-вложенности-кодом.md (§3–§7, таблица §9).
+Круг 2 (решения оркестратора 30.10): мелочь не ждёт (Н-10), §5.4 — план
+закрыт, глава удалена, план переименован; §5.2 (map-from-message.py) —
+scripts/test_map_from_message_chapter.py.
 Каждая строка §9 — случай этой пробы или пробы хука
 (scripts/hooks/test_launch_plan_guard.py); карта соответствия —
 .tasks/hr.nesting-creation-rules/пробы-карта.md.
@@ -105,6 +108,15 @@
             «min(групп, ёмкость)» = min(нужно, ёмкость), нужно 0 (файлов ещё
             нет) считается 1; ёмкость 0 — исполнителей 0, ждать: true, в
             тексте «ждать»; иначе ждать: false (ждать только при ёмкости 0).
+            Правило мелочь не ждёт НИКОГДА (слово владельца 30.10, ревью
+            Н-10: контроль мелочь не трогает): исполнителей 1, ждать: false и
+            при ёмкости 0, строка ёмкости без «ждать».
+  План закрыт (§5.4): владелец плана задачи (план её главы) со status done, а
+            у плана есть открытые задачи (карточки с глава: <план>/…, status не
+            done) — в «след» решения и --нужен-план строка «план закрыт с
+            открытыми задачами: <план>: <задача>, <задача>…» (все открытые,
+            закрытые не называются); код 0, текст без --json печатает её
+            строкой «след: …».
   План задачи без блока план: — файл .tasks/<id>/план.md (как
             check-pipeline.py путь_бумаги(карточка, "план")): решение.план = его
             путь, состояние не «нужен_план_нет».
@@ -176,6 +188,13 @@
    дверей D%» (параллельных — доля решений с исполнителей ≥ 2,
    тяжёлых — доля сложности «высокая», проценты целые).
 
+--проверить-план <план>: правила §4.3 по плану И ссылки карты на него (§5.4).
+  Карточка с глава: <план>/<путь>, чьей главы в плане нет (глава удалена), —
+  код 1, по строке на каждую такую карточку: «сирота: <задача> → <глава>».
+  Плана с таким id нет, а карточки на него ссылаются (план переименован) —
+  код 1, тот же перечень по всем этим карточкам. Плана нет и ссылок нет —
+  код 1 «план не найден». Карточки чужих планов не называются.
+
 Правка карты и плана — только вставкой текста под dev-map.lock (cards.map_lock),
 сверка числа карточек и yaml.safe_load; комментарии сохраняются. Лок: карта
 дерева — cards.lock_path() (общий с демонами); другая карта (--карта/
@@ -186,7 +205,8 @@ HARNESS_DEVMAP, realpath не карта дерева) — <каталог ка�
 
 Коды выхода: 0 — решение (в том числе ждать, предупреждения, skipped по
 битым данным); 1 — нарушение данных (пересечение, цикл, «нечего делить»,
-сирота, глубже верх_вложенности, правило §4.3, нет карточки, неизвестный ид
+сирота (и перечень сирот --проверить-план), глубже верх_вложенности,
+правило §4.3, нет карточки, неизвестный ид
 отметки, задача уже в главе); 2 — неверный вызов.
 
 ═════════════════════════════════════════════════════════════════════════════
@@ -196,6 +216,8 @@ helper-roles.yaml/pipeline.yaml/harness.conf. В копии pipeline.yaml у
 «обычная» 2 шага, у «крупная» 7 — числа стенда, а не боевые. Строки журналов
 стенда — копия формата боевых строк (agent.launch, file.claim, role.decision)
 с заменой значений; нагрузка — меченые запуски смены, как в бою.
+окно_живых стенда — своё (ROLES); боевой helper-roles.yaml пробы не читают,
+его значение (30 или 15) на них не влияет.
 Механизм — рядом либо HARNESS_LAUNCH_PLAN (дверь для мутаций копии).
 Прогон: python3 scripts/test_launch_plan.py
 """
@@ -215,6 +237,19 @@ import yaml
 
 HERE = Path(__file__).resolve().parent
 LAUNCH_PLAN = Path(os.environ.get("HARNESS_LAUNCH_PLAN") or HERE / "launch-plan.py")
+
+
+def tree_file(*parts: str) -> Path:
+    # Проект: scripts/ рядом с harness/; пакет: harness/scripts/ рядом с demons/.
+    for candidate in (HERE.parent / "harness" / Path(*parts), HERE.parent / Path(*parts)):
+        if candidate.is_file():
+            return candidate
+    return HERE.parent / "harness" / Path(*parts)
+
+
+# Судья скорости: launch-plan.py грузит его из <корень проекта>/harness/demons, стенд кладёт
+# туда ссылку на настоящий файл (или на копию под мутацией — дверь SPEED_MODE_BIN).
+SPEED_JUDGE = Path(os.environ.get("SPEED_MODE_BIN") or tree_file("demons", "speed_mode.py"))
 SRC = "scripts/launch-plan.py"
 HOOK_SRC = "scripts/hooks/launch_plan_guard.py"
 CLAIM_SRC = "scripts/hooks/file_claim_guard.py"
@@ -1344,6 +1379,133 @@ def case_high_without_files(tmp: Path) -> None:
           "порог резки" in (d.get("строка_ёмкости") or ""))
 
 
+def fill_capacity(stand: Stand, count: int = 5) -> None:
+    """count живых помощников по заявкам: при жёсткий_верх 5 ёмкость 0, задач 0."""
+    for i in range(1, count + 1):
+        stand.claim(f"полный{i}", "-")
+
+
+def case_trifle_never_waits(tmp: Path) -> None:
+    print("мелочь не ждёт и при ёмкости 0; простая и прочее ждут (Н-10, слово 30.10)")
+    s = Stand(tmp / "мелочь-ёмкость-0")
+    s.card("T")
+    s.pretask("T", files=[s.file("src/a.py")])
+    fill_capacity(s)
+    s.write()
+    code, d, _ = s.decide("T")
+    check("мелочь при ёмкости 0: стенд — свободно 0, живых 5", (0, 5),
+          (get(d, "ёмкость", "свободно"), get(d, "ёмкость", "живых")))
+    check("мелочь при ёмкости 0: правило мелочь, исполнителей 1, ждать false",
+          ("мелочь", 1, False), (d.get("правило"), d.get("исполнителей"), d.get("ждать")))
+    check("мелочь при ёмкости 0: строка ёмкости без «ждать»", False,
+          "ждать" in (d.get("строка_ёмкости") or ""))
+
+    for name, parts_of, rule in (
+            ("простая", lambda st: plain_parts(st, "s", 4, price="простая"), "простая"),
+            ("прочее", lambda st: plain_parts(st, "o", 1), "прочее")):
+        s = Stand(tmp / f"{name}-ёмкость-0")
+        s.task_in_plan("T", parts_of(s))
+        fill_capacity(s)
+        s.write()
+        code, d, _ = s.decide("T")
+        check(f"{name} при ёмкости 0 (контроль): правило {rule}, исполнителей 0, ждать",
+              (rule, 0, True), (d.get("правило"), d.get("исполнителей"), d.get("ждать")))
+
+
+def trace_line(lines, marker: str) -> str:
+    return next((str(line) for line in lines or [] if marker in str(line)), "")
+
+
+def tokens(text: str) -> set:
+    return set(re.findall(r"[\w.-]+", text))
+
+
+CLOSED_MARK = "план закрыт с открытыми задачами"
+
+
+def case_closed_plan(tmp: Path) -> None:
+    print("план закрыт с открытыми задачами — предупреждение с перечнем (§5.4)")
+
+    def stand(name: str, owner_status: str) -> Stand:
+        s = Stand(tmp / f"закрыт-{name}")
+        s.plan("P", owner="хозяин-плана", owner_status=owner_status,
+               chapters=[{"id": "c", "название": "c", "охват": []},
+                         {"id": "d", "название": "d", "охват": []}])
+        s.task_in_plan("open-a", plain_parts(s, "a", 2, price="простая"))
+        s.card("open-b", status="plan", chapter="P/d")
+        s.card("shut-c", status="done", chapter="P/c")
+        s.write()
+        return s
+
+    s = stand("done", "done")
+    code, d, _ = s.decide("open-a")
+    line = trace_line(d.get("след"), CLOSED_MARK)
+    check("закрыт: решение — код 0, в «след» строка «план закрыт с открытыми задачами»",
+          (0, True), (code, bool(line)))
+    check("закрыт: перечень — open-a и open-b (обе главы), закрытая shut-c не названа",
+          (True, True, False),
+          ("open-a" in tokens(line), "open-b" in tokens(line), "shut-c" in tokens(line)))
+    code, out, err = s.run("open-a")
+    check("закрыт: текст решения печатает «след: план закрыт с открытыми задачами»", True,
+          f"след: {CLOSED_MARK}" in out)
+    code, d, _ = s.need_plan("open-a")
+    line = trace_line(d.get("след"), CLOSED_MARK)
+    check("закрыт: --нужен-план — код 0, часть_плана, в «след» перечень open-a, open-b",
+          (0, "часть_плана", True, True),
+          (code, d.get("исход"), "open-a" in tokens(line), "open-b" in tokens(line)))
+
+    s = stand("открыт", "wip")
+    check("открыт (контроль): владелец не done — строки нет ни в решении, ни в --нужен-план",
+          ("", ""), (trace_line(s.decide("open-a")[1].get("след"), CLOSED_MARK),
+                     trace_line(s.need_plan("open-a")[1].get("след"), CLOSED_MARK)))
+
+
+def case_deleted_chapter(tmp: Path) -> None:
+    print("глава удалена из плана — код 1 с перечнем карточек (§5.4)")
+    s = Stand(tmp / "глава-удалена")
+    s.plan("P")
+    s.card("card-ok", chapter="P/c")
+    s.card("card-gone1", chapter="P/gone")
+    s.card("card-gone2", chapter="P/gone/sub")
+    s.card("card-alien", chapter="Q/gone")
+    s.write()
+    code, out, err = s.run("--проверить-план", "P")
+    found = tokens(out + err)
+    check("глава удалена: --проверить-план — код 1, слово «сирота»", (1, True),
+          (code, "сирота" in out + err))
+    check("глава удалена: перечень card-gone1, card-gone2; card-ok и чужой card-alien не названы",
+          (True, True, False, False),
+          ("card-gone1" in found, "card-gone2" in found, "card-ok" in found,
+           "card-alien" in found))
+
+    s = Stand(tmp / "глава-цела")
+    s.plan("P")
+    s.card("card-ok", chapter="P/c")
+    s.card("card-alien", chapter="Q/gone")
+    s.write()
+    check("глава цела (контроль): ссылки только на живую главу и чужой план — код 0", 0,
+          s.run("--проверить-план", "P")[0])
+
+
+def case_renamed_plan(tmp: Path) -> None:
+    print("план переименован — сирота у всех его задач, перечень (§5.4)")
+    s = Stand(tmp / "переименован")
+    s.plan("P2")
+    s.card("ren-a", chapter="P/c")
+    s.card("ren-b", chapter="P/c/sub")
+    s.card("ren-new", chapter="P2/c")
+    s.write()
+    code, out, err = s.run("--проверить-план", "P")
+    found = tokens(out + err)
+    check("переименован: --проверить-план старого id — код 1, слово «сирота»", (1, True),
+          (code, "сирота" in out + err))
+    check("переименован: перечень ren-a и ren-b; ren-new (в новом плане) не назван",
+          (True, True, False), ("ren-a" in found, "ren-b" in found, "ren-new" in found))
+    check("переименован: --нужен-план ren-a — код 1", 1, s.need_plan("ren-a")[0])
+    check("переименован: новый план P2 — код 0 (его ссылки целы)", 0,
+          s.run("--проверить-план", "P2")[0])
+
+
 def case_tasks_plan(tmp: Path) -> None:
     print("план в .tasks/<id>/план.md — механизм видит план")
     s = Stand(tmp / "план-в-tasks")
@@ -1598,14 +1760,167 @@ def case_broken(tmp: Path) -> None:
     check("без аргументов — код 2", 2, proc.returncode)
 
 
+HACKATHON_STEPS = ["спека", "ревью_спеки", "контракт", "план", "тесты", "ревью_кода"]
+
+
+def hackathon_lines(stand: Stand, task: str, until: str | None) -> list:
+    """Строка режима и подсказка из текста решения; срок — в harness.conf стенда."""
+    stand.conf.write_text(CONF_TEXT + (f'HACKATHON_UNTIL="{until}"\n' if until else ""),
+                          encoding="utf-8")
+    _, out, err = stand.run(task)
+    return [line for line in (out + err).splitlines()
+            if line.startswith("хакатон:") or "--включить-задачу" in line]
+
+
+def case_hackathon_line(tmp: Path) -> None:
+    print("строка режима хакатон: видно, включён ли режим и шаги уровня задачи")
+    s = Stand(tmp / "хакатон", pipeline={"шаги.хакатон": HACKATHON_STEPS})
+    s.card("T")
+    s.card("H", level="хакатон")
+    for task in ("T", "H"):
+        s.pretask(task, files=[s.file(f"src/{task}.py")])
+    s.write()
+    now = dt.datetime.now().astimezone().replace(microsecond=0)
+    future = (now + dt.timedelta(hours=5)).isoformat()
+    past = (now - dt.timedelta(hours=5)).isoformat()
+    hint = "hackathon.py --включить-задачу T"
+    check("хакатон: режим выключен — одна строка, шаги уровня",
+          ["хакатон: режим выключен; уровень задачи обычная; шаги: тесты, ревью_кода"],
+          hackathon_lines(s, "T", None))
+    check("хакатон: срок истёк — выключен",
+          ["хакатон: режим выключен; уровень задачи обычная; шаги: тесты, ревью_кода"],
+          hackathon_lines(s, "T", past))
+    lines = hackathon_lines(s, "T", future)
+    check("хакатон: режим включён — строка со сроком", True,
+          f"хакатон: режим включён до {future}; уровень задачи обычная; шаги: тесты, ревью_кода"
+          in lines)
+    check("хакатон: режим включён, задача не хакатон — подсказка включить задачу",
+          True, any(hint in line for line in lines))
+    lines = hackathon_lines(s, "H", future)
+    check("хакатон: уровень хакатон — шаги без мутаций, подсказки нет",
+          [f"хакатон: режим включён до {future}; уровень задачи хакатон; шаги: "
+           + ", ".join(HACKATHON_STEPS)], lines)
+
+
+# ═══════════════ потолок живых от режима скорости (Ч6, спека 10.3.12) ═══════════════
+
+SPEED_DATA = {
+    "режимы": {"slow": {"задач": 1, "имя": "медленный", "живых_потолок": 3},
+               "medium": {"задач": 3, "имя": "средний", "живых_потолок": 5},
+               "fast": {"задач": 5, "имя": "быстрый", "живых_потолок": 8},
+               "ultra": {"задач": 10, "имя": "ультра", "живых_потолок": 12}},
+    "живых_при_аварии": 2, "по_умолчанию": "medium", "ступени": [1, 3, 5, 10],
+    "открытый_запуск_макс_мин": 240, "старт_ждать_с": 120, "спек_ждут_владельца_максимум": 3,
+    "блокеры": {"пауза": {"потолок": 0, "говорить": "нет"}, "авария": {"потолок": 1, "говорить": "да"}},
+}
+SPEED_MODES = {1: "slow", 3: "medium", 5: "fast", 10: "ultra"}
+
+
+def speed_stand(tmp: Path, name: str, eff: int | None, wip: int = 1, age_min: float = 0,
+                raw: str | None = None, selected: str | None = None, accident: bool = False) -> tuple:
+    """Стенд со своим скорость.json и судьёй; (стенд, доп. окружение). В работе у судьи — wip
+    карточек wip (T и ещё wip−1); eff None — состояния нет вовсе."""
+    s = Stand(tmp / f"скорость-{name}", roles={"предохранитель.порог_сверх_режима": 1})
+    s.task_in_plan("T", plain_parts(s, "v", 4))
+    for i in range(1, wip):
+        s.card(f"раб-{i}")
+    s.write()
+    demons = s.root / "harness" / "demons"
+    demons.mkdir(parents=True, exist_ok=True)
+    (demons / "speed_mode.py").symlink_to(SPEED_JUDGE)
+    panel = s.base / "panel"
+    panel.mkdir()
+    data = s.base / "speed-modes.yaml"
+    data.write_text(yaml.safe_dump(SPEED_DATA, allow_unicode=True), encoding="utf-8")
+    if raw is not None:
+        (panel / "скорость.json").write_text(raw, encoding="utf-8")
+    elif eff is not None:
+        mode = selected or SPEED_MODES.get(eff, "ultra")
+        state = {"ts": iso_ago(age_min), "выбранный": mode,
+                 "выбранный_задач": SPEED_DATA["режимы"][mode]["задач"], "эффективный": eff,
+                 "в_работе": [], "блокеры": {"авария": {"потолок": 1, "причина": "проба"}} if accident else {},
+                 "кандидаты": {}, "к_взятию": [], "добор": 0, "добор_почему": "проба", "причина": "проба",
+                 "готовых": 0, "ждут_владельца": 0, "фантомов": 0, "зависимостей": 0, "битые": []}
+        (panel / "скорость.json").write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+    projects = s.base / "projects"
+    projects.mkdir()
+    env = {"HARNESS_PANEL_STATE": str(panel), "PANEL_STATE_DIR": str(panel),
+           "SPEED_MODE_DATA": str(data), "CLAUDE_PROJECTS_DIR": str(projects),
+           "HARNESS_ACTIVE_LINE": "", "SPEED_MODE": ""}
+    return s, env
+
+
+def speed_cap(stand: Stand, env: dict) -> tuple:
+    code, out, err = stand.run("T", "--json", extra_env=env)
+    d = parse_json(out)
+    return d, (get(d, "ёмкость", "жёсткий_верх"), get(d, "ёмкость", "порог_нагрузки"),
+               get(d, "ёмкость", "режим")), out + err
+
+
+def case_speed_ceiling(tmp: Path) -> None:
+    print("потолок живых и порог нагрузки от ЭФФЕКТИВНОГО режима судьи скорости")
+    for eff, top in ((1, 3), (3, 5), (5, 8), (10, 12)):
+        s, env = speed_stand(tmp, f"эфф-{eff}", eff)
+        d, got, raw = speed_cap(s, env)
+        check(f"эффективный {eff}: жёсткий_верх {top}, порог {eff + 1}, режим {eff}",
+              (top, eff + 1, eff), got)
+        check(f"эффективный {eff}: строка ёмкости называет режим и порог", True,
+              f"эффективный режим {eff}" in (d.get("строка_ёмкости") or "")
+              and f"при пороге {eff + 1}" in (d.get("строка_ёмкости") or ""))
+    s, env = speed_stand(tmp, "авария", 1, accident=True)
+    check("авария: жёсткий_верх 2 (живых_при_аварии)", 2, speed_cap(s, env)[1][0])
+    s, env = speed_stand(tmp, "выбран-ультра", 1, selected="ultra")
+    check("выбран ultra при эффективном 1: жёсткий_верх 3, порог 2 — судится эффективный",
+          (3, 2, 1), speed_cap(s, env)[1])
+
+
+def case_speed_judge_silent(tmp: Path) -> None:
+    print("судья не ответил: прежние 5 и 3 из данных")
+    variants = (("старое-11-мин", dict(eff=10, age_min=11)),
+                ("битое", dict(eff=None, raw="{не json")),
+                ("без-полей", dict(eff=None, raw=json.dumps({"ts": iso_ago(0), "эффективный": 10}))),
+                ("нет-файла", dict(eff=None)))
+    for name, kw in variants:
+        s, env = speed_stand(tmp, f"молчит-{name}", **kw)
+        d, got, raw = speed_cap(s, env)
+        check(f"{name}: жёсткий_верх 5, порог 3, режим нет", (5, 3, None), got)
+        check(f"{name}: строка ёмкости — «судья скорости не отвечает»", True,
+              "судья скорости не отвечает" in (d.get("строка_ёмкости") or ""))
+    s, env = speed_stand(tmp, "свежее-9-мин", 5, age_min=9)
+    check("состояние 9 мин назад ещё верно: жёсткий_верх 8", 8, speed_cap(s, env)[1][0])
+
+
+def case_speed_capacity(tmp: Path) -> None:
+    print("ёмкость и правило нагрузки при потолке судьи")
+    s, env = speed_stand(tmp, "шесть-живых", 1, accident=True)
+    fill_capacity(s, 6)
+    d, got, _ = speed_cap(s, env)
+    check("6 живых при потолке 2: исполнителей 0, ждать", (2, 0, True),
+          (got[0], d.get("исполнителей"), d.get("ждать")))
+    for eff, wip, loaded in ((5, 3, False), (3, 3, False), (3, 4, True), (1, 2, True)):
+        s, env = speed_stand(tmp, f"нагрузка-{eff}-{wip}", eff, wip=wip)
+        d, got, _ = speed_cap(s, env)
+        check(f"эффективный {eff}, в работе {wip} (порог {eff + 1}): «нагрузка» "
+              f"{'выбрана' if loaded else 'не выбрана'}",
+              (wip, loaded), (get(d, "ёмкость", "задач_в_работе"), d.get("правило") == "нагрузка"))
+    s, env = speed_stand(tmp, "несвеж-нагрузка", 10, wip=1, age_min=30)
+    load(s)
+    d, got, _ = speed_cap(s, env)
+    check("судья несвеж, 3 задачи по журналу запусков: порог 3 из данных — «нагрузка»",
+          (3, 3, "нагрузка"), (got[1], get(d, "ёмкость", "задач_в_работе"), d.get("правило")))
+
+
 CASES = (case_trifle, case_parallel, case_chain, case_large, case_no_overlap, case_plan_part,
          case_orphan, case_candidate, case_nesting_depth, case_attach, case_new_chapter,
          case_pin, case_simple, case_estimate, case_two_launches, case_load,
          case_cut_under_load, case_simple_under_load, case_cut_nothing,
          case_cut_threshold_data, case_ceiling, case_live_sources, case_battle_tasks,
-         case_waiting_part, case_waiting_by_need, case_high_without_files, case_tasks_plan,
+         case_waiting_part, case_waiting_by_need, case_high_without_files,
+         case_trifle_never_waits, case_closed_plan, case_deleted_chapter, case_renamed_plan,
+         case_tasks_plan,
          case_map_lock, case_depth_attach_pin, case_outputs, case_metrics,
-         case_metrics_round1, case_broken)
+         case_metrics_round1, case_broken, case_hackathon_line,
+         case_speed_ceiling, case_speed_judge_silent, case_speed_capacity)
 
 
 def main() -> int:

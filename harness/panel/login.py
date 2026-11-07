@@ -150,26 +150,43 @@ class Вход:
         return self.внутренний_файл.read_text(encoding="utf-8").strip()
 
     # ── токены входа ────────────────────────────────────────────────────────
+    # Файл токена зовётся отпечатком, а не самим токеном: имя файла видно в
+    # листинге каталога, и носи оно ключ — ls выдавал бы действующий вход (И-3).
+    def _token_file(self, токен: str) -> Path:
+        return self.токены / hashlib.sha256(токен.encode()).hexdigest()
+
+    def _remove_expired(self) -> None:
+        """Стирает всё старше срока токена, в том числе старые файлы с ключом в
+        имени и остатки обмена. Возраст — по mtime, имя не читается."""
+        cutoff = time.time() - self.ТОКЕН_ЖИВЁТ_СЕК
+        for entry in self.токены.iterdir():
+            try:
+                if entry.stat().st_mtime < cutoff:
+                    entry.unlink()
+            except OSError:
+                pass          # файл чужого пользователя или уже убран соседом
+
     def выдать_токен(self, chat_id: str) -> str | None:
         """Одноразовый токен владельцу. Чужому чату — None, и это не ошибка."""
         if str(chat_id) != self.chat_id:
             return None
+        self._remove_expired()
         токен = secrets.token_urlsafe(32)
-        _записать_тайно(self.токены / токен, json.dumps({"ts": time.time()}))
+        _записать_тайно(self._token_file(токен), json.dumps({"ts": time.time()}))
         return токен
 
     def жив(self, токен: str) -> bool:
         """Токен ещё можно обменять. Взгляд ничего не тратит (C4)."""
-        файл = self.токены / токен
-        if not self._свой(файл) or not файл.exists():
+        self._remove_expired()
+        файл = self._token_file(токен)
+        if not файл.exists():
             return False
         return time.time() - self._выдан(файл) <= self.ТОКЕН_ЖИВЁТ_СЕК
 
     def обменять(self, токен: str, откуда: str) -> str | None:
         """Токен → подписанная сессия. Ровно один раз, даже при гонке (I13)."""
-        файл = self.токены / токен
-        if not self._свой(файл):
-            return None
+        self._remove_expired()
+        файл = self._token_file(токен)
         забрано = файл.with_name(файл.name + ".обменян")
         try:
             os.rename(файл, забрано)          # атомарно: успевает ровно один
@@ -183,13 +200,6 @@ class Вход:
         if time.time() - выдан > self.ТОКЕН_ЖИВЁТ_СЕК:
             return None
         return self._завести_сессию(откуда)
-
-    def _свой(self, файл: Path) -> bool:
-        """Имя токена не выводит за каталог: путей на входе панели нет."""
-        try:
-            return файл.resolve().parent == self.токены.resolve()
-        except OSError:
-            return False
 
     def _выдан(self, файл: Path) -> float:
         try:

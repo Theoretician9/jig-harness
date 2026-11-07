@@ -21,6 +21,8 @@
 #   bash scripts/publish.sh            # проверить и опубликовать
 #   bash scripts/publish.sh --проверка # только проверить, ничего не менять
 #   bash scripts/publish.sh --selftest
+#   bash scripts/publish.sh --переписать-историю <каталог-копии> --бэкап <файл.bundle>
+#                                       # перепись публичной истории (см. ниже)
 #
 # Код возврата: 0 — опубликовано (или проверка прошла), 1 — отказ замка,
 # 2 — не настроено.
@@ -153,6 +155,9 @@ ids_iz_istorii() { # $1=момент ISO (пусто — вся история) 
 опубликовать_сборку() {  # [--сухо] — прогнать замки 4-6 и выйти, ничего не отправляя
     local sborka="$PUBLIC_BUILD_DIR" paket="$PACKAGE_DIR" itog hesh suho=0
     [ "${1:-}" = "--сухо" ] && suho=1
+    # Собирается ровно тот коммит пакета, на который дано согласие (замок 2): HEAD,
+    # прочитанный здесь заново, мог уйти вперёд за время замка 1.
+    local paket_sha="${PAKET_SHA:-$(git -C "$paket" rev-parse HEAD 2>/dev/null)}"
 
     # Замок 4: собрать из УЧТЁННОГО состояния пакета.
     # Паспорт передаётся ЯВНО: без довода сборщик и гейт читают боевой
@@ -161,7 +166,8 @@ ids_iz_istorii() { # $1=момент ISO (пусто — вся история) 
     # подставном дереве (ревью кода 12.09.2026, №10).
     local pasport="${PUBLIC_PASPORT:-$(konf_koren)/install.conf}"
     itog=$(python3 "$PROJECT_DIR/scripts/build-public.py" \
-                   --пакет "$paket" --куда "$sborka" --паспорт "$pasport" 2>&1) || {
+                   --пакет "$paket" --куда "$sborka" --паспорт "$pasport" \
+                   --коммит "$paket_sha" 2>&1) || {
         say "ОТКАЗ: сборка не прошла — $itog"; return 1; }
     hesh=$(printf '%s' "$itog" | python3 -c 'import json,sys; print(json.load(sys.stdin)["пакет"])' 2>/dev/null)
     # Пустой хэш означает, что вывод сборщика не разобран: дальше он ушёл бы в
@@ -296,6 +302,16 @@ ids_iz_istorii() { # $1=момент ISO (пусто — вся история) 
             say "ОТКАЗ: коммит сборки не прошёл"; return 1; }
     fi
 
+    # Между замком 2 и пушем прошли минуты (замки 1, 3-6, версия): пакет, адрес,
+    # вершина публичной ветки и коммиты сборки обязаны быть теми, что одобрил владелец.
+    if [ "$(git -C "$paket" rev-parse HEAD 2>/dev/null)" != "$paket_sha" ]; then
+        say "ОТКАЗ: пакет сдвинулся после согласия — не отправлено"; return 1
+    fi
+    if [ -n "${PREDMET_ZAMKA:-}" ] && ! vyvod=$(python3 "$PROJECT_DIR/scripts/lib/door_subjects.py" \
+            сверить-публикацию "$PREDMET_ZAMKA" "$paket" "$sborka" "$PUBLIC_REMOTE" "$PUBLIC_BRANCH" 2>&1); then
+        say "ОТКАЗ: предмет публикации изменился после согласия — не отправлено: $vyvod"; return 1
+    fi
+
     # Только вперёд. Публичную историю переписывает владелец руками и по своему
     # слову: у тех, кто уже склонировал, обновление держится на ff-only, и
     # force сломал бы его навсегда.
@@ -338,6 +354,173 @@ ids_iz_istorii() { # $1=момент ISO (пусто — вся история) 
     fi
     say "опубликовано: $PUBLIC_BRANCH ← сборка из пакета $hesh"
     return 0
+}
+
+# ── Дверь переписи публичной истории ───────────────────────────────────────
+# Обычный путь — только вперёд (ff-only), и это держит обновление у тех, кто
+# уже склонировал. Перепись истории — решение владельца, и ей нужна законная
+# дверь, а не ручной force: сторож команд пускает к публичному удалённому
+# только этот скрипт. Дверь отправляет ГОТОВУЮ копию истории одной атомарной
+# отправкой, и каждая ссылка отправляется с арендой на тот sha, что дверь
+# прочла: чужой коммит, пришедший между чтением и отправкой, отвергнет всё.
+# Срок кнопки на перепись — owner_word.СРОК_ВИДА_МИН (60 мин).
+
+# Ссылки репозитория, ветки и теги: «sha ref», отсортированно. Теги — sha
+# самого объекта тега, не пересечённый: аренда сверяется именно с ним.
+ssylki_kopii() { # $1=репозиторий
+    git -C "$1" for-each-ref --format='%(objectname) %(refname)' refs/heads refs/tags | sort
+}
+
+# Ссылки публичного удалённого по адресу; HEAD и «^{}» отбрасываются.
+ssylki_udalyonnogo() { # $1=адрес → «sha ref»; код 1, если спросить не удалось
+    local otvet
+    otvet=$(git ls-remote "$1" 'refs/heads/*' 'refs/tags/*' 2>/dev/null) || return 1
+    printf '%s\n' "$otvet" | awk 'NF == 2 && $2 !~ /\^\{\}$/ {print $1, $2}' | sort
+}
+
+# Бэкап годен, если verify проходит и из него реально разворачивается
+# репозиторий: verify судит заголовок и обрезанный пакет не замечает.
+proverit_bekap() { # $1=файл $2=рабочий каталог
+    [ -f "$1" ] || { say "ОТКАЗ: бэкап (bundle) не найден: $1"; return 1; }
+    git init -q "$2/verify" && git -C "$2/verify" bundle verify "$1" >/dev/null 2>&1 \
+        || { say "ОТКАЗ: бэкап (bundle) не проходит git bundle verify: $1"; return 1; }
+    git clone -q --bare "$1" "$2/clone" >/dev/null 2>&1 && git -C "$2/clone" fsck --no-dangling >/dev/null 2>&1 \
+        || { say "ОТКАЗ: бэкап (bundle) не разворачивается в репозиторий — пакет внутри повреждён: $1"; return 1; }
+}
+
+# Прежняя публичная история обязана лежать в бэкапе целиком: откат из него —
+# единственный путь назад.
+bekap_pokryvaet() { # $1=файл $2=«sha ref» удалённого
+    local golovy stroka
+    golovy=$(git bundle list-heads "$1" 2>/dev/null)
+    while IFS= read -r stroka; do
+        grep -qxF "$stroka" <<< "$golovy" || {
+            say "ОТКАЗ: в бэкапе (bundle) нет ссылки «${stroka#* }» с её нынешним sha — бэкап устарел"
+            return 1; }
+    done <<< "$2"
+}
+
+# Ссылки удалённого и копии должны совпадать ПО ИМЕНАМ: лишнее у удалённого
+# (чужая работа) или у копии (тег, которого люди не видели) — решение человека.
+sverit_imena_ssylok() { # $1=«sha ref» удалённого $2=«sha ref» копии
+    local tam u_nas lishnee
+    tam=$(printf '%s\n' "$1" | cut -d' ' -f2 | LC_ALL=C sort); u_nas=$(printf '%s\n' "$2" | cut -d' ' -f2 | LC_ALL=C sort)
+    lishnee=$(LC_ALL=C comm -23 <(printf '%s\n' "$tam") <(printf '%s\n' "$u_nas") | paste -sd' ')
+    [ -z "$lishnee" ] || { say "ОТКАЗ: на удалённом есть ссылки, которых нет в копии: $lishnee"; return 1; }
+    lishnee=$(LC_ALL=C comm -13 <(printf '%s\n' "$tam") <(printf '%s\n' "$u_nas") | paste -sd' ')
+    [ -z "$lishnee" ] || { say "ОТКАЗ: в копии есть ссылки, которых нет на удалённом: $lishnee"; return 1; }
+}
+
+# Гейт чистоты по ИСТОРИИ копии. Сам гейт на историю отвечает кодом 0 и лишь
+# предупреждает (убрать её можно только перезаписью — то есть этой дверью), а
+# здесь перепись и есть то, что должно убрать следы: дверь считает находки сама.
+# Свежесть метки не судим: дерево копии уже опубликовано и сверено с деревом
+# сборки, а метка называет пакет, из которого оно собрано; пересобрать нельзя.
+proverit_chistotu_kopii() { # $1=копия $2=паспорт
+    local vyvod rc=0
+    vyvod=$(python3 "$PROJECT_DIR/scripts/check-public-clean.py" "$1" \
+                --пакет "$PACKAGE_DIR" --проект "$PROJECT_DIR" --паспорт "$2" \
+                --свежесть-не-судить 2>&1) || rc=$?
+    if [ "$rc" != 0 ] || grep -q '⚠ история' <<< "$vyvod"; then
+        say "ОТКАЗ: в копии остались следы установки (гейт чистоты, код $rc)"
+        printf '%s\n' "$vyvod" | sed 's/^/  /'
+        return 1
+    fi
+}
+
+# Согласие владельца на перепись — «Да» кнопкой на предмет переписи (вершина удалённого ДО входит
+# в предмет: после переписи прежнее «Да» повторный force-push не откроет). Нет кнопки — ворота
+# сами просят её; рабочий каталог двери убирается на выходе.
+RABOCHIJ_KATALOG_DVERI=""
+zavershit_dver() {
+    [ -z "$RABOCHIJ_KATALOG_DVERI" ] || rm -rf "$RABOCHIJ_KATALOG_DVERI"
+}
+
+PREDMET_PEREPISI=""
+vzyat_soglasie_dveri() { # $1=копия
+    local otvet
+    otvet=$(HARNESS_LOG_DIR="$LOG_DIR" python3 "$PROJECT_DIR/scripts/deploy_guard.py" --действие перепись \
+                --только-согласие --просить --перепись "$1" 2>&1) || {
+        say "ОТКАЗ: $otvet"
+        return 1; }
+    # Предмет, по которому открыта дверь; перед force-push он пересчитывается.
+    PREDMET_PEREPISI=$(printf '%s\n' "$otvet" | sed -n 's/^предмет: //p' | tail -1)
+    [ -n "$PREDMET_PEREPISI" ] || { say "ОТКАЗ: ворота не назвали предмет переписи"; return 1; }
+}
+
+# Сборка переводится на новую историю: fetch берёт ветку и теги v*, ветка
+# переставляется под проверкой старого sha, индекс сбрасывается.
+perevesti_sborku() { # $1=адрес $2=новый sha ветки
+    local sborka="$PUBLIC_BUILD_DIR" star
+    star=$(git -C "$sborka" rev-parse "refs/heads/$PUBLIC_BRANCH") || return 1
+    git -C "$sborka" remote set-url "$PUBLIC_REMOTE" "$1" 2>/dev/null \
+        || git -C "$sborka" remote add "$PUBLIC_REMOTE" "$1" || return 1
+    git -C "$sborka" fetch -q "$PUBLIC_REMOTE" \
+            "+refs/heads/$PUBLIC_BRANCH:refs/remotes/$PUBLIC_REMOTE/$PUBLIC_BRANCH" '+refs/tags/v*:refs/tags/v*' \
+        && git -C "$sborka" update-ref "refs/heads/$PUBLIC_BRANCH" "$2" "$star" \
+        && git -C "$sborka" reset -q
+}
+
+perepisat_istoriyu() { # $1=каталог копии $2=файл бэкапа
+    local kopiya bekap adres pasport tam u_nas refy="" stroka sha ref novyj soobshchenie
+    local -a arendy=() spisok=()
+    kopiya=$(readlink -f "$1" 2>/dev/null); bekap=$(readlink -f "$2" 2>/dev/null)
+    say "=== перепись публичной истории: копия → $PUBLIC_REMOTE/$PUBLIC_BRANCH ==="
+    git -C "${kopiya:-/нет}" rev-parse --git-dir >/dev/null 2>&1 \
+        || { say "ОТКАЗ: копии (репозитория) нет: $1"; return 1; }
+    git -C "$kopiya" rev-parse -q --verify "refs/heads/$PUBLIC_BRANCH" >/dev/null \
+        || { say "ОТКАЗ: в копии нет ветки «$PUBLIC_BRANCH»"; return 1; }
+    [ -n "$bekap" ] || { say "ОТКАЗ: не указан бэкап (bundle): --бэкап <файл.bundle>"; return 1; }
+    RABOCHIJ_KATALOG_DVERI=$(mktemp -d)
+    trap zavershit_dver EXIT
+    proverit_bekap "$bekap" "$RABOCHIJ_KATALOG_DVERI" || return 1
+    say "бэкап: $bekap, sha256 $(sha256sum "$bekap" | cut -d' ' -f1)"
+
+    adres=$(git -C "$PACKAGE_DIR" remote get-url "$PUBLIC_REMOTE" 2>/dev/null || true)
+    [ -n "$adres" ] || { say "ОТКАЗ: у пакета нет удалённого «$PUBLIC_REMOTE» — публиковать некуда"; return 1; }
+    tam=$(ssylki_udalyonnogo "$adres") && [ -n "$tam" ] \
+        || { say "ОТКАЗ: ссылок публичного удалённого прочитать не удалось (или их нет)"; return 1; }
+    u_nas=$(ssylki_kopii "$kopiya")
+    sverit_imena_ssylok "$tam" "$u_nas" || return 1
+    bekap_pokryvaet "$bekap" "$tam" || return 1
+    [ "$(git -C "$PUBLIC_BUILD_DIR" rev-parse "refs/heads/$PUBLIC_BRANCH" 2>/dev/null) refs/heads/$PUBLIC_BRANCH" \
+        = "$(printf '%s\n' "$tam" | grep " refs/heads/$PUBLIC_BRANCH\$")" ] \
+        || { say "ОТКАЗ: ветка сборки не равна ветке удалённого — в сборке неопубликованное"; return 1; }
+
+    [ "$(git -C "$kopiya" rev-parse "refs/heads/$PUBLIC_BRANCH^{tree}")" \
+        = "$(git -C "$PUBLIC_BUILD_DIR" rev-parse "refs/heads/$PUBLIC_BRANCH^{tree}" 2>/dev/null)" ] \
+        || { say "ОТКАЗ: дерево ветки в копии не равно дереву локальной сборки — перепись меняет историю, не содержимое"; return 1; }
+    # Паспорт передаётся явно, как в замке 6: иначе гейт читает боевой.
+    pasport="${PUBLIC_PASPORT:-$(konf_koren)/install.conf}"
+    proverit_chistotu_kopii "$kopiya" "$pasport" || return 1
+    say "проверки пройдены: ссылки сверены, бэкап покрывает удалённый, дерево равно сборке, следов в истории нет"
+
+    vzyat_soglasie_dveri "$kopiya" || return 1
+    while read -r sha ref; do
+        arendy+=("--force-with-lease=$ref:$sha")
+    done <<< "$tam"
+    # Без «+» в refspec: принудительность даёт ТОЛЬКО аренда. «+» отменил бы её проверку.
+    while read -r sha ref; do
+        spisok+=("$ref:$ref")
+    done <<< "$u_nas"
+    # Между «Да» и отправкой удалённый и копия обязаны остаться теми же, что на кнопке.
+    soobshchenie=$(python3 "$PROJECT_DIR/scripts/lib/door_subjects.py" сверить-перепись "$PREDMET_PEREPISI" \
+                       "$kopiya" "$PACKAGE_DIR" "$PUBLIC_REMOTE" "$PUBLIC_BRANCH" 2>&1) \
+        || { say "ОТКАЗ: $soobshchenie"; return 1; }
+    if ! git -C "$kopiya" push --atomic "${arendy[@]}" "$adres" "${spisok[@]}" 2>&1; then
+        say "ОТКАЗ: атомарная отправка не прошла (удалённый ушёл вперёд или отверг) — ничего не изменено"
+        return 1
+    fi
+    say "отправлено одной атомарной отправкой: ссылок $(printf '%s\n' "$u_nas" | grep -c .)"
+    say "откат: бэкап $bekap; прежние ссылки удалённого:"
+    printf '%s\n' "$tam" | sed 's/^/  /'
+    say "откат: git clone --mirror $bekap <каталог> && git -C <каталог> push --mirror <адрес «$PUBLIC_REMOTE» из git remote get-url>"
+    [ "$(ssylki_udalyonnogo "$adres")" = "$u_nas" ] \
+        || { say "ОТКАЗ: после отправки ссылки удалённого не равны ссылкам копии — смотри откат выше"; return 1; }
+    novyj=$(git -C "$kopiya" rev-parse "refs/heads/$PUBLIC_BRANCH")
+    perevesti_sborku "$adres" "$novyj" \
+        || { say "ОТКАЗ: удалённый переписан, но сборку перевести не удалось — смотри откат выше"; return 1; }
+    say "переписано: удалённый == копия, сборка переведена на новую историю"
 }
 
 if [ "${1:-}" = "--selftest" ]; then
@@ -744,6 +927,14 @@ if [ -z "${PUBLIC_BRANCH:-}" ] || [ -z "${PUBLIC_REMOTE:-}" ]    || [ -z "${PUBL
     exit 2
 fi
 
+# Перепись истории — отдельный режим ДО обычной цепочки замков: ворота
+# обычного пути в него не входят, у двери свои проверки.
+if [ "${1:-}" = "--переписать-историю" ]; then
+    [ "$#" = 4 ] && [ "${3:-}" = "--бэкап" ] || { say "ОТКАЗ: нужно --переписать-историю <каталог-копии> --бэкап <файл.bundle>"; exit 1; }
+    perepisat_istoriyu "${2:-}" "${4:-}" || exit 1
+    exit 0
+fi
+
 CHECK_ONLY=0
 FIRST=0
 [ "${1:-}" = "--проверка" ] && CHECK_ONLY=1
@@ -764,29 +955,34 @@ PO_SLOVU=0
 say "=== публикация: сборка → $PUBLIC_REMOTE/$PUBLIC_BRANCH ==="
 
 # ── Замок 1: ворота ────────────────────────────────────────────────────────
+# Свежесть согласия спрашивается ДО ворот (не тратя «да»), а тратится после:
+# ворота идут 10–40 минут, и «да», полученное перед запуском, к замку 2 иначе
+# старело. Прогон ворот — часть той же попытки, поэтому возраст судится на
+# момент её начала.
+POPYTKA_NACHATA=$(date +%s)
+# Нет кнопки — ворота просят её сами (--просить), но не в проверке: --проверка сеть и владельца не трогает.
+PREFLIGHT_ASK=""
+[ "$CHECK_ONLY" = 1 ] || PREFLIGHT_ASK="--просить"
+PREFLIGHT_REFUSAL=$(HARNESS_LOG_DIR="$LOG_DIR" python3 "$PROJECT_DIR/scripts/deploy_guard.py" --действие публикация --только-согласие \
+        --публикация "$PACKAGE_DIR" $PREFLIGHT_ASK 2>&1) || {
+    say "ОТКАЗ: $PREFLIGHT_REFUSAL"
+    exit 1
+}
 zamok_vorot "${LOG_DIR:?пуст LOG_DIR — не прочитан паспорт установки}" || exit 1
 
 # ── Замок 2: согласие владельца ИМЕННО на публикацию ───────────────────────
-REFUSAL=$(python3 "$PROJECT_DIR/scripts/deploy_guard.py" --действие публикация --только-согласие $([ "$CHECK_ONLY" = 1 ] && echo --не-тратить) 2>&1) || true
-if [ -n "$REFUSAL" ] && printf '%s' "$REFUSAL" | grep -q "нет согласия"; then
+# Судит КОД ВОЗВРАТА ворот: 0 — согласие есть, любой другой (1, 2, упавший python) — стоп.
+# Суд по тексту ответа пропускал всякий отказ, сказанный другими словами.
+PAKET_SHA=$(git -C "$PACKAGE_DIR" rev-parse HEAD 2>/dev/null) \
+    || { say "ОТКАЗ: HEAD пакета $PACKAGE_DIR не прочитан — публиковать нечего"; exit 1; }
+if ! REFUSAL=$(HARNESS_LOG_DIR="$LOG_DIR" python3 "$PROJECT_DIR/scripts/deploy_guard.py" --действие публикация --только-согласие \
+        --публикация "$PACKAGE_DIR" --свежесть-на "$POPYTKA_NACHATA" 2>&1); then
     say "ОТКАЗ: $REFUSAL"
-    say "Скажи владельцу, ЧТО именно публикуется, и дождись «да» про публикацию."
     exit 1
 fi
+# Предмет, по которому открыт замок, ворота печатают строкой «предмет: …»; перед пушем он пересчитывается.
+PREDMET_ZAMKA=$(printf '%s\n' "$REFUSAL" | sed -n 's/^предмет: //p' | tail -1)
 say "замок 2 · согласие владельца на публикацию есть"
-
-# Разрешение израсходовано ПРОХОДОМ замка, а действие ещё впереди. Упадём
-# дальше — вернём «да» владельца: 12.09.2026 публикация упала через две строки
-# после замка на своём дефекте, и второе «да» пришлось просить зря. Ловушка
-# снимается при успехе (в конце скрипта).
-VERNUT_SOGLASIE=1
-vernut_soglasie_pri_otkaze() {
-    [ "${VERNUT_SOGLASIE:-0}" = 1 ] || return 0
-    [ "$CHECK_ONLY" = 1 ] && return 0
-    python3 "$PROJECT_DIR/scripts/deploy_guard.py" --действие публикация \
-        --вернуть-согласие 2>&1 | sed 's/^/    /' || true
-}
-trap vernut_soglasie_pri_otkaze EXIT
 
 # ── Замок 3: на витрину — только проверенное владельцем ────────────────────
 # Момент, на котором стоит публичная ветка. Нет ветки — нет и точки отсчёта:
@@ -861,5 +1057,4 @@ fi
 
 # ── Публикация: собранное дерево, а не пакет ───────────────────────────────
 опубликовать_сборку || exit 1
-# Действие СОСТОЯЛОСЬ — теперь согласие потрачено по делу, возвращать нечего.
-VERNUT_SOGLASIE=0
+

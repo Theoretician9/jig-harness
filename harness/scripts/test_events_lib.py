@@ -46,6 +46,7 @@ ROOT = Path(__file__).resolve().parent.parent
 LIB = os.environ.get("HARNESS_EVENTS_LIB") or str(ROOT / "scripts" / "lib" / "events.py")
 SH = os.environ.get("HARNESS_EVENTS_SH") or str(ROOT / "scripts" / "lib" / "events.sh")
 LIVE_EVENTS = Path("/var/log/harness/.events")
+STAND_PREFIX = "events-lib-probe-"
 # Реестр журналов — ДАННЫЕ: ребёнок получает его копию дверью HARNESS_JOURNALS.
 # Без двери механизм ищет реестр рядом с собой, и копия механизма в каталоге
 # мутаций читала бы чужой (или никакой) реестр — мутации M19/M28 судились бы
@@ -190,9 +191,16 @@ def gen_secret() -> str:
 
 
 def live_snapshot():
+    """Следы стенда в боевом .events, а не тишина каталога: туда пишет вся машина.
+    Журналы стенда в реестре не значатся, а кэш задачи хранит путь карты стенда."""
     if not LIVE_EVENTS.exists():
         return ("нет",)
-    return tuple(sorted((p.name, p.stat().st_mtime_ns) for p in LIVE_EVENTS.rglob("*")))
+    import yaml
+    registered = set(yaml.safe_load(REGISTRY.read_text(encoding="utf-8"))["journals"])
+    lost = (LIVE_EVENTS / "lost.jsonl").read_text(encoding="utf-8", errors="replace")
+    stand_rows = sum(1 for m in re.finditer(r'"journal": "([^"]*)"', lost) if m.group(1) not in registered)
+    cache = LIVE_EVENTS / "current-task.json"
+    return stand_rows, cache.exists() and STAND_PREFIX in cache.read_text(encoding="utf-8", errors="replace")
 
 
 SRC = "scripts/hooks/guard_bash.py"
@@ -207,6 +215,8 @@ SRC = "scripts/hooks/guard_bash.py"
 # Формат: (каталог-ключ реестра, файл относительно каталога, строка, ожидание).
 SAMPLES = [
     ("log", 'confirmations.jsonl', {"ts": "2026-10-27T13:35:09+05:00", "kind": "any"}, '2026-10-27T08:35:09+00:00'),
+    ("log", 'consent-buttons.jsonl', {"v": 1, "ts": "2026-11-05T09:22:16+05:00", "src": "scripts/lib/consent_buttons.py", "event": "consent.sent", "outcome": "ok", "task": "hr.sample", "task_from": "map", "session": None, "data": {"nonce": "n-sample", "цель": "/tmp/sample", "message_id": 1, "from_id": None}}, '2026-11-05T04:22:16+00:00'),
+    ("log", 'consent-requests.jsonl', {"v": 1, "ts": "2026-11-05T09:21:39+05:00", "src": "scripts/ask-consent.py", "event": "consent.request", "outcome": "ok", "task": "hr.sample", "task_from": "map", "session": "s-sample", "data": {"nonce": "n-sample", "цель": "/tmp/sample", "почему": "образец"}}, '2026-11-05T04:21:39+00:00'),
     ("log", 'db-drops.jsonl', {"ts": "2026-08-13T09:50:12+05:00"}, '2026-08-13T04:50:12+00:00'),
     ("log", 'demon-spend.jsonl', {"когда": "2026-10-27T12:46:53+05:00", "session_id": "s-sample"}, '2026-10-27T07:46:53+00:00'),
     ("log", 'gates.jsonl', {"ts": "2026-10-27T14:02:36+05:00", "gate": "pre-commit", "verdict": "pass"}, '2026-10-27T09:02:36+00:00'),
@@ -215,15 +225,25 @@ SAMPLES = [
     ("log", 'inbox.jsonl', {"ts": "2026-10-27T13:51:38+05:00"}, '2026-10-27T08:51:38+00:00'),
     ("log", 'model-po-shagu.jsonl', {"ts": "2026-10-18T19:35:37+05:00"}, '2026-10-18T14:35:37+00:00'),
     ("log", 'model-switch.jsonl', {"ts": "2026-10-18T19:35:37+05:00"}, '2026-10-18T14:35:37+00:00'),
+    ("log", 'process-load.jsonl', {"v": 1, "ts": "2026-11-06T07:15:02+05:00", "src": "scripts/process-dispatcher.py", "event": "process.sample", "outcome": "ok", "task": "-", "task_from": "arg", "session": None, "data": {"окно_с": 60.1, "ядер": 4, "машина_cpu_с": 182.1, "группы": [{"id": "sample", "прогон": "1", "cpu_с": 1.0, "rss_мб": 10, "процессов": 1}], "остаток": {"cron.service": 0.1, "вне_корзин": 0.1}, "цена": {"cpu_мс": 60, "мс": 70}}}, '2026-11-06T02:15:02+00:00'),
+    ("log", 'process-runs.jsonl', {"v": 1, "ts": "2026-11-05T13:20:06+05:00", "src": "scripts/run-background.sh", "event": "process.end", "outcome": "ok", "task": "-", "task_from": "env", "session": None, "data": {"id": "sample", "pid": 1, "rc": 0, "с": 1.0, "cpu_с": 0.01}}, '2026-11-05T08:20:06+00:00'),
     ("log", 'rotation.jsonl', {"ts": "2026-10-27T13:20:05+05:00", "event": "silence_kick", "session": "s-sample"}, '2026-10-27T08:20:05+00:00'),
     ("log", 'skills.jsonl', {"ts": "2026-10-27T09:08:34Z", "skill": "pretask-contract", "task": "hr.harness-detailed-logging", "сессия": "s-sample"}, '2026-10-27T09:08:34+00:00'),
     ("log", 'stack-вопросы.jsonl', {"ts": "2026-10-26T15:45:03.842938+05:00"}, '2026-10-26T10:45:03+00:00'),
     ("log", 'tg_out.jsonl', {"ts": "2026-10-27T14:03:20+05:00"}, '2026-10-27T09:03:20+00:00'),
     ("log", 'tmp-sweep-incident-journal.jsonl', {"когда": "2026-10-24T23:24:19+0500"}, '2026-10-24T18:24:19+00:00'),
+    ("log", 'artifact-seals.jsonl', {"ts": "2026-11-06T20:56:38Z", "file": ".tasks/hr.sample/безопасность.yaml", "agent": "a-sample", "model": "sample", "источник": "хук"}, '2026-11-06T20:56:38+00:00'),
+    ("log", 'checks-slice.jsonl', {"v": 1, "ts": "2026-11-06T18:04:13+05:00", "src": "scripts/run-in-checks-slice.sh", "event": "checks.slice.queue-busy", "outcome": "refused", "task": "-", "task_from": "env", "session": "s-sample"}, '2026-11-06T13:04:13+00:00'),
+    ("log", 'self-sensors.jsonl', {"v": 1, "ts": "2026-11-07T03:05:21+05:00", "src": "scripts/self-sensors.py", "event": "sensors.daily", "outcome": "ok", "task": "hr.sample", "task_from": "map", "session": None}, '2026-11-06T22:05:21+00:00'),
     ("log", 'tokens-2026-08.jsonl', {"ts": "2026-08-31T11:23:10.490Z", "session": "s-sample"}, '2026-08-31T11:23:10+00:00'),
     ("log", 'tokens-2026-09.jsonl', {"ts": "2026-09-30T18:09:42.075Z", "session": "s-sample"}, '2026-09-30T18:09:42+00:00'),
     ("log", 'tokens-2026-10.jsonl', {"ts": "2026-10-27T09:09:34.617Z", "session": "s-sample"}, '2026-10-27T09:09:34+00:00'),
     ("log", 'внимание.jsonl', {"id": "1793085816.170080706", "когда": "2026-10-27T12:23:36+05:00"}, '2026-10-27T07:23:36+00:00'),
+    ("log", 'вложенность.jsonl', {"v": 1, "ts": "2026-11-04T09:22:31+05:00", "src": "scripts/hooks/launch_plan_guard.py", "event": "nesting.decision", "outcome": "skipped", "task": "hr.sample", "task_from": "map", "session": "s-sample"}, '2026-11-04T04:22:31+00:00'),
+    ("log", 'ответы-в-канал.jsonl', {"v": 1, "ts": "2026-11-04T00:14:53+05:00", "src": "scripts/hooks/channel_reply_guard.py", "event": "channel_reply.block", "outcome": "refused", "task": "hr.sample", "task_from": "map", "session": "s-sample"}, '2026-11-03T19:14:53+00:00'),
+    ("log", 'роли-помощников.jsonl', {"v": 1, "ts": "2026-11-04T09:26:18+05:00", "src": "scripts/hooks/lead_role_guard.py", "event": "role.decision", "outcome": "ok", "task": "hr.sample", "task_from": "map", "session": "s-sample"}, '2026-11-04T04:26:18+00:00'),
+    ("log", 'режим-скорости.jsonl', {"v": 1, "ts": "2026-11-05T13:20:06+05:00", "at": "2026-11-05T13:20:03+05:00", "src": "harness/demons/speed_mode.py", "event": "blocker.on", "outcome": "ok", "task": "hr.sample", "task_from": "map", "session": None, "data": {"блокер": "sample", "порог": 1}}, '2026-11-05T08:20:03+00:00'),
+    ("log", 'тревоги-ждут.jsonl', {"ts": "2026-11-01T09:01:12.345678+05:00", "key": "sample:broken", "title": "образец", "line": "harness", "watcher": "sample"}, '2026-11-01T04:01:12+00:00'),
     ("log", 'доставка.jsonl', {"v": 1, "ts": "2026-10-28T13:43:12+05:00", "src": "scripts/tg-dispatcher.sh", "event": "delivery.received", "outcome": "ok", "data": {"update_id": "1", "ts": "1793176992.643578412"}}, '2026-10-28T08:43:12+00:00'),
     ("log", 'возможности.jsonl', {"ts": "2026-08-12T11:58:27Z"}, '2026-08-12T11:58:27+00:00'),
     ("log", 'ворота-итог.jsonl', {"ts": "2026-10-27T14:01:22+05:00"}, '2026-10-27T09:01:22+00:00'),
@@ -891,7 +911,9 @@ def case_contract_extras(base: Path) -> None:
 
 def main() -> int:
     snap = live_snapshot()
+    # Литерал, а не константа: уборка /tmp (test_tmp_sweep, T-R) ищет создателя префикса по литералу в вызове.
     base = Path(tempfile.mkdtemp(prefix="events-lib-probe-"))
+    check("стенд: префикс mkdtemp равен STAND_PREFIX", STAND_PREFIX, base.name[:len(STAND_PREFIX)])
     os.chmod(base, 0o755)
     print(f"стенд: {base}; механизм: {LIB}; группа событий: {GROUP_NAME}")
     cases = [case_secret_forms, case_index_lock, case_lock_timeout, case_unwritable, case_short_write, case_never_raises, case_bad_journal_name,

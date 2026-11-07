@@ -40,6 +40,7 @@ GATES = {
     "pre-commit-gate.sh": "devmap_schema",
     "compare-with-package.py": "package_sync",
 }
+SNAPSHOT_GATES = ("check-context-hygiene.py", "weed-the-map.py")
 
 STUB = r'''#!/usr/bin/env python3
 import json, os, sys, time
@@ -52,7 +53,7 @@ key = name.split(".")[0].upper().replace("-", "_")
 stdin = "" if sys.stdin.isatty() else sys.stdin.read()
 files = {a: Path(a).read_text(encoding="utf-8") for a in args if os.path.isfile(a)}
 with open(os.environ["PRECHECK_STUB_LOG"], "a", encoding="utf-8") as log:
-    log.write(json.dumps({"name": name, "args": args, "stdin": stdin,
+    log.write(json.dumps({"name": name, "self": __file__, "args": args, "stdin": stdin,
                           "cwd": os.getcwd(), "files": files,
                           "force": os.environ.get("HARNESS_PIPELINE_FORCE"),
                           "why": os.environ.get("HARNESS_PIPELINE_WHY")},
@@ -105,6 +106,12 @@ def build_stand(base: Path, hook_text: str) -> Path:
     git(repo, "init", "-q")
     git(repo, "config", "user.email", "s@s")
     git(repo, "config", "user.name", "s")
+    git(repo, "add", "scripts")
+    git(repo, "commit", "-q", "-m", "стенд")
+    # Гигиену и прополку хук зовёт из снимка индекса: их копия в дереве
+    # сломана, и вызов мимо снимка проба увидит отказом.
+    for script in SNAPSHOT_GATES:
+        (scripts / script).write_text("import sys\nsys.exit(98)\n", encoding="utf-8")
     (repo / "dev-map.yaml").write_text("версия: индекс\n", encoding="utf-8")
     (repo / "доки").mkdir()
     (repo / "доки" / "файл с пробелом.md").write_text("x\n", encoding="utf-8")
@@ -158,10 +165,12 @@ def main() -> int:
         check("прополка карты: --проверить",
               by.get("weed-the-map.py", {}).get("args") == ["--проверить"],
               str(by.get("weed-the-map.py")))
-        hyg = by.get("check-context-hygiene.py", {}).get("args") or []
-        check("гигиена: --repo <корень>",
-              len(hyg) == 2 and hyg[0] == "--repo" and Path(hyg[1]).resolve() == repo.resolve(),
-              str(hyg))
+        hyg_call = by.get("check-context-hygiene.py", {})
+        hyg = hyg_call.get("args") or []
+        check("гигиена: --repo <снимок индекса>, и сама зовётся из снимка",
+              len(hyg) == 2 and hyg[0] == "--repo" and Path(hyg[1]).resolve() != repo.resolve()
+              and Path(hyg_call["self"]) == Path(hyg[1]) / "scripts" / "check-context-hygiene.py",
+              str(hyg_call))
         check("пайплайн: без аргументов", by.get("check-pipeline.py", {}).get("args") == [],
               str(by.get("check-pipeline.py")))
         staged = by.get("compare-with-package.py", {}).get("stdin", "")

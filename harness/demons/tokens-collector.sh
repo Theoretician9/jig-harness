@@ -55,6 +55,9 @@ say() { printf '%s  %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"; }
 
 # ── самотест: фейковый транскрипт во временном каталоге ─────────────────────
 if [ "${1:-}" = "--selftest" ]; then
+    # Самотест сам создаёт своё условие: PROJECT_DIR от запускающего (gates.sh)
+    # перебил бы временный конфиг и подсунул живую карту/репозиторий.
+    unset PROJECT_DIR
     T=$(mktemp -d)
     trap 'rm -rf "$T"' EXIT
     mkdir -p "$T/hb" "$T/log" "$T/tr/-home-agent-proj"
@@ -550,10 +553,19 @@ for path in sorted(glob.glob(os.path.join(troot, "*", "*.jsonl"))
                     "cache_r": int(usage.get("cache_read_input_tokens") or 0),
                     "tools": вызовов_инструментов(msg),
                 }
-                # Метка помощника ставится ТОЛЬКО ему: событие смены остаётся
-                # байт в байт прежним, а старые события без метки читаются как смена.
+                # Метки ставятся ТОЛЬКО помощнику и головной сессии: событие
+                # основной сессии остаётся байт в байт прежним, а старые события
+                # без меток читаются как смена. agent — id помощника (из строки,
+                # запасной путь — имя файла agent-<id>.jsonl); headless — сессия
+                # `claude -p` (entrypoint не cli): ей метку процесса даёт
+                # диспетчер процессов по demon-spend, а не угадывает потом.
                 if obj.get("isSidechain") is True:
                     событие["side"] = True
+                    агент = obj.get("agentId") or os.path.basename(path)[len("agent-"):-len(".jsonl")]
+                    if агент:
+                        событие["agent"] = агент
+                elif obj.get("entrypoint") not in (None, "cli"):
+                    событие["headless"] = True
                 events.append(событие)
             rec["pos"] = done + cut + 1
             rec["seen"] = file_seen

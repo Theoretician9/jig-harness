@@ -101,10 +101,13 @@ if [ -e "$STAND/tg-fail" ]; then printf 'FAIL %s\n' "\$*" >> "$STAND/tg.log"; ex
 printf 'CALL %s\n' "\$*" >> "$STAND/tg.log"
 exit 0
 EOF
-# Писатель карточек — заглушка: проба смотрит, снято ли «два агента».
+# Писатель карточек — обёртка: доводы в alert.log и вызов НАСТОЯЩЕМУ писателю с
+# LOG_DIR сторожа. Судится событие в журнале тревог, а не факт вызова: повторное
+# снятие закрытой карточки — штатный ход, а снятия открытой быть обязано.
 cat > "$STAND/proj/scripts/alert-task.py" <<EOF
-import sys
+import os, sys
 open("$STAND/alert.log", "a").write(" ".join(sys.argv[1:]) + "\\n")
+os.execv(sys.executable, [sys.executable, "$HERE/alert-task.py", *sys.argv[1:]])
 EOF
 chmod +x "$STAND"/bin/* "$STAND"/proj/scripts/*.sh
 ln -s "$LIB_PY" "$STAND/proj/scripts/lib/agent_processes.py"
@@ -162,7 +165,8 @@ warden_call() {  # $1=корень дерева $2=LOG_DIR $3..=функция �
     local root="$1" logdir="$2"; shift 2
     [ -n "$root" ] && [ -d "$root" ] || { echo "нет-дерева"; return; }
     mkdir -p "$logdir" "$STAND/hb"
-    env PATH="$STAND/bin:$PATH" PROJECT_DIR="$STAND/proj" HARNESS_SCRIPTS="$STAND/proj/scripts" \
+    # Без CLAUDE_CODE_SESSION_ID: настоящий писатель отказал бы как зову из сессии.
+    env -u CLAUDE_CODE_SESSION_ID PATH="$STAND/bin:$PATH" PROJECT_DIR="$STAND/proj" HARNESS_SCRIPTS="$STAND/proj/scripts" \
         LOG_DIR="$logdir" HEARTBEAT_DIR="$STAND/hb" TMUX_SESSION="$SES" \
         AGENT_START_CMD="true" AGENT_START_TIMEOUT_SEC=5 NEST_RESTORE_WAIT_SEC="${W_NEST_WAIT:-5}" \
         TWO_AGENTS_CONFIRM_SEC="${W_CONFIRM_SEC:-}" \
@@ -175,6 +179,19 @@ warden_call() {  # $1=корень дерева $2=LOG_DIR $3..=функция �
     echo $?
 }
 
+# События ключа session-warden:two-agents в журнале тревог: строки разбираются
+# как JSON, нет журнала — ноль событий.
+journal_events() {  # $1=LOG_DIR $2=событие
+    python3 - "$1/тревоги-сторожей.jsonl" "$2" <<'PY'
+import json, sys
+try:
+    lines = open(sys.argv[1], encoding="utf-8").read().splitlines()
+except OSError:
+    lines = []
+rows = [json.loads(l) for l in lines if l.strip()]
+print(sum(1 for r in rows if r.get("ключ") == "session-warden:two-agents" and r.get("событие") == sys.argv[2]))
+PY
+}
 has_mark() { [ -s "$STAND/start-agent.mark" ] && echo да || echo нет; }
 new_session_called() { grep -qw 'new-session' "$STAND/tmux.log" 2>/dev/null && echo да || echo нет; }
 # Только доставленные (CALL): отказы доставки пишутся строкой FAIL.
@@ -316,10 +333,27 @@ warden_call "$ROOT" "$LOGD" check_two_agents >/dev/null
 case_check "одна смена (с подагентом) — файл состояния был и снят" "да;нет" "$STATE_BEFORE;$([ -e "$STATE" ] && echo да || echo нет)"
 case_check "тревога была, условие ушло — карточка two-agents снята (resolve)" "1" \
     "$(grep -c '^--resolve session-warden:two-agents$' "$STAND/alert.log" 2>/dev/null || true)"
-# Без поднятой тревоги (.told нет) снимать нечего.
-: > "$STAND/alert.log"
+# Карточки в журнале нет — снимать нечего: события снятия не появляется.
 warden_call "$ROOT" "$LOGD" check_two_agents >/dev/null
-case_check "тревоги не было — resolve не зван" "0" "$(grep -c 'two-agents' "$STAND/alert.log" 2>/dev/null || true)"
+case_check "карточки two-agents нет — события снятия в журнале нет" "0" \
+    "$(journal_events "$LOGD" 'зелёное')"
+
+# ── (г2) карточка открыта, метки .told нет ──────────────────────────────────
+# Метку стёрли (перезапуск, уборка), а запись в журнале тревог открыта: судья
+# видит одну смену — снять обязан, иначе тревога висит красной вечно.
+echo "── (г2) журнал открыт, .told нет, одна смена — карточка снимается один раз ──"
+LOGJ="$STAND/log-journal"
+mkdir -p "$LOGJ"
+printf '%s\n' '{"ts": "2026-11-03T00:00:00.000000+00:00", "ключ": "session-warden:two-agents", "событие": "заведена", "id": "hr.w1t-two-agents", "сторож": "session-warden", "почему": ""}' \
+    > "$LOGJ/тревоги-сторожей.jsonl"
+warden_call "$ROOT" "$LOGJ" check_two_agents >/dev/null
+case_check "г2: журнал открыт, .told нет, одна смена — событие снятия в журнале" "1" \
+    "$(journal_events "$LOGJ" 'зелёное')"
+warden_call "$ROOT" "$LOGJ" check_two_agents >/dev/null
+case_check "г2: повторный круг при закрытой карточке — второго снятия нет" "1" \
+    "$(journal_events "$LOGJ" 'зелёное')"
+case_check "г2: писатель не отказал как зову из сессии" "0" \
+    "$(journal_events "$LOGJ" 'из-сессии')"
 
 # ── свой сервер под пробы с настоящим tmux ──────────────────────────────────
 own_server_up() {  # $1=сессия; печатать нечего, pid — в MY_SERVER_PID и own-server.pid

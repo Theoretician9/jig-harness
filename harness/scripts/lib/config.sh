@@ -143,6 +143,34 @@ komanda_agenta() {  # $1 = AGENT_START_CMD; печатает её же, без �
     printf 'env -u %s %s' "$NOSITEL_CHUZHOGO_VHODA" "$cmd"
 }
 
+# Метки запуска демона (спека логирования §5.4): <имя>.start при старте и
+# <имя>.end при выходе. Чистый bash: метки пишут и частые демоны. Каталог тот же,
+# что у events.py state_dir().
+harness_run_dir() { printf '%s' "${HARNESS_EVENTS_STATE:-${LOG_DIR:-/var/log/harness}/.events}/runs"; }
+
+harness_run() {  # $1 = имя демона; ставит ловушку выхода для демонов без своей
+    HARNESS_RUN_NAME="$1"; HARNESS_RUN_T0=$(date +%s)
+    local dir stat
+    dir="$(harness_run_dir)"
+    stat="$(cat /proc/$$/stat 2>/dev/null)"
+    # Поле 22 считается после последней «) »: имя процесса само может нести пробелы.
+    { mkdir -p "$dir" && printf 'pid=%s started=%s proc_start=%s\n' "$$" "$HARNESS_RUN_T0" \
+        "$(printf '%s' "${stat##*) }" | awk '{print $20}')" > "$dir/$1.start"; } \
+        || echo "harness_run: метку $1.start записать не удалось" >&2
+    trap 'rc=$?; harness_run_end "$rc"' EXIT
+    return 0
+}
+
+harness_run_end() {  # $1 = код выхода демона; сам не выходит и код не меняет
+    local dir now
+    [ -n "${HARNESS_RUN_NAME:-}" ] || return 0
+    dir="$(harness_run_dir)"; now=$(date +%s)
+    { mkdir -p "$dir" && printf 'pid=%s exit=%s ended=%s seconds=%s\n' "$$" "$1" "$now" \
+        "$((now - ${HARNESS_RUN_T0:-$now}))" > "$dir/$HARNESS_RUN_NAME.end"; } \
+        || echo "harness_run_end: метку $HARNESS_RUN_NAME.end записать не удалось" >&2
+    return 0
+}
+
 # Самотест: обе функции без него не проверял никто, а konf_iz_fajla — вход
 # сторожа инварианта И-3 (ревью кода 12.09.2026, F2-gen-03).
 konf_selftest() {

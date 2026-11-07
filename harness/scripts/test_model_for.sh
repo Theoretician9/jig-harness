@@ -135,12 +135,14 @@ rm -f "$T/log/model-dlya.log"
     MODELS_CONF="$T/models.yaml" LOG_DIR="$T/log" DEMON_MODEL= PROJECT_DIR="$T/proj" \
     timeout 30 bash -c 'source "$PROJECT_DIR/scripts/lib/models.sh"; model_dlya вид-которого-нет' \
     > "$T/out" 2> "$T/daemon.log")
-heard=0
-grep -q 'вид-которого-нет' "$T/daemon.log" 2>/dev/null && heard=1
-grep -q 'вид-которого-нет' "$T/log/model-dlya.log" 2>/dev/null && heard=1
-verdict "$heard" \
-    "БОЛЬНОЙ VG-04: model_dlya с неизвестным видом — вид назван в журнале демона (stderr или model-dlya.log)" \
-    "stderr демона «$(cat "$T/daemon.log")», model-dlya.log «$(cat "$T/log/model-dlya.log" 2>/dev/null)»"
+# Носителей два, и судится каждый: при «или» запись model-for.sh в
+# model-dlya.log прятала заглушённый stderr model_dlya.
+verdict "$(grep -q 'вид-которого-нет' "$T/daemon.log" 2>/dev/null && echo 1 || echo 0)" \
+    "БОЛЬНОЙ VG-04: model_dlya с неизвестным видом — вид назван в stderr демона (его журнал)" \
+    "stderr демона «$(cat "$T/daemon.log")»"
+verdict "$(grep -q 'вид-которого-нет' "$T/log/model-dlya.log" 2>/dev/null && echo 1 || echo 0)" \
+    "БОЛЬНОЙ VG-04: model_dlya с неизвестным видом — вид назван в model-dlya.log" \
+    "model-dlya.log «$(cat "$T/log/model-dlya.log" 2>/dev/null)»"
 verdict "$([ "$(tr -d '\n' < "$T/out")" = haiku ] && echo 1 || echo 0)" \
     "VG-04: model_dlya на неизвестном виде отдаёт умолчание haiku — вызов claude не падает" \
     "stdout «$(tr -d '\n' < "$T/out")»"

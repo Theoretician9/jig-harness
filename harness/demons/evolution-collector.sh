@@ -144,4 +144,8 @@ if [ "$SUMMARY_LINES" -gt "$SUMMARY_MAX" ]; then
     say "summary.jsonl превысил потолок $SUMMARY_MAX — срезано $CUT_N строк"
 fi
 
+# ── датчики ядра: раз в сутки (сутки отмеряет сам скрипт) ───────────────────
+# `||`: под set -e сбой датчиков не должен оборвать остальной сбор.
+python3 "$PROJECT_DIR/scripts/self-sensors.py" --record || say "self-sensors: код $?"
+
 touch "$HEARTBEAT_DIR/evolution-collector"

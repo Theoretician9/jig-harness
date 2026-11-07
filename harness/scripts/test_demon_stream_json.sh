@@ -179,7 +179,8 @@ reset_state() {
 told() { grep -c . "$TG_OUT"; }
 yes_no() { if "$@"; then echo да; else echo нет; fi; }
 SPEND="$LOG_DIR/demon-spend.jsonl"
-spend_lines() { [ -f "$SPEND" ] && grep -c . "$SPEND" || echo 0; }
+# Строки РАСХОДА: строка demon.start пишется до вызова и расходом не является.
+spend_lines() { [ -f "$SPEND" ] || { echo 0; return; }; grep -v '"demon.start"' "$SPEND" | grep -c . || true; }
 # Поле ПОСЛЕДНЕЙ строки расхода; «нет строки» — отдельный ответ, не пусто.
 spend_field() {
     python3 - "$SPEND" "$1" <<'PY'

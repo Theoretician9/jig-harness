@@ -116,15 +116,87 @@ USER_DB="${PROBE_DB_USER:-postgres}"
     printf 'жнец прошлых прогонов: контейнеров убрано %s, томов %s\n' "$ubrano_kont" "$ubrano_tom"
 }
 
-# Роли, которых дамп требует как владельцев. Имя роли берётся ИЗ ДАМПА: своё
-# умолчание было бы именем продукта, а его в коде харнеса быть не должно.
+# Роли, которых дамп требует: владельцы, получатели и отзываемые права, члены
+# групп. Имя роли берётся ИЗ ДАМПА: своё умолчание было бы именем продукта, а
+# его в коде харнеса быть не должно.
 #
 # Признак привязан к НАЧАЛУ строки DDL — как у соседа метакоманды_в_дампе и по
 # той же причине: без привязки строка ДАННЫХ внутри COPY со словами «OWNER TO
-# zloy» заводила роль в контейнере пробы (ревью 28.09.2026, F-12).
+# zloy» заводила роль в контейнере пробы. Роль в дампе названа не только через
+# OWNER TO: GRANT … TO, REVOKE … FROM и ALTER DEFAULT PRIVILEGES FOR ROLE дают
+# ~125 «role does not exist» на здоровом дампе. PUBLIC — слово SQL, не роль.
+# Имя берётся после ПОСЛЕДНЕГО TO/FROM строки: pg_dump пишет по одной роли на
+# оператор, а WITH GRANT OPTION стоит после имени и в класс имени не попадает.
 роли_в_дампе() { # $1 = путь дампа
-    grep -ohE '^(ALTER|CREATE|GRANT)[^;]* OWNER TO "?[A-Za-z0-9_-]+"?' "$1" 2>/dev/null \
-        | sed -E 's/.* OWNER TO "?([A-Za-z0-9_-]+)"?/\1/' | LC_ALL=C sort -u
+    local name_re='"?([A-Za-z0-9_-]+)"?'
+    {
+        grep -ohE '^(ALTER|CREATE|GRANT)[^;]* OWNER TO "?[A-Za-z0-9_-]+"?' "$1" \
+            | sed -E "s/.* OWNER TO $name_re/\1/"
+        grep -ohE '^(GRANT|REVOKE|ALTER DEFAULT PRIVILEGES)[^;]* (TO|FROM) "?[A-Za-z0-9_-]+"?' "$1" \
+            | sed -E "s/.* (TO|FROM) $name_re/\2/"
+        grep -ohE '^ALTER DEFAULT PRIVILEGES FOR ROLE "?[A-Za-z0-9_-]+"?' "$1" \
+            | sed -E "s/.* FOR ROLE $name_re/\1/"
+        # Членство «GRANT роль TO роль» — без ON: первое слово тоже роль.
+        grep -ohE '^GRANT "?[A-Za-z0-9_-]+"? TO ' "$1" \
+            | sed -E "s/^GRANT $name_re TO /\1/"
+    } 2>/dev/null | grep -vx 'PUBLIC' | LC_ALL=C sort -u
+}
+
+# Образ своего контейнера под версию pg_dump, снявшего дамп. Дамп pg_dump 17 в
+# сервере 16 не заливается («transaction_timeout», «\restrict»), а pg_dump не
+# снимает сервер новее себя — значит, ориентир именно его версия из шапки.
+# Шапка ищется в начале файла: дамп бывает в сотни МБ, а без шапки читать его
+# весь ради отказа незачем.
+image_for_dump() { # $1 = дамп, $2 = образ по умолчанию, $3 = шаблон с {major}
+    local major
+    major=$(head -n 30 "$1" 2>/dev/null | grep -m1 -oE '^-- Dumped by pg_dump version [0-9]+' \
+        | grep -oE '[0-9]+$')
+    if [ -n "$major" ] && [ -n "${3:-}" ]; then
+        printf '%s\n' "${3//\{major\}/$major}"
+    else
+        printf '%s\n' "$2"
+    fi
+}
+
+# Тег -3.6: в 17-3.5 сервер 17.5, и дамп pg_dump 17.11 с «\restrict» в нём не
+# заливается. Шаблон образа: НЕЗАДАННЫЙ ключ даёт умолчание, ПУСТОЙ — выключает подбор.
+# Живой /etc/harness/harness.conf ключа не имеет, и без умолчания в коде правка
+# не подействовала бы на боевом прогоне до развёртывания конфига.
+PROBE_IMAGE_TEMPLATE_DEFAULT='postgis/postgis:{major}-3.6'
+image_template() {
+    printf '%s\n' "${PROBE_DB_IMAGE_TEMPLATE-$PROBE_IMAGE_TEMPLATE_DEFAULT}"
+}
+
+# Текст тревоги владельцу — по виду исхода; пусто = молчать. «Не применима» —
+# решение владельца (дампов нет), тревога о нём стала бы шумом. Без кодов
+# инвариантов и путей: владелец их не открывает.
+alert_message() { # $1 = вид (not_restored|not_run|not_applicable|restored), $2 = ошибок, $3 = таблиц, $4 = причина
+    case "${1:-}" in
+        not_restored)
+            printf 'Проверка резервной копии: база из свежей копии НЕ восстановилась целиком. Ошибок при заливке: %s, таблиц поднялось: %s. Пока это не разобрано, копии нельзя считать годными. Подробности в журнале проверки; управляющий разберёт причину.\n' \
+                "${2:-?}" "${3:-0}" ;;
+        not_run)
+            printf 'Проверка резервной копии не проведена: %s. Годна ли копия, пока неизвестно; проверка повторится по расписанию, а причину надо устранить сейчас.\n' \
+                "${4:-причина не названа}" ;;
+    esac
+}
+
+alert_owner() { # те же доводы, что у alert_message
+    local msg sender="${RESTORE_PROBE_SENDER:-$PROJECT_DIR/scripts/tg_send.sh}"
+    msg=$(alert_message "$@")
+    [ -n "$msg" ] || return 0
+    # --task: за вестью есть работа модели (разобрать причину), карточка по ключу.
+    "$sender" "$msg" --task restore-probe:failed >/dev/null 2>&1 && return 0
+    echo "проба: тревога владельцу не ушла — дверь отказала"
+    return 1
+}
+
+# Выход «ПРОБА НЕ ПРОВЕДЕНА»: строка в журнал и тревога. Отказ двери выход не
+# меняет — проба и так завершается отказом.
+abort_not_run() { # $1 = причина
+    echo "$(date '+%Y-%m-%d %H:%M:%S')  ПРОБА НЕ ПРОВЕДЕНА: $1"
+    alert_owner not_run "" "" "$1" || true
+    exit 1
 }
 
 # Пароль одноразовой базы: генерируется, в секреты не ходит — боевой пароль в
@@ -137,6 +209,16 @@ USER_DB="${PROBE_DB_USER:-postgres}"
 
 if [ "${1:-}" = "--selftest" ]; then
     ok=1
+    # Фальшивая дверь тревоги ставится ПЕРВОЙ и наследуется всеми вложенными
+    # прогонами: боевой tg_send.sh из самопроверки не зовётся никогда — иначе
+    # каждый прогон ворот слал бы владельцу ложную тревогу.
+    dvor_trevogi=$(mktemp -d)
+    printf '#!/usr/bin/env bash\nprintf "=== вызов\\n%%s\\n" "$*" >> "%s/door.log"\n' \
+        "$dvor_trevogi" > "$dvor_trevogi/sender.sh"
+    printf '#!/usr/bin/env bash\nexit 1\n' > "$dvor_trevogi/sender-broken.sh"
+    chmod +x "$dvor_trevogi/sender.sh" "$dvor_trevogi/sender-broken.sh"
+    export RESTORE_PROBE_SENDER="$dvor_trevogi/sender.sh"
+    door_calls() { cat "$dvor_trevogi/door.log" 2>/dev/null | grep -c '^=== вызов'; }
     проба() { # $1=ждём(да|нет) $2=содержимое дампа $3=имя случая
         local f; f=$(mktemp)
         printf '%s\n' "$2" > "$f"
@@ -182,6 +264,11 @@ if [ "${1:-}" = "--selftest" ]; then
     if [ -f "$dvor_bez_baz/metki/restore-probe" ]; then
         echo "  ок    метка присмотра поставлена и при неприменимости — молчание не путается со смертью"
     else echo "  ПЛОХО метки нет: присмотр решит, что проба умерла"; ok=0; fi
+    # Неприменимость — не отказ: дампов нет по решению владельца, и тревога
+    # раз в неделю о том, что он сам решил, стала бы шумом.
+    if [ "$(door_calls)" = 0 ]; then
+        echo "  ок    дампов нет — владельца не тревожим (живой прогон, дверь не звали)"
+    else echo "  ПЛОХО «не применима» ушло владельцу тревогой: $(door_calls) вызовов"; ok=0; fi
     # БОЛЬНОЙ СЛУЧАЙ: ключ пуст, а дамп на диске ЛЕЖИТ. Судить надо явление:
     # прежняя редакция вышла бы нулём и не проверила бы ничего (ревью кода C-3).
     printf 'дамп' > "$dvor_bez_baz/kopii/db-lavka.dump"
@@ -269,17 +356,144 @@ PostgreSQL init process complete; ready for start up."; then
     if printf '%s' "$p1" | grep -q '[A-Za-z]'; then
         echo "  ок    пароль взят из объявленного алфавита, а не из метки времени"
     else echo "  ПЛОХО пароль состоит из одних цифр — это счётчик, а не случайность: «$p1»"; ok=0; fi
-    (( ok )) && { echo "SELFTEST: зелёный (23 пути: 6 метакоманды, 5 выбор контейнера, 3 дампов нет вовсе, 2 замок ролей, 1 роли из дампа, 2 маркер готовности, 2 жнец остатков, 2 пароль)"; exit 0; }
+    # ── БОЛЬНОЙ СЛУЧАЙ 05.10–26.10.2026: роли из GRANT/REVOKE ─────────────────
+    # Четыре прогона подряд проба писала «НЕ восстановился» на здоровом дампе:
+    # роли продукта названы в нём не только через OWNER TO, но и через GRANT …
+    # TO, REVOKE … FROM и ALTER DEFAULT PRIVILEGES FOR ROLE — ~125 ошибок «role
+    # does not exist». PUBLIC — слово SQL, а не роль: CREATE ROLE на нём падал
+    # бы каждый прогон. postgres в образе уже есть, создание идемпотентно —
+    # в списке он безвреден.
+    роли() { # $1=ждём (через пробел, порядок LC_ALL=C) $2=содержимое дампа $3=имя случая
+        local f got; f=$(mktemp)
+        printf '%s\n' "$2" > "$f"
+        got=$(роли_в_дампе "$f" | tr '\n' ' '); got="${got% }"
+        rm -f "$f"
+        if [ "$got" = "$1" ]; then printf '  ок    %s\n' "$3"
+        else printf '  ПЛОХО %s: ждали «%s», получили «%s»\n' "$3" "$1" "$got"; ok=0; fi
+    }
+    роли "app_user" 'GRANT SELECT,INSERT ON TABLE public.t TO app_user;' \
+        "БОЛЬНОЙ СЛУЧАЙ: роль из GRANT … TO заводится"
+    роли "app-rw" 'GRANT ALL ON SEQUENCE public.s TO "app-rw" WITH GRANT OPTION;' \
+        "GRANT … TO в кавычках и с WITH GRANT OPTION"
+    роли "app_revoked" 'REVOKE ALL ON TABLE public.t FROM app_revoked;' \
+        "роль из REVOKE … FROM"
+    роли "app_owner app_watch" \
+        'ALTER DEFAULT PRIVILEGES FOR ROLE app_owner IN SCHEMA public GRANT SELECT ON TABLES TO app_watch;' \
+        "ALTER DEFAULT PRIVILEGES: и владелец FOR ROLE, и получатель TO"
+    роли "app_child app_parent" 'GRANT app_parent TO app_child;' \
+        "членство GRANT роль TO роль — заводятся обе"
+    роли "postgres" "$(printf '%s\n' 'REVOKE ALL ON SCHEMA public FROM PUBLIC;' \
+            'GRANT USAGE ON SCHEMA public TO PUBLIC;' \
+            'ALTER DEFAULT PRIVILEGES FOR ROLE postgres REVOKE ALL ON FUNCTIONS FROM PUBLIC;')" \
+        "PUBLIC ролью не считается, postgres остаётся (создание идемпотентно)"
+    роли "" "$(printf '%s\n' 'COPY public.t (c) FROM stdin;' 'письмо: GRANT SELECT ON t TO zloy' \
+            'и ещё: REVOKE ALL ON t FROM zloy2' '\.')" \
+        "строка ДАННЫХ внутри COPY с GRANT/REVOKE роль не заводит"
+    # ── БОЛЬНОЙ СЛУЧАЙ 05.10–26.10.2026: дамп pg 17 в образе 16 ──────────────
+    # Свой контейнер поднимался из PROBE_DB_IMAGE (16), а дамп снят pg_dump 17:
+    # «transaction_timeout» и «\restrict» — синтаксис старшего pg_dump на
+    # младшем сервере. Версию решает pg_dump, а не сервер-источник: pg_dump не
+    # снимает сервер новее себя, и синтаксис дампа — его.
+    shapka() { # $1=версия сервера $2=версия pg_dump
+        printf -- '--\n-- PostgreSQL database dump\n--\n\n'
+        printf -- '-- Dumped from database version %s (Debian %s-1.pgdg13+1)\n' "$1" "$1"
+        printf -- '-- Dumped by pg_dump version %s (Debian %s-1.pgdg13+1)\n' "$2" "$2"
+    }
+    obraz() { # $1=ждём $2=начало дампа $3=шаблон $4=имя случая
+        local f got; f=$(mktemp)
+        printf '%s\nSET statement_timeout = 0;\n' "$2" > "$f"
+        got=$(image_for_dump "$f" "postgis/postgis:16-3.4" "$3")
+        rm -f "$f"
+        if [ "$got" = "$1" ]; then printf '  ок    %s\n' "$4"
+        else printf '  ПЛОХО %s: ждали «%s», получили «%s»\n' "$4" "$1" "$got"; ok=0; fi
+    }
+    shablon='postgis/postgis:{major}-3.5'
+    obraz "postgis/postgis:17-3.5" "$(shapka 17.6 17.6)" "$shablon" \
+        "БОЛЬНОЙ СЛУЧАЙ: дамп pg_dump 17 — образ major 17"
+    obraz "postgis/postgis:16-3.5" "$(shapka 16.4 16.4)" "$shablon" "дамп 16 — образ major 16"
+    obraz "postgis/postgis:17-3.5" "$(shapka 15.8 17.6)" "$shablon" \
+        "сервер 15, pg_dump 17 — образ по pg_dump"
+    obraz "postgis/postgis:16-3.4" "-- дамп без шапки" "$shablon" \
+        "шапки нет — PROBE_DB_IMAGE как есть"
+    obraz "postgis/postgis:16-3.4" "$(shapka 17.6 17.6)" "" \
+        "шаблон пуст — PROBE_DB_IMAGE как есть (подбор выключается данными)"
+    # ── БОЛЬНОЙ СЛУЧАЙ 05.10–26.10.2026: отказ пробы не доходил до владельца ──
+    # Исход печатался только в журнал крона: четыре недели «НЕ восстановился»
+    # не прочёл никто. Решение «слать или нет» — чистая функция по виду исхода
+    # (alert_message: пусто — молчать), отправка — alert_owner через дверь
+    # RESTORE_PROBE_SENDER (здесь — фальшивая, пишет в файл).
+    trevoga() { # $1=ждём вызовов $2=вид исхода $3=ошибок $4=таблиц $5=причина $6=имя случая
+        : > "$dvor_trevogi/door.log"
+        alert_owner "$2" "$3" "$4" "$5" >/dev/null 2>&1
+        local got; got=$(door_calls)
+        if [ "$got" = "$1" ]; then printf '  ок    %s\n' "$6"
+        else printf '  ПЛОХО %s: ждали вызовов двери %s, получили %s\n' "$6" "$1" "$got"; ok=0; fi
+    }
+    # Шаблон: незаданный ключ — умолчание кода, пустой — подбор выключен.
+    if [ "$(unset PROBE_DB_IMAGE_TEMPLATE; image_template)" = 'postgis/postgis:{major}-3.6' ]; then
+        echo "  ок    ключ шаблона не задан — действует умолчание кода"
+    else echo "  ПЛОХО без ключа шаблона подбор образа не работает до правки живого конфига"; ok=0; fi
+    if [ -z "$(PROBE_DB_IMAGE_TEMPLATE="" image_template)" ]; then
+        echo "  ок    ключ шаблона пуст — подбор образа выключен данными"
+    else echo "  ПЛОХО пустой ключ шаблона не выключает подбор"; ok=0; fi
+    trevoga 1 not_restored 128 100 "" \
+        "БОЛЬНОЙ СЛУЧАЙ: дамп не восстановился — владельцу ровно одно сообщение"
+    trevoga 1 not_run "" "" "контейнер не поднялся" "проба не проведена — сообщение уходит"
+    trevoga 0 not_applicable "" "" "" "дампов нет — тишина"
+    trevoga 0 restored 0 100 "" "дамп восстановился — тишина"
+    # Текст — для владельца: что случилось, сколько ошибок, что делать. Без
+    # кодов инвариантов и путей — он их не открывает.
+    tekst=$(alert_message not_restored 128 100 "" 2>/dev/null)
+    tekst_ne_provedena=$(alert_message not_run "" "" "контейнер не поднялся" 2>/dev/null)
+    if printf '%s' "$tekst" | grep -q '128' \
+       && printf '%s' "$tekst" | grep -qi 'восстанов' \
+       && ! printf '%s' "$tekst" | grep -qE 'И-1|/var/|scripts/|\.sh' \
+       && [ "${#tekst}" -le 600 ] \
+       && printf '%s' "$tekst_ne_provedena" | grep -q 'контейнер не поднялся'; then
+        echo "  ок    текст тревоги простыми словами: число ошибок есть, кодов и путей нет, причина названа"
+    else echo "  ПЛОХО текст тревоги: «$tekst» / «$tekst_ne_provedena»"; ok=0; fi
+    # Недоставленная тревога — та же тишина, если о ней молчать.
+    vyvod_dveri=$(RESTORE_PROBE_SENDER="$dvor_trevogi/sender-broken.sh" \
+        alert_owner not_restored 128 100 "" 2>&1); rc_dveri=$?
+    if [ "$rc_dveri" != 0 ] && printf '%s' "$vyvod_dveri" | grep -q 'не ушла'; then
+        echo "  ок    дверь отказала — проба говорит «тревога не ушла» и возвращает отказ"
+    else echo "  ПЛОХО отказ двери проглочен: rc=$rc_dveri, «$vyvod_dveri»"; ok=0; fi
+    # Живой путь целиком: функция, которую основной ход не зовёт, зелена в
+    # случаях выше. Образ заведомо несуществующий — docker отказывает за доли
+    # секунды, и проба доходит до «НЕ ПРОВЕДЕНА».
+    dvor_zhivoj=$(mktemp -d)
+    mkdir -p "$dvor_zhivoj/kopii/2026-11-02_0000"
+    printf 'CREATE TABLE t ();\n' > "$dvor_zhivoj/kopii/2026-11-02_0000/db-selftest.dump"
+    printf '%s\n' "BACKUP_DIR=\"$dvor_zhivoj/kopii\"" "LOG_DIR=\"$dvor_zhivoj\"" 'BACKUP_DBS=""' \
+        'DROPPABLE_DB_PREFIX="proba_"' 'PROBE_DB_CONTAINER=""' 'PROBE_DB_USER=""' \
+        'PROBE_DB_IMAGE="harness-restore-selftest.invalid/none:0"' 'PROBE_DB_IMAGE_TEMPLATE=""' \
+        "HEARTBEAT_DIR=\"$dvor_zhivoj/metki\"" > "$dvor_zhivoj/harness.conf"
+    : > "$dvor_trevogi/door.log"
+    vyvod_zhivoj=$(HARNESS_CONF="$dvor_zhivoj/harness.conf" LOG_DIR="$dvor_zhivoj" \
+        HEARTBEAT_DIR="$dvor_zhivoj/metki" bash "$0" 2>&1)
+    if printf '%s' "$vyvod_zhivoj" | grep -q 'НЕ ПРОВЕДЕНА' && [ "$(door_calls)" = 1 ]; then
+        echo "  ок    БОЛЬНОЙ СЛУЧАЙ: живой прогон «НЕ ПРОВЕДЕНА» — тревога ушла одна"
+    else
+        echo "  ПЛОХО живой прогон: вызовов двери $(door_calls), исход «$(printf '%s' "$vyvod_zhivoj" | tail -1)»"; ok=0
+    fi
+    rm -rf "$dvor_zhivoj" "$dvor_trevogi"
+    (( ok )) && { echo "SELFTEST: зелёный (45 путей: 6 метакоманды, 5 выбор контейнера, 4 дампов нет вовсе, 2 замок ролей, 1 роли владельцев, 7 роли из GRANT/REVOKE, 2 маркер готовности, 2 жнец остатков, 2 пароль, 5 образ по версии дампа, 2 шаблон образа, 7 тревога владельцу)"; exit 0; }
     echo "SELFTEST: КРАСНЫЙ"; exit 1
 fi
 
+
+# Дамп выбирается ДО подъёма контейнера: образ своего контейнера зависит от
+# версии pg_dump в шапке этого дампа.
+DUMP="${1:-$(find "$BACKUP_DIR" -name 'db-*.dump' -type f -printf '%T@ %p\n' 2>/dev/null \
+      | sort -nr | head -1 | cut -d' ' -f2-)}"
+[ -n "$DUMP" ] && [ -s "$DUMP" ] || abort_not_run "дампа не нашлось в $BACKUP_DIR"
 
 # Свой контейнер, если названного в конфиге нет: копии продукта существуют и
 # тогда, когда сам продукт погашен владельцем (замер 28.09.2026 — проба
 # отказывала на первом шаге с 21.09).
 SVOJ_KONT=0
 if нужен_свой_контейнер "$CONT"; then
-    OBRAZ="${PROBE_DB_IMAGE:-postgis/postgis:16-3.4}"
+    OBRAZ=$(image_for_dump "$DUMP" "${PROBE_DB_IMAGE:-postgis/postgis:16-3.4}" "$(image_template)")
     CONT="harness-restore-proba-$$"
     USER_DB="postgres"
     echo "контейнера продукта нет — поднимаю свой ($OBRAZ, $CONT)"
@@ -308,8 +522,7 @@ if нужен_свой_контейнер "$CONT"; then
         # Причина отказа НУЖНА: без неё «контейнер не поднялся» ничем не
         # отличается от «образа нет» и «места нет».
         echo "ОТКАЗ: свой контейнер для пробы не поднялся (образ $OBRAZ): $ZAPUSK"
-        echo "$(date '+%Y-%m-%d %H:%M:%S')  ПРОБА НЕ ПРОВЕДЕНА: контейнер не поднялся"
-        exit 1
+        abort_not_run "контейнер не поднялся (образ $OBRAZ)"
     }
     SVOJ_KONT=1
     # Ждём НАСТОЯЩЕЙ готовности. Официальный образ при первом запуске поднимает
@@ -336,14 +549,10 @@ if нужен_свой_контейнер "$CONT"; then
     done
     if ! docker exec -i "$CONT" pg_isready -U "$USER_DB" >/dev/null 2>&1; then
         echo "ОТКАЗ: свой контейнер не стал готов за 300 с (образ $OBRAZ: нет строки о готовности или база не отвечает)"
-        echo "$(date '+%Y-%m-%d %H:%M:%S')  ПРОБА НЕ ПРОВЕДЕНА: база не поднялась"
-        exit 1
+        abort_not_run "база не поднялась"
     fi
 fi
 
-DUMP="${1:-$(find "$BACKUP_DIR" -name 'db-*.dump' -type f -printf '%T@ %p\n' 2>/dev/null \
-      | sort -nr | head -1 | cut -d' ' -f2-)}"
-[ -n "$DUMP" ] && [ -s "$DUMP" ] || { echo "проба: дампа не нашлось в $BACKUP_DIR"; exit 1; }
 DB="${PREFIX}restore_$(date +%m%d_%H%M)"
 
 # Проба оставляет за собой базу на 278 МБ, а убрать её может только штатная
@@ -364,8 +573,7 @@ if [ "${OLD_PROBES:-0}" -gt 0 ] 2>/dev/null; then
         "select '  DB_ADMIN_EXEC=''docker exec -i $CONT'' bash scripts/drop-database.sh '||datname \
          ||'   ('||pg_size_pretty(pg_database_size(datname))||')' \
          from pg_database where datname like '${PREFIX}restore_%'" 2>/dev/null
-    echo "$(date '+%Y-%m-%d %H:%M:%S')  ПРОБА НЕ ПРОВЕДЕНА: место занято прежней пробой"
-    exit 1
+    abort_not_run "место занято прежней пробной базой"
 fi
 
 FOUND=$(метакоманды_в_дампе "$DUMP")
@@ -373,14 +581,13 @@ if [ -n "$FOUND" ]; then
     echo "ОТКАЗ: в дампе есть команды смены базы — заливка ушла бы мимо пробной:"
     printf '  %s\n' "$FOUND"
     echo "Сними дамп без --create (или вырежи метакоманды) и повтори."
-    echo "$(date '+%Y-%m-%d %H:%M:%S')  ПРОБА НЕ ПРОВЕДЕНА: дамп уводит заливку в чужую базу"
-    exit 1
+    abort_not_run "дамп уводит заливку в чужую базу"
 fi
 
 echo "=== проба восстановления: $(date '+%Y-%m-%d %H:%M:%S') ==="
 echo "дамп: $DUMP ($(du -h "$DUMP" | cut -f1)) → база $DB в контейнере $CONT"
 docker exec -i "$CONT" psql -U "$USER_DB" -d postgres -c "CREATE DATABASE \"$DB\"" \
-    || { echo "ОТКАЗ: базу не создать — проба не проведена"; exit 1; }
+    || { echo "ОТКАЗ: базу не создать — проба не проведена"; abort_not_run "пробную базу не создать"; }
 if роли_создавать "$SVOJ_KONT"; then
     # Роли владельцев нужны дампу: в чистом контейнере их нет, и заливка даёт
     # «role does not exist» на каждой таблице (замер 28.09.2026 — 49 ошибок, 0
@@ -389,9 +596,11 @@ if роли_создавать "$SVOJ_KONT"; then
         [ -n "$rol" ] || continue
         # Идемпотентно: роль вроде postgres в образе уже есть, и голый CREATE ROLE
         # печатал бы тревогу каждый прогон — сторож, который кричит всегда.
+        # </dev/null: `docker exec -i` читает stdin цикла и съедал все роли, кроме
+        # первой (стенд 02.11.2026: app_y не заведена, хотя найдена в дампе).
         docker exec -i "$CONT" psql -U "$USER_DB" -d postgres \
             -c "DO \$\$ BEGIN CREATE ROLE \"$rol\" NOLOGIN;
-                EXCEPTION WHEN duplicate_object THEN NULL; END \$\$" >/dev/null 2>&1 \
+                EXCEPTION WHEN duplicate_object THEN NULL; END \$\$" >/dev/null 2>&1 </dev/null \
             || echo "проба: роль $rol не создана — ошибки владельца возможны"
     done <<< "$(роли_в_дампе "$DUMP")"
 fi
@@ -424,7 +633,12 @@ mkdir -p "${HEARTBEAT_DIR}" 2>/dev/null || true
 
 if [ "$RC" = 0 ] && [ "${ERRS:-1}" = 0 ] && [ "${TABLES:-0}" -gt 0 ]; then
     echo "$(date '+%Y-%m-%d %H:%M:%S')  ПРОБА ЗАВЕРШЕНА: дамп восстанавливается (таблиц ${TABLES}, ошибок 0)"
+    # Зелёное снимает карточку отказа; писателя может не быть — проба от этого не падает.
+    if [ -f "$PROJECT_DIR/scripts/alert-task.py" ]; then
+        python3 "$PROJECT_DIR/scripts/alert-task.py" --resolve restore-probe:failed </dev/null >/dev/null 2>&1 || true
+    fi
     exit 0
 fi
 echo "$(date '+%Y-%m-%d %H:%M:%S')  ПРОБА ЗАВЕРШЕНА: дамп НЕ восстановился целиком — это отказ И-1, разбирайся сейчас"
+alert_owner not_restored "${ERRS:-?}" "${TABLES:-0}" "" || true
 exit 1

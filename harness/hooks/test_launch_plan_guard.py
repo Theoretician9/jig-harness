@@ -62,6 +62,22 @@ event nesting.decision, data {ид, часть, роль, правило, отк
 Стенд — тот же, что у test_launch_plan.py (Stand оттуда): свои журналы, карта,
 планы, копии данных. Механизм — рядом либо HARNESS_LAUNCH_PLAN_GUARD (дверь
 для мутаций); launch-plan.py — HARNESS_LAUNCH_PLAN.
+Мелкая и при ёмкости 0 (слово владельца 30.10, Н-10): план запуска мелочи —
+исполнителей 1, ждать false; хук молчит, отказа 5 нет.
+
+Цена хука (замер 30.10 15:20–15:24, стенд этой пробы, 4 ядра, нагрузка 30–34,
+лог /var/log/harness/nesting-r2-hooktime.log), по 10 прогонов:
+  таймаут 1 с: стена мин 4,08 / медиана 4,56 / макс 5,54 с; CPU (user+sys хука
+    и детей) 0,21 / 0,23 / 0,25 с;
+  решение из кэша: стена 0,93 / 2,98 / 4,51 с; CPU 0,17 / 0,18 / 0,21 с;
+  `python3 -c pass`: стена 0,37 / 0,74 с, CPU 0,04 с; импорт хука (yaml,
+    events…): стена 1,28 / 2,43 с, CPU 0,16 с.
+Стену делает очередь к процессору (≈7 задач на ядро), не хук: без нагрузки
+хук в случае таймаута — CPU 0,25 + ожидание 1 с ≤ 1,5 с. Поэтому проба судит
+три вещи: стена < 5 с (грубая, под нагрузкой > 30 может не уложиться — макс
+5,54), метка «медленный вызов не досидел» и CPU-время ≤ 1,5 с — две последние
+от нагрузки не зависят.
+
 Прогон: python3 scripts/hooks/test_launch_plan_guard.py
 """
 from __future__ import annotations
@@ -69,6 +85,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import resource
 import subprocess
 import sys
 import tempfile
@@ -85,6 +102,10 @@ LAUNCH_PLAN = probe.LAUNCH_PLAN
 HOOK_SRC = probe.HOOK_SRC
 LEAD, WORKER = probe.LEAD, probe.WORKER
 DOOR_REASON = "проверка двери пробой: lead на простую задачу"
+# Окно стенда — из своей копии данных, не боевое значение helper-roles.yaml.
+WINDOW_MIN = probe.ROLES["вывод_роли"]["предохранитель"]["окно_живых"]
+HOOK_CPU_MAX_S = 1.5
+SLOW_WALL_MAX_S = 5
 
 checked = failed = 0
 
@@ -297,6 +318,25 @@ def case_trifle_silent(tmp: Path) -> None:
     check("мелкая: строка skipped", "skipped", last(s).get("outcome"))
 
 
+def case_trifle_capacity_zero(tmp: Path) -> None:
+    print("мелкая при ёмкости 0 — хук молчит, отказа 5 нет (Н-10, слово 30.10)")
+    s = probe.Stand(tmp / "мелкая-ёмкость-0", roles={"строгость": "красный"})
+    s.card("M")
+    s.pretask("M", files=[s.file("src/m.py")])
+    probe.fill_capacity(s)
+    s.write()
+    s.run("M")
+    saved = json.loads((s.logs / "планы-запуска" / "M.json").read_text(encoding="utf-8"))
+    check("мелкая при ёмкости 0: план запуска — свободно 0, исполнителей 1, ждать false",
+          (0, 1, False), ((saved.get("ёмкость") or {}).get("свободно"),
+                          saved.get("исполнителей"), saved.get("ждать")))
+    for n in (1, 2):
+        code, err, ctx = hook(s, agent(f"Часть: M#{n}\nПравь."))
+        check(f"мелкая при ёмкости 0, запуск {n}: код 0, без текста, skipped, отказа нет",
+              (0, "", "", "skipped", None),
+              (code, err, ctx, last(s).get("outcome"), (last(s).get("data") or {}).get("отказ")))
+
+
 def case_stale_cache(tmp: Path) -> None:
     print("решение старше окна пересчитывается (Н-2)")
     s = setup(tmp / "кэш", "красный")
@@ -312,7 +352,7 @@ def case_stale_cache(tmp: Path) -> None:
           (2, 5), (code, (last(s).get("data") or {}).get("отказ")))
 
     saved.write_text(json.dumps(frozen, ensure_ascii=False), encoding="utf-8")
-    old = time.time() - (30 + 5) * 60
+    old = time.time() - (WINDOW_MIN + 5) * 60
     os.utime(saved, (old, old))
     code, err, ctx = hook(s, payload)
     check("кэш: решение старше окна_живых — пересчёт, первый исполнитель проходит",
@@ -347,21 +387,34 @@ def case_failure(tmp: Path) -> None:
     check("сбой: своя ошибка — код 0, строка skipped, data.сбой «сбой»",
           (0, "skipped", "сбой"), (code, row.get("outcome"), (row.get("data") or {}).get("сбой")))
 
-    slow = tmp / "медленный-launch-plan.py"
-    slow.write_text("import time\ntime.sleep(3)\n", encoding="utf-8")
     for limit, expected in ((1, "таймаут"), (10, None)):
+        # Метку медленный вызов пишет, только досидев свои 3 с: есть метка — хук ждал.
+        marker = tmp / f"досидел-{limit}"
+        slow = tmp / f"медленный-launch-plan-{limit}.py"
+        slow.write_text(f"import pathlib, time\ntime.sleep(3)\n"
+                        f"pathlib.Path({str(marker)!r}).write_text('1')\n", encoding="utf-8")
         s = setup(tmp / f"таймаут-{limit}", "красный", plan_runs=False)
         s.set_roles({"строгость": "красный", "таймаут_плана_с": limit})
+        before = resource.getrusage(resource.RUSAGE_CHILDREN)
         started = time.monotonic()
         code, err, ctx = hook(s, agent("Часть: P/c/W\nВеди.", subagent_type=LEAD),
                               launch_plan=slow)
         spent = time.monotonic() - started
+        after = resource.getrusage(resource.RUSAGE_CHILDREN)
         row = last(s)
         check(f"таймаут_плана_с {limit} из данных: код 0, skipped, сбой {expected}",
               (0, "skipped", expected),
               (code, row.get("outcome"), (row.get("data") or {}).get("сбой")))
+        check(f"таймаут_плана_с {limit}: медленный вызов {'убит до конца' if limit == 1 else 'досидел (контроль метки)'}",
+              limit != 1, marker.exists())
         if limit == 1:
-            check("таймаут 1 с: хук не ждал 3 с медленного вызова", True, spent < 3)
+            # Стена под нагрузкой машины плывёт (замер в docstring), порог стены — с
+            # запасом; метка и CPU-время хука от нагрузки не зависят.
+            cpu = (after.ru_utime - before.ru_utime) + (after.ru_stime - before.ru_stime)
+            check(f"таймаут 1 с: хук не ждал 3 с медленного вызова (стена < {SLOW_WALL_MAX_S} с)",
+                  True, spent < SLOW_WALL_MAX_S)
+            check(f"таймаут 1 с: CPU-время хука (user+sys детей) ≤ {HOOK_CPU_MAX_S} с, "
+                  f"вышло {cpu:.2f} с", True, cpu <= HOOK_CPU_MAX_S)
 
 
 def case_tasks_plan(tmp: Path) -> None:
@@ -378,7 +431,8 @@ def case_tasks_plan(tmp: Path) -> None:
 
 
 CASES = (case_red, case_yellow, case_door, case_skip, case_self_derive, case_stale,
-         case_trifle_silent, case_stale_cache, case_order, case_failure, case_tasks_plan)
+         case_trifle_silent, case_trifle_capacity_zero, case_stale_cache, case_order,
+         case_failure, case_tasks_plan)
 
 
 def main() -> int:

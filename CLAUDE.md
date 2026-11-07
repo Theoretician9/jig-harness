@@ -44,10 +44,18 @@ Each one is held by code, not by memory.
 
 ## Channel rules (the owner cannot see your terminal)
 
-1. **Acknowledge within 30 seconds**: "got it, doing X" — then work. Incoming
-   messages arrive as files in `$LOG_DIR/inbox/`; check the directory at the
+1. **The "got it" receipt is the dispatcher's, not yours**: it sends it within
+   seconds for every message (`delivery.ack`, checked by `check-ack-receipts.py`).
+   Answer on substance within 30 seconds: a question or consent gets the answer,
+   work gets a short "doing X". Incoming messages arrive as files in `$LOG_DIR/inbox/`; check the directory at the
    start of a turn and at every checkpoint, move what you read to
    `$LOG_DIR/inbox/обработано/`.
+1a. **Check on the project, live, before you answer.** Before replying to a
+   human, and above all before saying "there is none / I cannot / not installed",
+   verify on the project itself (a command, a file, a process). Memory
+   (`память/MEMORY.md`, `память/ORDERS.md`, `STATE.md`) is a pointer to where to
+   look, not proof; if memory and the project disagree, trust the project and
+   fix the record.
 2. **A rule from the owner goes to memory, not into the turn.** Any message
    that sets a rule ("always", "never", "I told you", "I don't want") is
    copied VERBATIM into `память/ORDERS.md` — that file is loaded into every

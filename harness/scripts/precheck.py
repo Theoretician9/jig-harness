@@ -16,7 +16,7 @@
 молчит.
 
 Судится ИНДЕКС, как у коммита: сначала `git add`, потом precheck, потом commit.
-Гигиена и прополка карты и в хуке читают рабочее дерево — здесь так же.
+Гейты, которые хук зовёт из снимка индекса ($SNAP_DIR), и здесь идут из снимка.
 
 Дверь обхода пайплайна (HARNESS_PIPELINE_FORCE) здесь не открывается: гейт с
 открытой дверью пишет строку в журнал обходов, и она закрыла бы долг задачи без
@@ -46,7 +46,7 @@ GATE_NAMES = ("context_hygiene", "прополка_карты", "пайплай�
               "devmap_schema", "package_sync")
 
 # Валидатор, который хук держит строкой, и дверь хука, которая зовёт его же.
-INLINE_DOORS = {"$DEVMAP_VALIDATOR": "--devmap-only"}
+INLINE_DOORS = {"devmap_check": "--devmap-only"}
 
 # Обход не должен оставить след без коммита (см. шапку).
 STRIPPED_ENV = ("HARNESS_PIPELINE_FORCE", "HARNESS_PIPELINE_WHY")
@@ -94,8 +94,8 @@ def parse_gate(line: str, name: str) -> dict:
         line = re.sub(rf'\s*\|\|\s*fail "{re.escape(name)}"$', "", line)
     argv = shlex.split(line)
     for inline, door in INLINE_DOORS.items():
-        if argv[:3] == ["python3", "-c", inline]:
-            argv = ["bash", "$SCRIPT_DIR/" + HOOK.name, door] + argv[3:]
+        if argv[:1] == [inline]:
+            argv = ["bash", "$SCRIPT_DIR/" + HOOK.name, door] + argv[1:]
     return {"name": name, "argv": argv, "stdin": stdin_var, "yellow": yellow}
 
 
@@ -106,6 +106,15 @@ def staged_list(lines: list[str], root: Path) -> str:
     if proc.returncode != 0:
         raise HookError(f"список индекса не прочитан: {proc.stderr.strip()}")
     return proc.stdout
+
+
+def index_snapshot(root: Path, stage_tmp: Path) -> Path:
+    snap = stage_tmp / "snapshot"
+    proc = subprocess.run(["git", "checkout-index", "-a", f"--prefix={snap}/"],
+                          cwd=root, capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise HookError(f"снимок индекса не снят: {proc.stderr.strip()}")
+    return snap
 
 
 def expand(argv: list[str], values: dict[str, str], staged: set[str],
@@ -187,13 +196,14 @@ def main(argv: list[str]) -> int:
     refused = 0
     started = time.monotonic()
     with tempfile.TemporaryDirectory() as tmp:
-        values = {"SCRIPT_DIR": str(SCRIPT_DIR), "PWD": str(root), "STAGE_TMP": tmp}
-        for gate in gates:
-            try:
-                cmd = expand(gate["argv"], values, staged, root, Path(tmp))
-            except HookError as err:
-                print(f"[precheck] ОТКАЗ РАБОТАТЬ: {err}")
-                return 2
+        try:
+            values = {"SCRIPT_DIR": str(SCRIPT_DIR), "PWD": str(root), "STAGE_TMP": tmp,
+                      "SNAP_DIR": str(index_snapshot(root, Path(tmp)))}
+            commands = [expand(gate["argv"], values, staged, root, Path(tmp)) for gate in gates]
+        except HookError as err:
+            print(f"[precheck] ОТКАЗ РАБОТАТЬ: {err}")
+            return 2
+        for gate, cmd in zip(gates, commands):
             if cmd is None:
                 print(f"  пропущен {gate['name']} — его файла нет в индексе, коммит его не судит")
                 continue

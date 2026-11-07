@@ -19,6 +19,7 @@ import stat
 import subprocess
 import sys
 import time
+import traceback
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -667,6 +668,242 @@ def _разобрать_устройство(записи: list, искать: s
     return {"всего": len(записи), "найдено": найдено,
             "группы": [{"вид": вид, "строки": группы[вид]}
                        for вид in (*порядок, *sorted(хвост)) if вид in группы]}
+
+
+# ───────────────────────── раздел «Процессы» ─────────────────────────
+
+BACKGROUND_KEY = "BACKGROUND_PROCESSES"
+CHECKS_SLICE_DIR = "/sys/fs/cgroup/harness.slice/harness-checks.slice"
+VIEW_FILE = "process-dispatcher-view.json"
+CHECKS_RUNS_SHOWN = 5
+RUNS_TAIL_BYTES = 2_000_000
+
+
+def _process_library_module():
+    """Модуль библиотеки процессов: в проекте scripts/lib, в пакете harness/scripts/lib."""
+    for folder in Path(__file__).resolve().parents:
+        if (folder / "scripts" / "lib" / "process_library.py").is_file():
+            if str(folder / "scripts" / "lib") not in sys.path:
+                sys.path.insert(0, str(folder / "scripts" / "lib"))
+            break
+    import process_library
+    return process_library
+
+
+def _short_reason(error: Exception) -> str:
+    """Класс сбоя и причина без путей: полный текст и путь остаются в журнале панели."""
+    reason = re.sub(r"(?:/[\w.@+-]+)+", "…", str(error))[:120]
+    return f"{type(error).__name__}: {reason}" if reason else type(error).__name__
+
+
+def _section(build) -> dict:
+    """Сбой одного блока страницы называет причину и не роняет остальные."""
+    try:
+        return build()
+    except Exception as error:                      # noqa: BLE001
+        traceback.print_exc(file=sys.stderr)
+        return {"нет данных": _short_reason(error)}
+
+
+def _background_state() -> str:
+    """on / off, как их читает обёртка run-background.sh: пустой или нечитаемый конфиг — off."""
+    values = settings.конф.из_файла(settings.конф.путь_harness_conf())
+    return "on" if values and values.get(BACKGROUND_KEY, "on").strip() == "on" else "off"
+
+
+def _mechanisms_by_file() -> dict:
+    """файл → запись механизма: «что делает» процесса без своего «зачем» берётся оттуда."""
+    path = Path(os.environ.get("HARNESS_USTROJSTVO")
+                or КОРЕНЬ / "harness" / "config" / "mechanisms.yaml")
+    import yaml
+    try:
+        records = yaml.safe_load(path.read_text(encoding="utf-8"))["механизмы"]
+    except (OSError, KeyError, TypeError, yaml.YAMLError):
+        return {}
+    return {record["файл"]: record for record in records if isinstance(record, dict) and record.get("файл")}
+
+
+def _words(value) -> str:
+    return " ".join(str(value or "").split())
+
+
+def _process_state(record: dict, exempt: bool, key: str) -> str:
+    """идёт · погашен · вне · снят · иное: что выключатель делает с этой записью сейчас."""
+    status = record.get("статус", "")
+    if status.startswith("снят"):
+        return "снят"
+    if status != "работает":
+        return "иное"
+    if record["класс"] != "фоновый" or record["запуск"] == "служба-проверок":
+        return "вне"
+    return "идёт" if exempt or key == "on" else "погашен"
+
+
+def _process_card(record: dict, schedule: dict, exemptions: dict, mechanisms: dict, key: str, words) -> dict:
+    mechanism = next((mechanisms[путь] for путь in [*(record.get("механизмы") or []), *(record.get("файлы") or [])]
+                      if путь in mechanisms), {})
+    exempt = record["id"] in exemptions
+    return {
+        "id": record["id"], "название": record["название"], "класс": record["класс"],
+        "запуск": record["запуск"], "статус": record.get("статус", ""),
+        "состояние": _process_state(record, exempt, key),
+        "исключение": exemptions.get(record["id"]),
+        "расписание": words((schedule.get(record["id"]) or {}).get("расписание"), record["запуск"]),
+        "что_делает": _words(record.get("зачем") or mechanism.get("роль")),
+        "шаги": [_words(step) for step in record.get("что_делает") or []],
+        "когда": _words(mechanism.get("когда")), "без_него": _words(mechanism.get("без_него")),
+        "файлы": list(record.get("файлы") or []),
+        "замер": (record.get("доля_нагрузки") or {}).get("замер"),
+    }
+
+
+def _process_library() -> dict:
+    library = _process_library_module()
+    records = library.registry()["процессы"]
+    schedule = library.load()
+    exemptions = {record["id"]: _words(record.get("основание"))
+                  for record in (schedule.get("выключатель") or {}).get("исключения") or []}
+    mechanisms, key = _mechanisms_by_file(), _background_state()
+    class_order = {"фоновый": 0, "по внутреннему действию": 1, "сторонний": 2}
+    cards = [_process_card(r, schedule.get("процессы") or {}, exemptions, mechanisms, key, library.schedule_words)
+             for r in records]
+    cards.sort(key=lambda c: (class_order.get(c["класс"], 3), c["название"].lower()))
+    return {"ключ": key, "исключений": sum(1 for c in cards if c["исключение"]), "записи": cards}
+
+
+def _dispatcher_view() -> dict:
+    path = _лог() / VIEW_FILE
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {"нет данных": "Данных пока нет: диспетчер ещё не собрал первый замер"}
+    try:
+        view = json.loads(text)
+    except ValueError as error:
+        return {"нет данных": f"файл витрины диспетчера не разобран: {error}"}
+    if not isinstance(view, dict) or not isinstance(view.get("окна"), dict):
+        return {"нет данных": "файл витрины диспетчера неполон: нет окон"}
+    return view
+
+
+def _systemctl(*args: str) -> str:
+    program = os.environ.get("PANEL_SYSTEMCTL") or "systemctl"
+    done = subprocess.run([program, *args], capture_output=True, text=True, timeout=10, check=True)
+    return done.stdout
+
+
+def _unit_properties(units: list, props: str) -> dict:
+    """{юнит: {свойство: значение}}: блоки ответа `systemctl show` идут в порядке юнитов."""
+    blocks = _systemctl("show", *units, "-p", props).strip().split("\n\n")
+    return {unit: dict(line.split("=", 1) for line in block.splitlines() if "=" in line)
+            for unit, block in zip(units, blocks)}
+
+
+def _cgroup_value(name: str):
+    try:
+        return (Path(os.environ.get("PANEL_CGROUP_CHECKS") or CHECKS_SLICE_DIR) / name).read_text().strip()
+    except OSError:
+        return None
+
+
+def _number(text):
+    """Число из значения cgroup/systemctl; «max», «infinity», «[not set]» и пусто — None (нет потолка / нет значения)."""
+    return int(text) if text and text.strip().isdigit() else None
+
+
+def _checks_slice(show: dict) -> dict:
+    """Что действует СЕЙЧАС: файлы cgroup, а где их нет — `systemctl show`. Конфиг не читается:
+    задуманное и действующее могут разойтись, и показывать надо второе."""
+    quota = (_cgroup_value("cpu.max") or "").split()
+    if quota and quota[0].isdigit() and len(quota) == 2 and quota[1].isdigit():
+        cores = int(quota[0]) / int(quota[1])
+    else:
+        usec = (show.get("CPUQuotaPerSecUSec") or "").removesuffix("s")
+        try:
+            cores = float(usec)
+        except ValueError:
+            cores = None
+    cpu_stat = dict(line.split() for line in (_cgroup_value("cpu.stat") or "").splitlines() if len(line.split()) == 2)
+
+    def memory(name: str, prop: str):
+        return _number(_cgroup_value(name)) if _cgroup_value(name) else _number(show.get(prop))
+    return {"ядер_потолок": cores, "ядер_всего": os.cpu_count(),
+            "память_мягкий": memory("memory.high", "MemoryHigh"), "память_жёсткий": memory("memory.max", "MemoryMax"),
+            "память_сейчас": memory("memory.current", "MemoryCurrent"), "память_пик": _number(_cgroup_value("memory.peak")),
+            "торможений": _number(cpu_stat.get("nr_throttled"))}
+
+
+def _log_tail(path: Path) -> list:
+    """Строки хвоста файла (до RUNS_TAIL_BYTES): журнал растёт до десятков МБ, а страницу открывают каждую минуту."""
+    try:
+        with open(path, "rb") as log:
+            size = log.seek(0, os.SEEK_END)
+            log.seek(max(0, size - RUNS_TAIL_BYTES))
+            lines = log.read().splitlines()
+    except FileNotFoundError:
+        return []
+    return lines[1:] if size > RUNS_TAIL_BYTES else lines      # первая строка хвоста может быть оборвана
+
+
+def _check_runs(ids: list) -> dict:
+    """{id: [последние прогоны, новые первыми]} из process-runs.jsonl: конец прогона с кодом и временем."""
+    from collections import deque
+    runs = {i: deque(maxlen=CHECKS_RUNS_SHOWN) for i in ids}
+    for line in _log_tail(_лог() / "process-runs.jsonl"):
+        if b'"process.end"' not in line:
+            continue
+        try:
+            event = json.loads(line)
+            data = event["data"]
+            moment = datetime.datetime.fromisoformat(event["ts"]).timestamp()
+        except (ValueError, KeyError, TypeError):
+            continue
+        if data.get("id") in runs:
+            runs[data["id"]].appendleft({"ts": moment, "с": data.get("с"), "rc": data.get("rc"),
+                                         "cpu_с": data.get("cpu_с")})
+    return {i: list(v) for i, v in runs.items()}
+
+
+def _running_since(show: dict):
+    """«чч:мм» начала прогона, если служба идёт (oneshot в работе — activating), иначе None."""
+    if show.get("ActiveState") not in ("active", "activating"):
+        return None
+    found = re.search(r"(\d\d:\d\d):\d\d", show.get("ExecMainStartTimestamp") or "")
+    return found.group(1) if found else "?"
+
+
+def _checks_service() -> dict:
+    library = _process_library_module()
+    records = {r["id"]: r for r in library.registry()["процессы"]}
+    ids = library.checks_ids()
+    schedule = library.load().get("процессы") or {}
+    units = ["harness-checks.slice"] + [f"harness-{i}.{kind}" for i in ids for kind in ("timer", "service")]
+    show = _unit_properties(units, "LoadState,ActiveState,UnitFileState,ExecMainStartTimestamp,"
+                                   "CPUQuotaPerSecUSec,MemoryHigh,MemoryMax,MemoryCurrent")
+    if not any(show[f"harness-{i}.timer"].get("LoadState") == "loaded" for i in ids):
+        return {"нет данных": "Служба проверок ещё не установлена"}
+    next_run = {entry["unit"]: entry.get("next") for entry in json.loads(_systemctl("list-timers", "harness-*", "--all",
+                                                                       "--output=json") or "[]")}
+    runs = _check_runs(ids)
+    rows = []
+    for i in ids:
+        timer, service = show[f"harness-{i}.timer"], show[f"harness-{i}.service"]
+        upcoming = next_run.get(f"harness-{i}.timer")
+        rows.append({"id": i, "название": records[i]["название"],
+                     "расписание": library.schedule_words((schedule.get(i) or {}).get("расписание"), records[i]["запуск"]),
+                     "юнит": f"harness-{i}.timer", "включён": timer.get("ActiveState") == "active",
+                     "идёт_с": _running_since(service),
+                     "следующий": upcoming / 1_000_000 if upcoming else None, "прогоны": runs[i]})
+    return {"срез": _checks_slice(show["harness-checks.slice"]), "таймеры": rows}
+
+
+def processes() -> dict:
+    """Раздел «Процессы»: библиотека, диспетчер (из витрины), служба проверок.
+    У каждого блока своё «нет данных» — сбой одного остальные не трогает."""
+    library = _section(_process_library)
+    return {"библиотека": library, "диспетчер": _section(_dispatcher_view), "проверки": _section(_checks_service),
+            "названия": {c["id"]: c["название"] for c in library.get("записи", [])},
+            "ядер": os.cpu_count(), "снято": time.time()}
 
 
 def обновления() -> dict:

@@ -35,9 +35,11 @@ DISPATCHER="$KOREN/scripts/tg-dispatcher.sh"
 [ -r "$DISPATCHER" ] || { echo "ПРОБА: нет диспетчера $DISPATCHER"; exit 1; }
 
 source "$KOREN/scripts/lib/selftest_cases.sh"
+source "$KOREN/scripts/lib/stand_sweep.sh"
 
 T=$(mktemp -d /tmp/proba-zavis-XXXXXX)
-STAMP="proba-zavis-$$"          # имя висящих процессов подделки: по нему уборка
+echo $$ > "$T/owner"
+STAMP="proba-zavis-$$"          # имя висящих процессов подделки (их убирает и sweep_stand: PATH стенда)
 WAIT_S=25                       # предел ожидания одного признака
 PIDS_API=()
 PIDS_DISP=()
@@ -49,13 +51,15 @@ stop_stand() {  # $1 = PID диспетчера: он лидер своей гр
 }
 
 pribrat() {
-    local p
+    local p n
     for p in "${PIDS_DISP[@]}"; do stop_stand "$p"; done
     for p in "${PIDS_API[@]}"; do kill "$p" 2>/dev/null; done
     pkill -KILL -f "^$STAMP" 2>/dev/null
+    n=$(sweep_stand "$T/"); [ "$n" = 0 ] || echo "убрано процессов стенда при выходе: $n" >&2
     rm -rf "$T"
 }
 trap pribrat EXIT
+sweep_dead_stands /tmp/proba-zavis-
 
 # ── подделка tmux: журнал вызовов и зависание на заданной подкоманде ────────
 mkdir -p "$T/bin"
@@ -165,7 +169,7 @@ start_stand() {  # $1 = имя, $2 = режим tmux, $3 = PANE_TMUX_TIMEOUT, $4
     printf '%s' "$2" > "$S/mode"
     printf '000:СТЕНДОВЫЙ' > "$S/token"   # не-секрет: подставной Bot API стенда
     port=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')
-    python3 "$T/api.py" "$port" "$4" "$S/acks" "$S/api.ready" > "$S/api.out" 2>&1 &
+    PROBA_STAND="$T/" python3 "$T/api.py" "$port" "$4" "$S/acks" "$S/api.ready" > "$S/api.out" 2>&1 &
     PIDS_API+=($!)
     wait_for 10 test -e "$S/api.ready" \
         || { echo "ПРОБА: Bot API стенда $1 не поднялся на порту $port"; cat "$S/api.out"; exit 1; }

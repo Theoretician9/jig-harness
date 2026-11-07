@@ -34,7 +34,11 @@
     проекта, 71 тыс. токенов на старт) получает ПРЕДУПРЕЖДЕНИЕ в additionalContext
     с именем harness-worker, а не отказ, и строку agent.heavy-type в журнале;
     лёгкие типы (harness-worker, Explore, Plan, claude-code-guide) — без
-    предупреждения и без строки; запуск, отменённый сторожем скила, не считается.
+    предупреждения и без строки; запуск, отменённый сторожем скила, не считается;
+  * продолжение помощника (SendMessage) никогда не отказывается: потолок
+    «без-задачи» исчерпан, новый запуск — отказ (код 2), а SendMessage — код 0 и
+    строка agent.resume {вызов: toolUseId адресата из его meta.json}; адресат без
+    meta.json — код 0, строки нет (ревью hr.status-human-readable, G2-01).
 
 Механизм берётся рядом с пробой либо из HARNESS_AGENT_BUDGET_GUARD (дверь для
 мутаций: копия с поломкой). Прогон: python3 scripts/hooks/test_agent_budget_guard.py
@@ -59,6 +63,7 @@ JOURNAL_NAME = "вызовы-агентов.jsonl"
 SRC = "scripts/hooks/agent_budget_guard.py"
 LAUNCH_EVENT = "agent.launch"
 HEAVY_EVENT = "agent.heavy-type"
+RESUME_EVENT = "agent.resume"
 LIGHT_TYPE = "harness-worker"
 NO_TASK = "без-задачи"
 LEAD_LEVEL = "управляющий"
@@ -172,6 +177,15 @@ class Stand:
     def heavy_rows(self) -> list:
         return [r for r in self.rows()
                 if r.get("src") == SRC and r.get("event") == HEAVY_EVENT]
+
+    def send(self, target: str, session: str = "проба"):
+        """(код, stderr) SendMessage смены помощнику target."""
+        payload = {"tool_name": "SendMessage", "session_id": session,
+                   "transcript_path": str(self.base / "s.jsonl"),
+                   "tool_input": {"to": target, "message": "продолжай"}}
+        proc = subprocess.run([sys.executable, str(GUARD)], input=json.dumps(payload),
+                              capture_output=True, text=True, env=self.env(), timeout=60)
+        return proc.returncode, proc.stderr
 
     def door(self, reason: str) -> int:
         return subprocess.run([sys.executable, str(GUARD), "--door", reason],
@@ -462,6 +476,28 @@ def judge_type_hint(tmp: Path) -> None:
           ("", 0), (context, len(stand.heavy_rows())))
 
 
+def judge_resume(tmp: Path) -> None:
+    """Продолжение не судится потолком: иначе смена теряет управление своими помощниками."""
+    stand = Stand(tmp / "продолжение", {NO_TASK: {"всего": 1, "ревью": 0}})
+    stand.set_map([])
+    check("условие: первый запуск без задачи проходит", 0, stand.launch()[0])
+    check("условие: потолок «без-задачи» исчерпан — второй запуск отказан", 2, stand.launch()[0])
+    stand.write_meta("проба", "помощник-1", {"spawnDepth": 1, "toolUseId": "toolu_proba_1"})
+    before = len(stand.rows())
+    code, err = stand.send("помощник-1")
+    check("БОЛЬНОЙ: SendMessage при исчерпанном потолке проходит (код 0)", (0, ""), (code, err.strip()))
+    resumed = [r for r in stand.rows()[before:] if r.get("event") == RESUME_EVENT]
+    check("SendMessage записал agent.resume с вызовом адресата", ["toolu_proba_1"],
+          [(r.get("data") or {}).get("вызов") for r in resumed])
+    check("новый запуск при том же потолке — по-прежнему отказ", 2, stand.launch()[0])
+    before = len(stand.rows())
+    check("адресат без meta.json — код 0", 0, stand.send("незнакомец")[0])
+    check("адресат без meta.json — строки agent.resume нет", [],
+          [r for r in stand.rows()[before:] if r.get("event") == RESUME_EVENT])
+    stand.write_meta("проба", "битый", {}).write_text("{не json", encoding="utf-8")
+    check("адресат с битым meta.json — код 0", 0, stand.send("битый")[0])
+
+
 def main() -> int:
     if not GUARD.exists():
         print(f"  ПЛОХО механизма нет: {GUARD}")
@@ -482,6 +518,7 @@ def main() -> int:
         judge_depth(tmp)
         judge_lead(tmp)
         judge_type_hint(tmp)
+        judge_resume(tmp)
     print(f"SELFTEST: {'зелёный' if not failed else 'КРАСНЫЙ'} ({checked} случаев, "
           f"уровней из данных {len(levels)}, неудач {failed})")
     return 1 if failed else 0

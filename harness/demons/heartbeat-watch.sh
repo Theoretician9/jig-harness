@@ -5,7 +5,7 @@
 # Что держит: страховку нельзя оценивать по частоте обращений к ней
 # (01-SPEC §9). Каждый демон ставит метку в $HEARTBEAT_DIR только при
 # успешном прогоне; сторож раз в сутки сверяет возраст КАЖДОЙ метки с её
-# периодом ×2 и шлёт владельцу сводку ВСЕГДА — и зелёную «все демоны живы»,
+# периодом × множитель метки и шлёт владельцу сводку ВСЕГДА — и зелёную «все демоны живы»,
 # и красную поимённо. Молчание сторожа неотличимо от его смерти, поэтому
 # смерть самого сторожа владелец обнаруживает по ОТСУТСТВИЮ утреннего
 # сообщения (норма UNIFIED/08).
@@ -73,7 +73,7 @@ EOF
     # больной случай Д-4а: сводка НЕ доставлена (канал не настроен) → размер
     # НЕ запоминается, прирост обязан всплыть в СЛЕДУЮЩЕЙ доставленной сводке.
     printf '%s\n' '{"ts":4,"reason":"т","detail":"т"}' >> "$T/guard_exceptions.log"
-    if OUT=$(INSTALL_CONF="$T/install.conf" HARNESS_CONF="$T/harness.conf" bash "$0" 2>&1); then
+    if OUT=$(HARNESS_INSTALL_CONF="$T/install.conf" PROJECT_DIR="$T" HARNESS_CONF="$T/harness.conf" bash "$0" 2>&1); then
         echo "САМОТЕСТ ПРОВАЛЕН: недоставленная сводка не сделала прогон красным"; echo "$OUT"; exit 1
     fi
     OUT=$(INSTALL_CONF="$T/install.conf" HARNESS_CONF="$T/harness.conf" \
@@ -310,6 +310,65 @@ EOF
     chmod +x "$K/scripts/tg_send.sh"
     [ "$ITOG" = "1;0;0;0;net" ] \
         || { echo "САМОТЕСТ ПРОВАЛЕН: двери нет — сводка обязана провалить прогон, а не уйти прямым curl (код;curl;текст;вложение;метка = $ITOG, ждали 1;0;0;0;net)"; exit 1; }
+    # Слово владельца 06.11: процесс, погашенный выключателем фоновых, — не мёртвый.
+    # Судья гашения один — настоящий run-background.sh --разрешён; стенд подменяет
+    # ему только конфиг (HARNESS_CONF) и библиотеку исключений (HARNESS_PROCESS_LIBRARY),
+    # чтобы ответ не зависел от живого harness.conf.
+    V="$T/vykl"
+    mkdir -p "$V/hb" "$V/log"
+    cat > "$V/install.conf" <<EOF
+PROJECT_NAME="selftest"
+PROJECT_DIR="$V"
+AGENT_USER="selftest"
+SECRETS_DIR="$V"
+TG_TOKEN_FILE="$V/no-token"
+TG_CHAT_ID=""
+AUTONOMY="semi"
+HEARTBEAT_DIR="$V/hb"
+LOG_DIR="$V/log"
+EOF
+    cat > "$V/harness.conf" <<EOF
+BACKGROUND_PROCESSES=off
+HEARTBEAT_PERIODS="switched-off:10 switched-on:10 switched-off.tail:10 switched-on.tail:10"
+EOF
+    cat > "$V/process-library.yaml" <<EOF
+выключатель:
+  ключ: BACKGROUND_PROCESSES
+  исключения:
+    - id: switched-on
+      основание: "стенд самотеста"
+процессы:
+  switched-off:
+    запуск: юнит
+  switched-on:
+    запуск: юнит
+EOF
+    touch -d '30 days ago' "$V/hb/.install-stamp"
+    # Метки <id>.<хвост>: судья обязан услышать id задания. Для погашенного id полное
+    # имя дало бы тот же ответ, поэтому путаницу ловит только хвост исключённого switched-on.
+    touch -d '2 hours ago' "$V/hb/switched-off" "$V/hb/switched-on" "$V/hb/switched-off.tail" "$V/hb/switched-on.tail"
+    RUN_BG="$(dirname "$(readlink -f "$0")")/../../scripts/run-background.sh"
+    # Контроль стенда: без него красный случай мог бы значить «стенд не погасил», а не «код не знает».
+    stand_judge() {
+        HARNESS_INSTALL_CONF="$V/install.conf" HARNESS_CONF="$V/harness.conf" \
+            HARNESS_PROCESS_LIBRARY="$V/process-library.yaml" bash "$RUN_BG" --разрешён "$1" >/dev/null 2>&1
+    }
+    stand_judge switched-off && { echo "САМОТЕСТ ПРОВАЛЕН: стенд выключателя — судья не погасил switched-off (rc 0, ждали 1)"; exit 1; }
+    stand_judge switched-on || { echo "САМОТЕСТ ПРОВАЛЕН: стенд выключателя — судья погасил исключённый switched-on (ждали rc 0)"; exit 1; }
+    OUT=$(HARNESS_INSTALL_CONF="$V/install.conf" HARNESS_CONF="$V/harness.conf" \
+          HARNESS_PROCESS_LIBRARY="$V/process-library.yaml" \
+          HEARTBEAT_DRY_SEND=1 bash "$0") || { echo "САМОТЕСТ ПРОВАЛЕН: прогон стенда выключателя упал"; echo "$OUT"; exit 1; }
+    # Здоровый: исключён из выключателя, метка старая — мёртвый, как прежде.
+    echo "$OUT" | grep -q 'switched-on — МЁРТВ' \
+        || { echo "САМОТЕСТ ПРОВАЛЕН: включённый (в исключениях) процесс со старой меткой не назван МЁРТВ"; echo "$OUT"; exit 1; }
+    echo "$OUT" | grep -q 'switched-on.tail — МЁРТВ' \
+        || { echo "САМОТЕСТ ПРОВАЛЕН: метка switched-on.tail исключённого задания не названа МЁРТВ (судья спрошен не по id задания)"; echo "$OUT"; exit 1; }
+    # Больной: погашен выключателем, метка старая — не мёртвый, а одна строка числом.
+    if echo "$OUT" | grep -Eq 'switched-off(\.tail)? — МЁРТВ'; then
+        echo "САМОТЕСТ ПРОВАЛЕН: погашенный выключателем switched-off или switched-off.tail объявлен МЁРТВ (слово владельца 06.11)"; echo "$OUT"; exit 1
+    fi
+    echo "$OUT" | grep -q 'выключены выключателем: 2$' \
+        || { echo "САМОТЕСТ ПРОВАЛЕН: в сводке нет строки «выключены выключателем: 2»"; echo "$OUT"; exit 1; }
     echo "САМОТЕСТ ПРОЙДЕН: мёртвая метка названа, живая не оклеветана, прирост лога сторожа замечен,"
     echo "недоставка не съедает сигнал (SIZE_FILE после отправки), юнит диспетчера и токены — в сводке,"
     echo "свежая установка без метки — «ещё не прогонялся», вариант А — «диспетчер выключен»"
@@ -345,30 +404,101 @@ STAMP_AGE_MIN=$(( (NOW - $(stat -c '%Y' "$INSTALL_STAMP")) / 60 ))
 DEAD=""; FRESH=""; ALIVE_N=0; DEAD_N=0; FRESH_N=0
 ALIVE_NAMES=(); DEAD_NAMES=(); DEAD_LINES=()
 
-# Таблица: "имя:период-в-минутах …". Порог тревоги = период ×2 — один
-# пропущенный прогон прощается (машина могла перезагружаться), два — нет.
+# Множитель порога — данные: раздел «запас-порога» system-jobs.yaml (имя метки →
+# множитель). Страховка (копия, проба восстановления) судится строго ×1, гигиена
+# прощает один пропуск; у не названных — умолчание ×2. Нет файла — умолчание ×2
+# (безопасно); файл есть, но не читается — сторож падает громко (set -e).
+MULT_FILE="${HEARTBEAT_MULT_FILE:-$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../config/system-jobs.yaml}"
+DEFAULT_MULT=2
+declare -A MULT=()
+MULT_TABLE=$(python3 - "$MULT_FILE" <<'PYEOF'
+import os, sys, yaml
+if os.path.exists(sys.argv[1]):
+    with open(sys.argv[1], encoding="utf-8") as fh:
+        for name, mult in ((yaml.safe_load(fh) or {}).get("запас-порога") or {}).items():
+            print(name, int(mult))
+PYEOF
+)
+while read -r mname mval; do
+    [ -n "$mname" ] && MULT[$mname]="$mval"
+done <<< "$MULT_TABLE"
+
+# Слово владельца 06.11: процесс, погашенный выключателем фоновых, — не мёртвый.
+# Судья гашения один — run-background.sh --разрешён (rc 0 идёт, 1 погашен); своего
+# чтения ключа и исключений здесь нет, окружение (HARNESS_CONF и др.) судья наследует.
+# Метка → id процесса: имя метки — id задания (system-jobs.yaml «задания» или
+# «процессы» библиотеки) → спрашиваем по нему; вид <id>.<хвост> при <id>-задании →
+# по <id>; имя из «метки_без_задания» (выключатель их не гасит) → судье не отдаём;
+# прочее имя спрашиваем как есть — судья сам скажет, исключён ли id.
+# Судью зовём только по меткам, что иначе стали бы мёртвыми: отдельный bash+python на каждую.
+RUN_BG="${HARNESS_RUN_BACKGROUND:-$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../../scripts/run-background.sh}"
+LIBRARY_FILE="${HARNESS_PROCESS_LIBRARY:-$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../config/process-library.yaml}"
+declare -A JOB_IDS=() NOJOB_NAMES=()
+while read -r kind jname; do
+    case "$kind" in job) JOB_IDS[$jname]=1 ;; nojob) NOJOB_NAMES[$jname]=1 ;; esac
+done < <(python3 - "$MULT_FILE" "$LIBRARY_FILE" <<'PYEOF'
+import os, sys, yaml
+def load(path):
+    if not os.path.exists(path):
+        return {}
+    with open(path, encoding="utf-8") as fh:
+        return yaml.safe_load(fh) or {}
+jobs = load(sys.argv[1])
+for job in jobs.get("задания") or []:
+    print("job", job.get("имя"))
+for name in jobs.get("метки_без_задания") or {}:
+    print("nojob", name)
+for name in load(sys.argv[2]).get("процессы") or {}:
+    print("job", name)
+PYEOF
+)
+OFF_N=0
+switched_off() {  # $1 = имя метки; rc 0 — процесс погашен выключателем
+    local name="$1" id="$1" rc
+    if [ -z "${JOB_IDS[$name]:-}" ]; then
+        if [ -n "${JOB_IDS[${name%%.*}]:-}" ]; then id="${name%%.*}"
+        elif [ -n "${NOJOB_NAMES[$name]:-}" ]; then return 1
+        fi
+    fi
+    if [ ! -f "$RUN_BG" ]; then
+        say "судьи выключателя нет ($RUN_BG): $name считаю включённым"; return 1
+    fi
+    bash "$RUN_BG" --разрешён "$id" >/dev/null 2>&1; rc=$?
+    case "$rc" in
+        0) return 1 ;;
+        1) return 0 ;;
+        *) say "судья выключателя вернул $rc по $id: $name считаю включённым"; return 1 ;;
+    esac
+}
+
+# Таблица: "имя:период-в-минутах …". Порог тревоги = период × множитель метки.
 for entry in $HEARTBEAT_PERIODS; do
     name="${entry%%:*}"; period_min="${entry##*:}"
+    mult="${MULT[$name]:-$DEFAULT_MULT}"
     mark="$HEARTBEAT_DIR/$name"
     if [ ! -f "$mark" ]; then
-        if [ "$STAMP_AGE_MIN" -lt $((period_min * 2)) ]; then
+        if [ "$STAMP_AGE_MIN" -lt $((period_min * mult)) ]; then
             FRESH="${FRESH}
 • $name — ещё не прогонялся (установлен недавно)"
             FRESH_N=$((FRESH_N + 1))
+        elif switched_off "$name"; then
+            OFF_N=$((OFF_N + 1))
         else
             DEAD="${DEAD}
-• $name — МЁРТВ: метки нет вообще (ни одного успешного прогона за период ×2)"
+• $name — МЁРТВ: метки нет вообще (ни одного успешного прогона за период ×${mult})"
             DEAD_N=$((DEAD_N + 1))
-            DEAD_NAMES+=("$name"); DEAD_LINES+=("$name — МЁРТВ: метки нет вообще (ни одного успешного прогона за период ×2)")
+            DEAD_NAMES+=("$name"); DEAD_LINES+=("$name — МЁРТВ: метки нет вообще (ни одного успешного прогона за период ×${mult})")
         fi
         continue
     fi
     age_min=$(( (NOW - $(stat -c '%Y' "$mark")) / 60 ))
-    if [ "$age_min" -gt $((period_min * 2)) ]; then
+    if [ "$age_min" -gt $((period_min * mult)) ] && switched_off "$name"; then
+        OFF_N=$((OFF_N + 1))
+    elif [ "$age_min" -gt $((period_min * mult)) ]; then
         DEAD="${DEAD}
-• $name — МЁРТВ: метка ${age_min} мин при периоде ${period_min} (порог ×2)"
+• $name — МЁРТВ: метка ${age_min} мин при периоде ${period_min} (порог ×${mult})"
         DEAD_N=$((DEAD_N + 1))
-        DEAD_NAMES+=("$name"); DEAD_LINES+=("$name — МЁРТВ: метка ${age_min} мин при периоде ${period_min} (порог ×2)")
+        DEAD_NAMES+=("$name"); DEAD_LINES+=("$name — МЁРТВ: метка ${age_min} мин при периоде ${period_min} (порог ×${mult})")
     else
         ALIVE_N=$((ALIVE_N + 1))
         ALIVE_NAMES+=("$name")
@@ -382,6 +512,12 @@ elif [ "$DEAD_N" = 0 ]; then
 else
     SUMMARY="Утренняя сводка харнеса: живых $ALIVE_N, МЁРТВЫХ $DEAD_N:$DEAD$FRESH
 Лечение: лог службы в $LOG_DIR/<имя>.log, прогон вручную в env -i (01-SPEC §9)."
+fi
+
+# Погашенные выключателем не мёртвые и в счёт МЁРТВЫХ не идут; свежая метка — живой как был.
+if [ "$OFF_N" -gt 0 ]; then
+    SUMMARY="$SUMMARY
+выключены выключателем: $OFF_N"
 fi
 
 # ── прирост guard_exceptions.log: падения сторожа команд видны в сводке ─────
@@ -581,6 +717,49 @@ PYEOF
 $OBHODY_TEKST"
 fi
 
+# Придержанное лимитом подписки дверь канала пишет в журнал; без строки в
+# сводке сколько вестей проглотило правило, владелец не видит.
+HELD_LOG="${LOG_DIR}/придержано-лимитом.jsonl"
+if [ -s "$HELD_LOG" ]; then
+    HELD_TEKST=$(python3 - "$HELD_LOG" <<'PYEOF' 2>&1 || true
+import json, os, sys
+from datetime import datetime, timedelta
+# Окно: скользящие 24 часа от момента прогона. Файл больше водораздела
+# читается с хвоста: журнал растёт без уборщика, целиком его читать нельзя.
+ВОДОРАЗДЕЛ = 16 * 1024 * 1024
+try:
+    сейчас = datetime.now().astimezone()
+    порог = сейчас - timedelta(hours=24)
+    размер = os.path.getsize(sys.argv[1])
+    всего = без_досыла = 0
+    with open(sys.argv[1], "rb") as файл:
+        if размер > ВОДОРАЗДЕЛ:
+            файл.seek(размер - ВОДОРАЗДЕЛ)
+            файл.readline()  # обрезанная первая строка
+        for сырая in файл:
+            try:
+                запись = json.loads(сырая.decode("utf-8", errors="replace"))
+                when = datetime.fromisoformat(запись["ts"])
+                if when.tzinfo is None:
+                    when = when.astimezone()
+            except (ValueError, KeyError, TypeError):
+                continue
+            if not порог <= when <= сейчас:
+                continue
+            всего += 1
+            if запись.get("досыл") is False:
+                без_досыла += 1
+    хвост = f" (журнал {размер // 1048576} МиБ, считан хвост {ВОДОРАЗДЕЛ // 1048576} МиБ)" if размер > ВОДОРАЗДЕЛ else ""
+    if всего or хвост:
+        print(f"придержано лимитом за сутки {всего}, из них без досыла {без_досыла}{хвост}")
+except Exception:
+    print("придержано: журнал не прочитан")
+PYEOF
+)
+    [ -n "$HELD_TEKST" ] && SUMMARY="$SUMMARY
+$HELD_TEKST"
+fi
+
 say "$SUMMARY"
 [ -n "$TOKENS_FILE" ] && say "$(cat "$TOKENS_FILE")"
 say "текст сводки: $(LC_ALL=C.UTF-8 bash -c 'printf %s "${#1}"' _ "$SUMMARY") знаков${TOKENS_FILE:+, вложение: $TOKENS_FILE}"
@@ -628,6 +807,16 @@ sync_tasks() {
     for name in "${ALIVE_NAMES[@]}"; do
         alert_task --resolve "heartbeat-watch:dead:$(dead_slug "$name")"
     done
+    # Демон убран из таблицы периодов — его метку никто не поставит и не
+    # проверит, карточка «мёртв» повисла бы навсегда. Гасим открытые
+    # heartbeat-watch:dead:* с именами вне таблицы; чужие ключи не трогаем.
+    [ -f "$PROJECT_DIR/scripts/alert-task.py" ] || return 0
+    local known=" " key
+    for entry in $HEARTBEAT_PERIODS; do known+="heartbeat-watch:dead:$(dead_slug "${entry%%:*}") "; done
+    while IFS=$'\t' read -r key _; do
+        case "$key" in heartbeat-watch:dead:*) ;; *) continue ;; esac
+        [[ "$known" == *" $key "* ]] || alert_task --resolve "$key"
+    done < <(python3 "$PROJECT_DIR/scripts/alert-task.py" --open </dev/null 2>/dev/null || true)
 }
 sync_tasks
 

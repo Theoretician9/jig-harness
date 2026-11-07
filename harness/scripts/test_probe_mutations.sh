@@ -38,6 +38,9 @@ TOOL="scripts/mutation-probe.sh"
 LIVE_INV="harness/config/invariants.yaml"
 LIVE_PROBES="harness/config/probe-mutations.yaml"
 GOOD=0; BAD=0
+# Прогоны стенда игрушечные: дверь среза увела бы их в живую очередь flock к чужим
+# прогонам, а из копии дерева — в скрипт, которого там нет.
+export HARNESS_IN_CHECKS_SLICE=1
 BEFORE=$(md5sum "$LIVE_INV" "$LIVE_PROBES" 2>/dev/null)
 
 sluchaj() { # $1=имя $2=условие (0 — зелёный) $3=пояснение
@@ -344,15 +347,26 @@ printf '# правка механизма\n' >> "$YARD/mehanizm.sh"
 kesh_progon "$YARD" 7
 kesh_sluchaj "кэш инварианта: изменился только механизм (пути в команде нет) — заново" 2 0 0
 
-# Дыра не кэшируется: слепая проба краснит КАЖДЫЙ прогон.
+# Дыра кэшируется, но вердикт остаётся красным: слепую пробу второй раз не
+# зовут (ночь тратила ~6 ч на повтор известных дыр), а итог по-прежнему её
+# считает. Опасность здесь обратная зелёному кэшу — известная дыра, тихо
+# ставшая «ок» или пропавшая из счёта.
 YARD=$(kesh_dvor 'exit 0')
 kesh_progon "$YARD" 7
 kesh_progon "$YARD" 7
-if [ "$ZOVY" = 2 ] && [ "$RC" = 1 ] && printf '%s' "$OUT" | grep -q "дыр 1, из кэша 0"; then
-    sluchaj "кэш: дыра не кэшируется — второй прогон снова зовёт пробу и красный" 0 ""
+if [ "$ZOVY" = 0 ] && [ "$RC" = 1 ] && printf '%s' "$OUT" | grep -q "дыр 1, из кэша 1" \
+   && printf '%s' "$OUT" | grep -q "^  ПЛОХО (известная, из кэша.*случай кэша"; then
+    sluchaj "кэш: дыра при втором прогоне берётся из кэша и вердикт красный" 0 ""
 else
-    sluchaj "кэш: дыра не кэшируется — второй прогон снова зовёт пробу и красный" 1 "зовов $ZOVY, код $RC, вывод: $(printf '%s' "$OUT" | tr '\n' '|' | cut -c1-300)"
+    sluchaj "кэш: дыра при втором прогоне берётся из кэша и вердикт красный" 1 "зовов $ZOVY, код $RC, вывод: $(printf '%s' "$OUT" | tr '\n' '|' | cut -c1-300)"
 fi
+
+# Строки кэша до поля «дыра» (три поля) — зелёные попадания, а не дыры.
+YARD=$(kesh_dvor "$ZRJACHAJA")
+kesh_progon "$YARD" 7
+cut -f1-3 "$YARD/mutations-cache.tsv" > "$YARD/kesh.tmp" && mv "$YARD/kesh.tmp" "$YARD/mutations-cache.tsv"
+kesh_progon "$YARD" 7
+kesh_sluchaj "кэш: старая строка из трёх полей — зелёное попадание" 0 1 0
 
 # ── Выборка записей: проба из scripts/ читает harness/config ──────────────
 # БОЛЬНОЙ СЛУЧАЙ 29.10.2026 (hr.hackathon-mode, находка P2): прогон по ВЫБОРКЕ

@@ -21,13 +21,18 @@
 #      emit (events.py), и стендовых стенограммах: пустой набор и мало данных —
 #      ОТКАЗ, К-1 с ∞ и законным отказом, расширение окна, К-2 с NTP, К-3, потери
 #      (К-5), К-6 по очереди Claude Code, в том числе по строкам диспетчера без меток;
+#   2б. просрочено: судья channel_reply.overdue/closed_by_door и CLI
+#      delivery-latency.py --просрочено --на/--сетка на стендовом LOG_DIR (спека
+#      .tasks/hr.alert-self-sensors-attention/spec.md §6, мутации (а)–(д3) §8.2);
+#   2в. живые: восемь команд П1/П2 той же спеки на живых журналах, только чтение —
+#      лишь по ключу «--случай живые», в общий прогон не входит;
 #   3. код: журнал «доставка» в реестре с обоими писателями.
 #
 # Стенд: свой LOG_DIR, каталог паузы, Bot API на своём порту, tmux — подделка первой
 # в PATH (живой сервер tmux не зовётся), timedatectl — подделка с ответом стенда.
 # Вызовов модели нет (карты dev-map.yaml на стенде нет).
 #
-#   bash scripts/test_delivery_marks.sh [--случай диспетчер|прибор|код]
+#   bash scripts/test_delivery_marks.sh [--случай диспетчер|прибор|просрочено|живые|код]
 # Код возврата: 0 — зелёная, 1 — красная. Последняя строка — итог с числом путей.
 # Механизмы берутся от места самой пробы (../ от scripts/): мутации идут «из-копии».
 #
@@ -52,25 +57,28 @@ done
 ONLY=""
 if [ "${1:-}" = "--случай" ]; then
     ONLY="${2:-}"
-    case "$ONLY" in диспетчер|прибор|код) ;; *) echo "ПРОБА: неизвестный случай «$ONLY» (диспетчер|прибор|код)"; exit 1 ;; esac
+    case "$ONLY" in диспетчер|прибор|просрочено|живые|код) ;; *) echo "ПРОБА: неизвестный случай «$ONLY» (диспетчер|прибор|просрочено|живые|код)"; exit 1 ;; esac
 elif [ -n "${1:-}" ]; then
     echo "ПРОБА: неизвестный ключ «$1»"; exit 1
 fi
 want() { [ -z "$ONLY" ] || [ "$ONLY" = "$1" ]; }
 
 source "$KOREN/scripts/lib/selftest_cases.sh"
+source "$KOREN/scripts/lib/stand_sweep.sh"
 
 T=$(mktemp -d /tmp/proba-delivery-marks-XXXXXX)
+echo $$ > "$T/owner"
 STAMP="proba-delivery-marks-$$"
 PATHS_JUDGED=0
 PIDS_KILL=()
 cleanup() {
-    local p
+    local p n
     for p in "${PIDS_KILL[@]}"; do kill -KILL -- "-$p" 2>/dev/null; kill -KILL "$p" 2>/dev/null; done
-    pkill -KILL -f "^$STAMP" 2>/dev/null
+    n=$(sweep_stand "$T/"); [ "$n" = 0 ] || echo "убрано процессов стенда при выходе: $n" >&2
     if [ -n "${PROBA_KEEP:-}" ]; then echo "стенд оставлен (PROBA_KEEP): $T"; else rm -rf "$T"; fi
 }
 trap cleanup EXIT
+sweep_dead_stands /tmp/proba-delivery-marks-
 
 wait_for() {  # $1 = предел, остальное — условие
     local end=$(( $(date +%s) + $1 )); shift
@@ -271,7 +279,7 @@ PYEOF
         : > "$S/tmux-calls"
         printf '000:СТЕНДОВЫЙ' > "$S/token"   # не-секрет: подставной Bot API стенда
         port=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')
-        python3 "$T/api.py" "$port" "$S/acks" "$S/api.ready" "$S/updates.json" "$TG_DATE_SENTINEL" > "$S/api.out" 2>&1 &
+        PROBA_STAND="$T/" python3 "$T/api.py" "$port" "$S/acks" "$S/api.ready" "$S/updates.json" "$TG_DATE_SENTINEL" > "$S/api.out" 2>&1 &
         PIDS_KILL+=($!); disown $!
         wait_for 10 test -e "$S/api.ready" || { d_bad "Bot API не поднялся"; return; }
         cat > "$S/install.conf" <<EOF
@@ -287,7 +295,7 @@ EOF
             "$STAMP-disp" > "$S/harness.conf"
         lockdir="$S/log/locks/services"; mkdir -p "$lockdir"
         if [ -n "$hold" ]; then
-            python3 "$T/holder.py" "$S/release" "$S/held" "$lockdir/pane.lock" &
+            PROBA_STAND="$T/" python3 "$T/holder.py" "$S/release" "$S/held" "$lockdir/pane.lock" &
             PIDS_KILL+=($!); disown $!
             wait_for 5 test -e "$S/held" || { d_bad "лок толчков не взят"; return; }
         fi
@@ -312,6 +320,10 @@ EOF
             setsid nohup bash "$DISPATCHER" > "$S/dispatcher.out" 2>&1 < /dev/null &
         DPID=$!
         PIDS_KILL+=("$DPID"); disown "$DPID"
+        # $! — обёртка: setsid вне группы-лидера форкается, и диспетчер живёт под
+        # другим pid. Свой pid диспетчер пишет первой строкой лок-файла.
+        wait_for 10 grep -qE '^[0-9]+$' "$lockdir/tg-dispatcher.lock" \
+            && PIDS_KILL+=("$(head -1 "$lockdir/tg-dispatcher.lock")")
         if [ "$last" -gt 0 ]; then
             wait_for 40 offset_is "$S" $((last + 1)) \
                 || { d_bad "диспетчер не разобрал update $last за 40 с"; tail -5 "$S/log/tg-dispatcher.log" 2>/dev/null | sed 's/^/    /'; }
@@ -604,6 +616,152 @@ PYEOF
     case_check "сводка: 20 сообщений — код 0" "0" "${R%%|*}"
     case_check "сводка: отрезок received→kick_sent с n=20" "да" \
         "$(grep -E 'received→kick_sent' "$T/instr-summary/out" 2>/dev/null | grep -qE 'n= *20\b' && echo да || echo нет)"
+fi
+
+# ═══ 2б. ПРОСРОЧЕНО: судья channel_reply.overdue/closed_by_door и CLI --просрочено ═══
+# Спека .tasks/hr.alert-self-sensors-attention/spec.md §5, §6, §8.2 (мутации (а)–(д3)).
+# Судья и прибор берутся от места пробы (KOREN): мутации «из-копии».
+if want просрочено; then
+    PATHS_JUDGED=$((PATHS_JUDGED + 1))
+    echo "═══ путь 2б: просроченные сообщения владельца (стенд)"
+    cat > "$T/overdue.py" <<'PYEOF'
+import sys
+lib, mode, log_dir = sys.argv[1], sys.argv[2], sys.argv[3]
+sys.path.insert(0, lib)
+import channel_reply  # noqa: E402
+if mode == "overdue":
+    within, now, horizon = float(sys.argv[4]), float(sys.argv[5]), float(sys.argv[6])
+    print(len(channel_reply.overdue(log_dir, within, now, horizon)))
+else:  # door <moment> <now> [max_age]
+    moment, now = float(sys.argv[4]), float(sys.argv[5])
+    kw = {"max_age": float(sys.argv[6])} if len(sys.argv) > 6 else {}
+    print("закрыто" if channel_reply.closed_by_door(log_dir, moment, now, **kw) else "открыто")
+PYEOF
+    OD_NOW=$(( $(date +%s) - 3600 ))
+    od_stand() {  # $1 = имя → каталог стенда; ключи срока в своём harness.conf
+        local X="$T/od-$1"
+        rm -rf "$X"; mkdir -p "$X/log/inbox/обработано"
+        : > "$X/log/tg_out.jsonl"
+        printf 'LOG_DIR="%s"\nPROJECT_DIR="%s"\nPANEL_STATE_DIR="%s"\n' "$X/log" "$X" "$X/panel" > "$X/install.conf"
+        printf 'OWNER_REPLY_MAX_MIN="%s"\nCHANNEL_REPLY_MAX_AGE_MIN="120"\n' "${2:-5}" > "$X/harness.conf"
+        echo "$X"
+    }
+    od_msg() {  # $1 = стенд, $2 = эпоха сообщения, $3 = текст
+        printf '%s\n' "${3:-вопрос стенда}" > "$1/log/inbox/обработано/$2.000000000.txt"
+        touch -d "@$2" "$1/log/inbox/обработано/$2.000000000.txt"
+    }
+    od_reply() {  # $1 = стенд, $2 = iz_sessii, $3 = эпоха
+        jq -cn --arg ts "$(date -d "@$3" --iso-8601=seconds)" --argjson s "$2" \
+            '{ts:$ts, iz_sessii:$s, text:"ответ по сути: стенд проверил и вот итог"}' >> "$1/log/tg_out.jsonl"
+    }
+    od_door() {  # $1 = стенд, $2 = эпоха метки
+        echo "стенд: владелец написал «ок»" > "$1/log/reply-not-needed"; touch -d "@$2" "$1/log/reply-not-needed"
+    }
+    od_fn() { python3 "$T/overdue.py" "$KOREN/scripts/lib" "$@" 2>&1 | tail -1; }
+    od_cli() {  # $1 = стенд, дальше доводы прибора → «код|последняя строка»; вывод в $1/out
+        local X="$1" rc=0; shift
+        env HARNESS_LOG_DIR="$X/log" HARNESS_INSTALL_CONF="$X/install.conf" HARNESS_CONF="$X/harness.conf" \
+            timeout -k 2 60 python3 "$INSTRUMENT" "$@" > "$X/out" 2>&1 || rc=$?
+        echo "$rc|$(grep -v '^[[:space:]]*$' "$X/out" | tail -1)"
+    }
+    od_verdict() {  # $1 = «код|строка», $2 = код, $3 = подстрока
+        local rc="${1%%|*}" line="${1#*|}"
+        [ "$rc" = "$2" ] && [[ "$line" == *"$3"* ]] && echo да || echo "нет (код $rc: ${line:0:160})"
+    }
+
+    echo "— судья overdue: порог, ответ, дверь, горизонт"
+    X=$(od_stand a300); od_msg "$X" $(( OD_NOW - 300 ))
+    case_check "П-О1: ровно N·60 с — просрочено (≥)" 1 "$(od_fn overdue "$X/log" 300 "$OD_NOW" 7200)"
+    X=$(od_stand a299); od_msg "$X" $(( OD_NOW - 299 ))
+    case_check "П-О1: N·60 − 1 с — не просрочено" 0 "$(od_fn overdue "$X/log" 300 "$OD_NOW" 7200)"
+    X=$(od_stand a2-future); od_msg "$X" $(( OD_NOW - 360 )); od_reply "$X" true $(( OD_NOW + 60 ))
+    case_check "П-О2: ответ позже «сейчас» не закрывает — просрочено" 1 "$(od_fn overdue "$X/log" 300 "$OD_NOW" 7200)"
+    X=$(od_stand a2-past); od_msg "$X" $(( OD_NOW - 360 )); od_reply "$X" true $(( OD_NOW - 60 ))
+    case_check "П-О2: ответ смены до «сейчас» закрывает" 0 "$(od_fn overdue "$X/log" 300 "$OD_NOW" 7200)"
+    X=$(od_stand b-daemon); od_msg "$X" $(( OD_NOW - 360 )); od_reply "$X" false $(( OD_NOW - 60 ))
+    case_check "П-О3: весть демона (iz_sessii=false) не ответ — просрочено" 1 "$(od_fn overdue "$X/log" 300 "$OD_NOW" 7200)"
+    X=$(od_stand d-door); od_msg "$X" $(( OD_NOW - 360 )); od_door "$X" $(( OD_NOW - 60 ))
+    case_check "П-О4: дверь новее сообщения закрывает" 0 "$(od_fn overdue "$X/log" 300 "$OD_NOW" 7200)"
+    X=$(od_stand d2-future); od_msg "$X" $(( OD_NOW - 360 )); od_door "$X" $(( OD_NOW + 60 ))
+    case_check "П-О4: дверь с моментом позже «сейчас» не закрывает" 1 "$(od_fn overdue "$X/log" 300 "$OD_NOW" 7200)"
+    X=$(od_stand d3-old); od_msg "$X" $(( OD_NOW - 2400 )); od_door "$X" $(( OD_NOW - 1860 ))
+    case_check "П-О4: дверь старше «сейчас» на 31 мин закрывает навсегда" 0 "$(od_fn overdue "$X/log" 300 "$OD_NOW" 7200)"
+    X=$(od_stand horizon); od_msg "$X" $(( OD_NOW - 7260 ))
+    case_check "П-О5: сообщение за горизонтом — не просрочено" 0 "$(od_fn overdue "$X/log" 300 "$OD_NOW" 7200)"
+
+    echo "— судья closed_by_door: срок у хука, у стража — нет"
+    X=$(od_stand door-fn); od_door "$X" $(( OD_NOW - 1860 ))
+    case_check "П-О6: без срока дверь 31 мин закрывает" "закрыто" "$(od_fn door "$X/log" $(( OD_NOW - 2400 )) "$OD_NOW")"
+    case_check "П-О6: со сроком хука 30 мин дверь 31 мин — не дверь" "открыто" "$(od_fn door "$X/log" $(( OD_NOW - 2400 )) "$OD_NOW" 1800)"
+    case_check "П-О6: дверь старше сообщения не закрывает" "открыто" "$(od_fn door "$X/log" $(( OD_NOW - 1800 )) "$OD_NOW")"
+    case_check "П-О6: дверь позже «сейчас» не закрывает" "открыто" "$(od_fn door "$X/log" $(( OD_NOW - 2400 )) $(( OD_NOW - 1900 )))"
+
+    echo "— CLI --просрочено --на"
+    X=$(od_stand cli); od_msg "$X" $(( OD_NOW - 360 )) "Простыми словами какие задачи стоят"
+    R=$(od_cli "$X" --просрочено --на "@$OD_NOW")
+    case_check "П-О7: --на @эпоха, сообщение 6 мин — ПРОВАЛ, код 1, n=1" "да" "$(od_verdict "$R" 1 'ВЕРДИКТ просрочено: ПРОВАЛ')"
+    case_check "П-О7: вердикт называет n=1" "да" "$([[ "${R#*|}" == *"n=1"* ]] && echo да || echo нет)"
+    case_check "П-О7: строка сообщения «имя<TAB>ЧЧ:ММ:СС<TAB>6<TAB>текст»" "да" \
+        "$(grep -qP "^$(( OD_NOW - 360 ))\\.000000000(\\.txt)?\\t$(date -d "@$(( OD_NOW - 360 ))" +%H:%M:%S)\\t6\\tПростыми словами" "$X/out" && echo да || echo нет)"
+    R=$(od_cli "$X" --просрочено --на "$(date -d "@$(( OD_NOW - 61 ))" '+%F %T')")
+    case_check "П-О7: --на местным временем, возраст 299 с — ПРОЙДЕН, код 0, n=0" "да" "$(od_verdict "$R" 0 'n=0')"
+    R=$(od_cli "$X" --просрочено --на "вчера")
+    case_check "П-О7: --на неразборчиво — код 2, отказ разбора времени, а не незнакомый ключ" "2 да" \
+        "${R%%|*} $(grep -q 'вчера' "$X/out" && ! grep -q 'unrecognized arguments' "$X/out" && echo да || echo нет)"
+    X=$(od_stand cli-key 10); od_msg "$X" $(( OD_NOW - 360 ))
+    R=$(od_cli "$X" --просрочено --на "@$OD_NOW")
+    case_check "П-О8: срок из ключа OWNER_REPLY_MAX_MIN=10 — 6 мин ПРОЙДЕН" "да" "$(od_verdict "$R" 0 ПРОЙДЕН)"
+    X=$(od_stand cli-unanswered); od_msg "$X" $(( OD_NOW - 360 ))
+    od_cli "$X" --без-ответа >/dev/null
+    case_check "П-О8: --без-ответа читает тот же срок — «срок ответа 5 мин»" "да" \
+        "$(grep -q 'срок ответа 5 мин' "$X/out" && echo да || echo "нет ($(tail -1 "$X/out" | cut -c1-120))")"
+
+    echo "— CLI --просрочено --сетка"
+    loc() { date -d "2026-10-01 $1" +%s; }
+    X=$(od_stand grid)
+    od_msg "$X" "$(loc 10:00:30)"; od_reply "$X" true "$(loc 10:20:00)"
+    od_msg "$X" "$(loc 10:30:30)"; od_msg "$X" "$(loc 10:32:30)"; od_reply "$X" true "$(loc 10:40:00)"
+    R=$(od_cli "$X" --просрочено --сетка "2026-10-01 10:00" "2026-10-01 11:00")
+    case_check "П-О9: сетка N=5 — сработок 3, эпизодов 2, n=3" "да" "$(od_verdict "$R" "${R%%|*}" 'ВЕРДИКТ сетка: сработок 3, эпизодов 2, n=3')"
+    R=$(od_cli "$X" --просрочено --сетка "2026-10-01 10:00" "2026-10-01 11:00" --порог 10)
+    case_check "П-О9: сетка --порог 10 — сработок 1, эпизодов 1" "да" "$(od_verdict "$R" "${R%%|*}" 'ВЕРДИКТ сетка: сработок 1, эпизодов 1')"
+fi
+
+# ═══ 2в. ЖИВЫЕ: восемь команд П1/П2 на живых журналах — только чтение ════════
+# Не входит в прогон без ключа: живые журналы — не стенд. Срок задан копией живого
+# harness.conf с ключами спеки: до доустановки живого ключа ещё нет.
+if [ "$ONLY" = живые ]; then
+    PATHS_JUDGED=$((PATHS_JUDGED + 1))
+    echo "═══ путь 2в: --просрочено на живых журналах (П1, П2)"
+    LIVE_CONF=$(env -u HARNESS_CONF python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import config; print(config.путь_harness_conf())' "$KOREN/scripts/lib" 2>/dev/null)
+    { cat "$LIVE_CONF" 2>/dev/null; printf '\nOWNER_REPLY_MAX_MIN="5"\nCHANNEL_REPLY_MAX_AGE_MIN="120"\n'; } > "$T/live-harness.conf"
+    live() {  # доводы прибора → «код|последняя строка»; вывод в $T/live.out
+        local rc=0
+        env -u HARNESS_LOG_DIR HARNESS_CONF="$T/live-harness.conf" \
+            timeout -k 2 300 python3 "$INSTRUMENT" "$@" > "$T/live.out" 2>&1 || rc=$?
+        echo "$rc|$(grep -v '^[[:space:]]*$' "$T/live.out" | tail -1)"
+    }
+    rows() { grep -cP '^\d+\.\d+(\.txt)?\t' "$T/live.out"; }
+    ok_rc() { local rc="${1%%|*}" line="${1#*|}"; [ "$rc" = "$2" ] && [[ "$line" == *"$3"* ]] && echo да || echo "нет (код $rc: ${line:0:160})"; }
+    R=$(live --просрочено --на "2026-11-05 01:44:14")
+    case_check "П1-1: 05.11 01:44:14 — ПРОЙДЕН, n=0" "да" "$(ok_rc "$R" 0 'ПРОЙДЕН')"
+    R=$(live --просрочено --на "2026-11-05 01:44:16")
+    case_check "П1-2: 05.11 01:44:16 — ПРОВАЛ, одна строка 1793824754.781341534" "да 1 да" \
+        "$(ok_rc "$R" 1 ПРОВАЛ) $(rows) $(grep -qP '^1793824754\.781341534' "$T/live.out" && echo да || echo нет)"
+    R=$(live --просрочено --на "2026-11-03 03:18:16")
+    case_check "П1-3: 03.11 03:18:16 — ПРОВАЛ, одна строка 1793657594.714405629" "да 1 да" \
+        "$(ok_rc "$R" 1 ПРОВАЛ) $(rows) $(grep -qP '^1793657594\.714405629' "$T/live.out" && echo да || echo нет)"
+    R=$(live --просрочено --на "2026-11-06 00:30:00")
+    case_check "П1-4: 06.11 00:30:00 — ПРОВАЛ, две строки 00:20:33 и 00:24:30" "да 2 00:20:33 00:24:30" \
+        "$(ok_rc "$R" 1 ПРОВАЛ) $(rows) $(grep -P '^\d+\.\d+(\.txt)?\t' "$T/live.out" | cut -f2 | sort | tr '\n' ' ' | sed 's/ $//')"
+    R=$(live --просрочено --на "2026-11-06 00:34:30")
+    case_check "П1-5: 06.11 00:34:30 — ПРОЙДЕН (ответ 00:34:20)" "да" "$(ok_rc "$R" 0 ПРОЙДЕН)"
+    R=$(live --просрочено --на "2026-11-03 02:16:00")
+    case_check "П1-6: 03.11 02:16:00 — ПРОЙДЕН (слепое пятно 02:14)" "да" "$(ok_rc "$R" 0 ПРОЙДЕН)"
+    R=$(live --просрочено --сетка "2026-10-31 00:00" "2026-11-07 00:00")
+    case_check "П2-1: неделя N=5 — сработок 11, эпизодов 10" "да" "$(ok_rc "$R" "${R%%|*}" 'сработок 11, эпизодов 10')"
+    R=$(live --просрочено --сетка "2026-10-31 00:00" "2026-11-07 00:00" --порог 10)
+    case_check "П2-2: неделя N=10 — сработок 5, эпизодов 5" "да" "$(ok_rc "$R" "${R%%|*}" 'сработок 5, эпизодов 5')"
 fi
 
 # ═══ 3. КОД: журнал в реестре ══════════════════════════════════════════════

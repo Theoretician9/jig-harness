@@ -13,6 +13,8 @@
 """
 import datetime as dt
 import html
+import sys
+import traceback
 import urllib.parse
 
 СТИЛЬ = """
@@ -367,6 +369,7 @@ def панель(снимок: dict, ручки: list[dict], csrf: str, сооб
              '<div class="кнопки">'
              '<a href="/karta"><button>Карта работы</button></a>'
              '<a href="/ustrojstvo"><button>Как устроено</button></a>'
+             '<a href="/processy"><button>Процессы</button></a>'
              '<a href="/pamyat"><button>Память</button></a>'
              '<form method="post" action="/vyjti">'
              f'<input type="hidden" name="csrf" value="{html.escape(csrf)}">'
@@ -747,3 +750,599 @@ def устройство(данные: dict, искать: str = "") -> str:
             + "".join(_механизм(с) for с in группа["строки"]) + '</div>')
     return _страница("Устройство харнеса",
                      шапка + поиск + сводка + "".join(разделы))
+
+
+# ───────────────────────── раздел «Процессы» ─────────────────────────
+
+# Ширины: ничего жёстче 360 px вне @media (min-width…); таблицы на узком экране
+# складываются в блоки по data-label, горизонтальной прокрутки у страницы нет.
+PROCESS_STYLE = """
+html{scroll-behavior:smooth}
+a{color:var(--оранж)}
+a.пилюля{color:var(--текст);text-decoration:none}
+a.пилюля.вкл{background:linear-gradient(135deg,var(--оранж),var(--фиолет));
+  border-color:transparent;color:#fff;font-weight:600}
+.раздел .пилюля,.якоря .пилюля{font-size:.88rem}
+.раздел .мелко{font-size:.9rem}
+.якоря{display:flex;flex-wrap:wrap;gap:8px;margin:0 2px 18px}
+.раздел{margin-top:16px;scroll-margin-top:12px}
+.раздел .карта{padding:12px 14px}
+.раздел .карта h2{margin:0 0 6px}
+.раздел > h2{font-size:1.1rem;margin:0 2px 4px}
+.раздел > .мелко{margin:0 2px 12px}
+.фильтры{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:0 0 12px}
+.фильтры form{display:flex;flex:1 1 200px;gap:8px;min-width:0}
+.фильтры input[type=text]{font:inherit;flex:1;min-width:0;padding:8px 14px;border-radius:99px;
+  border:1px solid var(--рамка);background:var(--карта2);color:var(--текст)}
+.карточки{display:grid;gap:14px;grid-template-columns:minmax(0,1fr)}
+.карточка{background:var(--карта);border:1px solid var(--рамка);border-radius:20px;
+  padding:14px 16px;overflow-wrap:anywhere;min-width:0}
+.карточка h3{margin:0 0 8px;font-size:1.02rem;font-weight:650;line-height:1.3}
+.метки{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px}
+.серая{opacity:.8}
+.расписание{color:var(--тихо);font-size:.9rem;margin-bottom:6px}
+.что{margin:0 0 8px;font-size:.92rem}
+details{margin-top:8px}
+summary{cursor:pointer;color:var(--тихо);font-size:.9rem}
+.класс{background:var(--карта2);border:1px solid var(--рамка);border-radius:20px;padding:12px 14px;margin:0 0 12px}
+.класс > summary{color:var(--текст);font-size:1rem;font-weight:600;line-height:1.35}
+.класс .итог-класса{display:block;color:var(--тихо);font-size:.9rem;font-weight:400}
+.класс > .карточки,.класс > .мелко{margin-top:12px}
+.подробно{margin-top:8px;font-size:.9rem}
+.подробно dt{color:var(--тихо);margin-top:8px}
+.подробно dd{margin:2px 0 0}
+.подробно ul{margin:2px 0 0;padding-left:18px}
+.файлы{font-size:.75rem;color:var(--тихо);word-break:break-all}
+.итоги{display:grid;gap:8px;grid-template-columns:repeat(2,minmax(0,1fr));margin:12px 0}
+.итог{background:var(--карта);border:1px solid var(--рамка);border-radius:16px;padding:10px 12px;min-width:0}
+.итог .число{font-size:1.4rem;line-height:1.2;overflow-wrap:anywhere}
+.группы{display:grid;gap:10px;grid-template-columns:minmax(0,1fr);margin:12px 0}
+.доля{margin-top:3px;padding:2px 8px;border-radius:8px;background-color:var(--карта2);
+  background-image:linear-gradient(90deg,rgba(255,90,31,.45),rgba(124,92,255,.45));
+  background-repeat:no-repeat;background-size:var(--ширина,0) 100%}
+.доля-строка{display:flex;justify-content:space-between;gap:10px;font-size:.9rem;line-height:1.3}
+.доля-строка span:first-child{min-width:0;overflow-wrap:anywhere}
+.доля-строка span:last-child{white-space:nowrap}
+.таблица{width:100%;border-collapse:collapse;font-size:.9rem}
+.таблица th{text-align:left;color:var(--тихо);font-weight:500;padding:6px 8px;
+  border-bottom:1px solid var(--рамка)}
+.таблица td{padding:7px 8px;border-bottom:1px solid var(--рамка);vertical-align:top;overflow-wrap:anywhere}
+.тихо{color:var(--тихо)}
+.пусто{padding:14px 16px;color:var(--тихо)}
+@media (min-width:700px){
+  .карточки{grid-template-columns:repeat(auto-fit,minmax(320px,1fr))}
+  .итоги{grid-template-columns:repeat(4,minmax(0,1fr))}
+}
+@media (min-width:900px){
+  .группы{grid-template-columns:repeat(2,minmax(0,1fr))}
+}
+@media (max-width:600px){
+  .таблица,.таблица tbody,.таблица tr{display:block}
+  .таблица thead{display:none}
+  .таблица tr{background:var(--карта);border:1px solid var(--рамка);border-radius:16px;
+    padding:6px 12px;margin-bottom:8px}
+  .таблица td{display:grid;grid-template-columns:minmax(0,7.5em) minmax(0,1fr);gap:6px;
+    border-bottom:0;padding:2px 0;line-height:1.3}
+  .таблица td::before{content:attr(data-label);color:var(--тихо)}
+  .таблица td:first-child{display:flex;flex-wrap:wrap;align-items:baseline;gap:2px 12px;font-weight:600;padding-bottom:5px}
+  .таблица td:first-child details{margin-top:0;font-weight:400}
+  .таблица td:first-child::before{display:none}
+  .таблица td.пуст{display:none}
+}
+"""
+
+PROCESS_WINDOWS = {"sejchas": ("сейчас", "Сейчас"), "24ch": ("24ч", "24 ч"), "7d": ("7д", "7 сут")}
+PROCESS_SORTS = {"cpu": "ядро_ч", "mem": "память_пик_мб", "runs": "запусков", "tok": "токены"}
+PROCESS_FILTER_CLASSES = ("фоновый", "по внутреннему действию", "сторонний")
+PROCESS_FILTER_STATES = {"idut": "включены", "pogasheny": "погашены ключом", "isklyucheniya": "исключения"}
+PROCESS_STALE_MIN = 30
+PROCESS_CLASS_WORDS = {"фоновый": "фоновый: работает сам, по расписанию или службой",
+                       "по внутреннему действию": "по внутреннему действию: запускается действием, не по времени",
+                       "сторонний": "сторонний: чужая программа на сервере"}
+PROCESS_LABELS = {"claude-session": "Основная сессия Claude", "helpers": "Помощники",
+                  "helpers: без метки": "Помощники без метки", "модель: голова без метки": "Основная модель без метки",
+                  "ask-the-model": "Вопрос модели", "cgroup-корень": "Корень cgroup",
+                  "прочее": "Прочие процессы сервера"}
+PROCESS_CRON_PREFIX = "крон:"
+PROCESS_CLASS_TITLES = {"фоновый": "Фоновые процессы", "по внутреннему действию": "Процессы по внутреннему действию",
+                        "сторонний": "Сторонние процессы"}
+PROCESS_BARS = (("cpu", "Ядра: доля ёмкости", "доля_ёмкости_проц", "%"),
+                ("mem", "Память: пик", "память_пик_мб", "МБ"),
+                ("runs", "Запуски: доля времени", "доля_запусков_проц", "%"),
+                ("tok", "Токены: доля", "доля_токенов_проц", "%"))
+PROCESS_BARS_SHOWN = 8
+PROCESS_CORE_SLACK = 1.1
+PROCESS_PARALLEL = "helpers"
+PROCESS_ACCURACY = {"сервер": "доля делит итог cgroup по дереву процессов",
+                    "запуски": "время запусков оценено по меткам и транскриптам",
+                    "токены": "владелец вызова определён по журналам и транскриптам"}
+PROCESS_COLUMNS = (("ядро-ч", "сервер"), ("% ёмкости", "сервер"), ("память пик/ср", "сервер"),
+                   ("запусков", "запуски"), ("в работе", "запуски"), ("доля запусков", "запуски"),
+                   ("токены", "токены"), ("доля токенов", "токены"))
+
+
+def _e(value) -> str:
+    return html.escape(str(value))
+
+
+def _p_number(value):
+    if value is None:
+        return None
+    if isinstance(value, int) or value >= 1000:
+        return f"{round(value):,}".replace(",", " ")
+    text = f"{value:.3g}"
+    return (f"{value:.0f}" if "e" in text else text).replace(".", ",")
+
+
+def _p_gb(value) -> str:
+    return f"{value / 2**30:.1f}".replace(".", ",").removesuffix(",0") + " ГБ"
+
+
+def _p_missing() -> str:
+    return '<span class="тихо">не измерено</span>'
+
+
+def _p_cell(text, accuracy: str = "точно", kind: str = "сервер", unit: str = "") -> str:
+    """Число ячейки: None — «не измерено», оценка — «≈» с пояснением в title."""
+    if text is None:
+        return _p_missing()
+    text = f"{text}{unit}"
+    if accuracy == "≈":
+        return f'<span title="оценка: {_e(PROCESS_ACCURACY[kind])}">≈ {_e(text)}</span>'
+    return _e(text)
+
+
+def _p_href(params: dict, fragment: str, **change) -> str:
+    merged = {**params, **change}
+    shown = {k: v for k, v in merged.items() if v}
+    return "/processy" + ("?" + _e(urllib.parse.urlencode(shown)) if shown else "") + "#" + fragment
+
+
+def _p_name(ident: str, names: dict) -> str:
+    if ident in PROCESS_LABELS:                       # короткие подписи владельцу важнее длинных названий библиотеки
+        return PROCESS_LABELS[ident]
+    if ident in names:
+        return names[ident]
+    unit, sep, tail = ident.partition(": ")
+    if sep and tail == "неразмечено":
+        return f"Не разобрано ({unit})"
+    if ident.startswith(PROCESS_CRON_PREFIX):
+        return f"Задание крона без метки ({ident.removeprefix(PROCESS_CRON_PREFIX)})"
+    return ident
+
+
+def _p_when(moment: float, now: float) -> str:
+    stamp, today = dt.datetime.fromtimestamp(moment), dt.datetime.fromtimestamp(now)
+    days = (stamp.date() - today.date()).days
+    day = {0: "сегодня", 1: "завтра", -1: "вчера"}.get(days, stamp.strftime("%d.%m"))
+    return f"{day} {stamp:%H:%M}"
+
+
+def _p_span(seconds: float) -> str:
+    minutes = round(abs(seconds) / 60)
+    return f"{minutes} мин" if minutes < 60 else f"{minutes // 60} ч {minutes % 60} мин" if minutes < 1440 else f"{minutes // 1440} сут"
+
+
+def _p_duration(seconds) -> str:
+    if seconds is None:
+        return "не измерено"
+    seconds = float(seconds)
+    return f"{seconds:.0f} с" if seconds < 90 else _p_span(seconds)
+
+
+# ── библиотека ──
+
+def _p_state_pill(card: dict) -> str:
+    state = card["состояние"]
+    if state == "идёт":
+        return '<span class="пилюля зелёная">идёт</span>'
+    if state == "погашен":
+        return '<span class="пилюля жёлтая">погашен выключателем</span>'
+    if state == "снят":
+        return '<span class="пилюля красная">снят</span>'
+    if state == "иное":
+        return f'<span class="пилюля жёлтая">{_e(card["статус"])}</span>'
+    return '<span class="пилюля серая">вне выключателя</span>'
+
+
+def _p_measure(measure) -> str:
+    week = measure.get("неделя") if isinstance(measure, dict) else None
+    if not week:
+        return "не измерено"
+    parts = []
+    server, runs, tokens = week.get("сервер"), week.get("запуски"), week.get("токены")
+    if server:
+        parts.append(f"ядро-часов {_p_number(server['ядро_часов'])}, память пик {_p_number(server['память_пик_мб'])} МБ")
+    if runs:
+        parts.append(f"запусков {_p_number(runs['запусков'])}")
+    if tokens:
+        parts.append(f"токены {_p_number(tokens['всего'])} ({_p_number(tokens['доля_проц'])} %)")
+    covered = week.get("покрытие_ч") or 0
+    note = f" · неделя неполная: данных {_p_number(covered)} ч из 168" if covered < 168 else ""
+    return ("; ".join(parts) or "не измерено") + note
+
+
+def _p_details(card: dict) -> str:
+    rows = [("Класс", PROCESS_CLASS_WORDS.get(card["класс"], card["класс"])),
+            ("Как запускается", f"{card['запуск']}, {card['расписание']}")]
+    if card["исключение"]:
+        rows.append(("Основание исключения", card["исключение"]))
+    if len(card["что_делает"]) > 150:
+        rows.append(("Полностью", card["что_делает"]))
+    out = "".join(f"<dt>{_e(k)}</dt><dd>{_e(v)}</dd>" for k, v in rows)
+    if card["шаги"]:
+        out += "<dt>Что делает по шагам</dt><dd><ul>" + "".join(f"<li>{_e(s)}</li>" for s in card["шаги"]) + "</ul></dd>"
+    out += "".join(f"<dt>{_e(k)}</dt><dd>{_e(card[f])}</dd>" for k, f in (("Когда", "когда"), ("Без него", "без_него")) if card[f])
+    if card["файлы"]:
+        out += f'<dt>Файлы</dt><dd class="файлы">{_e(", ".join(card["файлы"]))}</dd>'
+    out += f"<dt>Ресурсы</dt><dd>{_e(_p_measure(card['замер']))}</dd>"
+    out += f'<dt>id</dt><dd class="файлы">{_e(card["id"])}</dd>'
+    return f'<details><summary>подробнее</summary><dl class="подробно">{out}</dl></details>'
+
+
+def _p_card(card: dict) -> str:
+    short = card["что_делает"] if len(card["что_делает"]) <= 150 else card["что_делает"][:147].rstrip() + "…"
+    tags = _p_state_pill(card) + ('<span class="пилюля">исключение</span>' if card["исключение"] else "")
+    own = ('<div class="мелко">своя служба, ключом не гасится</div>'
+           if card["запуск"] == "служба-проверок" else "")
+    return (f'<article class="карточка" data-id="{_e(card["id"])}"><h3>{_e(card["название"])}</h3>'
+            f'<div class="метки">{tags}</div><div class="расписание">{_e(card["расписание"])}</div>'
+            f'<p class="что">{_e(short)}</p>{own}{_p_details(card)}</article>')
+
+
+def _p_match(card: dict, query: str) -> bool:
+    return query in " ".join((card["название"], card["id"], card["что_делает"])).lower()
+
+
+def _p_filters(cards: list, params: dict) -> str:
+    def pill(label: str, count: int, key: str, value: str) -> str:
+        chosen = params.get(key) == value
+        link = _p_href(params, "lib", **{key: "" if chosen else value})
+        return f'<a class="пилюля{" вкл" if chosen else ""}" href="{link}">{_e(label)} {count}</a>'
+    counts = {"фоновый": 0, "по внутреннему действию": 0, "сторонний": 0}
+    for card in cards:
+        counts[card["класс"]] = counts.get(card["класс"], 0) + 1
+    states = {"idut": sum(c["состояние"] == "идёт" for c in cards),
+              "pogasheny": sum(c["состояние"] == "погашен" for c in cards),
+              "isklyucheniya": sum(bool(c["исключение"]) for c in cards)}
+    labels = {"фоновый": "фоновые", "по внутреннему действию": "по действию", "сторонний": "сторонние"}
+    all_pill = (f'<a class="пилюля{"" if params.get("klass") else " вкл"}" '
+                f'href="{_p_href(params, "lib", klass="")}">все {len(cards)}</a>')
+    klass = "".join(pill(labels.get(k, k), n, "klass", k) for k, n in counts.items())
+    state = "".join(pill(PROCESS_FILTER_STATES[k], n, "vkl", k) for k, n in states.items())
+    hidden = "".join(f'<input type="hidden" name="{_e(k)}" value="{_e(v)}">'
+                     for k, v in params.items() if v and k != "q")
+    search = (f'<form method="get" action="/processy#lib">{hidden}'
+              f'<input type="text" name="q" value="{_e(params.get("q", ""))}" placeholder="поиск">'
+              f'<button>Найти</button></form>')
+    return f'<div class="фильтры">{all_pill}{klass}</div><div class="фильтры">{state}{search}</div>'
+
+
+def _p_group(cls: str, cards: list, filtered: bool) -> str:
+    """Класс одной раскрывающейся группой: итог «идёт · погашено · исключений» виден и в закрытом виде."""
+    running = sum(c["состояние"] == "идёт" for c in cards)
+    stopped = sum(c["состояние"] == "погашен" for c in cards)
+    exempt = sum(bool(c["исключение"]) for c in cards)
+    title = PROCESS_CLASS_TITLES.get(cls, cls)
+    parts = [f"{word} {count}" for word, count in (("идёт", running), ("погашено", stopped), ("исключений", exempt)) if count]
+    summary = (f'{_e(title)} · {len(cards)}<span class="итог-класса">'
+               f'{" · ".join(parts) or "ключ выключателя их не гасит"}</span>')
+    meaning = f'<div class="мелко">{_e(PROCESS_CLASS_WORDS.get(cls, ""))}</div>' if cls in PROCESS_CLASS_WORDS else ""
+    return (f'<details class="класс"{" open" if filtered else ""}><summary>{summary}</summary>{meaning}'
+            f'<div class="карточки">{"".join(_p_card(c) for c in cards)}</div></details>')
+
+
+def _p_library(library: dict, params: dict) -> str:
+    if library.get("нет данных"):
+        return f'<div class="карта">{_e(library["нет данных"])}</div>'
+    cards = library["записи"]
+    key = ("выключены ключом, работают только исключения" if library["ключ"] == "off"
+           else "включены")
+    note = (f'<div class="мелко">Фоновые процессы: {key} (исключений {library["исключений"]}). '
+            f'Всё, что запускает работа сессии, ключ не трогает.</div>')
+    shown = [c for c in cards
+             if (not params.get("klass") or c["класс"] == params["klass"])
+             and (params.get("vkl") != "idut" or c["состояние"] == "идёт")
+             and (params.get("vkl") != "pogasheny" or c["состояние"] == "погашен")
+             and (params.get("vkl") != "isklyucheniya" or c["исключение"])
+             and (not params.get("q") or _p_match(c, params["q"].strip().lower()))]
+    filtered = any(params.get(k) for k in ("klass", "vkl", "q"))
+    by_class = {}
+    for card in shown:
+        by_class.setdefault(card["класс"], []).append(card)
+    body = ("".join(_p_group(cls, group, filtered) for cls, group in by_class.items()) if shown
+            else '<div class="карта пусто">Под фильтр ничего не попало</div>')
+    return note + _p_filters(cards, params) + body
+
+
+# ── расходы ──
+
+def _p_sorted(rows: list, sort: str) -> list:
+    field = PROCESS_SORTS.get(sort, "ядро_ч")
+    return sorted(rows, key=lambda r: (r.get(field) is None, -(r.get(field) or 0), r["id"]))
+
+
+def _p_sum(rows: list, field: str):
+    values = [r[field] for r in rows if r.get(field) is not None]
+    return sum(values) if values else None
+
+
+def _p_age(view: dict, now: float):
+    try:
+        taken = dt.datetime.fromisoformat(view["снято"]).timestamp()
+    except (KeyError, TypeError, ValueError):
+        return None, None
+    return taken, (now - taken) / 60
+
+
+def _p_stamp(view: dict, now: float) -> str:
+    taken, age = _p_age(view, now)
+    if taken is None:
+        return '<span class="тихо">время снятия неизвестно</span>'
+    stale = ' <span class="пилюля жёлтая">витрина устарела</span>' if age > PROCESS_STALE_MIN else ""
+    return f'снято {dt.datetime.fromtimestamp(taken):%H:%M} ({round(age)} мин назад){stale}'
+
+
+def _p_windows(params: dict) -> str:
+    pills = "".join(f'<a class="пилюля{" вкл" if params["okno"] == key else ""}" '
+                    f'href="{_p_href(params, "cost", okno=key)}">{_e(label)}</a>'
+                    for key, (_, label) in PROCESS_WINDOWS.items())
+    return f'<div class="фильтры">{pills}</div>'
+
+
+def _p_broken(row: dict, covered, cores) -> bool:
+    """Невозможное число — сбой замера: доля ёмкости больше 100 % или ядро-часов больше, чем ядер × часов покрытия."""
+    share, core_hours = row.get("доля_ёмкости_проц"), row.get("ядро_ч")
+    over_capacity = share is not None and share > 100
+    over_cores = bool(cores) and covered is not None and core_hours is not None \
+        and core_hours > cores * covered * PROCESS_CORE_SLACK
+    return over_capacity or over_cores
+
+
+def _p_failure() -> str:
+    return '<span class="пилюля красная">сбой замера</span>'
+
+
+def _p_more(count: int, total: float, unit: str) -> str:
+    text = f"{_p_number(total)} {unit}" + (" пиков" if unit == "МБ" else "")
+    return (f'<div class="доля"><div class="доля-строка"><span>остальные {count}</span>'
+            f'<span>— ≈ {_e(text)}</span></div></div>')
+
+
+def _p_bars(group: str, title: str, rows: list, field: str, unit: str, names: dict, failed: list) -> str:
+    """Верхние 8 процессов полосами; хвост — одной строкой «остальные N — ≈X»."""
+    rated = sorted((r for r in rows if r.get(field)), key=lambda r: -r[field])
+    peak = rated[0][field] if rated else 0
+    lines = []
+    for row in rated[:PROCESS_BARS_SHOWN]:
+        name = _e(_p_name(row["id"], names)) + (" · параллельно" if row["id"] == PROCESS_PARALLEL else "")
+        width = 100 * row[field] / peak if unit == "МБ" else min(100, row[field])
+        lines.append(f'<div class="доля" style="--ширина:{width:.0f}%"><div class="доля-строка"><span>{name}</span>'
+                     f'<span>{_e(_p_number(row[field]))} {unit}</span></div></div>')
+    if len(rated) > PROCESS_BARS_SHOWN:
+        tail = rated[PROCESS_BARS_SHOWN:]
+        lines.append(_p_more(len(tail), sum(r[field] for r in tail), unit))
+    if failed:
+        lines.append(f'<div class="доля">{_p_failure()} <span class="мелко">'
+                     f'{_e(", ".join(_p_name(r["id"], names) for r in failed))}</span></div>')
+    if not lines:
+        lines.append('<div class="мелко">не измерено</div>')
+    return f'<div class="карта" data-group="{group}"><h2>{_e(title)}</h2>{"".join(lines)}</div>'
+
+
+def _p_groups(rows: list, names: dict, failed: list) -> str:
+    return '<div class="группы">' + "".join(
+        _p_bars(group, title, rows, field, unit, names, failed if group == "cpu" else [])
+        for group, title, field, unit in PROCESS_BARS) + '</div>'
+
+
+def _p_row(row: dict, names: dict, constant: set, broken: bool) -> str:
+    accuracy = row.get("точность") or {}
+    always = row["id"] in constant
+
+    def run_cell(value, unit="", fmt=_p_number, dash=False):
+        if value is None:
+            return "—" if dash and always else '<span class="тихо">постоянно</span>' if always else _p_missing()
+        return _p_cell(fmt(value), accuracy.get("запуски", "точно"), "запуски", unit)
+    server = accuracy.get("сервер", "точно")
+    peak = row.get("память_пик_мб")
+    memory = _p_missing() if peak is None else _p_cell(
+        f"{_p_number(peak)} / {_p_number(row.get('память_ср_мб')) or '—'} МБ", server, "сервер")
+    core_hours = _p_failure() if broken else _p_cell(_p_number(row.get("ядро_ч")), server, "сервер")
+    share = _p_failure() if broken else _p_cell(_p_number(row.get("доля_ёмкости_проц")), server, "сервер", " %")
+    cells = [core_hours, share, memory, run_cell(row.get("запусков")),
+             run_cell(row.get("в_работе_ч"), fmt=lambda hours: _p_duration(hours * 3600)),
+             run_cell(row.get("доля_запусков_проц"), " %", dash=True),
+             _p_cell(_p_number(row.get("токены")), accuracy.get("токены", "точно"), "токены"),
+             _p_cell(_p_number(row.get("доля_токенов_проц")), accuracy.get("токены", "точно"), "токены", " %")]
+    parallel = (' <span class="мелко" title="помощники работают одновременно: время запусков суммируется, '
+                'доля по времени выходит больше доли по ядрам">параллельно</span>' if row["id"] == PROCESS_PARALLEL else "")
+    first = f'<td data-label="процесс">{_e(_p_name(row["id"], names))}{parallel}</td>'
+    empty = {True: ' class="пуст"', False: ""}
+    return "<tr>" + first + "".join(
+        f'<td data-label="{_e(label)}"{empty["не измерено" in cell]}>{cell}</td>'
+        for (label, _), cell in zip(PROCESS_COLUMNS, cells)) + "</tr>"
+
+
+def _p_table(rows: list, names: dict, constant: set, params: dict, broken: set) -> str:
+    sorts = "".join(f'<a class="пилюля{" вкл" if params["sort"] == key else ""}" href="{_p_href(params, "cost", sort=key)}">'
+                    f'{label}</a>' for key, label in (("cpu", "по ядрам"), ("mem", "по памяти"),
+                                                     ("runs", "по запускам"), ("tok", "по токенам")))
+    head = "<thead><tr><th>процесс</th>" + "".join(f"<th>{_e(label)}</th>" for label, _ in PROCESS_COLUMNS) + "</tr></thead>"
+    body = "".join(_p_row(r, names, constant, id(r) in broken) for r in _p_sorted(rows, params["sort"]))
+    return (f'<details><summary>Все процессы ({len(rows)})</summary><div class="фильтры" style="margin-top:10px">{sorts}</div>'
+            f'<table class="таблица">{head}<tbody>{body}</tbody></table></details>')
+
+
+def _p_unmarked(view: dict, window: dict, rows: list) -> dict:
+    """Не разобранные доли юнитов за ЭТО окно: подвал не меньше строки «<юнит>: неразмечено» того же окна,
+    иначе одно слово «не разобрано» называло бы две величины. Окно новой витрины даёт долю само,
+    у старой остаток юнита лежит в корне витрины."""
+    own = window.get("неразмечено")
+    result = dict(own if isinstance(own, dict) else view.get("неразмечено") or {})
+    for row in rows:
+        unit, sep, tail = row["id"].partition(": ")
+        if sep and tail == "неразмечено" and row.get("доля_ёмкости_проц") is not None:
+            result[unit] = max(result.get(unit) or 0, row["доля_ёмкости_проц"])
+    return result
+
+
+def _p_footer(view: dict, window: dict, rows: list) -> str:
+    check = view.get("сверка") or {}
+    gap = check.get("расхождение_токенов")
+    gap_text = (_p_missing() if gap is None else f'<span class="пилюля {"зелёная" if gap == 0 else "красная"}">'
+                f'расхождение с tokens-collector: {_e(_p_number(abs(gap)) or 0)} токенов</span>')
+    lost = check.get("без_метки_проц")
+    unmarked = ", ".join(f'{_e(unit.replace("_", " "))} {_e(_p_number(share))} %'
+                         for unit, share in _p_unmarked(view, window, rows).items() if share is not None)
+    return (f'<div class="мелко" style="margin-top:12px">{gap_text} · без метки {_p_number(lost) if lost is not None else "не измерено"} % токенов'
+            f' · не разобрано: {unmarked or "—"}</div>')
+
+
+def _p_coverage(covered, label: str) -> str:
+    hours = {"24ч": 24, "7д": 168}.get(label)
+    if covered is None:
+        return "данных нет"
+    return (f"последние 10 минут, данных {_p_number(covered * 60)} мин" if hours is None
+            else f"данных {_p_number(covered)} ч из {hours}")
+
+
+def _p_tile(title: str, value: str, note: str) -> str:
+    return (f'<div class="итог"><div class="мелко">{_e(title)}</div><div class="число">{value}</div>'
+            f'<div class="мелко">{note}</div></div>')
+
+
+def _p_tiles(window: dict, rows: list, good: list, failed: list, label: str) -> str:
+    """Ядра и память — замер сервера (его покрытие подписано у них); запуски и токены — по журналам окна."""
+    covering = _e(_p_coverage(window.get("покрытие_ч"), label))
+    share = _p_sum(good, "доля_ёмкости_проц")
+    cut = f" · без {len(failed)} строк со сбоем замера" if failed else ""
+    cores = (_p_missing() if share is None else _p_failure() if share > 100 else _e(_p_number(share)) + " %")
+    tiles = [_p_tile("Ядра (доля ёмкости)", cores, covering + _e(cut))]
+    memory = window.get("память_пик_мб")
+    if memory is not None:
+        tiles.append(_p_tile("Память (пик)", _e(_p_number(memory)) + " МБ", covering))
+    runs, skipped = _p_sum(rows, "запусков"), _p_sum(rows, "пропусков")
+    skipped_text = "пропуски не измерены" if skipped is None else \
+        f"пропущено ключом {_p_number(skipped)}"
+    tiles.append(_p_tile("Запуски", _p_missing() if runs is None else _e(_p_number(runs)),
+                         skipped_text))
+    tokens = _p_sum(rows, "токены")
+    tiles.append(_p_tile("Токены", _p_missing() if tokens is None else _e(_p_number(tokens)), "по журналам"))
+    return f'<div class="итоги">{"".join(tiles)}</div>'
+
+
+def _p_cost(view: dict, names: dict, constant: set, params: dict, now: float, cores) -> str:
+    if view.get("нет данных"):
+        return f'<div class="карта пусто">{_e(view["нет данных"])}</div>'
+    label, _ = PROCESS_WINDOWS[params["okno"]]
+    window = view["окна"].get(label) or {}
+    rows = window.get("строки") or []
+    note = f'<div class="мелко">{_p_stamp(view, now)}</div>'
+    if not rows:
+        return _p_windows(params) + note + '<div class="карта пусто">За это окно данных пока нет</div>'
+    covered = window.get("покрытие_ч")
+    broken = {id(r) for r in rows if _p_broken(r, covered, cores)}
+    good = [r for r in rows if id(r) not in broken]
+    failed = [r for r in rows if id(r) in broken]
+    dropped = window.get("отброшено_строк", view.get("отброшено_строк"))
+    dropped_pill = (f' <span class="пилюля жёлтая">отброшено {_e(_p_number(dropped))} выборок со сбоем замера</span>'
+                    if isinstance(dropped, (int, float)) and dropped > 0 else "")
+    return (_p_windows(params) + f'<div class="мелко">{_p_stamp(view, now)}{dropped_pill}</div>'
+            + _p_tiles(window, rows, good, failed, label) + _p_groups(good, names, failed)
+            + _p_table(rows, names, constant, params, broken) + _p_footer(view, window, rows))
+
+
+# ── служба проверок ──
+
+def _p_slice(cut: dict) -> str:
+    cores, total = cut["ядер_потолок"], cut["ядер_всего"]
+    ceiling = (f'Потолок ядер {_p_number(cores)} из {total} ({_p_number(cores * 100)} %)' if cores
+               else '<span class="пилюля красная">без потолка</span> по ядрам')
+    soft, hard, now_, peak = cut["память_мягкий"], cut["память_жёсткий"], cut["память_сейчас"], cut["память_пик"]
+    memory = "Память: " + (f"мягкий {_p_gb(soft)}" if soft else "мягкого потолка нет") + " / " + (
+        f"жёсткий {_p_gb(hard)}" if hard else '<span class="пилюля красная">без потолка</span>')
+    bar = ""
+    if now_ is not None and hard:
+        share = 100 * now_ / hard
+        bar = (f'<div class="полоса"><i style="width:{min(100, share):.0f}%;background:{_цвет_доли(share)}"></i></div>'
+               f'<div class="мелко">занято сейчас {_p_gb(now_)} из {_p_gb(hard)}</div>')
+    elif now_ is not None:
+        bar = f'<div class="мелко">занято сейчас {_p_gb(now_)}</div>'
+    throttled = "не измерено" if cut["торможений"] is None else _p_number(cut["торможений"])
+    extra = f'пик памяти {_p_gb(peak)}' if peak is not None else "пик памяти не измерен"
+    return (f'<div class="карта"><div>{ceiling}</div><div style="margin-top:6px">{memory}</div>{bar}'
+            f'<div class="мелко" style="margin-top:8px">торможений по ядрам: {throttled} · {extra}</div></div>')
+
+
+def _p_runs(runs: list, now: float) -> str:
+    if not runs:
+        return '<span class="тихо">прогонов ещё не было</span>'
+
+    def line(run):
+        code = run["rc"]
+        pill = ('<span class="пилюля серая">без кода</span>' if code is None else
+                '<span class="пилюля зелёная">успешно</span>' if code == 0 else f'<span class="пилюля красная">код {_e(code)}</span>')
+        cpu = "" if run["cpu_с"] is None else f', CPU {_p_number(run["cpu_с"])} с'
+        return f'{_e(_p_when(run["ts"], now))}, {_e(_p_duration(run["с"]))}{_e(cpu)} {pill}'
+    more = (f"<details><summary>последние прогоны ({len(runs)})</summary>"
+            + "".join(f'<div class="мелко">{line(r)}</div>' for r in runs) + "</details>") if len(runs) > 1 else ""
+    return line(runs[0]) + more
+
+
+def _p_timer_row(timer: dict, now: float) -> str:
+    if timer["идёт_с"]:
+        upcoming = f'<span class="пилюля зелёная">идёт с {_e(timer["идёт_с"])}</span>'
+    elif not timer["включён"]:
+        upcoming = '<span class="пилюля серая">выключен</span>'
+    elif timer["следующий"]:
+        upcoming = f'{_e(_p_when(timer["следующий"], now))}, через {_e(_p_span(timer["следующий"] - now))}'
+    else:
+        upcoming = _p_missing()
+    cells = [("процесс", f'{_e(timer["название"])}<details><summary>подробнее</summary>'
+                         f'<div class="файлы">{_e(timer["юнит"])}</div></details>'),
+             ("расписание", _e(timer["расписание"])), ("следующий", upcoming),
+             ("последний", _p_runs(timer["прогоны"], now))]
+    return "<tr>" + "".join(f'<td data-label="{label}">{cell}</td>' for label, cell in cells) + "</tr>"
+
+
+def _p_checks(checks: dict, now: float) -> str:
+    note = '<div class="мелко">Отдельная служба со своим потолком ядер и памяти: ключ выключателя её не гасит.</div>'
+    if checks.get("нет данных"):
+        return note + f'<div class="карта пусто">{_e(checks["нет данных"])}</div>'
+    table = ('<table class="таблица"><thead><tr><th>процесс</th><th>расписание</th><th>следующий запуск</th>'
+             '<th>последний прогон</th></tr></thead><tbody>'
+             + "".join(_p_timer_row(t, now) for t in checks["таймеры"]) + "</tbody></table>")
+    return note + _p_slice(checks["срез"]) + '<div style="margin-top:14px">' + table + "</div>"
+
+
+def _p_section(anchor: str, title: str, subject: str, build) -> str:
+    """Сбой отрисовки одного блока не роняет страницу: на его месте причина, остальные блоки целы."""
+    try:
+        inner = build()
+    except Exception as error:                      # noqa: BLE001
+        traceback.print_exc(file=sys.stderr)
+        inner = (f'<div class="карта пусто">Блок не показан: {_e(subject)} не удалось разобрать '
+                 f'({_e(type(error).__name__)}).</div>')
+    return f'<section class="раздел" id="{anchor}"><h2>{_e(title)}</h2>{inner}</section>'
+
+
+def processes_page(data: dict, window: str = "24ch", klass: str = "", vkl: str = "", sort: str = "cpu",
+                   query: str = "") -> str:
+    """Раздел «Процессы». Параметры уже разобраны сервером; неизвестное окно и сортировка — значения по умолчанию."""
+    params = {"okno": window if window in PROCESS_WINDOWS else "24ch", "klass": klass, "vkl": vkl,
+              "sort": sort if sort in PROCESS_SORTS else "cpu", "q": query}
+    names = data.get("названия") or {}
+    constant = {c["id"] for c in (data["библиотека"].get("записи") or []) if c["запуск"] in ("служба", "контейнер")}
+    now = data.get("снято") or dt.datetime.now().timestamp()
+    head = ('<div class="шапка"><div style="display:flex;align-items:center;gap:12px">'
+            '<div class="значок">✳</div><h1>Процессы харнеса</h1></div>'
+            '<a href="/"><button>На панель</button></a></div>'
+            '<div class="якоря"><a class="пилюля" href="#lib">Библиотека</a>'
+            '<a class="пилюля" href="#cost">Расходы</a><a class="пилюля" href="#checks">Проверки</a></div>')
+    body = (head
+            + _p_section("lib", "Библиотека процессов", "данные библиотеки", lambda: _p_library(data["библиотека"], params))
+            + _p_section("cost", "Расходы: диспетчер", "строку в витрине диспетчера",
+                         lambda: _p_cost(data["диспетчер"], names, constant, params, now, data.get("ядер")))
+            + _p_section("checks", "Служба проверок", "данные службы проверок", lambda: _p_checks(data["проверки"], now)))
+    return _страница("Процессы харнеса", f"<style>{PROCESS_STYLE}</style>{body}")

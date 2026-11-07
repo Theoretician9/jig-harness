@@ -98,6 +98,12 @@ pane_cmd() {
     printf '%s\n' "$PANE_CMD"
 }
 
+# Команда в панели — это агент (claude/node), а не оболочка. Один судья факта
+# «агент в панели»: на нём стоят решения сторожа сессий и страж ответа владельцу.
+pane_is_agent() {  # $1 = команда панели (PANE_CMD)
+    case "$1" in claude|node) return 0 ;; *) return 1 ;; esac
+}
+
 # Каталог scripts/ определяется при подключении: судьи паузы и лимита лежат в нём.
 PANE_SCRIPTS="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
 source "$PANE_SCRIPTS/lib/events.sh"
@@ -225,6 +231,10 @@ PYEOF
 # называющий файл, отдаётся как есть, только если неотдан ровно этот один; иначе
 # склейка по порядку. Нечего отдавать (всё уже отдал толчок, взявший лок раньше)
 # — PANE_PRESS пуст.
+# Фраза в конце каждого пинка о сообщении: пинок мог устареть (файл прочитан иным
+# путём, пока строка ждала в вводе), а «принял» владельцу уже отправил диспетчер.
+PANE_OWNER_NOTE="Если файла уже нет во входящих — пинок устарел, повторно не отвечай; «принял» владельцу уже отправил диспетчер, не квитируй, отвечай по сути."
+
 pane_compose() {  # текст звонящего
     local text="$1" stamps=() ts
     PANE_PRESS="$text"; PANE_NAMED=()
@@ -232,10 +242,10 @@ pane_compose() {  # текст звонящего
     while IFS= read -r ts; do [ -n "$ts" ] && stamps+=("$ts"); done < <(pane_unsent_ts)
     if [ "${#stamps[@]}" = 0 ]; then PANE_PRESS=""; return 0; fi
     if [ "${#stamps[@]}" = 1 ] && [[ "$text" == *"/${stamps[0]}.txt"* ]]; then
-        PANE_NAMED=("${stamps[0]}"); return 0
+        PANE_NAMED=("${stamps[0]}"); PANE_PRESS="$text $PANE_OWNER_NOTE"; return 0
     fi
     mapfile -t glued < <(pane_glue_text "${stamps[@]}")
-    PANE_PRESS="${glued[0]}"
+    PANE_PRESS="${glued[0]} $PANE_OWNER_NOTE"
     PANE_NAMED=("${glued[@]:1}")
 }
 
@@ -243,6 +253,62 @@ pane_mark_sent() {  # ts…
     local ts
     mkdir -p "${LOG_DIR:-}/kick-state"
     for ts in "$@"; do : > "${LOG_DIR:-}/kick-state/sent-$ts"; done
+}
+
+# ── ПОДТВЕРЖДЕНИЕ ПРИЁМА ПИНКА ──────────────────────────────────────────────
+# Код возврата tmux говорит лишь «клавиши доставлены в панель», а не «Enter
+# принят приглашением»: замер 03.11.2026 — пинки лежали в строке ввода claude по
+# 43 минуты и всплывали дублем, часть не появлялась вовсе. Поэтому после Enter
+# смотрим на экран: стоит ли хвост нашего текста В СТРОКЕ ВВОДА.
+#
+# Иголка — «<ts>.txt» последнего названного в пинке файла входящих. Хвост текста
+# не годится: пинок диспетчера кончается одним и тем же «…/обработано/.», и эхо
+# (или ещё стоящий в очереди) прошлый пинок дал бы ложное «не принят». ts уникален.
+# Названных файлов нет (комментарий панели, «пауза снята») — подтверждения нет.
+# Область — от последней строки приглашения («>» или «❯», перед ней допустима рамка
+# «│») до низа экрана: так захватывается и строка ввода, перенесённая на несколько
+# строк, и не захватывается история выше. Эхо принятого сообщения в истории тоже
+# начинается с «>», но строка ввода всегда НИЖЕ него, поэтому «последняя» верна.
+# Приглашения на экране нет (меню, диалог) — запасное окно: последние
+# PANE_CONFIRM_LINES непустых строк (по умолчанию 5). Как рисует настоящий claude,
+# здесь не проверено: стенд — фальшивый процесс с тем же видом строки.
+#
+# Строку ввода НЕ чистим ни при каких обстоятельствах (ни Ctrl+U, ни C-c, ни
+# Escape): там может быть набор человека. Единственное действие — повторный Enter.
+# Не удалось снять экран — ведём себя как до подтверждения (fail-open).
+# PANE_CONFIRM=0 выключает всё это; PANE_CONFIRM_DELAY — пауза перед снимком.
+
+# 0 — иголка в области ввода, 1 — нет, 2 — экран снять не удалось.
+pane_tail_on_screen() {  # иголка
+    local want screen lines="${PANE_CONFIRM_LINES:-5}"
+    want="${1//[[:space:]]/}"; want="${want//│/}"
+    [ -n "$want" ] || return 1
+    pane_tmux capture-pane -p -t "${TMUX_SESSION:-}" || return 2
+    screen=$(printf '%s\n' "$PANE_OUT" | awk -v n="$lines" '
+        { l[NR] = $0 }
+        NF { last = NR }
+        $0 ~ /^[[:space:]]*(│[[:space:]]*)?(>|❯)/ { prompt = NR }
+        END {
+            from = prompt ? prompt : last - n + 1
+            for (i = from; i <= last; i++) if (i > 0) print l[i]
+        }')
+    screen="${screen//[[:space:]]/}"; screen="${screen//│/}"
+    [[ "$screen" == *"$want"* ]]
+}
+
+# 0 — принят (или выяснить нельзя), 1 — Enter не принят даже со второго раза.
+# Принятый Enter виден на первом же снимке, поэтому в обычном случае цена —
+# одна короткая пауза под локом панели.
+pane_confirm_kick() {  # иголка
+    [ "${PANE_CONFIRM:-1}" != 0 ] || return 0
+    local delay="${PANE_CONFIRM_DELAY:-0.2}" rc=0
+    sleep "$delay"
+    pane_tail_on_screen "$1" || rc=$?
+    [ "$rc" = 0 ] || return 0
+    pane_tmux send-keys -t "${TMUX_SESSION:-}" Enter || return 0
+    sleep "$delay"
+    pane_tail_on_screen "$1" || return 0
+    return 1
 }
 
 pane_kick_owner_locked() {  # текст
@@ -257,7 +323,13 @@ pane_kick_owner_locked() {  # текст
     [ -n "$PANE_PRESS" ] || { PANE_REFUSAL=""; return 0; }
     pane_kick "$PANE_PRESS" || { PANE_KICK_AT=$(date +%s.%N); return 1; }
     PANE_KICK_AT=$(date +%s.%N)
+    # Текст УЖЕ стоит в строке ввода, поэтому метка отдачи ставится и при «не принят»:
+    # без неё следующий пинок сторожа склеил бы второй экземпляр в ту же строку, и
+    # оба ушли бы одним сообщением. Правду о застревании несёт событие kick_stuck.
+    # Код 0 нарочно: повтор диспетчера (код 1) положил бы ещё один такой же.
+    if [ "${#PANE_NAMED[@]}" -gt 0 ] && ! pane_confirm_kick "${PANE_NAMED[-1]}.txt"; then PANE_KICK_STUCK=1; fi
     [ "${#PANE_NAMED[@]}" = 0 ] || pane_mark_sent "${PANE_NAMED[@]}"
+    [ -z "${PANE_KICK_STUCK:-}" ] || return 0
     [ "${PANE_SEND_NOW:-0}" = 1 ] || return 0
     # В оболочке C-s — XOFF и терминал замирает: аккорд только в живого агента.
     pane_cmd_set
@@ -277,9 +349,12 @@ pane_kick_owner() {  # текст
     PANE_REFUSAL=""
     PANE_SEND_NOW_RESULT=""
     PANE_KICK_AT=""
+    PANE_KICK_STUCK=""
     PANE_PRESS=""
     PANE_NAMED=()
     pane_lock_run pane_kick_owner_locked "$1" || rc=$?
+    # Флаг прохода сторожа: один толчок tmux за проход, ветка 6д смотрит его последней.
+    [ "$rc" != 0 ] || TMUX_KICKED=1
     pane_delivery_mark "$1" "$rc"
     return "$rc"
 }
@@ -303,6 +378,9 @@ pane_delivery_mark() {  # текст звонящего, код двери
         why="${PANE_REFUSAL%%:*}"
         HARNESS_LOG_DIR="$LOG_DIR" harness_event доставка scripts/lib/pane.sh delivery.kick_refused held \
             "ts_список=$list" "почему=$why" "когда=$at"
+    elif [ -n "${PANE_KICK_STUCK:-}" ]; then
+        HARNESS_LOG_DIR="$LOG_DIR" harness_event доставка scripts/lib/pane.sh delivery.kick_stuck held \
+            "ts_список=$list" "почему=enter-не-принят" "когда=$at"
     elif [ -n "$PANE_PRESS" ]; then
         HARNESS_LOG_DIR="$LOG_DIR" harness_event доставка scripts/lib/pane.sh delivery.kick_sent ok \
             "ts_список=$list" "когда=$at"
@@ -317,8 +395,11 @@ pane_delivery_mark() {  # текст звонящего, код двери
 # подъём после лимита). Держит только паузу: лимит здесь судить нельзя, потому
 # что limit-watch будит смену именно в момент сброса.
 pane_kick_service() {  # текст
+    local rc=0
     PANE_REFUSAL=""
-    pane_lock_run pane_kick "$1"
+    pane_lock_run pane_kick "$1" || rc=$?
+    [ "$rc" != 0 ] || TMUX_KICKED=1
+    return "$rc"
 }
 
 # Команда сессии под тем же локом: /exit, /clear, /model, клавиши диалога,

@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Уборка docker: старые образы, остановленные контейнеры, безымянные тома, кэш сборки.
+"""Уборка docker: старые свои образы, остановленные контейнеры, безымянные тома.
 
 Механизм УДАЛЯЕТ (И-1). Боевой ход идёт только с --разрешено (его добавляет демон под
 выключателем DOCKER_SWEEP_ENABLED), иначе отказ до первого вызова docker. Каждое
 правило безопасности — отдельный случай scripts/test_docker_sweep.py.
 Не вызываются никогда: system/volume/image/container prune, rm и rmi с -f/-v,
-builder prune -a — они не различают своё и чужое.
+builder prune — они не различают своё и чужое (кэш сборки общий на машину и хозяина не
+имеет, поэтому класса «кэш сборки» нет).
 """
 import fcntl
 import json
@@ -29,8 +30,8 @@ ROLLBACK_TAG = re.compile(r"^\d{8}_\d{4}_[0-9a-f]+$")
 ANONYMOUS_LABEL = "com.docker.volume.anonymous"
 COMPOSE_PROJECT = "com.docker.compose.project"
 UNITS = {"B": 1, "KB": 10**3, "MB": 10**6, "GB": 10**9, "TB": 10**12}
-CLASSES = ("контейнеры", "образы", "тома", "кэш сборки")
-MODES = {"--ночь": "ночь", "--давление": "давление", "--после-выката": "после выката"}
+CLASSES = ("контейнеры", "образы", "тома")
+MODES = {"--ночь": "ночь", "--давление": "давление"}
 
 
 def say(text: str) -> None:
@@ -71,7 +72,6 @@ class Config:
     now: float
     image_hours: float
     stopped_hours: float
-    cache_gb: float
     volume_days: float
     protect: re.Pattern | None
     own: re.Pattern | None
@@ -122,8 +122,11 @@ def image_items(inventory: dict, cfg: Config, hours: float, first_seen: dict) ->
         groups.setdefault(row["ID"], []).append(row)
     items = []
     for ident, rows in groups.items():
+        # Висячий образ без имени и чужой репозиторий не свои: демон docker общий для проектов машины.
         refs = [f"{r['Repository']}:{r['Tag']}" for r in rows
-                if r["Repository"] != "<none>" and r["Tag"] != "<none>"]
+                if r["Repository"] != "<none>" and r["Tag"] != "<none>" and is_own(cfg, r["Repository"], {})]
+        if not refs:
+            continue
         if any(int(r.get("Containers") or 0) for r in rows):
             continue
         if any(r["Tag"] in PROTECTED_TAGS or ROLLBACK_TAG.match(r["Tag"]) for r in rows):
@@ -135,8 +138,8 @@ def image_items(inventory: dict, cfg: Config, hours: float, first_seen: dict) ->
         if cfg.now - first_seen.get(ident, cfg.now) < hours * HOUR:
             continue
         size = to_bytes(rows[0].get("UniqueSize") or "") or to_bytes(rows[0].get("Size") or "")
-        for target in refs or [ident]:
-            items.append(Item("образы", target, size // len(refs or [1]), "образ без контейнера, старше срока",
+        for target in refs:
+            items.append(Item("образы", target, size // len(refs), "образ без контейнера, старше срока",
                               ["rmi", target]))
     return items
 
@@ -193,20 +196,6 @@ def volume_candidates(inventory: dict, cfg: Config, own_volumes: set) -> list:
             for r in rows if r["Name"] in created and cfg.now - created[r["Name"]] >= cfg.volume_days * DAY]
 
 
-def cache_item(cfg: Config) -> Item | None:
-    for line in docker("system", "df", "--format", "{{json .}}").stdout.splitlines():
-        row = json.loads(line)
-        if row.get("Type") == "Build Cache":
-            reclaim = min(to_bytes(row.get("Reclaimable") or ""), to_bytes(row.get("Size") or ""))
-            freed = reclaim - int(cfg.cache_gb * 10**9)
-            if freed <= 0:
-                return None
-            keep = f"{cfg.cache_gb:g}GB"
-            return Item("кэш сборки", "build-cache", freed, "кэш последней сборки оставлен",
-                        ["builder", "prune", "-f", "--keep-storage", keep])
-    return None
-
-
 # --- метки томов и журнал --------------------------------------------------------
 
 def read_marks(path: str) -> dict:
@@ -244,11 +233,6 @@ def journal_row(journal, item: Item, now: float, action: str) -> None:
     journal.flush()
 
 
-def reclaimed_bytes(output: str) -> int:
-    match = re.search(r"Total reclaimed space:\s*(\S+)", output)
-    return to_bytes(match.group(1)) if match else 0
-
-
 def execute(items: list, journal, now: float) -> list:
     done = []
     for item in items:
@@ -257,8 +241,6 @@ def execute(items: list, journal, now: float) -> list:
         except subprocess.TimeoutExpired:
             journal_row(journal, item, now, "отказ: предел времени")
             continue
-        if result.returncode == 0 and item.klass == "кэш сборки":
-            item.nbytes = reclaimed_bytes(result.stdout)   # итог — замер docker, не расчёт
         if result.returncode:
             reason = (result.stderr.strip().splitlines() or ["код %d" % result.returncode])[0]
             journal_row(journal, item, now, f"отказ: {reason}")
@@ -294,17 +276,35 @@ def arg_value(argv: list, name: str, default):
     return type(default)(argv[argv.index(name) + 1]) if name in argv else default
 
 
+def deploy_running(journal_path: str) -> bool:
+    # Файл замка остаётся лежать после выката, поэтому судит захват, а не наличие.
+    path = os.path.join(os.path.dirname(journal_path), "locks", "deploy.lock")
+    try:
+        handle = open(path)
+    except FileNotFoundError:
+        return False
+    except OSError:
+        # Не смогли прочесть замок — не знаем, идёт ли выкат: лучше не убирать.
+        return True
+    with handle:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            return True
+    return False
+
+
 def sweep(argv: list) -> int:
     modes = [m for m in MODES if m in argv]
     dry = "--dry-run" in argv
     if len(modes) != 1:
-        say("docker: нужен один режим --ночь, --давление или --после-выката")
+        say("docker: нужен один режим --ночь или --давление")
         return 2
     if not dry and "--разрешено" not in argv:
         say("docker: боевой ход выключен (DOCKER_SWEEP_ENABLED=0), ничего не убрано")
         return 2
     own = arg_value(argv, "--свои", "")
-    if not dry and modes[0] != "--после-выката" and not own:
+    if not dry and not own:
         # Пустой список своих значил бы «снимай всё чужое»: отказ до первого вызова docker.
         say("docker: не задан список своих (DOCKER_SWEEP_OWN) — боевой ход отказан, ничего не убрано")
         return 2
@@ -318,7 +318,6 @@ def sweep(argv: list) -> int:
         now=float(now),
         image_hours=arg_value(argv, "--образы-ч", 168.0),
         stopped_hours=arg_value(argv, "--контейнеры-ч", 24.0),
-        cache_gb=arg_value(argv, "--кэш-гб", 2.0),
         volume_days=arg_value(argv, "--тома-дней", 14.0),
         protect=re.compile(protect) if protect else None,
         own=re.compile(own) if own else None,
@@ -327,6 +326,11 @@ def sweep(argv: list) -> int:
     journal_path = arg_value(argv, "--журнал", "docker-sweep.jsonl")
     marks_path = arg_value(argv, "--метки", "docker-sweep-marks.json")
     history_path = marks_path + ".история"
+
+    if deploy_running(journal_path):
+        # Выкат пересоздаёт контейнеры и образы: уборка в этот миг снимет то, что вот-вот понадобится.
+        say("docker: идёт выкат (занят deploy.lock) — ничего не убрано")
+        return 0
 
     lock = open(journal_path + ".lock", "w")
     try:
@@ -338,24 +342,21 @@ def sweep(argv: list) -> int:
     plan: dict = {k: [] for k in CLASSES}
     history = read_history(history_path)
     try:
-        if mode != "после выката":
-            inventory = docker_json("system", "df", "-v", "--format", "{{json .}}")
-            rows = inspect_containers()
-            # Первая встреча пишется на каждом боевом ходе независимо от порогов: иначе
-            # история копится только когда образ уже подходит под снятие.
-            ids = {r["ID"] for r in inventory.get("Images", [])}
-            history["образы"] = {i: history["образы"].get(i, cfg.now) for i in ids}
-            first_seen = dict(history["образы"])
-            plan["контейнеры"] = container_items(cfg, rows)
-            plan["образы"] = image_items(inventory, cfg, image_hours, first_seen)
-            if cfg.volumes_on:
-                present = {v["Name"] for v in inventory.get("Volumes", [])}
-                history["тома_свои"] = sorted((set(history["тома_свои"]) | own_attached(cfg, rows)) & present)
-            candidates = volume_candidates(inventory, cfg, set(history["тома_свои"])) if cfg.volumes_on else []
-            kept, ripe = mature_volumes(candidates, read_marks(marks_path), cfg.now)
-            plan["тома"] = ripe
-        cache = cache_item(cfg)
-        plan["кэш сборки"] = [cache] if cache else []
+        inventory = docker_json("system", "df", "-v", "--format", "{{json .}}")
+        rows = inspect_containers()
+        # Первая встреча пишется на каждом боевом ходе независимо от порогов: иначе
+        # история копится только когда образ уже подходит под снятие.
+        ids = {r["ID"] for r in inventory.get("Images", [])}
+        history["образы"] = {i: history["образы"].get(i, cfg.now) for i in ids}
+        first_seen = dict(history["образы"])
+        plan["контейнеры"] = container_items(cfg, rows)
+        plan["образы"] = image_items(inventory, cfg, image_hours, first_seen)
+        if cfg.volumes_on:
+            present = {v["Name"] for v in inventory.get("Volumes", [])}
+            history["тома_свои"] = sorted((set(history["тома_свои"]) | own_attached(cfg, rows)) & present)
+        candidates = volume_candidates(inventory, cfg, set(history["тома_свои"])) if cfg.volumes_on else []
+        kept, ripe = mature_volumes(candidates, read_marks(marks_path), cfg.now)
+        plan["тома"] = ripe
     except (DockerDown, ValueError, KeyError, subprocess.TimeoutExpired) as exc:
         say(f"docker не отвечает или ответил непонятно: {exc} — уборка пропущена")
         return 0
@@ -368,9 +369,8 @@ def sweep(argv: list) -> int:
     with open_journal(journal_path) as journal:
         for klass in CLASSES:
             done[klass] = execute(plan[klass], journal, cfg.now)
-    if mode != "после выката":
-        write_marks(history_path, history)
-    if cfg.volumes_on and mode != "после выката":
+    write_marks(history_path, history)
+    if cfg.volumes_on:
         gone = {i.ident for i in done["тома"]}
         write_marks(marks_path, {n: t for n, t in kept.items() if n not in gone})
     summarize(done, "убрано", False)

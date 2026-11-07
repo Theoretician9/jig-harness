@@ -170,7 +170,7 @@ def insert_position(lines: list, line_id: str) -> int:
         if in_line and re.match(r"^\s{0,4}-\s+id:\s", line):
             break          # началась следующая линия, задач в нашей нет
     # MapRefused, а не голый SystemExit: писатель тревог ловит именно его и кладёт
-    # намерение в очередь; на линии без задач (sample-29, app-cms) иначе оно терялось.
+    # намерение в очередь; на линии без задач (`tasks: []` или пустой хвост) иначе оно терялось.
     raise MapRefused(f"в карте не нашлось места для задачи линии «{line_id}»")
 
 
@@ -313,7 +313,7 @@ def epoch(stamp) -> float:
 
 
 def alert_weights(journal_path: str, data: dict) -> dict:
-    """{id: ключ} для ОДНОЙ карточки — старшей открытой тревоги.
+    """{id: ключ} для ВСЕХ открытых тревог.
 
     Признак срочности ставит демон (журнал), а не смена (карта): поле в карте
     пишет тот, кому оно выгодно. Журнал и карта сверяются в обе стороны."""
@@ -323,7 +323,7 @@ def alert_weights(journal_path: str, data: dict) -> dict:
         return {}
     folded = fold_journal(parse_journal(lines))
     tasks = {t.get("id"): t for line in data.get("lines") or [] for t in line.get("tasks") or []}
-    found = []
+    found = {}
     for key, item in folded.items():
         if state_of(item) != "открыта":
             continue
@@ -331,11 +331,8 @@ def alert_weights(journal_path: str, data: dict) -> dict:
         task = tasks.get(birth["id"])
         if (task and task.get("источник") == ALERT_SOURCE_PREFIX + key
                 and task.get("status") not in NOT_WEIGHTED_STATUSES):
-            found.append((epoch(birth.get("ts")), birth["id"], key))
-    if not found:
-        return {}
-    _, card_id, key = min(found)
-    return {card_id: key}
+            found[birth["id"]] = key
+    return found
 
 
 # ── перенесено из map-from-message.py ──────────────────────────────────────

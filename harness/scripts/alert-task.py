@@ -8,7 +8,7 @@ must-create-model-task/spec.md (ред. 2), состояния зова — §3.
 
     alert-task.py --key K --title T --text X [--watcher W] [--line L]
     alert-task.py --resolve K        # сторож видит зелёное
-    alert-task.py --drain            # донести отложенные намерения
+    alert-task.py --drain            # донести отложенное и погасить тревоги снятых сторожей
     alert-task.py --is-green K       # приёмка: 0 и «ЗЕЛЁНОЕ K», иначе 1
     alert-task.py --open             # открытые ключи
     alert-task.py --selftest
@@ -484,12 +484,51 @@ def command_open(paths: Paths) -> int:
     return 0
 
 
+def retired_watchers(paths: Paths) -> set:
+    """Имена из `снятые_сторожа` system-jobs.yaml, у которых нет ни демона, ни скрипта.
+    Кривой или нечитаемый файл даёт пустое множество: донос должен идти дальше."""
+    try:
+        data = yaml.safe_load((paths.project / "harness" / "config" / "system-jobs.yaml")
+                              .read_text(encoding="utf-8"))
+    except (OSError, ValueError, yaml.YAMLError):
+        return set()
+    listed = data.get("снятые_сторожа") if isinstance(data, dict) else None
+    if not isinstance(listed, list):
+        return set()
+    # Тревогу живого сторожа список не снимает: иначе правка одной строки
+    # заменила бы починку.
+    return {name for name in listed if isinstance(name, str)
+            and not (paths.project / "harness" / "demons" / f"{name}.sh").exists()
+            and not (paths.project / "scripts" / f"{name}.py").exists()}
+
+
+def retire_alerts(paths: Paths) -> int:
+    """Гасит открытые тревоги и очередь снятых сторожей: снять тревогу может только
+    сторож, а его уже нет. Возвращает число погашенных ключей."""
+    retired = retired_watchers(paths)
+    lines = journal_lines(paths)
+    found = {}
+    for key, item in cards.fold_journal(cards.parse_journal(lines)).items():
+        if cards.state_of(item) == "открыта":
+            found[key] = watcher_of(key, item["birth"].get("сторож"))
+    for row in queue_rows(paths):
+        # Строка очереди, по которой уже есть «зелёное» позже, второго не рождает.
+        if not green_after(lines, row["key"], str(row.get("ts"))):
+            found.setdefault(row["key"], watcher_of(row["key"], row.get("watcher")))
+    gone = {key: who for key, who in found.items() if who in retired}
+    for key, who in gone.items():
+        log_event(paths, cards.GREEN_EVENT, key, why="сторож снят", watcher=who)
+    return len(gone)
+
+
 def command_drain(paths: Paths) -> int:
     compact_journal(paths)
+    retired_count = retire_alerts(paths)
     stats = drain(paths)
     ceiling = f", потолок {stats['ceiling']}" if stats["ceiling"] else ""
+    retired_tail = f", сторож снят {retired_count}" if retired_count else ""
     print(f"донос: донесено {stats['added']}, повторов {stats['repeats']}, "
-          f"снято {stats['dropped']}, осталось {stats['left']}{ceiling}")
+          f"снято {stats['dropped']}, осталось {stats['left']}{ceiling}{retired_tail}")
     if stats["left"]:
         print(f"в очереди {stats['left']}: {stats['reason']}")
     return 0

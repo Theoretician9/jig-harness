@@ -87,7 +87,7 @@ def двор(механизмы: list[dict], классы: dict, состоян�
     """
     import yaml
 
-    путь = pathlib.Path(tempfile.mkdtemp(prefix="класс-"))
+    путь = pathlib.Path(tempfile.mkdtemp(prefix="проба-класс-"))
     (путь / "mechanisms.yaml").write_text(
         yaml.dump(механизмы, allow_unicode=True), encoding="utf-8")
     (путь / "classes.yaml").write_text(

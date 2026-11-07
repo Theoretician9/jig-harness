@@ -45,6 +45,7 @@
     python3 scripts/acceptance.py              # сухой прогон: только отчёт
     python3 scripts/acceptance.py --применить  # + записать исходы в карту
     python3 scripts/acceptance.py --selftest
+    python3 scripts/acceptance.py --мутации-задачи <id>  # шаг «мутации»: бумага .tasks/<id>/мутации.log
     python3 scripts/acceptance.py --кандидаты  # «сделано, но не заявлено»: только список
 Код возврата: 0 — прогон состоялся, 1 — есть провалы.
 """
@@ -363,8 +364,9 @@ def судить(задача: dict, корень: Path) -> dict:
     return вердикт
 
 
-# ── Мутации — долг до принятия (пульт pipeline.yaml, ключ «шаги_приёмки») ──
-ИТОГ_МУТАЦИЙ = re.compile(r"дыр (\d+)")
+# ── Мутации — шаг задачи до test (пульт pipeline.yaml, шаги; ключ «шаги_приёмки» — ручка) ──
+ИТОГ_ПРИБОРА = re.compile(r"покраснели как надо (\d+), дыр (\d+)")
+ТАБЛИЦЫ_МУТАЦИЙ = ("harness/config/probe-mutations.yaml", "harness/config/invariants.yaml")
 ПРИБОР_МУТАЦИЙ = ["bash", "scripts/mutation-probe.sh"]
 _ПАЙПЛАЙН = []
 
@@ -387,91 +389,215 @@ def шаги_приёмки_карточки(задача: dict, корень: P
     return _ПАЙПЛАЙН[0].шаги_приёмки_задачи(задача, корень)
 
 
-def последний_коммит(ид: str, корень: Path) -> float | None:
-    """Время последнего коммита задачи (эпоха); None — git молчит."""
-    try:
-        ответ = subprocess.run(
-            ["git", "-C", str(корень), "log", "-1", "--format=%ct",
-             f"--grep=^Dev-Map: {ид}$", "--extended-regexp"],
-            capture_output=True, text=True, timeout=60)
-    except (OSError, subprocess.SubprocessError):
-        return None
-    if ответ.returncode != 0 or not ответ.stdout.strip():
-        return None
-    return float(ответ.stdout.strip())
-
-
 def журнал_мутаций(корень: Path, ид: str) -> Path:
     return корень / ".tasks" / ид / "мутации.log"
 
 
-def долг_мутаций(ид: str, корень: Path, отложенные, последний: float | None) -> str | None:
-    """Почему мутации задачи не закрыты; None — долга нет.
-
-    Закрывает долг только итог «дыр 0» в журнале НОВЕЕ последнего коммита:
-    журнал от прошлого кода доказывает прошлый код.
-    """
-    if "мутации" not in (отложенные or ()):
+def _git_lines(корень: Path, *args: str) -> list[str] | None:
+    """Строки вывода git; None — git молчит (не запустился или отказал)."""
+    try:
+        ответ = subprocess.run(["git", "-C", str(корень), "-c", "core.quotepath=false", *args],
+                               capture_output=True, text=True, timeout=120)
+    except (OSError, subprocess.SubprocessError):
         return None
+    return ответ.stdout.splitlines() if ответ.returncode == 0 else None
+
+
+def mutation_table(корень: Path) -> tuple[set, dict]:
+    """(механизмы с записями мутаций, файл-доказательство -> его механизм)."""
+    import yaml
+
+    def load(name: str, key: str):
+        путь = корень / "harness" / "config" / name
+        if not путь.is_file():
+            return None
+        return (yaml.safe_load(путь.read_text(encoding="utf-8")) or {}).get(key)
+
+    invariants = [e for e in load("invariants.yaml", "инварианты") or [] if e.get("мутация")]
+    proofs = {п: з["механизм"] for п, з in (load("probe-mutations.yaml", "пробы") or {}).items()
+              if з and з.get("мутация")}
+    return {e.get("файл") for e in invariants} | set(proofs.values()), proofs
+
+
+def механизмы_задачи(ид: str, корень: Path) -> list[str] | None:
+    """Механизмы с записями мутаций, которых коснулась задача: сами или их
+    файл-доказательство. None — история не прочитана."""
+    файлы = файлы_задачи(ид, корень)
+    if файлы is None:
+        return None
+    mechanisms, proofs = mutation_table(корень)
+    return sorted({ф for ф in файлы if ф in mechanisms} | {proofs[ф] for ф in файлы if ф in proofs})
+
+
+def paper_sections(текст: str, mechanisms: list[str]) -> dict[str, str]:
+    """Разделы `--- <механизм>` бумаги; раздел кончается следующим разделом или итогом."""
+    sections, current = {}, None
+    for строка in текст.splitlines():
+        if строка.startswith("=== мутации задачи"):
+            current = None
+        elif строка.startswith("--- ") and строка[4:] in mechanisms:
+            current = строка[4:]
+            sections[current] = []
+        elif current:
+            sections[current].append(строка)
+    return {к: "\n".join(в) for к, в in sections.items()}
+
+
+def section_debt(тело: str) -> str | None:
+    """Почему раздел одного механизма не зелёный; None — зелёный."""
+    итоги = ИТОГ_ПРИБОРА.findall(тело)
+    if not итоги:
+        return "в разделе нет итога прибора (прибор упал?)"
+    if int(итоги[-1][1]):
+        return f"дыр {итоги[-1][1]}"
+    return "прогон НЕДОГНАН" if "НЕДОГНАНА" in тело else None
+
+
+def stale_debts(ид: str, корень: Path, sha: str, mechanisms: list[str]) -> list[str]:
+    """Правки задачи после sha бумаги в механизмы, их доказательства и таблицы."""
+    _, proofs = mutation_table(корень)
+    watched = {м: м for м in mechanisms}
+    watched.update({п: м for п, м in proofs.items() if м in mechanisms})
+    watched.update({т: т for т in ТАБЛИЦЫ_МУТАЦИЙ})
+    после = _git_lines(корень, "log", "--format=", "--name-only",
+                       f"--grep=^Dev-Map: {ид}$", "--extended-regexp", f"{sha}..HEAD")
+    if после is None:
+        return ["бумага мутаций: коммиты после неё не прочитаны"]
+    return [f"бумага старше правки: после коммита {sha[:9]} задача правила {ф} ({watched[ф]})"
+            for ф in dict.fromkeys(после) if ф in watched]
+
+
+def mutation_paper_debts(ид: str, корень: Path) -> list[str] | None:
+    """Долги шага «мутации»: пусто — шаг пройден или не требуется; None — история
+    не прочитана. Судит бумагу по коммиту, а не по времени файла."""
+    mechanisms = механизмы_задачи(ид, корень)
+    if not mechanisms:
+        return mechanisms
     журнал = журнал_мутаций(корень, ид)
     if not журнал.is_file():
-        return f"мутации: ждут ночи — нет .tasks/{ид}/мутации.log"
-    итоги = ИТОГ_МУТАЦИЙ.findall(журнал.read_text(encoding="utf-8", errors="replace"))
-    if not итоги:
-        return "мутации: в журнале нет итога «дыр N» — мутаций механизмов задачи нет"
-    if int(итоги[-1]):
-        return f"мутации: дыр {итоги[-1]} — проба слабая, карточка заведена"
-    if последний is None or журнал.stat().st_mtime < последний:
-        return "мутации: журнал старше последнего коммита задачи — ждут ночи"
-    return None
+        return [f"мутации: нет .tasks/{ид}/мутации.log; механизмы: {', '.join(mechanisms)}"]
+    текст = журнал.read_text(encoding="utf-8", errors="replace")
+    шапка = re.match(r"коммит ([0-9a-f]{7,40})$", текст.splitlines()[0] if текст else "")
+    if not шапка:
+        return ["мутации: в шапке бумаги нет «коммит <sha>»"]
+    sha = шапка.group(1)
+    if _git_lines(корень, "merge-base", "--is-ancestor", sha, "HEAD") is None:
+        return [f"мутации: коммит бумаги {sha[:9]} не предок HEAD"]
+    sections = paper_sections(текст, mechanisms)
+    debts = []
+    for м in mechanisms:
+        беда = section_debt(sections[м]) if м in sections else "нет раздела в бумаге"
+        if беда:
+            debts.append(f"мутации: {м}: {беда}")
+    return debts + stale_debts(ид, корень, sha, mechanisms)
+
+
+def долг_мутаций(ид: str, корень: Path, отложенные) -> str | None:
+    """Почему мутации задачи не закрыты; None — долга нет (или шаг не отложен)."""
+    if "мутации" not in (отложенные or ()):
+        return None
+    debts = mutation_paper_debts(ид, корень)
+    if debts is None:
+        return "мутации: история задачи не прочитана (git молчит)"
+    return "; ".join(debts) or None
+
+
+def _хакатон():
+    import importlib.util
+    спец = importlib.util.spec_from_file_location(
+        "hackathon_acceptance", Path(__file__).resolve().parent / "hackathon.py")
+    модуль = importlib.util.module_from_spec(спец)
+    спец.loader.exec_module(модуль)
+    return модуль
 
 
 def долг_мутаций_задачи(задача: dict, корень: Path) -> str | None:
     """Долг мутаций карточки. История задачи — в репозитории харнеса (КОРЕНЬ),
     журнал — там, где судятся её проверки (корень)."""
     ид = задача.get("id", "?")
+    if _хакатон().is_hackathon(задача):
+        return None  # мутации хакатона — долг карточки <id>-prod-debt
     отложенные = шаги_приёмки_карточки(задача, КОРЕНЬ)
     if отложенные is None:
         return "мутации: история задачи не прочитана (git молчит) — долг не судим"
     if "мутации" not in отложенные:
         return None
-    return долг_мутаций(ид, корень, отложенные, последний_коммит(ид, КОРЕНЬ))
+    return долг_мутаций(ид, корень, отложенные)
 
 
-def файлы_задачи(ид: str, корень: Path) -> list[str]:
-    """Существующие файлы из коммитов задачи — кандидаты в механизмы."""
-    ответ = subprocess.run(
-        ["git", "-C", str(корень), "-c", "core.quotepath=false", "log", "--format=",
-         "--name-only", f"--grep=^Dev-Map: {ид}$", "--extended-regexp"],
-        capture_output=True, text=True, timeout=120)
-    имена = dict.fromkeys(с for с in ответ.stdout.splitlines() if с.strip())
-    return [и for и in имена if (корень / и).is_file()]
+def файлы_задачи(ид: str, корень: Path) -> list[str] | None:
+    """Существующие файлы из коммитов задачи; None — git молчит."""
+    имена = _git_lines(корень, "log", "--format=", "--name-only",
+                       f"--grep=^Dev-Map: {ид}$", "--extended-regexp")
+    if имена is None:
+        return None
+    return [и for и in dict.fromkeys(с for с in имена if с.strip()) if (корень / и).is_file()]
 
 
-def мутации_задачи(ид: str, корень: Path, прибор: list[str]) -> int | None:
-    """Прогнать мутации механизмов задачи в её журнал. Дыр N; None — мутаций нет."""
+def task_changed_lines(ид: str, корень: Path, файл: str) -> str | None:
+    """Номера строк файла (как в рабочем дереве), изменённых задачей, через запятую.
+    None — сужать нельзя: файл задача не правила, база не найдена или строк нет."""
+    commits = _git_lines(корень, "log", "--reverse", "--format=%H", f"--grep=^Dev-Map: {ид}$",
+                         "--extended-regexp", "--", файл)
+    if not commits:
+        return None
+    diff_lines = _git_lines(корень, "diff", "-U0", f"{commits[0]}^", "--", файл)
+    if not diff_lines:
+        return None
+    lines: list[int] = []
+    for line in diff_lines:
+        hunk = re.match(r"@@ -\S+ \+(\d+)(?:,(\d+))? @@", line)
+        if not hunk:
+            continue
+        start, count = int(hunk.group(1)), int(hunk.group(2) or 1)
+        # Чистое удаление (+N,0): поведение изменилось на стыке строк N и N+1.
+        lines += range(start, start + count) if count else [n for n in (start, start + 1) if n > 0]
+    return ",".join(map(str, lines)) or None
+
+
+class QueueBusy(Exception):
+    """Очередь среза занята дольше предела ожидания: прогон не состоялся."""
+
+
+QUEUE_BUSY_RC = 75
+
+
+def мутации_задачи(ид: str, корень: Path, прибор: list[str], narrow: bool = True) -> int | None:
+    """Прогнать мутации механизмов задачи в её бумагу. Дыр N; None — механизмов
+    нет или история не прочитана (бумага тогда не пишется)."""
+    mechanisms = механизмы_задачи(ид, корень)
+    head = _git_lines(корень, "rev-parse", "HEAD")
+    if not mechanisms or not head:
+        return None
     покраснели = дыр = 0
     куски = []
-    for файл in файлы_задачи(ид, корень):
-        ответ = subprocess.run(прибор + ["--механизм", файл], cwd=str(корень),
+    for файл in mechanisms:
+        # Шаг задачи гоняет мутации ИЗМЕНЁННЫХ задачей строк; полный набор — ночью.
+        env = dict(os.environ)
+        lines = task_changed_lines(ид, корень, файл) if narrow else None
+        if lines:
+            env["MUT_ONLY_LINES"] = lines
+        else:
+            env.pop("MUT_ONLY_LINES", None)
+        ответ = subprocess.run(прибор + ["--механизм", файл], cwd=str(корень), env=env,
                                capture_output=True, text=True, errors="replace")
+        if ответ.returncode == QUEUE_BUSY_RC:
+            raise QueueBusy((ответ.stdout + ответ.stderr).strip())
         вывод = ответ.stdout + ответ.stderr
-        if "записей для механизма нет" in вывод:
-            continue
-        итог = re.findall(r"покраснели как надо (\d+), дыр (\d+)", вывод)
+        итог = ИТОГ_ПРИБОРА.findall(вывод)
         # Прибор без итога ничего не доказал — это дыра, а не тишина.
         к, д = (int(итог[-1][0]), int(итог[-1][1])) if итог else (0, 1)
         покраснели += к
         дыр += д
         куски.append(f"--- {файл}\n{вывод}")
-    if not куски:
-        итог = f"=== мутации задачи {ид}: мутаций для её файлов в таблице нет ==="
-    else:
-        итог = f"=== мутации задачи {ид}: покраснели {покраснели}, дыр {дыр} ==="
+        for line in вывод.splitlines():
+            if "правка без мутаций" in line:
+                print(line.strip())
+    итог = f"=== мутации задачи {ид}: покраснели {покраснели}, дыр {дыр} ==="
     журнал = журнал_мутаций(корень, ид)
     журнал.parent.mkdir(parents=True, exist_ok=True)
-    журнал.write_text("\n".join(куски + [итог]) + "\n", encoding="utf-8")
-    return дыр if куски else None
+    журнал.write_text("\n".join([f"коммит {head[0]}"] + куски + [итог]) + "\n", encoding="utf-8")
+    return дыр
 
 
 def ночные_мутации(карта: dict, корень: Path, прибор: list[str], писатель) -> list:
@@ -486,7 +612,10 @@ def ночные_мутации(карта: dict, корень: Path, прибо
         if not долг or "не прочитана" in долг:
             continue
         ид = з.get("id", "?")
-        дыр = мутации_задачи(ид, корень, прибор)
+        try:
+            дыр = мутации_задачи(ид, корень, прибор, narrow=False)
+        except QueueBusy:
+            continue  # очередь занята: ночь повторит, а не заводит карточку «слабая проба»
         ключ = "task-mutations:" + hashlib.sha1(ид.encode()).hexdigest()[:12]
         if дыр == 0:
             писатель(["--resolve", ключ])
@@ -499,11 +628,33 @@ def ночные_мутации(карта: dict, корень: Path, прибо
     return итог
 
 
-def _ночные_мутации() -> int:
+def _mutation_probe() -> list[str]:
     import shlex
+    return shlex.split(os.environ.get("HARNESS_MUTATION_PROBE") or "") or ПРИБОР_МУТАЦИЙ
+
+
+def _task_mutations(ид: str) -> int:
+    """Шаг «мутации» задачи: бумага .tasks/<id>/мутации.log. Код 0 — дыр 0, 1 — дыры,
+    2 — история не прочитана. Тревог не заводит: дыру чинит тот же исполнитель."""
+    if механизмы_задачи(ид, КОРЕНЬ) is None:
+        print(f"мутации задачи {ид}: история не прочитана (git молчит)")
+        return 2
+    try:
+        дыр = мутации_задачи(ид, КОРЕНЬ, _mutation_probe())
+    except QueueBusy as busy:
+        print(f"мутации задачи {ид}: не прогнано: очередь среза занята — {busy}")
+        return QUEUE_BUSY_RC
+    if дыр is None:
+        print(f"мутации задачи {ид}: механизмов с записями нет — шаг пуст")
+        return 0
+    print(f"мутации задачи {ид}: дыр {дыр}, бумага {журнал_мутаций(КОРЕНЬ, ид)}")
+    return 1 if дыр else 0
+
+
+def _ночные_мутации() -> int:
     import yaml
     карта = yaml.safe_load(КАРТА.read_text(encoding="utf-8"))
-    прибор = shlex.split(os.environ.get("HARNESS_MUTATION_PROBE") or "") or ПРИБОР_МУТАЦИЙ
+    прибор = _mutation_probe()
 
     def писатель(доводы: list) -> None:
         subprocess.run([sys.executable, str(КОРЕНЬ / "scripts" / "alert-task.py"), *доводы],
@@ -1914,6 +2065,12 @@ def _печать_долга(порция: int = 0) -> int:
 
 
 def main() -> int:
+    if "--мутации-задачи" in sys.argv and not os.environ.get("HARNESS_IN_CHECKS_SLICE"):
+        # Под потолок среза идёт только настоящий прогон мутаций: пустой набор
+        # (нет механизмов, git молчит) дёшев и очередь не занимает.
+        if механизмы_задачи(sys.argv[sys.argv.index("--мутации-задачи") + 1], КОРЕНЬ) != []:
+            door = str(Path(__file__).resolve().parent / "run-in-checks-slice.sh")
+            os.execv("/bin/bash", ["/bin/bash", door, sys.executable, str(Path(__file__).resolve()), *sys.argv[1:]])
     if "--selftest" in sys.argv:
         return _selftest()
     if "--формы" in sys.argv:
@@ -1925,6 +2082,8 @@ def main() -> int:
         return 0
     if "--мутации-долга" in sys.argv:
         return _ночные_мутации()
+    if "--мутации-задачи" in sys.argv:
+        return _task_mutations(sys.argv[sys.argv.index("--мутации-задачи") + 1])
     if "--кандидаты" in sys.argv:
         # «Сделано, но не заявлено»: только список, статус не меняется (И-4).
         return _print_closing_candidates()

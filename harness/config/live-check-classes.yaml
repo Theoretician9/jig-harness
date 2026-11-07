@@ -117,6 +117,10 @@
     класс: A1
   "harness/demons/sentinel.sh":
     класс: A2
+  "harness/demons/resource-report.sh":
+    класс: A1
+  "harness/demons/resource_report.py":
+    класс: A2
   "harness/demons/server-hygiene.sh":
     класс: A1
   "harness/demons/server_hygiene_check.py":
@@ -316,6 +320,8 @@
     класс: C1
   "scripts/check-event-writers.py":
     класс: C1
+  "scripts/check-ack-receipts.py":
+    класс: C1
   "scripts/check-secrets-perms.py":
     класс: C1
   "scripts/check-secrets.sh":
@@ -380,6 +386,10 @@
   "scripts/hooks/agent_budget_guard.py":
     класс: B1
   "scripts/hooks/test_agent_budget_guard.py":
+    класс: D
+  "scripts/hooks/agent_finish_log.py":
+    класс: B1
+  "scripts/hooks/test_agent_finish_log.py":
     класс: D
   "scripts/hooks/file_claim_guard.py":
     класс: B1
@@ -558,6 +568,8 @@
     класс: D
   "scripts/test_tg_send_commit_trees.sh":
     класс: D
+  "scripts/test_status_report.py":
+    класс: D
   "scripts/test_nightly_gates_ceiling.sh":
     класс: D
   "scripts/test_nightly_gates_live_edit.sh":
@@ -579,6 +591,8 @@
   "scripts/test_watchers_wave2.sh":
     класс: D
   "scripts/test_watchers_wave3.sh":
+    класс: D
+  "scripts/test_memory_revision_threshold.sh":
     класс: D
   "scripts/test_devmap_selfheal.sh":
     класс: D
@@ -641,6 +655,10 @@
   "scripts/test_warden_blocked_idle.sh":
     класс: D
   "scripts/test_warden_subagent_work.sh":
+    класс: D
+  "scripts/test_warden_limit_silence.sh":
+    класс: D
+  "scripts/test_warden_pulse.sh":
     класс: D
   "scripts/test_who_is_on_port.py":
     класс: D
@@ -725,6 +743,8 @@
     класс: D
   "scripts/tmp-sweep.py":
     класс: C3
+  "scripts/test_resource_report.py":
+    класс: D
     причина: "необратим на производстве"
   "scripts/test_tmp_sweep.py":
     класс: D
@@ -755,7 +775,11 @@
     класс: D
   "scripts/test_dispatcher_stall_watch.sh":
     класс: D
+  "scripts/test_ack_receipts.sh":
+    класс: D
   "scripts/test_archive_map.py":
+    класс: D
+  "scripts/test_weed_duplicates.py":
     класс: D
   "scripts/test_demon_stream_json.sh":
     класс: D
@@ -824,6 +848,10 @@
   "scripts/test_map_writers_library.py":
     класс: D
   "scripts/test_sentinel_drain.py":
+    класс: D
+  "scripts/test_sentinel_resolve.py":
+    класс: D
+  "scripts/test_heartbeat_watch_alerts.py":
     класс: D
   "scripts/test_cards_lib.py":
     класс: D

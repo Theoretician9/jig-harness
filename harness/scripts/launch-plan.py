@@ -15,6 +15,7 @@ scripts/test_launch_plan.py; спека docs/specs/2026-10-29-правила-в�
 """
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import subprocess
@@ -32,6 +33,7 @@ import events                                                # noqa: E402
 import cards                                                 # noqa: E402
 import launch_plan_lib as lib                                # noqa: E402
 import pipeline                                              # noqa: E402
+import hackathon                                             # noqa: E402
 
 SRC = "scripts/launch-plan.py"
 JOURNAL = "вложенность"
@@ -176,6 +178,11 @@ def complexity(ctx: Ctx, g: dict, roles: dict) -> dict:
     return {**result, "имя": name, "след": trace}
 
 
+def closed_plan_trace(g: dict) -> list:
+    line = lib.closed_plan_line(g["located"][0], g["cards"]) if g["located"] else None
+    return [line] if line else []
+
+
 def plan_outcome(ctx: Ctx, g: dict, roles: dict) -> tuple:
     """Исход §5: (исход, подсказка, след)."""
     if g["located"]:
@@ -210,8 +217,11 @@ def capacity_line(cap: dict, safety: dict, cx: dict, verdict: str) -> str:
         alive += f" (заявок {src['заявки']}, ролей {src['роли']}, вызовов {src['вызовы']})"
     loaded = cap["задач_в_работе"] >= safety["порог_нагрузки"]
     cut = f"сложность: {cx['мера']} ≥ порог резки {cx['порог']}; " if cx["режет"] and loaded else ""
-    return (f"ёмкость: свободно {cap['ёмкость']} из {safety['жёсткий_верх']}, {alive}, "
-            f"задач в работе {cap['задач_в_работе']}; {cut}решение: {verdict}")
+    mode = ("судья скорости не отвечает, потолок как до режимов" if safety["режим"] is None
+            else f"эффективный режим {safety['режим']}")
+    return (f"ёмкость: свободно {cap['ёмкость']} из {safety['жёсткий_верх']} ({mode}), {alive}, "
+            f"задач в работе {cap['задач_в_работе']} при пороге {safety['порог_нагрузки']}; "
+            f"{cut}решение: {verdict}")
 
 
 def task_plan(ctx: Ctx, g: dict, task: str):
@@ -222,16 +232,59 @@ def task_plan(ctx: Ctx, g: dict, task: str):
     return own if own.is_file() else None
 
 
+def hackathon_lines(ctx: Ctx, g: dict, task: str) -> list:
+    on = hackathon.active(conf_path=ctx.conf_path)
+    mode = f"включён до {hackathon.until_text(ctx.conf_path)}" if on else "выключен"
+    steps = ", ".join(pipeline.шаги_уровня(g["pipe_conf"], g["level"]))
+    lines = [f"хакатон: режим {mode}; уровень задачи {g['level']}; шаги: {steps}"]
+    if on and g["level"] != hackathon.LEVEL:
+        lines.append(f"  перевести задачу на уровень хакатон: python3 scripts/hackathon.py "
+                     f"--включить-задачу {task} --карта {ctx.devmap}")
+    return lines
+
+
+def judge_view(ctx: Ctx):
+    """(эффективный режим, потолок живых, задач в работе) у судьи скорости; None — судья не ответил."""
+    path = ctx.root / "harness" / "demons" / "speed_mode.py"
+    try:
+        spec = importlib.util.spec_from_file_location("speed_mode", path)
+        judge = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(judge)
+    except (OSError, ImportError, AttributeError, KeyError, TypeError, ValueError, yaml.YAMLError):
+        return None
+    try:
+        mode, ceiling = judge.effective(ctx.now), judge.ceiling_alive(ctx.now)
+        # Один счёт «задач в работе» на сторожа и потолок: считает судья, не live_state.
+        work = len(judge.in_work(ctx.now))
+    except (OSError, ImportError, AttributeError, KeyError, TypeError, ValueError, yaml.YAMLError,
+            judge.DataError, judge.MeasureError):
+        return None
+    return None if mode is None or ceiling is None else (mode, ceiling, work)
+
+
+def mode_safety(ctx: Ctx, safety: dict) -> dict:
+    """Предохранитель с подменой от судьи; без судьи — данные как до режимов."""
+    view = judge_view(ctx)
+    if view is None:
+        return {**safety, "режим": None, "задач_в_работе": None}
+    mode, ceiling, work = view
+    return {**safety, "жёсткий_верх": ceiling, "порог_нагрузки": mode + safety["порог_сверх_режима"],
+            "режим": mode, "задач_в_работе": work}
+
+
 def decide(ctx: Ctx, task: str) -> dict:
     roles = ctx.roles()
     g = gather(ctx, task, roles)
     cx = complexity(ctx, g, roles)
     outcome, hints, outcome_trace = plan_outcome(ctx, g, roles)
-    safety = roles["предохранитель"]
+    safety = mode_safety(ctx, roles["предохранитель"])
     window = float(safety["окно_живых"]) * 60
     live = lib.live_state(g["claim_rows"], ctx.journal_rows("роли-помощников"),
                           ctx.journal_rows("вызовы-агентов"), ctx.now, window,
                           safety["жёсткий_верх"])
+    # Без судьи — счёт live_state, как до режимов.
+    in_work = live["задач_в_работе"] if safety["задач_в_работе"] is None else safety["задач_в_работе"]
+    live = {**live, "задач_в_работе": in_work}
     held = lib.held_paths(g["claims"], task)
     struct = g["structure"]
     waiting = {p["n"] for p in g["parts"] if held & set(p["файлы"])}
@@ -243,10 +296,12 @@ def decide(ctx: Ctx, task: str) -> dict:
     rule = lib.pick_rule(roles["правила"], facts, {**roles, **safety})
     # Нужно 0 (файлов ещё нет) — один исполнитель или управляющий, который порежет работу.
     wanted = max(needed, 1)
+    # Мелочь не ждёт никогда: один исполнитель и при ёмкости 0.
+    trifle = rule["имя"] == "мелочь"
+    room = max(live["ёмкость"], 1) if trifle else live["ёмкость"]
     count, trimmed = lib.executors(rule["исполнителей"], {"групп": wanted, "нужно": wanted,
-                                                          "ёмкость": live["ёмкость"]},
-                                   live["ёмкость"])
-    wait = live["ёмкость"] == 0
+                                                          "ёмкость": room}, room)
+    wait = room == 0
     verdict = (f"ждать, ёмкость {live['ёмкость']} ({rule['имя']})" if wait
                else f"{plural(count)} ({rule['имя']}, групп {struct['групп']})")
     label = f"Часть: {g['chapter']}/{task}" if g["chapter"] else f"Часть: {task}"
@@ -275,13 +330,15 @@ def decide(ctx: Ctx, task: str) -> dict:
                    "волна": struct["волна"][p["n"]], "ждёт": p["n"] in waiting,
                    "метка": f"{label}#{p['n']}"} for p in g["parts"]],
         "волн": struct["волн"],
-        "ёмкость": {"жёсткий_верх": safety["жёсткий_верх"], "живых": live["живых"],
+        "ёмкость": {"жёсткий_верх": safety["жёсткий_верх"], "порог_нагрузки": safety["порог_нагрузки"],
+                    "режим": safety["режим"], "живых": live["живых"],
                     "свободно": live["свободно"], "задач_в_работе": live["задач_в_работе"],
                     "задачи": live["задачи"], "по_источникам": live["по_источникам"],
                     "нужно": needed, "ждут": len(blocked), "урезал": trimmed},
         "строка_ёмкости": capacity_line(live, safety, cx, verdict),
         "модели": models, "подсказка": hints,
-        "след": cx["след"] + outcome_trace,
+        "строки_хакатона": hackathon_lines(ctx, g, task),
+        "след": cx["след"] + outcome_trace + closed_plan_trace(g),
         "хеш_плана": lib.file_hash(source["файл"]) if source["файл"] else None,
         "_решение": verdict,
     }
@@ -299,6 +356,7 @@ def render_text(d: dict) -> str:
             f"{', '.join(p['файлы'])}  [{p['метка']}]" for p in d["части"]]
     out.append("модели: " + (", ".join(f"{k} → {v}" for k, v in d["модели"].items()) or "—"))
     out.append(d["строка_ёмкости"])
+    out += d["строки_хакатона"]
     out += [f"след: {line}" for line in d["след"]]
     return "\n".join(out)
 
@@ -352,6 +410,7 @@ def cmd_need_plan(ctx: Ctx, opts: dict) -> int:
     outcome, hints, trace = plan_outcome(ctx, g, roles)
     for chapter in hints:
         emit(task, "nesting.chapter", "ok", {"задача": task, "глава": chapter, "источник": "подсказка"})
+    trace = trace + closed_plan_trace(g)
     result = {"задача": task, "исход": outcome, "глава": g["chapter"], "подсказка": hints, "след": trace}
     return show(result, opts, f"{task}: {outcome}" + (f" (глава {g['chapter']})" if g["chapter"] else "")
                 + ("; прижить к " + ", ".join(hints) if hints else "")
@@ -434,10 +493,11 @@ def cmd_pin(ctx: Ctx, opts: dict) -> int:
 def cmd_check_plan(ctx: Ctx, opts: dict) -> int:
     pid = opts["pos"][0]
     plans = lib.all_plans(ctx.plans_dir)
+    orphans = lib.orphan_problems(plans, ctx.cards(), pid)
     if pid not in plans:
-        raise lib.DataError(f"план {pid} не найден в {ctx.plans_dir}")
+        raise lib.DataError([f"план {pid} не найден в {ctx.plans_dir}", *orphans])
     plan, plan_path = plans[pid]
-    problems = lib.plan_problems(plan, plan_path, ctx.cards(), ctx.roles()["верх_вложенности"])
+    problems = lib.plan_problems(plan, plan_path, ctx.cards(), ctx.roles()["верх_вложенности"]) + orphans
     if problems:
         raise lib.DataError(problems)
     print(f"план {pid}: правила §4.3 соблюдены")

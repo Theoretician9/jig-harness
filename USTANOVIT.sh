@@ -254,21 +254,18 @@ MANUAL_LIST=()
   # было десять демонов против семнадцати в реестре, и на чистой машине семь
   # демонов не приезжали вовсе — установка падала на собственной же сверке
   # (сухой прогон 13.09.2026).
-  python3 -c '
-import sys, yaml
-реестр, проект, логи = sys.argv[1], sys.argv[2], sys.argv[3]
-д = yaml.safe_load(open(реестр, encoding="utf-8")) or {}
-for з in (д.get("задания") or []):
-    имя, когда = з.get("имя") or "", з.get("расписание") or ""
-    команда, журнал = з.get("команда") or "", з.get("журнал") or ""
-    if not (имя and когда and команда):
-        continue
-    куда = f" >>{логи}/{журнал} 2>&1" if журнал else ""
-    print(f"{когда}  {проект}/{команда}{куда}")
-' "$1" "$2" "$3"
+  # Форма строки (обёртка run-background.sh, перенаправление) живёт в одном месте —
+  # scripts/lib/process_library.py: её же пишет доустановка. Библиотека лежит
+  # рядом с реестром: harness/config → harness/scripts/lib.
+  python3 -I "$(dirname "$1")/../scripts/lib/process_library.py" cron-lines "$1" "$2" "$3"
 }
 
-демоны_из_спеки() { # путь к system-jobs.yaml → имена демонов, по одному в строке
+службы_проверок() { # $1 = реестр → id заданий, которые гонит служба systemd, а не крон
+  # Те же id, по которым cron-lines не пишет им строк: сверка crontab не вправе их ждать.
+  python3 -I "$(dirname "$1")/../scripts/lib/process_library.py" checks-ids
+}
+
+демоны_из_спеки() { # путь к system-jobs.yaml [имена заданий, которых не считать] → имена демонов, по одному в строке
   # Состав системы — ДАННЫЕ, а не проза. Прежде список вынимался awk-ом из §9
   # спеки установки, и спека отстала молча: 10 имён против 13 в данных
   # (замер 11.09.2026 — не было update-watch, memory-commit и
@@ -284,23 +281,27 @@ import re, sys, yaml
 д = yaml.safe_load(open(sys.argv[1], encoding="utf-8")) or {}
 for з in (д.get("задания") or []):
     имя = з.get("имя") or ""
-    if not имя:
+    if not имя or имя in sys.argv[2:]:
         continue
     найдено = re.search(r"([A-Za-z0-9_-]+)\.(?:sh|py)", з.get("команда") or "")
     print(найдено.group(1) if найдено else имя)
-' "$1" 2>/dev/null | sort -u
+' "$@" 2>/dev/null | sort -u
 }
 
-путь_скрипта() { # $1 = реестр, $2 = имя скрипта → путь от корня проекта
-  # Путь — из поля «команда», а не «harness/demons/<имя>.sh»: сторож срока входа
-  # и проба восстановления живут в scripts/, и вшитый каталог гонял бы
+команда_скрипта() { # $1 = реестр, $2 = имя скрипта → его команда целиком (путь от корня проекта + аргументы)
+  # Команда целиком, а не одно первое слово: демон с обязательным доводом
+  # (speed_mode.py --замер) без него выходит 1, и проверка запускаемости
+  # объявляла бы падением то, что cron запускает исправно. Путь — из поля
+  # «команда», а не «harness/demons/<имя>.sh»: сторож срока входа и проба
+  # восстановления живут в scripts/, и вшитый каталог гонял бы
   # несуществующий файл.
   python3 -c '
 import re, sys, yaml
 for з in (yaml.safe_load(open(sys.argv[1], encoding="utf-8")) or {}).get("задания") or []:
-    первое = (з.get("команда") or "").split()[:1]
+    команда = (з.get("команда") or "").strip()
+    первое = команда.split()[:1]
     if первое and re.sub(r"\.(sh|py)$", "", первое[0].rsplit("/", 1)[-1]) == sys.argv[2]:
-        print(первое[0]); break
+        print(команда); break
 ' "$1" "$2"
 }
 
@@ -316,12 +317,12 @@ for з in (yaml.safe_load(open(sys.argv[1], encoding="utf-8")) or {}).get("за�
     printf '  сверить нечем: нет python3 с модулем yaml (ставится шагом 2) — сверка отложена\n'
     return 2
   fi
-  spec_names=$(демоны_из_спеки "$spec")
+  spec_names=$(демоны_из_спеки "$spec" $(службы_проверок "$spec"))
   if [[ -z "$spec_names" ]]; then
     printf '  реестр %s не дал ни одного имени задания — сверка невозможна\n' "$spec"
     return 1
   fi
-  cron_names=$(grep -oE '/[A-Za-z0-9_-]+\.(sh|py)([[:space:]]|$)' | sed -E 's|^/||; s#\.(sh|py)[[:space:]]*$##' | sort -u)
+  cron_names=$(grep -oE '/[A-Za-z0-9_-]+\.(sh|py)([[:space:]]|$)' | sed -E 's|^/||; s#\.(sh|py)[[:space:]]*$##' | grep -vx 'run-background' | sort -u)
   missing=$(comm -23 <(printf '%s\n' "$spec_names") <(printf '%s\n' "$cron_names"))
   extra=$(comm -13 <(printf '%s\n' "$spec_names") <(printf '%s\n' "$cron_names"))
   if [[ -n "$missing" || -n "$extra" ]]; then
@@ -595,9 +596,30 @@ EOF
   # Возврат файлов входа: `sudo claude` рядом делает их root-овыми, и агент
   # теряет вход. Строка обязана совпадать с команда_возврата() в
   # scripts/check-login-expiry.py буква в букву — иначе sudo откажет.
+  # Узкие права агента на таймеры потока проверок: id — из библиотеки процессов
+  # (записи с признаком «служба-проверок»), правила поштучно, без подстановочных знаков.
+  # Двери библиотеки (HARNESS_PROCESS_LIBRARY*) доходят до python как есть.
+  # Список службы проверок читает python3 (библиотека процессов), а шаг 2 с его
+  # установкой ещё впереди: на чистой машине здесь было бы «command not found».
+  делай "DEBIAN_FRONTEND=noninteractive apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y python3 python3-yaml"
+  local checks_ids checks_id checks_action checks_rules="/usr/bin/systemctl daemon-reload"
+  checks_ids="$(python3 -I "$HARNESS_SRC/scripts/lib/process_library.py" checks-ids)" \
+    || стоп "$step" "не прочитан список службы потока проверок" "python3 -I '$HARNESS_SRC/scripts/lib/process_library.py' checks-ids"
+  for checks_id in $checks_ids; do
+    for checks_action in enable disable start stop "enable --now" "disable --now"; do
+      checks_rules+=", /usr/bin/systemctl $checks_action harness-$checks_id.timer"
+    done
+  done
+  # Дверь запуска под потолок среза: корневая обёртка с зашитым пользователем
+  # и ОДНА строка sudoers на неё (подстановочный знак безопасен: команду обёртка
+  # запускает только от агента, в срезе harness-checks.slice).
+  sed "s|@AGENT_USER@|$AGENT_USER|g" "$HARNESS_SRC/scripts/checks-slice-wrapper.sh" \
+    | записать_файл /usr/local/sbin/harness-run-in-checks 755 root:root
   записать_файл /etc/sudoers.d/50-agent 440 root:root <<EOF
 $AGENT_USER ALL=(root) NOPASSWD: /usr/bin/systemctl restart harness-agent, /usr/bin/systemctl status harness-agent, /usr/bin/systemctl restart harness-dispatcher.service, /usr/bin/systemctl restart harness-panel.service
 $AGENT_USER ALL=(root) NOPASSWD: /usr/bin/chown -hR $AGENT_USER\:$AGENT_USER /home/$AGENT_USER/.claude /home/$AGENT_USER/.claude.json
+$AGENT_USER ALL=(root) NOPASSWD: $checks_rules
+$AGENT_USER ALL=(root) NOPASSWD: /usr/local/sbin/harness-run-in-checks *
 EOF
   проверка "$step" "sudoers корректен (visudo -cf)" \
     "visudo -cf /etc/sudoers.d/50-agent" \
@@ -608,7 +630,7 @@ EOF
   проверка "$step" "каталоги принадлежат агенту" \
     "[ \"\$(stat -c '%U' '$PROJECT_DIR' '$LOG_DIR' '$HEARTBEAT_DIR' /var/backups/harness | sort -u)\" = '$AGENT_USER' ]" \
     "stat -c '%U %n' '$PROJECT_DIR' '$LOG_DIR' '$HEARTBEAT_DIR' /var/backups/harness"
-  DONE_LIST+=("пользователь $AGENT_USER, каталоги, sudoers (systemctl агента, диспетчера и панели; возврат своих файлов входа), /var/backups/harness")
+  DONE_LIST+=("пользователь $AGENT_USER, каталоги, sudoers (systemctl агента, диспетчера и панели; таймеры потока проверок; возврат своих файлов входа), /var/backups/harness")
   отметить шаг_1
 }
 
@@ -623,8 +645,10 @@ EOF
   # его системные библиотеки (libatk, libgbm, libasound…) — только root: без
   # них chromium не стартует, и живой смоук фронта агенту недоступен.
   делай "npx -y playwright install-deps chromium"
+  # ldconfig -p в переменную один раз: «ldconfig | grep -q» под pipefail
+  # изредка даёт 141 (grep вышел раньше, ldconfig получил SIGPIPE) — ложный СТОП.
   проверка "$step" "все инструменты отвечают версией, node >= 20, библиотеки браузера на месте" \
-    "git --version && tmux -V && python3 --version && jq --version && node --version && [ \"\$(node --version | sed 's/v//' | cut -d. -f1)\" -ge 20 ] && ldconfig -p | grep -q libatk-bridge-2.0.so.0 && ldconfig -p | grep -q libgbm.so.1" \
+    "git --version && tmux -V && python3 --version && jq --version && node --version && [ \"\$(node --version | sed 's/v//' | cut -d. -f1)\" -ge 20 ] && libs=\$(ldconfig -p) && grep -q libatk-bridge-2.0.so.0 <<<\"\$libs\" && grep -q libgbm.so.1 <<<\"\$libs\"" \
     "git --version; tmux -V; python3 --version; jq --version; node --version; ldconfig -p | grep -E 'libatk-bridge|libgbm'"
   DONE_LIST+=("apt: git tmux curl jq python3(+pip,venv,yaml) shellcheck ripgrep unzip; node LTS; библиотеки браузера playwright")
   отметить шаг_2
@@ -770,7 +794,7 @@ User=$AGENT_USER
 Environment=HOME=/home/$AGENT_USER
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
 WorkingDirectory=$PROJECT_DIR
-ExecStart=$PROJECT_DIR/harness/demons/sentinel.sh
+ExecStart=$PROJECT_DIR/scripts/run-background.sh sentinel -- $PROJECT_DIR/harness/demons/sentinel.sh
 EOF
   записать_файл /etc/systemd/system/harness-sentinel.timer 644 root:root <<EOF
 [Unit]
@@ -788,8 +812,8 @@ EOF
   записать_файл /etc/systemd/system/harness-sentinel-boot.service 644 root:root <<EOF
 [Unit]
 Description=Harness sentinel: подъём агента и проверка всех систем после загрузки
-Wants=network-online.target
-After=network-online.target harness-agent.service harness-dispatcher.service
+Wants=network-online.target docker.service nginx.service php8.3-fpm.service harness-panel.service harness-firewall.service
+After=network-online.target harness-agent.service harness-dispatcher.service docker.service nginx.service php8.3-fpm.service harness-panel.service harness-firewall.service
 
 [Service]
 Type=oneshot
@@ -1029,6 +1053,9 @@ After=network-online.target
 [Service]
 User=$AGENT_USER
 Environment=HOME=/home/$AGENT_USER
+# Тот же каталог, что у службы панели: внутренние вызовы
+# доказываются общим ключом.
+Environment=PANEL_SECRETS_DIR=/var/lib/harness/panel-state
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
 Environment=CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING=1
 Environment=CLAUDE_CODE_AUTO_COMPACT_WINDOW=800000
@@ -1149,7 +1176,7 @@ EOF
     скажи "  сверка набора демонов с реестром системных заданий: $spec_md"
     local sverka_rc=0
     if (( DRY )); then
-      printf '/%s.sh \n' "${demons[@]}" | сверить_демонов_со_спекой "$spec_md" || sverka_rc=$?
+      printf '%s\n' "$cron_body" | сверить_демонов_со_спекой "$spec_md" || sverka_rc=$?
     else
       crontab -l -u "$AGENT_USER" | сверить_демонов_со_спекой "$spec_md" || sverka_rc=$?
     fi
@@ -1182,14 +1209,16 @@ EOF
   # Тяжёлые демоны — только на запускаемость: полный прогон ревизии проекта зовёт
   # модель по всем областям харнеса и держит лок карты десятки минут (установка
   # первая установка 13.10.2026 встала на нём). Полный прогон — по расписанию.
-  local -a LIGHT_RUN=("nightly-gates=NIGHTLY_GATES_CMD=true" "project-revision=REVIZIA_ENABLED=0")
+  local -a LIGHT_RUN=("nightly-gates=NIGHTLY_GATES_CMD=true" "nightly-mutations=NIGHTLY_MUTATIONS_CMD=true" "project-revision=REVIZIA_ENABLED=0")
   local d rc light pair
   for d in "${demons[@]}"; do
     light=""
     for pair in "${LIGHT_RUN[@]}"; do
       [[ "${pair%%=*}" = "$d" ]] && light="${pair#*=}"
     done
-    local script; script="$PROJECT_DIR/$(путь_скрипта "$spec_md" "$d")"
+    local script; script="$PROJECT_DIR/$(команда_скрипта "$spec_md" "$d")"
+    # Через обёртку, как в crontab: при выключенном ключе прогон — это process.skip, exit 0.
+    script="$PROJECT_DIR/scripts/run-background.sh $d -- $script"
     скажи "  + sudo -u $AGENT_USER env -i HOME=/home/$AGENT_USER PATH=/usr/local/bin:/usr/bin:/bin /bin/sh -c '$script'; echo exit=\$?"
     if (( ! DRY )); then
       rc=0
@@ -1213,6 +1242,43 @@ EOF
   скажи "  (метки heartbeat: ls -l $HEARTBEAT_DIR — успешные демоны обновили свои; полная сверка — после первых суток)"
   DONE_LIST+=("crontab $AGENT_USER: ${#demons[@]} демонов точно по таблице §9 (набор сверен со спекой); каждый прогнан в env -i")
   отметить шаг_9
+}
+
+шаг_9б() { # служба потока проверок: срез с потолком и пары service+timer, без включения (спека hr.process-dispatcher §Г.1)
+  local step="шаг 9б — служба потока проверок"; CURRENT_STEP="$step"
+  уже_сделан шаг_9б && { скажи "[$step] пропуск (--resume)"; return 0; }
+  заголовок "$step"
+  # Потолки — ключи harness.conf: живой конфиг, если в нём они уже есть, иначе образец пакета
+  # (живой, поставленный до этого шага, ключей не имеет, и его мы не переписываем).
+  local conf="${HARNESS_CONF:-}"
+  if [[ -z "$conf" ]]; then
+    conf="$HARNESS_SRC/config/harness.conf"
+    grep -qs '^CHECKS_CPU_QUOTA=' /etc/harness/harness.conf && conf=/etc/harness/harness.conf
+  fi
+  local units_dir unit unit_files=()
+  units_dir="$(mktemp -d)"
+  HARNESS_CONF="$conf" python3 -I "$HARNESS_SRC/scripts/lib/process_library.py" checks-units \
+      "$units_dir" "$PROJECT_DIR" "$LOG_DIR" "$AGENT_USER" \
+    || стоп "$step" "юниты службы потока проверок не порождены" \
+         "HARNESS_CONF='$conf' python3 -I '$HARNESS_SRC/scripts/lib/process_library.py' checks-units /tmp/x '$PROJECT_DIR' '$LOG_DIR' '$AGENT_USER'"
+  for unit in "$units_dir"/*; do
+    записать_файл "/etc/systemd/system/$(basename "$unit")" 644 root:root < "$unit"
+    unit_files+=("/etc/systemd/system/$(basename "$unit")")
+  done
+  rm -rf "$units_dir"
+  for unit in "${unit_files[@]}"; do
+    проверить_юнит "$step" "$unit"
+  done
+  делай "systemctl daemon-reload"  # служба потока проверок: таймеры лежат выключенными
+  DONE_LIST+=("служба потока проверок: срез harness-checks.slice и ${#unit_files[@]} юнитов (таймеры выключены; включает владелец-оркестратор)")
+  # Включает агент своим узким sudo-правом (шаг 9): владельцу root-шагов не даём.
+  local checks_ids checks_id
+  checks_ids="$(python3 -I "$HARNESS_SRC/scripts/lib/process_library.py" checks-ids)" \
+    || стоп "$step" "не прочитан список службы потока проверок" "python3 -I '$HARNESS_SRC/scripts/lib/process_library.py' checks-ids"
+  for checks_id in $checks_ids; do
+    MANUAL_LIST+=("для агента: включить таймер потока проверок — sudo systemctl enable --now harness-$checks_id.timer")
+  done
+  отметить шаг_9б
 }
 
 # ------------------------------------------------------------------ финал ----
@@ -1540,5 +1606,6 @@ trap 'финал' EXIT
 шаг_7
 шаг_8
 шаг_9
+шаг_9б
 шаг_10
 exit 0

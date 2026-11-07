@@ -14,6 +14,7 @@
     python3 scripts/hackathon.py --выключить
     python3 scripts/hackathon.py --включить-задачу <id> --карта <путь>
     python3 scripts/hackathon.py --проверить-карту <путь>
+    python3 scripts/hackathon.py --строка [--карта <путь>]   (одна строка для оглядки старта)
 """
 import ast
 import datetime as dt
@@ -52,6 +53,11 @@ def until(conf_path=None):
         return None
     # Срок без пояса нельзя сравнить с «сейчас» честно: режим не включается.
     return moment if moment.tzinfo else None
+
+
+def until_text(conf_path=None):
+    """Срок как записан в конфиге (для показа), если он действителен."""
+    return config.из_файла(_conf(conf_path)).get(KEY, "") if until(conf_path) else None
 
 
 def active(now=None, conf_path=None):
@@ -210,6 +216,14 @@ def cmd_active(map_path):
     return 0 if len(wip) == 1 and is_hackathon(wip[0]) else 1
 
 
+def cmd_line(map_path):
+    mode = f"до {until_text()}" if active() else "выкл"
+    path = map_path or str(HERE.parent / "dev-map.yaml")
+    count = sum(1 for _, task in _tasks(_load(path)) if is_hackathon(task))
+    print(f"хакатон: {mode}; уровней хакатон {count}")
+    return 0
+
+
 def cmd_enable(hours):
     # write-key.py как CLI не годится (регулярка значений запрещает «:» и «+»),
     # поэтому берём его замену строки и общий атомарный писатель панели.
@@ -319,6 +333,8 @@ def main(argv):
 
     if "--активен" in argv:
         return cmd_active(value_of("--карта"))
+    if "--строка" in argv:
+        return cmd_line(value_of("--карта"))
     if "--включить-задачу" in argv:
         task_id, map_path = value_of("--включить-задачу"), value_of("--карта")
         if not task_id or not map_path:

@@ -16,7 +16,7 @@ writer would answer 6 to every case — green by form, not by rule.
 
     python3 scripts/test_alert_task.py                 # all sections
     python3 scripts/test_alert_task.py --section door  # door|weights|tgsend|patterns|senders|storm
-    python3 scripts/test_alert_task.py --section session,badq  # parts: session|empty|drainceil|badq|k5|stormj
+    python3 scripts/test_alert_task.py --section session,badq  # parts: session|empty|drainceil|badq|k5|stormj|retired
     python3 scripts/test_alert_task.py --capture-reference <door.sh>
 
 Doors for mutation runs ([[probe-loads-the-live-mechanism]]):
@@ -115,11 +115,11 @@ lines:
         summary: "образец"
         volume: { loc: 10, complexity: 1, tokens_k: 5, estimated: true }
         when: { started: "2026-10-01", done: null, tested: null, estimated: true }
-  - id: sample-29
+  - id: product
     layer: product
     name: "Продукт"
     tasks:
-      - id: kt.sample
+      - id: pd.sample
         status: plan
         owner_testable: false
         title: "образец продукта"
@@ -504,11 +504,11 @@ def section_door(tmp: Path) -> None:
 
     # p.11: inactive line
     rc, out, err = st.run("--key", "prod:x", "--title", "Беда продукта",
-                          "--text", "Беда продукта.", "--line", "sample-29")
+                          "--text", "Беда продукта.", "--line", "product")
     cards = st.by_source("prod:x")
     check("Р-15 неактивная линия — карточка всё равно есть, код 0", (0, 1), (rc, len(cards)))
-    check("Р-15 карточка в линии sample-29 с её приставкой", True,
-          bool(cards) and cards[0].get("_line") == "sample-29" and str(cards[0].get("id")).startswith("kt."))
+    check("Р-15 карточка в линии product с её приставкой", True,
+          bool(cards) and cards[0].get("_line") == "product" and str(cards[0].get("id")).startswith("pd."))
     check("Р-15 вслух: «не активна» в выводе", True, "не активна" in out + err)
     check("Р-15 в журнале «почему» называет неактивную линию", True,
           any("не активна" in str(e.get("почему")) for e in st.events("prod:x")))
@@ -542,6 +542,7 @@ def section_door(tmp: Path) -> None:
     section_empty_line(tmp)
     section_drain_ceiling(tmp)
     section_bad_queue_row(tmp)
+    section_retired_watcher(tmp)
 
 
 # ── review r1 (R1-01): a session must not write the alert state by hand ──────
@@ -656,7 +657,7 @@ EMPTY_LINES = ('  - id: empty-a\n    layer: product\n    name: "Пустая, ta
 
 
 def section_empty_line(tmp: Path) -> None:
-    """The live map has two lines without tasks (sample-29 `tasks: []`, app-cms
+    """The live map has two lines without tasks (one with `tasks: []`, one with
     `tasks:` at the end of the file). The writer may either put the card into
     such a line or refuse; what it may not do is lose the intent."""
     print("── линия без задач: намерение не теряется (R1-02) ──")
@@ -728,6 +729,166 @@ def section_bad_queue_row(tmp: Path) -> None:
     rc, _, err = st.run("--drain")
     check("R1-08 --drain с битой строкой — код 0 без трассировки", (0, False),
           (rc, "Traceback" in err))
+
+
+# ── hr.alert-mutations-changed-red: alerts of a retired watcher go out ───────
+
+RETIRED_JOBS = ("# стенд пробы: список снятых сторожей рядом со снять_ключи\n"
+                "снять_ключи: []\n"
+                "снятые_сторожа:\n"
+                "  - gone-watcher   # сторож стенда снят\n")
+
+
+def retired_stand(base: Path, jobs: str | None) -> Stand:
+    """jobs=None — стенд без system-jobs.yaml вовсе."""
+    st = Stand(base)
+    if jobs is not None:
+        config = st.project / "harness" / "config"
+        config.mkdir(parents=True, exist_ok=True)
+        (config / "system-jobs.yaml").write_text(jobs, encoding="utf-8")
+    return st
+
+
+def greens(st: Stand, key: str) -> list[dict]:
+    return [e for e in st.events(key) if e.get("событие") == "зелёное"]
+
+
+def section_retired_watcher(tmp: Path) -> None:
+    print("── снятый сторож: его тревоги гаснут на --drain (hr.alert-mutations-changed-red) ──")
+    st = retired_stand(tmp / "retired", RETIRED_JOBS)
+    st.raise_alert("gone-watcher:red", "Беда снятого сторожа")
+    st.raise_alert("alive-watcher:red", "Беда живого сторожа")
+    check("стенд: обе тревоги открыты, по карточке, очередь пуста", (1, 1, 1, 1, 0),
+          (st.run("--is-green", "gone-watcher:red")[0], st.run("--is-green", "alive-watcher:red")[0],
+           len(st.by_source("gone-watcher:red")), len(st.by_source("alive-watcher:red")),
+           len(st.queue_rows())))
+
+    rc, out, err = st.run("--drain")
+    check("R1 --drain при пустой очереди: код 0 без трассировки", (0, False),
+          (rc, "Traceback" in err))
+    check("R1 строка доноса называет погашенное: «сторож снят 1»", True, "сторож снят 1" in out)
+    rc, out, _ = st.run("--is-green", "gone-watcher:red")
+    check("R1 --is-green gone-watcher:red → «ЗЕЛЁНОЕ», код 0", (0, "ЗЕЛЁНОЕ gone-watcher:red"),
+          (rc, first(out)))
+    found = greens(st, "gone-watcher:red")
+    check("R1 журнал: одна строка «зелёное» по gone-watcher:red", 1, len(found))
+    check("R1 «почему» строки «зелёное» содержит «сторож снят»", True,
+          bool(found) and "сторож снят" in str(found[-1].get("почему")))
+
+    rc, out, _ = st.run("--is-green", "alive-watcher:red")
+    check("R2 контроль: alive-watcher:red остаётся КРАСНОЕ, код 1", (1, True),
+          (rc, first(out).startswith("КРАСНОЕ")))
+    check("R2 контроль: строки «зелёное» по alive-watcher нет", 0,
+          len(greens(st, "alive-watcher:red")))
+
+    rc, _, _ = st.run("--drain")
+    check("R3 повторный --drain: код 0, вторая «зелёное» не пишется", (0, 1),
+          (rc, len(greens(st, "gone-watcher:red"))))
+
+    for name, folder, jobs in (("без файла", "retired-nofile", None),
+                               ("без ключа", "retired-nokey", "снять_ключи: []\n")):
+        bare = retired_stand(tmp / folder, jobs)
+        bare.raise_alert("gone-watcher:red", "Беда при пустом списке")
+        rc, _, err = bare.run("--drain")
+        check(f"R4 {name}: --drain код 0 без трассировки", (0, False), (rc, "Traceback" in err))
+        check(f"R4 {name}: ничего не погашено", (1, 0),
+              (bare.run("--is-green", "gone-watcher:red")[0], len(greens(bare, "gone-watcher:red"))))
+
+    late = retired_stand(tmp / "retired-queue", RETIRED_JOBS)
+    holder = late.hold_lock(30)
+    try:
+        rc, _, _ = late.raise_alert("gone-watcher:late", "Отложенная беда снятого сторожа",
+                                    timeout=20)
+    finally:
+        holder.kill()
+        holder.wait()
+    check("стенд R5: намерение снятого сторожа отложено (код 4, строка в очереди)", (4, True),
+          (rc, any('"gone-watcher:late"' in r for r in late.queue_rows())))
+    rc, _, err = late.run("--drain")
+    check("R5 --drain: код 0 без трассировки", (0, False), (rc, "Traceback" in err))
+    check("R5 отложенное намерение снятого сторожа не рождает карточку", 0,
+          len(late.by_source("gone-watcher:late")))
+    check("R5 намерение снятого сторожа не остаётся в очереди", False,
+          any('"gone-watcher:late"' in r for r in late.queue_rows()))
+
+    odd = retired_stand(tmp / "retired-odd", RETIRED_JOBS)
+    odd.run("--key", "odd-prefix:red", "--title", "Беда", "--text", "Беда. Подробности.",
+            "--watcher", "gone-watcher")
+    rc, _, err = odd.run("--drain")
+    check("R6 --drain: код 0 без трассировки", (0, False), (rc, "Traceback" in err))
+    rc, out, _ = odd.run("--is-green", "odd-prefix:red")
+    check("R6 тревога с чужим префиксом, но полем «сторож» из списка → «ЗЕЛЁНОЕ»",
+          (0, "ЗЕЛЁНОЕ odd-prefix:red"), (rc, first(out)))
+    found = greens(odd, "odd-prefix:red")
+    check("R6 «почему» содержит «сторож снят»", True,
+          bool(found) and "сторож снят" in str(found[-1].get("почему")))
+
+    live = retired_stand(tmp / "retired-live",
+                         "снятые_сторожа: [gone-watcher, listed-alive, listed-py]\n")
+    for rel in ("harness/demons/listed-alive.sh", "scripts/listed-py.py"):
+        target = live.project / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("", encoding="utf-8")
+    for key in ("listed-alive:red", "listed-py:red", "gone-watcher:red"):
+        live.raise_alert(key, "Беда сторожа из списка")
+    rc, _, err = live.run("--drain")
+    check("R7 --drain: код 0 без трассировки", (0, False), (rc, "Traceback" in err))
+    for key in ("listed-alive:red", "listed-py:red"):
+        rc, out, _ = live.run("--is-green", key)
+        check(f"R7 живой сторож в списке не гасится: {key} КРАСНОЕ", (1, True, 0),
+              (rc, first(out).startswith("КРАСНОЕ"), len(greens(live, key))))
+    check("R7 контроль: gone-watcher:red на том же стенде гаснет", 0,
+          live.run("--is-green", "gone-watcher:red")[0])
+
+    bad_bodies = (("число", "снятые_сторожа: 5\n".encode()),
+                  ("строка", "снятые_сторожа: gone-watcher\n".encode()),
+                  ("словарь в списке", "снятые_сторожа:\n  - gone-watcher: x\n".encode()),
+                  ("словарь и строка",
+                   "снятые_сторожа:\n  - gone-watcher: x\n  - gone-watcher\n".encode()),
+                  ("не UTF-8", b"\xff\xfe"),
+                  ("не словарь", "- gone-watcher\n".encode()),
+                  ("битый YAML", "снятые_сторожа: [\n".encode()))
+    for n, (name, body) in enumerate(bad_bodies):
+        bad = retired_stand(tmp / f"retired-bad{n}", None)
+        config = bad.project / "harness" / "config"
+        config.mkdir(parents=True, exist_ok=True)
+        (config / "system-jobs.yaml").write_bytes(body)
+        bad.raise_alert("gone-watcher:red", "Беда при кривом списке")
+        rc, _, err = bad.run("--drain")
+        check(f"R8 кривой список ({name}): --drain код 0 без трассировки", (0, False),
+              (rc, "Traceback" in err))
+
+    held = retired_stand(tmp / "retired-twice", RETIRED_JOBS)
+    holder = held.hold_lock(40)
+    try:
+        rc, _, _ = held.raise_alert("gone-watcher:twice", "Отложенная беда", timeout=20)
+        key_rc = held.raise_alert("gone-watcher:twice", "Отложенная беда", timeout=20)[0]
+        queued = any('"gone-watcher:twice"' in r for r in held.queue_rows())
+        for _ in range(2):
+            held.run("--drain", timeout=20)
+        count = len(greens(held, "gone-watcher:twice"))
+    finally:
+        holder.kill()
+        holder.wait()
+    check("R9 при занятом локе намерение снятого сторожа в очереди, --key даёт 4", (4, 4, True),
+          (rc, key_rc, queued))
+    check("R9 два --drain при занятом локе: не больше одной строки «зелёное»", True, count <= 1)
+
+    settled = retired_stand(tmp / "retired-settled", RETIRED_JOBS)
+    holder = settled.hold_lock(30)
+    try:
+        settled.raise_alert("gone-watcher:settled", "Отложенная беда", timeout=20)
+    finally:
+        holder.kill()
+        holder.wait()
+    time.sleep(1.1)  # время журнала в секундах, а «зелёное» обязано быть позже строки очереди
+    resolved = settled.run("--resolve", "gone-watcher:settled")[0]
+    rc, _, err = settled.run("--drain")
+    check("R10 --resolve до доноса: код 0 без трассировки", (0, 0, False),
+          (resolved, rc, "Traceback" in err))
+    found = greens(settled, "gone-watcher:settled")
+    check("R10 снятая строка очереди не гасится второй раз: одна «зелёное», не «сторож снят»",
+          (1, False), (len(found), any("сторож снят" in str(e.get("почему")) for e in found)))
 
 
 def section_lock(tmp: Path) -> None:
@@ -918,8 +1079,9 @@ def section_weights(tmp: Path) -> None:
     born = [journal_line(t2, "b:x", "заведена", "hr.alert-b-x"),
             journal_line(t1, "a:x", "заведена", "hr.alert-a-x"),
             journal_line(t3, "c:x", "донесена", "hr.alert-c-x")]
-    check("вес получает ОДИН id — самый ранний по ts", {"hr.alert-a-x": "a:x"}, weights(born, three))
-    check("старшая позеленела — вес у следующей", {"hr.alert-b-x": "b:x"},
+    all_three = {"hr.alert-a-x": "a:x", "hr.alert-b-x": "b:x", "hr.alert-c-x": "c:x"}
+    check("вес получают ВСЕ открытые тревоги", all_three, weights(born, three))
+    check("позеленевшая тревога веса не получает", {"hr.alert-b-x": "b:x", "hr.alert-c-x": "c:x"},
           weights(born + [journal_line(t3, "a:x", "зелёное")], three))
     check("карточка тревога: руками без журнала → 0",
           {}, weights([], map_with(("hr.alert-m-x", "plan", "тревога:m:x"))))
@@ -929,12 +1091,13 @@ def section_weights(tmp: Path) -> None:
     tie = [journal_line(t1, "b:x", "заведена", "hr.alert-b-x"),
            journal_line(t1, "a:x", "заведена", "hr.alert-a-x")]
     for parked in ("test", "беклог"):
-        check(f"карточка старшей тревоги в {parked} — веса нет, вес у следующей",
-              {"hr.alert-b-x": "b:x"},
+        check(f"карточка тревоги в {parked} — веса нет, у остальных он есть",
+              {"hr.alert-b-x": "b:x", "hr.alert-c-x": "c:x"},
               weights(born, map_with(("hr.alert-a-x", parked, "тревога:a:x"),
                                      ("hr.alert-b-x", "plan", "тревога:b:x"),
                                      ("hr.alert-c-x", "wip", "тревога:c:x"))))
-    check("равенство ts — меньший id", {"hr.alert-a-x": "a:x"}, weights(tie, three))
+    check("равенство ts — вес у обеих", {"hr.alert-a-x": "a:x", "hr.alert-b-x": "b:x"},
+          weights(tie, three))
     check("битая строка журнала вес не роняет", {"hr.alert-a-x": "a:x"},
           weights(["{битая", born[1]], three))
 
@@ -956,14 +1119,16 @@ def section_weights(tmp: Path) -> None:
                           env=st.env(), capture_output=True, text=True)
     rows = re.findall(r"^\s+\d+\. (\S+) · (\d+) · (.*)$", done.stdout, re.M)
     order = [r[0] for r in rows]
-    check("work-queue: голова — старшая тревога", "hr.alert-aa-x", order[0] if order else None)
-    check("work-queue: старшая тревога весит 35", "35", rows[0][1] if rows else None)
+    check("work-queue: голова — тревога (при равном весе порядок строк карты)", True,
+          bool(order) and order[0].startswith("hr.alert-"))
+    check("work-queue: тревога весит не меньше 35", True,
+          bool(rows) and int(rows[0][1]) >= 35)
     check("work-queue: причина называет старшую тревогу сторожа", True,
           bool(rows) and "тревог" in rows[0][2])
-    check("work-queue: 11 тревог + 1 queue → queue на 2-м месте", "hr.sample-one",
-          order[1] if len(order) > 1 else None)
-    check("work-queue: младшие тревоги веса не получают", True,
-          all(int(w) < 35 for i, w, _ in rows if i.startswith("hr.alert-w")))
+    check("work-queue: 11 тревог + 1 queue → queue ниже тревог (потолок строк 10: все десять — тревоги)",
+          True, len(order) == 10 and all(i.startswith("hr.alert-") for i in order))
+    check("work-queue: каждая показанная тревога весит не меньше 35 и названа в причине", True,
+          bool(rows) and all(int(w) >= 35 and "тревог" in why for _, w, why in rows))
     section_k5(tmp)
 
 
@@ -1053,6 +1218,11 @@ class DoorStand(Stand):
             if (HERE / name).is_file():
                 shutil.copy(HERE / name, scripts / name)
         shutil.copy(door, scripts / "tg_send.sh")
+        # Без файла признаков сторож канала пишет замечание в stderr каждого письма.
+        signs = next(p for p in (ROOT / "harness" / "config" / "consent-ask-signs.yaml",
+                                 ROOT / "config" / "consent-ask-signs.yaml") if p.is_file())
+        (self.project / "harness" / "config").mkdir(parents=True)
+        shutil.copy(signs, self.project / "harness" / "config" / signs.name)
         (scripts / "alert-task.py").write_text(STUB_WRITER, encoding="utf-8")
         (base / "bin").mkdir()
         (base / "bin" / "curl").write_text(STUB_CURL, encoding="utf-8")
@@ -1620,7 +1790,7 @@ def storm_stand(base: Path) -> Stand:
 def section_storm_journal(tmp: Path) -> None:
     """R1-03: the alert journal is never trimmed and the weight re-reads it per
     key. The threshold is DATA (queue.yaml); the probe also judges that the
-    fast answer is the RIGHT one: s0 is green, so the weight belongs to s1."""
+    fast answer is the RIGHT one: s0 is green, so it is weightless; s1..s4 weigh."""
     print(f"── шторм журнала: {STORM_ROWS} строк, {STORM_KEYS} ключей (R1-03) ──")
     queue_path = config_file("queue.yaml")
     queue_cfg = (yaml.safe_load(queue_path.read_text(encoding="utf-8")) or {}) if queue_path else {}
@@ -1648,8 +1818,11 @@ def section_storm_journal(tmp: Path) -> None:
     check(f"R1-03 work-queue --порядок на шторме ≤ {limit:g} с (лучший из ≤3; вышло "
           f"{'предел истёк' if timed_out else f'{best:.2f} с'})", True, best <= limit)
     if rows:
-        check("R1-03 на шторме вес у s1 (s0 позеленел): голова hr.alert-s1-x · 35",
-              ("hr.alert-s1-x", "35"), rows[0][:2])
+        weight = {r[0]: int(r[1]) for r in rows}
+        open_ids = {f"hr.alert-s{n}-x" for n in range(1, 5)}
+        check("R1-03 на шторме голова — открытая тревога; s1..s4 весят ≥ 35, позеленевшая s0 в списке с весом < 35",
+              True, rows[0][0] in open_ids and all(weight.get(i, 0) >= 35 for i in open_ids)
+              and weight.get("hr.alert-s0-x", 35) < 35)
 
     print("── сжатие журнала тревог (R1-03) ──")
     st = storm_stand(tmp / "storm-compact")
@@ -1681,8 +1854,10 @@ def section_storm_journal(tmp: Path) -> None:
     check("R1-03 --open после сжатия: число повторов s1 сохранено",
           (born_repeats or 0) + 1, int(shown.group(1)) if shown else None)
     data = yaml.safe_load(st.map.read_text(encoding="utf-8"))
-    check("R1-03 вес после сжатия — у s1", {"hr.alert-s1-x": "s1:x"},
-          lib.alert_weights(str(st.journal), data))
+    # Карточки в стенде есть только у s0..s4: вес бывает лишь у тех, чья карточка есть.
+    open_keys = {f"s{n}:x" for n in range(5) if want[f"s{n}:x"] == "открыта"}
+    check("R1-03 вес после сжатия — у каждой открытой тревоги", open_keys,
+          set(lib.alert_weights(str(st.journal), data).values()))
 
 
 def cards_epoch(stamp) -> float:
@@ -1700,7 +1875,7 @@ SECTIONS = {"door": section_door, "weights": section_weights, "tgsend": section_
 # group in seconds instead of the whole door section (70 s).
 PARTS = {"session": section_session, "empty": section_empty_line,
          "drainceil": section_drain_ceiling, "badq": section_bad_queue_row,
-         "k5": section_k5, "stormj": section_storm_journal}
+         "k5": section_k5, "stormj": section_storm_journal, "retired": section_retired_watcher}
 
 
 def capture_reference(door: Path) -> int:

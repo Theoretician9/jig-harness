@@ -178,6 +178,9 @@ fi
 
 VERDICT=summary
 say "$ITOG за $(( ($(date +%s) - START_TS) / 60 )) мин"
+# broken = «прогон оборван»: итог получен, значит оборван не был, при любом числе красных;
+# red — отдельная тревога, её снимает только прогон без красных.
+alert_task --resolve nightly-gates:broken
 KRASNYH="$(krasnyh_v "$ITOG")"
 if [ "${KRASNYH:-0}" -gt 0 ]; then
     IMENA="$(grep -E '^  ПЛОХО ·' "$ZHURNAL" | sed 's/^  ПЛОХО · //; s/ (код.*//' | paste -sd', ' -)"
@@ -187,7 +190,6 @@ if [ "${KRASNYH:-0}" -gt 0 ]; then
 else
     say "красных нет — владельца не беспокою"
     alert_task --resolve nightly-gates:red
-    alert_task --resolve nightly-gates:broken
 fi
 exit 0
 }

@@ -15,8 +15,7 @@
 #
 # Что делает (в порядке от самого безопасного к самому заметному):
 #   1. Подрезает разросшиеся логи контейнеров
-#   2. Сносит «висячие» docker-образы (те, что без имени, остатки пересборок)
-#   3. Чистит кеш сборок docker
+#   2–3. (docker-образы, контейнеры и кеш сборок здесь не чистятся — см. шаг 10б)
 #   4. Оставляет по KEEP_ROLLBACK свежих датированных тега на сервис, остальные сносит
 #   5. Чистит кеши пакетных менеджеров пользователя
 #   6. Снимает осиротевших помощников инструментария (см. шаг 6)
@@ -43,6 +42,71 @@ set -euo pipefail
 HERE="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
 REPORT="$HERE/../../scripts/disk-report.py"
 
+# ── самотест: больной случай в песочнице ────────────────────────────────────
+# Разбирается ДО flock и до любого touch: самотест удаляющего демона не смеет
+# трогать боевое. Сам демон запускается в песочнице с чужими конфигами и
+# заглушками инструментов; боевой диск и каналы ему не видны.
+if [ "${1:-}" = "--selftest" ]; then
+    T=$(mktemp -d)
+    trap 'rm -rf "$T"' EXIT
+    mkdir -p "$T/bin" "$T/hb" "$T/log" "$T/proj" "$T/mem-logs" "$T/mem-sessions" "$T/root"
+    cat > "$T/install.conf" <<CONF
+PROJECT_NAME="selftest"
+PROJECT_DIR="$T/proj"
+AGENT_USER="selftest"
+SECRETS_DIR="$T"
+TG_TOKEN_FILE=""
+TG_CHAT_ID=""
+AUTONOMY="semi"
+HEARTBEAT_DIR="$T/hb"
+LOG_DIR="$T/log"
+CONF
+    cat > "$T/harness.conf" <<CONF
+DISK_MAX_PCT="85"
+DISK_TRIGGER_PCT="80"
+MEM_LOG_DIR="$T/mem-logs"
+MEM_SESSION_DIR="$T/mem-sessions"
+TMP_SWEEP_ENABLED="0"
+DOCKER_SWEEP_ENABLED="0"
+CONF
+    cat > "$T/bin/df" <<'DF'
+#!/usr/bin/env bash
+case "$*" in
+    *pcent*) printf 'Use%%\n %s%%\n' "$SELFTEST_DF_PCT" ;;
+    *used*)  printf ' Used\n 1000000\n' ;;
+    *)       exec /usr/bin/df "$@" ;;
+esac
+DF
+    for tool in docker npm pip uv curl; do printf '#!/usr/bin/env bash\nexit 0\n' > "$T/bin/$tool"; done
+    printf '#!/usr/bin/env bash\nexit 1\n' > "$T/bin/pgrep"
+    # Опись тревоги меряет du по настоящему диску минутами: подменяем, sudo не пускаем.
+    cp "$T/bin/pgrep" "$T/bin/sudo"
+    printf '#!/usr/bin/env bash\nprintf "100\\t/\\n"\n' > "$T/bin/du"
+    chmod +x "$T/bin/"*
+
+    selftest_fail() { echo "САМОТЕСТ ПРОВАЛЕН: $*"; exit 1; }
+    selftest_run() {  # $1 = занятость диска в %; код демона не судим — судится его след
+        env -i PATH="$T/bin:/usr/local/bin:/usr/bin:/bin" HOME="$T/root" LC_ALL=C.UTF-8 \
+            HARNESS_HOME="$T/root" HARNESS_INSTALL_CONF="$T/install.conf" HARNESS_CONF="$T/harness.conf" \
+            SELFTEST_DF_PCT="$1" bash "$HERE/$(basename "${BASH_SOURCE[0]}")" --по-давлению >/dev/null 2>&1 || true
+    }
+
+    printf 'x\n' > "$T/mem-logs/old.log"
+    printf 'x\n' > "$T/hb/disk-cleanup"
+    touch -d '2020-01-01 00:00' "$T/mem-logs/old.log" "$T/hb/disk-cleanup"
+    OLD_MTIME=$(stat -c %Y "$T/hb/disk-cleanup")
+
+    # 50% при пороге 80%: убирать нечего, старое остаётся, метку ночной уборки не двигаем.
+    selftest_run 50
+    [ -e "$T/mem-logs/old.log" ] || selftest_fail "при 50% (порог 80%) удалён старый файл"
+    [ "$(stat -c %Y "$T/hb/disk-cleanup")" = "$OLD_MTIME" ] || selftest_fail "при 50% сдвинута метка disk-cleanup"
+    # 95%: давление есть, старый файл обязан уйти.
+    selftest_run 95
+    [ ! -e "$T/mem-logs/old.log" ] || selftest_fail "при 95% старый файл не удалён"
+    echo "САМОТЕСТ ПРОЙДЕН: 50% — не тронуто, 95% — убрано"
+    exit 0
+fi
+
 # ── конфиги ─────────────────────────────────────────────────────────────────
 # shellcheck disable=SC1091
 source "$HERE/../../scripts/lib/config.sh"
@@ -57,12 +121,6 @@ konf_zagruzit
 
 KEEP_ROLLBACK="${KEEP_ROLLBACK:-2}"          # сколько датированных тегов отката хранить на сервис
 LOG_TRUNCATE_MB="${LOG_TRUNCATE_MB:-20}"     # логи контейнеров крупнее — обнулять
-# Кеш сборок: 24ч, а не неделя. Замер 05.08 — за смену активных пересборок
-# набежало 12.8 ГБ кеша, а фильтр «старше недели» не трогал НИЧЕГО из него:
-# уборка отчиталась «освобождено 24 МБ» при диске на 81%. Ручной прогон без
-# фильтра освободил 13 ГБ и вернул диск к 66%. Кеш моложе суток стоит держать —
-# он ускоряет соседние пересборки; всё, что старше, дешевле собрать заново.
-BUILD_CACHE_KEEP_H="${BUILD_CACHE_KEEP_H:-24}"
 # Возраст, с которого осиротевший помощник считается брошенным (шаг 6). Сутки:
 # живой сеанс столько не держит помощника без родителя.
 # 08.08 переменной здесь НЕ БЫЛО, хотя шаг 6 ею пользуется. При `set -u` первая
@@ -91,7 +149,6 @@ DOCKER_SWEEP_OWN="${DOCKER_SWEEP_OWN:-}"
 DOCKER_IMAGE_KEEP_H="${DOCKER_IMAGE_KEEP_H:-168}"
 DOCKER_IMAGE_PRESSURE_H="${DOCKER_IMAGE_PRESSURE_H:-48}"
 DOCKER_STOPPED_KEEP_H="${DOCKER_STOPPED_KEEP_H:-24}"
-DOCKER_CACHE_KEEP_GB="${DOCKER_CACHE_KEEP_GB:-2}"
 DOCKER_VOLUME_KEEP_DAYS="${DOCKER_VOLUME_KEEP_DAYS:-14}"
 
 DRY_RUN=0
@@ -109,7 +166,7 @@ case "${1:-}" in
     # «--selftest», которого здесь нет, и команда проверки демона чистила диск
     # и трогала метку свежести (ревью кода 13.10.2026, критическое). Отказ
     # называет законные ключи — иначе опечатка стоит настоящей уборки.
-    *)              printf 'незнакомый ключ «%s». Законные: --dry-run (показать, ничего не удаляя), --по-давлению (убрать, если диску тесно), --опись (где лежит место), без ключа — обычный прогон\n' "$1" >&2
+    *)              printf 'незнакомый ключ «%s». Законные: --dry-run (показать, ничего не удаляя), --по-давлению (убрать, если диску тесно), --опись (где лежит место), --selftest (проверка на песочнице, боевое не трогает), без ключа — обычный прогон\n' "$1" >&2
                     exit 2 ;;
 esac
 
@@ -195,28 +252,10 @@ else
     say "1. логи контейнеров: обнулено ${n:-0} файлов крупнее ${LOG_TRUNCATE_MB} МБ"
 fi
 
-# --- 2. Висячие образы --------------------------------------------------------
-# Это <none>:<none> — слои, оставшиеся от пересборок. Docker сам не удалит образ,
-# на котором работает контейнер, так что операция безопасна по построению.
-dangling=$(docker images -f dangling=true -q 2>/dev/null | wc -l) || dangling=0
-run docker image prune -f
-say "2. висячие образы: было $dangling"
-
-# --- 2б. Остановленные контейнеры старше суток --------------------------------
-# Улика 12.09.2026: осмотр сессии каждый раз печатал «контейнеры не в строю:
-# great_engelbart(exited)» — это был осиротевший контейнер сборки `npm run
-# build`, висевший десять часов. Предупреждение, которое горит всегда, не несёт
-# сведений: в следующий раз рядом с ним незаметно встанет упавшая боевая служба.
-#
-# Порог суток, а не голый prune: контейнер, остановленный владельцем час назад,
-# он мог остановить НАМЕРЕННО. Сутки — граница, после которой это мусор.
-stopped=$(docker ps -a -q --filter status=exited --filter status=created 2>/dev/null | wc -l) || stopped=0
-run docker container prune -f --filter "until=${STOPPED_KEEP_H:-24}h"
-say "2б. остановленные контейнеры старше ${STOPPED_KEEP_H:-24}ч убраны (было всего $stopped)"
-
-# --- 3. Кеш сборок ------------------------------------------------------------
-run docker builder prune -f --filter "until=${BUILD_CACHE_KEEP_H}h"
-say "3. кеш сборок старше ${BUILD_CACHE_KEEP_H}ч вычищен"
+# --- 2, 2б, 3. Образы, остановленные контейнеры, кеш сборок -------------------
+# Здесь их нет: демон docker общий для всех проектов машины, а голый prune не различает
+# своё и чужое. Образы и контейнеры убирает только шаг 10б (docker-sweep.py со списком
+# своих); кеш сборок хозяина не имеет и не убирается вовсе.
 
 # --- 4. Старые теги отката ----------------------------------------------------
 # Теги вида ГГГГММДД_ЧЧММ_хеш ставит scripts/tag-current.sh перед деплоем.
@@ -506,7 +545,7 @@ if [ "$DOCKER_SWEEP_ENABLED" = 1 ] || [ "$DRY_RUN" = 1 ]; then
         [ "$BY_PRESSURE" = 1 ] && DOCKER_MODE="--давление"
         DOCKER_ARGS=("$DOCKER_MODE" --образы-ч "$DOCKER_IMAGE_KEEP_H"
                      --образы-давление-ч "$DOCKER_IMAGE_PRESSURE_H"
-                     --контейнеры-ч "$DOCKER_STOPPED_KEEP_H" --кэш-гб "$DOCKER_CACHE_KEEP_GB"
+                     --контейнеры-ч "$DOCKER_STOPPED_KEEP_H"
                      --тома-дней "$DOCKER_VOLUME_KEEP_DAYS" --свои "$DOCKER_SWEEP_OWN"
                      --журнал "$LOG_DIR/уборка-docker.jsonl" --метки "$LOG_DIR/уборка-docker-метки.json")
         [ -n "$DOCKER_SWEEP_PROTECT" ] && DOCKER_ARGS+=(--защита "$DOCKER_SWEEP_PROTECT")

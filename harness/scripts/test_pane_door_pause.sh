@@ -59,16 +59,48 @@ want() { [ -z "$ONLY" ] || [ "$ONLY" = "$1" ]; }
 source "$KOREN/scripts/lib/selftest_cases.sh"
 
 T=$(mktemp -d /tmp/proba-pane-door-XXXXXX)
+echo $$ > "$T/owner"
 STAMP="proba-pane-door-$$"
 PATHS_JUDGED=0
 PIDS_KILL=()
+# Процессы стенда находятся по окружению: у каждого есть значение с путём стенда
+# (PATH, HARNESS_PANEL_STATE, PROBA_STAND), а командная строка диспетчера метки не несёт.
+sweep_stand() {  # $@ = каталоги стендов со слешем; печатает число убитых
+    local f pid n=0 k pat=()
+    [ $# -gt 0 ] || { echo 0; return; }
+    for f in "$@"; do pat+=(-e "=$f"); done
+    # Диспетчер живёт, пока проход до него не дошёл, и порождает потомков уже после
+    # снимка /proc: проходы повторяются, пока очередной не убьёт никого.
+    while :; do
+        k=0
+        for f in /proc/[0-9]*/environ; do
+            pid="${f#/proc/}"; pid="${pid%/environ}"
+            [ "$pid" = "$$" ] && continue
+            grep -qaF "${pat[@]}" "$f" 2>/dev/null && kill -KILL "$pid" 2>/dev/null && k=$((k+1))
+        done
+        n=$((n + k)); [ "$k" -gt 0 ] || break
+    done
+    echo "$n"
+}
 cleanup() {
     local p
     for p in "${PIDS_KILL[@]}"; do kill -KILL -- "-$p" 2>/dev/null; kill -KILL "$p" 2>/dev/null; done
-    pkill -KILL -f "^$STAMP" 2>/dev/null
+    sweep_stand "$T/" >/dev/null
     if [ -n "${PROBA_KEEP:-}" ]; then echo "стенд оставлен (PROBA_KEEP): $T"; else rm -rf "$T"; fi
 }
 trap cleanup EXIT
+# Стенды прогонов, убитых KILL-ом (ловушка не сработала). Живой хозяин — это
+# параллельный прогон той же пробы: его стенд не трогаем.
+DEAD=()
+for d in /tmp/proba-pane-door-*/; do
+    owner=$(cat "$d/owner" 2>/dev/null)
+    [ -n "$owner" ] && kill -0 "$owner" 2>/dev/null && continue
+    DEAD+=("$d")
+done
+LEFT=$(sweep_stand "${DEAD[@]}")
+if [ "$LEFT" -gt 0 ]; then
+    echo "убрано процессов от прерванных прогонов: $LEFT"
+fi
 
 # ── подделка tmux ──────────────────────────────────────────────────────────
 # Без PROBA_TMUX_LOG отказывает: вызов вне стенда виден, а не молча успешен.
@@ -593,7 +625,7 @@ PYEOF
         : > "$S/tmux-calls"
         printf '000:СТЕНДОВЫЙ' > "$S/token"   # не-секрет: подставной Bot API стенда
         port=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')
-        python3 "$T/api.py" "$port" "$S/acks" "$S/api.ready" > "$S/api.out" 2>&1 &
+        PROBA_STAND="$T/" python3 "$T/api.py" "$port" "$S/acks" "$S/api.ready" > "$S/api.out" 2>&1 &
         PIDS_KILL+=($!); disown $!
         wait_for 10 test -e "$S/api.ready" || { d_bad "Bot API не поднялся"; return; }
         cat > "$S/install.conf" <<EOF
@@ -608,7 +640,7 @@ EOF
         printf 'TMUX_SESSION="%s"\nSERVICE_LOCKS_SUBDIR="services"\nPANE_TMUX_TIMEOUT="3"\nPANE_ENTER_DELAY="0.1"\nPANE_SEND_NOW="1"\n' \
             "$STAMP-disp" > "$S/harness.conf"
         lockdir="$S/log/locks/services"; mkdir -p "$lockdir"
-        python3 "$T/holder.py" "$S/release" "$S/held" "$lockdir/pane-kick.lock" "$lockdir/pane.lock" &
+        PROBA_STAND="$T/" python3 "$T/holder.py" "$S/release" "$S/held" "$lockdir/pane-kick.lock" "$lockdir/pane.lock" &
         PIDS_KILL+=($!); disown $!
         wait_for 5 test -e "$S/held" || { d_bad "лок толчков не взят"; return; }
         [ "$when" = before ] && pause_on "$S/panel"

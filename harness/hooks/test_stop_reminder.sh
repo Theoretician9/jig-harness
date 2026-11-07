@@ -60,7 +60,7 @@ touch_file() { printf 'правка\n' >> "$T/repo/$1"; }
 # Прогон хука: печатает stderr, код — в $T/rc.
 run_hook() {
     local rc=0 out
-    out=$(cd "$T" && printf '{}' | env -u HANDOVER_MAX_AGE_MIN \
+    out=$(cd "$T" && printf '{}' | env -u HANDOVER_MAX_AGE_MIN -u DEVMAP_TRACE_FRESH_MIN \
             HARNESS_INSTALL_CONF="$T/install.conf" HARNESS_CONF="$T/harness.conf" \
             PROJECT_DIR="$T/repo" LOG_DIR="$T/log" \
             timeout 60 bash "$HOOK" 2>&1 >/dev/null) || rc=$?
@@ -163,6 +163,8 @@ queue_stand() {
     local R="$T/repo"
     cp "$QUEUE_SRC" "$R/scripts/work-queue.py"
     cp -r "$QUEUE_LIB" "$R/scripts/lib"
+    # Байткод не коммитим: прибор перепишет .pyc, и «без коммита» смешается со случаем.
+    rm -rf "$R/scripts/lib/__pycache__"
     printf 'queue: []\nlines:\n- id: h\n  tasks:\n%s\n' "$1" > "$R/dev-map.yaml"
     printf '{"id": "%s", "слово": "первым делом"}\n' "$ATTENTION_ID" > "$T/log/внимание.jsonl"
     git -C "$R" add -A
@@ -210,6 +212,123 @@ queue_stand "$(card pr.provalena test '    провал_проверки: "см�
 out=$(run_hook)
 verdict "$(names_it "$out" pr.provalena)" \
     "задача в test с провалом проверки — хук называет её «бери её»" "хук сказал: ${out:-ничего}"
+
+# ══ wip со свежим следом — «идёт», а не «доведи до test» ══════════════════════
+# Беда: хук требовал «доведи до test или назови блокер» и «бери её» от задачи,
+# по которой смена только что закоммитила, — сигнал горел каждый ход.
+# Правило: след (коммит с трейлером Dev-Map: <id> или правка
+# .tasks/<id>/журнал.md) не старше DEVMAP_TRACE_FRESH_MIN (умолчание 120) —
+# строка «· идёт: <id>, последний след N мин назад»; поле blocked — строка
+# «· ждёт: <id> — <текст>»; без следа и блокера — «доведи до test». Строки «·»
+# ход не держат: код 0.
+NOTE_RE='· идёт: %s, последний след [0-9]+ мин назад'
+
+journal_aged() {  # $1 id, $2 возраст правки журнала в секундах
+    mkdir -p "$T/repo/.tasks/$1"
+    printf 'шаг\n' > "$T/repo/.tasks/$1/журнал.md"
+    touch -d "@$(( $(date +%s) - $2 ))" "$T/repo/.tasks/$1/журнал.md"
+}
+
+# Вердикт «идёт»: строка «идёт» есть, «доведи» и «бери её» про задачу нет, код 0.
+judge_active() {  # $1 вывод, $2 id, $3 имя случая
+    # shellcheck disable=SC2059
+    verdict "$(printf '%s' "$1" | grep -qE "$(printf "$NOTE_RE" "$2")" && echo 1 || echo 0)" \
+        "$3 — «· идёт: $2, последний след N мин назад»" "хук сказал: ${1:-ничего}"
+    verdict "$(printf '%s' "$1" | grep -qF "доведи до test" && echo 0 || echo 1)" \
+        "$3 — нет «доведи до test»" "хук сказал: $(printf '%s' "$1" | grep -F "доведи")"
+    verdict "$([ "$(names_it "$1" "$2")" = 0 ] && echo 1 || echo 0)" \
+        "$3 — нет «бери её»" "хук сказал: $(printf '%s' "$1" | grep -F "бери её")"
+    verdict "$([ "$(cat "$T/rc")" = 0 ] && echo 1 || echo 0)" \
+        "$3 — только строки «·», ход закончен (код 0)" "код $(cat "$T/rc"), хук сказал: ${1:-ничего}"
+}
+
+judge_abandoned() {  # $1 вывод, $2 id, $3 имя случая
+    verdict "$(printf '%s' "$1" | grep -qF "1 задач(и) в статусе wip — доведи до test или назови блокер" && echo 1 || echo 0)" \
+        "$3 — «доведи до test или назови блокер»" "хук сказал: ${1:-ничего}"
+    verdict "$(printf '%s' "$1" | grep -qF "идёт: $2" && echo 0 || echo 1)" \
+        "$3 — строки «идёт» нет" "хук сказал: $(printf '%s' "$1" | grep -F "идёт:")"
+    verdict "$([ "$(cat "$T/rc")" = 2 ] && echo 1 || echo 0)" \
+        "$3 — ход держится (код 2)" "код $(cat "$T/rc")"
+}
+
+# ── свежий коммит с трейлером Dev-Map ─────────────────────────────────────
+queue_stand "$(card pr.idet wip)"
+git -C "$T/repo" commit -q --allow-empty -m 'шаг работы' -m 'Dev-Map: pr.idet'
+judge_active "$(run_hook)" pr.idet "свежий коммит с трейлером Dev-Map"
+
+# ── свежая правка журнала без коммита ─────────────────────────────────────
+queue_stand "$(card pr.idet wip)"
+journal_aged pr.idet 300
+judge_active "$(run_hook)" pr.idet "журнал задачи правлен 5 мин назад, коммита нет"
+
+# ── граница порога: след ровно 120 мин назад — ещё идёт ───────────────────
+queue_stand "$(card pr.idet wip)"
+journal_aged pr.idet $(( 120 * 60 + 20 ))
+judge_active "$(run_hook)" pr.idet "граница: след 120 мин назад (порог 120)"
+
+# ── за границей: 121 мин — брошена ────────────────────────────────────────
+queue_stand "$(card pr.idet wip)"
+journal_aged pr.idet $(( 121 * 60 + 20 ))
+judge_abandoned "$(run_hook)" pr.idet "за границей: след 121 мин назад"
+
+# ── брошенная: следа нет вовсе ────────────────────────────────────────────
+queue_stand "$(card pr.broshena wip)"
+judge_abandoned "$(run_hook)" pr.broshena "брошенная wip без следа"
+
+# ── порог — данные: DEVMAP_TRACE_FRESH_MIN=10, след 30 мин — брошена ──────
+queue_stand "$(card pr.idet wip)"
+printf 'DEVMAP_TRACE_FRESH_MIN=10\n' > "$T/harness.conf"
+journal_aged pr.idet $(( 30 * 60 ))
+judge_abandoned "$(run_hook)" pr.idet "порог из конфига 10 мин, след 30 мин"
+
+# ── блокер в карточке — «ждёт», ход не держится ───────────────────────────
+queue_stand "$(card pr.zhdet wip '    blocked: "ждёт ответа владельца"
+')"
+out=$(run_hook)
+verdict "$(printf '%s' "$out" | grep -qF "· ждёт: pr.zhdet — ждёт ответа владельца" && echo 1 || echo 0)" \
+    "блокер — «· ждёт: pr.zhdet — ждёт ответа владельца»" "хук сказал: ${out:-ничего}"
+verdict "$(printf '%s' "$out" | grep -qF "доведи до test" && echo 0 || echo 1)" \
+    "блокер — нет «доведи до test»" "хук сказал: $(printf '%s' "$out" | grep -F "доведи")"
+verdict "$([ "$(cat "$T/rc")" = 0 ] && echo 1 || echo 0)" \
+    "блокер — только строки «·», код 0" "код $(cat "$T/rc"), хук сказал: ${out:-ничего}"
+
+# ══ Неотправленные коммиты: напоминание судят ворота, согласие — только кнопка ══
+# Слово владельца 05.11.2026: «все вопросы по поводу моего Да должны приходить
+# кнопками в телегу». Хук спрашивает ворота без --просить (кнопку просит только
+# дверь) и при отказе ведёт к ask-consent, а не к «спроси да» текстом.
+# Ворота стенда — заглушка: пишет свои доводы, отвечает кодом из файла.
+push_stand() {  # $1 = код ворот стенда
+    new_stand "$KEY"
+    local R="$T/repo"
+    cat > "$R/scripts/deploy_guard.py" <<'PYEOF'
+import pathlib, sys
+стенд = pathlib.Path(__file__).resolve().parents[2]
+(стенд / "guard-args").write_text(" ".join(sys.argv[1:]), encoding="utf-8")
+sys.exit(int((стенд / "guard-rc").read_text()))
+PYEOF
+    printf '%s' "$1" > "$T/guard-rc"
+    git -C "$R" add -A
+    git -C "$R" commit -q -m 'ворота стенда'
+    git init -q --bare -b master "$T/remote.git"
+    git -C "$R" remote add origin "$T/remote.git"
+    git -C "$R" push -q -u origin master 2>/dev/null
+    git -C "$R" commit -q --allow-empty -m 'неотправленный'
+}
+
+push_stand 1
+out=$(run_hook)
+verdict "$(printf '%s' "$out" | grep -qF 'нужна кнопка «Да» владельца' \
+        && printf '%s' "$out" | grep -qF 'ask-consent.py --вид пуш' && echo 1 || echo 0)" \
+    "пуш: ворота закрыты — напоминание ведёт к кнопке через ask-consent" "хук сказал: ${out:-ничего}"
+verdict "$(printf '%s' "$out" | grep -qF 'сторож выката: можно' && echo 0 || echo 1)" \
+    "пуш: ворота закрыты — «можно» не сказано" "хук сказал: ${out:-ничего}"
+verdict "$([ "$(cat "$T/guard-args" 2>/dev/null)" = "--действие push --только-согласие" ] && echo 1 || echo 0)" \
+    "пуш: ворота спрошены без --просить — хук кнопку не просит" "доводы: $(cat "$T/guard-args" 2>/dev/null || echo 'ворота не спрошены')"
+
+push_stand 0
+out=$(run_hook)
+verdict "$(printf '%s' "$out" | grep -qF '1 коммит(ов) — git push (сторож выката: можно)' && echo 1 || echo 0)" \
+    "пуш: ворота открыты — «git push (сторож выката: можно)»" "хук сказал: ${out:-ничего}"
 
 echo
 echo "всего путей: $total, неудач: $bad"

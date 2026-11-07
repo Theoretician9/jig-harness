@@ -11,11 +11,15 @@
 """
 from __future__ import annotations
 
+import contextlib
+import copy
+import fcntl
 import functools
 import hashlib
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -305,7 +309,113 @@ def snapshot_of(card: dict, judge, repo: Path, log_dir: Path) -> dict:
     }
 
 
+FORMAT_TOKEN = re.compile(r"%x09|%H|%h|%cs|%ad|%s")
+HISTORY_FIELDS = {"%H": 0, "%h": 1, "%cs": 2, "%ad": 3, "%s": 4}
+SAFE_PATTERN = re.compile(r"[\w.\- :^$\\]*")
+
+
+def history_of(real_run, root: str) -> list:
+    """Вся история одним проходом: [(хеш, короткий, дата, дата_автора, тема, сообщение)]."""
+    done = real_run(["git", "-C", root, "log", "--date=short", "--format=%H%x1f%h%x1f%cs%x1f%ad%x1f%s%x1f%B%x1e"],
+                    capture_output=True, text=True, errors="replace", timeout=120)
+    if done.returncode != 0:
+        return None
+    rows = (row.strip("\n").split("\x1f", 5) for row in done.stdout.split("\x1e"))
+    rows = [row for row in rows if len(row) == 6]
+    # Судится только строка Dev-Map: поиск по остальному тексту ни разу не нужен.
+    for row in rows:
+        row[5] = "\n".join(line for line in row[5].splitlines() if "Dev-Map: " in line)
+    return rows
+
+
+def answer_grep(args: list, history_for):
+    """Ответ `git log --grep` из общей истории; None — запрос не наш, зови git."""
+    rest = list(args[1:])
+    while rest[:1] == ["-c"]:
+        del rest[:2]
+    if rest[:1] != ["-C"] or rest[2:3] != ["log"]:
+        return None
+    root, options = rest[1], rest[3:]
+    pattern = limit = form = None
+    for option in options:
+        if option.startswith("--grep="):
+            pattern = option[7:]
+        elif option == "--format=" or option.startswith("--format="):
+            form = option[9:]
+        elif re.fullmatch(r"-n?\d+", option):
+            limit = int(option.lstrip("-n"))
+        elif option not in ("--extended-regexp", "--date=short"):
+            return None
+    if pattern is None or form is None or "Dev-Map: " not in pattern or not SAFE_PATTERN.fullmatch(pattern):
+        return None
+    if "%" in FORMAT_TOKEN.sub("", form):
+        return None
+    rows = history_for(root)
+    if rows is None:
+        return None
+    matcher = re.compile(pattern, re.M)
+    found = [row for row in rows if row[5] and matcher.search(row[5])]
+    if limit is not None:
+        found = found[:limit]
+    def render(row):
+        return FORMAT_TOKEN.sub(
+                      lambda m: "\t" if m.group() == "%x09" else row[HISTORY_FIELDS[m.group()]], form)
+    return "".join(render(row) + "\n" for row in found)
+
+
+@contextlib.contextmanager
+def run_caches():
+    """Общее считается один раз на сборку, а не на карточку.
+
+    За сборку дерево не меняется, а судьи на каждой карточке заново звали одни и
+    те же чтения git и скан секретов всего репо (2 с на карточку) и заново
+    разбирали одни и те же YAML. Кэш живёт ровно в этом блоке: следующая сборка
+    видит дерево заново. Кэшируются только чтения: git и check-secrets.sh.
+    """
+    import yaml
+    real_run, real_load = subprocess.run, yaml.safe_load
+    runs, texts, histories = {}, {}, {}
+
+    def history_for(root):
+        if root not in histories:
+            histories[root] = history_of(real_run, root)
+        return histories[root]
+    loader = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
+
+    def cached_run(args, *rest, **kwargs):
+        reads = (isinstance(args, list) and not rest and
+                 (args[:1] == ["git"] or args[:1] == ["bash"] and str(args[1]).endswith("check-secrets.sh")))
+        if not reads:
+            return real_run(args, *rest, **kwargs)
+        key = (tuple(args), tuple(sorted(kwargs.items())))
+        if key not in runs:
+            text = (answer_grep(args, history_for)
+                    if args[0] == "git" and (kwargs.get("text") or kwargs.get("encoding")) else None)
+            runs[key] = (subprocess.CompletedProcess(args, 0, text, "") if text is not None
+                         else real_run(args, *rest, **kwargs))
+        return runs[key]
+
+    def cached_load(stream, Loader=None):
+        # Разобранное отдаём копией: вызвавший вправе менять своё дерево.
+        if not isinstance(stream, str):
+            return yaml.load(stream, Loader=loader)
+        if stream not in texts:
+            texts[stream] = yaml.load(stream, Loader=loader)
+        return copy.deepcopy(texts[stream])
+
+    subprocess.run, yaml.safe_load = cached_run, cached_load
+    try:
+        yield
+    finally:
+        subprocess.run, yaml.safe_load = real_run, real_load
+
+
 def build(map_path, judge, now: datetime) -> dict:
+    with run_caches():
+        return build_uncached(map_path, judge, now)
+
+
+def build_uncached(map_path, judge, now: datetime) -> dict:
     map_path = Path(map_path)
     columns = [column_name(s) for s in stages()]
     board = {"снято": now.isoformat(timespec="seconds"), "направление": config.активная_линия(),
@@ -393,7 +503,26 @@ def unchanged_board(target: Path, stamp: Path, fingerprint: str) -> dict | None:
     return board if isinstance(board, dict) else None
 
 
+def take_lock():
+    """Неблокирующий замок сборки: сборка идёт дольше шага крона, копии
+    наслаивались. None — прошлая сборка ещё держит замок. Дескриптор
+    ненаследуемый (PEP 446) и subprocess его не передаёт: git-потомок не удержит замок."""
+    path = Path(config.log_dir()) / "locks" / "services" / "build-board.lock"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = open(path, "a")
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        handle.close()
+        return None
+    return handle
+
+
 def main() -> int:
+    lock = take_lock()
+    if lock is None:
+        print("прошлая сборка идёт — пропуск")
+        return 0
     judge = load_gate()
     now = datetime.now()
     target = Path(config.panel_state_dir()) / "board.json"

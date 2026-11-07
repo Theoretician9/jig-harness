@@ -283,6 +283,166 @@ verdict "$([ "$before" != "$(head_of "$T")" ] && [ "$(status_in_head "$T" hr.b)"
     "VG-01, проход 2, сосед: чужая правка hr.b wip→test закоммичена, карта не заперта" \
     "HEAD сдвинут: $([ "$before" != "$(head_of "$T")" ] && echo да || echo нет), hr.b в HEAD = $(status_in_head "$T" hr.b), rc=$(cat "$T/rc")"
 
+# ── сверка: служебные темы и покрытые картой коммиты не считаются пропуском ──
+# Фильтр судится на ЖИВОМ значении ключа из harness.conf (разбор файла), а не
+# на копии списка: копия разъехалась бы с конфигом молча.
+CONF_PREFIXES=$(sed -n 's/^DEVMAP_SERVICE_PREFIXES="\(.*\)"$/\1/p' "$HERE/../harness/config/harness.conf" | head -1)
+verdict "$([ -n "$CONF_PREFIXES" ] && echo 1 || echo 0)" \
+    "ключ DEVMAP_SERVICE_PREFIXES разобран из harness.conf (пустой разбор — провал пробы)" "значение пусто"
+new_stand
+for subject in 'Правка памяти с панели: .orders' 'ПЕРЕДАЧА смены 04.11 01:52' 'Рубеж смены 21:03: STATE.md' 'devmap: пропуски заведены в карту (selfheal)'; do
+    git -C "$T/repo" -c user.name=t -c user.email=t@t commit -q --allow-empty -m "$subject"
+done
+list_out=$(cd "$T" && DEVMAP_SERVICE_PREFIXES="$CONF_PREFIXES" HARNESS_INSTALL_CONF="$T/install.conf" \
+    HARNESS_CONF="$T/harness.conf" bash "$DAEMON" --список-пропусков 30 2>/dev/null)
+verdict "$(printf '%s' "$list_out" | grep -qiE 'памяти с панели|передача|рубеж|devmap:' && echo 0 || echo 1)" \
+    "служебные темы (правка памяти с панели, передача, рубеж смены, devmap:) без учёта регистра не в выборке" \
+    "в выборке: $(printf '%s' "$list_out" | cut -c1-80 | tr '\n' '|')"
+verdict "$(printf '%s' "$list_out" | grep -q 'работа без трейлера' && echo 1 || echo 0)" \
+    "служебный фильтр не съел рабочий коммит" "выборка: $list_out"
+
+new_stand
+sha=$(git -C "$T/repo" log -1 --format=%H)
+sha_list_before=$(cd "$T" && HARNESS_INSTALL_CONF="$T/install.conf" HARNESS_CONF="$T/harness.conf" bash "$DAEMON" --список-пропусков 30 2>/dev/null)
+printf '        checklist:\n          - { summary: "работа %s", done_at: "2026-11-05" }\n' "${sha:0:10}" >> "$T/repo/dev-map.yaml"
+sha_list_after=$(cd "$T" && HARNESS_INSTALL_CONF="$T/install.conf" HARNESS_CONF="$T/harness.conf" bash "$DAEMON" --список-пропусков 30 2>/dev/null)
+verdict "$(printf '%s' "$sha_list_before" | grep -q "${sha:0:10}" && [ -z "$(printf '%s' "$sha_list_after" | tr -d '[:space:]')" ] && echo 1 || echo 0)" \
+    "коммит, чей SHA назван в карте, не считается пропуском (до: в выборке, после: пусто)" \
+    "до: $sha_list_before; после: $sha_list_after"
+
+# ── метка жизни: отказ — тоже прогон ─────────────────────────────────────────
+new_stand
+map_text wip wip 1 1 0 > "$T/model-map.yaml"
+run_daemon "$T" >/dev/null
+verdict "$([ -e "$T/hb/devmap-selfheal" ] && echo 1 || echo 0)" \
+    "БОЛЬНОЙ: отказ по смене статуса ставит метку жизни" "метки нет, rc=$(cat "$T/rc")"
+
+new_stand
+cat > "$T/repo/scripts/claude-demon.sh" <<'SH'
+#!/usr/bin/env bash
+exit 3
+SH
+run_daemon "$T" >/dev/null
+verdict "$([ -e "$T/hb/devmap-selfheal" ] && [ "$(cat "$T/rc")" = 1 ] && echo 1 || echo 0)" \
+    "БОЛЬНОЙ: сбой агента (код 3) ставит метку жизни, прогон отказывает кодом 1" "метка: $([ -e "$T/hb/devmap-selfheal" ] && echo есть || echo нет), rc=$(cat "$T/rc")"
+
+new_stand
+git -C "$T/repo" config core.hooksPath "$T/hooks"
+mkdir -p "$T/hooks"; printf '#!/bin/sh\nexit 1\n' > "$T/hooks/pre-commit"; chmod +x "$T/hooks/pre-commit"
+map_text test wip 1 1 0 > "$T/model-map.yaml"
+run_daemon "$T" >/dev/null
+verdict "$([ -e "$T/hb/devmap-selfheal" ] && [ "$(cat "$T/rc")" = 1 ] && echo 1 || echo 0)" \
+    "БОЛЬНОЙ: отказ pre-commit при коммите карты ставит метку жизни" "метка: $([ -e "$T/hb/devmap-selfheal" ] && echo есть || echo нет), rc=$(cat "$T/rc")"
+
+# ── лимит: прогон оставляет флаг повтора для limit-watch ─────────────────────
+new_stand
+cat > "$T/repo/scripts/claude-demon.sh" <<'SH'
+#!/usr/bin/env bash
+exit 77
+SH
+run_daemon "$T" >/dev/null
+verdict "$([ -e "$T/log/devmap/retry-after-limit" ] && [ -e "$T/hb/devmap-selfheal" ] && echo 1 || echo 0)" \
+    "БОЛЬНОЙ: отказ по лимиту оставляет флаг повтора retry-after-limit и метку жизни" \
+    "флаг: $([ -e "$T/log/devmap/retry-after-limit" ] && echo есть || echo нет)"
+new_stand
+map_text test wip 1 1 0 > "$T/model-map.yaml"
+run_daemon "$T" >/dev/null
+verdict "$([ ! -e "$T/log/devmap/retry-after-limit" ] && echo 1 || echo 0)" \
+    "сосед: успешный прогон флага повтора не оставляет"
+
+# ── plan -> test законен, когда к карточке привязан коммит из выборки ───────
+plan_stand() {
+    new_stand
+    map_text plan wip 1 0 0 > "$T/repo/dev-map.yaml"
+    git -C "$T/repo" add -A
+    git -C "$T/repo" -c user.name=t -c user.email=t@t commit -q -m 'карта: hr.a в плане
+
+Dev-Map: hr.a'
+    git -C "$T/repo" -c user.name=t -c user.email=t@t commit -q --allow-empty -m 'работа над hr.a'
+    PLAN_SHA=$(git -C "$T/repo" log -1 --format=%H)
+}
+plan_stand
+before=$(head_of "$T")
+map_text test wip 1 0 1 | sed "s/Дописано демоном/коммит ${PLAN_SHA:0:10}/" > "$T/model-map.yaml"
+run_daemon "$T" >/dev/null
+verdict "$([ "$before" != "$(head_of "$T")" ] && [ "$(status_in_head "$T" hr.a)" = test ] && echo 1 || echo 0)" \
+    "plan→test с привязанным SHA коммита из выборки — коммит есть" \
+    "hr.a в HEAD = $(status_in_head "$T" hr.a), rc=$(cat "$T/rc")"
+plan_stand
+before=$(head_of "$T")
+map_text test wip 1 0 1 > "$T/model-map.yaml"          # пункт без SHA
+run_daemon "$T" >/dev/null
+verdict "$([ "$before" = "$(head_of "$T")" ] && echo 1 || echo 0)" \
+    "БОЛЬНОЙ: plan→test без привязанного SHA — коммита нет" "hr.a в HEAD = $(status_in_head "$T" hr.a)"
+plan_stand
+before=$(head_of "$T")
+map_text done wip 1 0 1 | sed "s/Дописано демоном/коммит ${PLAN_SHA:0:10}/" > "$T/model-map.yaml"
+run_daemon "$T" >/dev/null
+verdict "$([ "$before" = "$(head_of "$T")" ] && echo 1 || echo 0)" \
+    "сосед: plan→done даже с SHA отвергается (разрешён только plan→test)" "hr.a в HEAD = $(status_in_head "$T" hr.a)"
+
+# ── модель оставила нечитаемый YAML: откат к снимку, а не падение ─────────────
+new_stand
+cp "$T/repo/dev-map.yaml" "$T/snapshot-before.yaml"
+printf 'version: 1\nlines: [\n  - id: harness\n    tasks: {id: hr.a\n' > "$T/model-map.yaml"
+before=$(head_of "$T")
+out=$(run_daemon "$T")
+rejected=$(find "$T/log/devmap" -maxdepth 1 -name 'rejected-*.yaml' -print -quit)
+verdict "$([ "$before" = "$(head_of "$T")" ] && cmp -s "$T/snapshot-before.yaml" "$T/repo/dev-map.yaml" && echo 1 || echo 0)" \
+    "БОЛЬНОЙ: битый YAML модели — коммита нет, карта в дереве = снимок до модели" \
+    "HEAD сдвинут: $([ "$before" != "$(head_of "$T")" ] && echo да || echo нет), дерево = снимок: $(cmp -s "$T/snapshot-before.yaml" "$T/repo/dev-map.yaml" && echo да || echo нет)"
+verdict "$([ -n "$rejected" ] && cmp -s "$T/model-map.yaml" "$rejected" && echo 1 || echo 0)" \
+    "битый YAML модели сохранён в rejected-*.yaml" "отвергнутая: ${rejected:-нет}"
+verdict "$(printf '%s' "$out" | grep -q 'карта после модели не читается' && [ -e "$T/hb/devmap-selfheal" ] && echo 1 || echo 0)" \
+    "битый YAML назван в журнале («карта после модели не читается»), метка жизни стоит" \
+    "метка: $([ -e "$T/hb/devmap-selfheal" ] && echo есть || echo нет); вывод: $(printf '%s' "$out" | tail -2 | tr '\n' ' ')"
+
+# ── БОЛЬНОЙ СЛУЧАЙ 05.11.2026: поля-даты без кавычек, как в живой карте ───────
+# yaml.safe_load отдаёт `done_at: 2026-11-05` объектом date, и сверка «до/после»,
+# не умевшая его сериализовать, звала законную правку нечитаемой картой.
+date_map() { map_text test wip 1 "$1" 1 | sed 's/done_at: "2026-10-18"/done_at: 2026-10-18/'; }
+new_stand
+date_map 0 > "$T/repo/dev-map.yaml"
+git -C "$T/repo" add -A
+git -C "$T/repo" -c user.name=t -c user.email=t@t commit -q -m 'карта: даты без кавычек
+
+Dev-Map: hr.a'
+git -C "$T/repo" -c user.name=t -c user.email=t@t commit -q --allow-empty -m 'работа после карты с датами'
+date_map 1 > "$T/model-map.yaml"                      # модель дописала hr.n
+before=$(head_of "$T")
+out=$(run_daemon "$T")
+verdict "$([ "$before" != "$(head_of "$T")" ] && [ "$(in_head_map "$T" hr.n)" = 1 ] && echo 1 || echo 0)" \
+    "БОЛЬНОЙ 05.11: карта с датами без кавычек, модель дописала hr.n — коммит есть" \
+    "HEAD сдвинут: $([ "$before" != "$(head_of "$T")" ] && echo да || echo нет), rc=$(cat "$T/rc"); вывод: $(printf '%s' "$out" | tail -2 | tr '\n' ' ')"
+verdict "$(printf '%s' "$out" | grep -q 'не читается' && echo 0 || echo 1)" \
+    "БОЛЬНОЙ 05.11: читаемая карта с датами не названа нечитаемой" \
+    "вывод: $(printf '%s' "$out" | tail -2 | tr '\n' ' ')"
+
+# ── тревога-карточка: агент упал — заведена, прогон удался — снята ────────────
+# Писатель тревог подставной: пишет свои доводы строкой в файл стенда.
+stub_alert_task() {
+    printf 'import sys\nwith open(%s, "a", encoding="utf-8") as f:\n    f.write(" ".join(sys.argv[1:]) + "\\n")\n' \
+        "'$T/alerts.txt'" > "$T/repo/scripts/alert-task.py"
+}
+new_stand
+stub_alert_task
+printf '#!/usr/bin/env bash\nexit 3\n' > "$T/repo/scripts/claude-demon.sh"
+run_daemon "$T" >/dev/null
+verdict "$(grep -q -- '--key devmap-selfheal:agent-failed' "$T/alerts.txt" 2>/dev/null && [ -e "$T/hb/devmap-selfheal" ] && echo 1 || echo 0)" \
+    "БОЛЬНОЙ: агент упал (код 3) — тревога devmap-selfheal:agent-failed заведена, метка жизни стоит" \
+    "тревоги: $(tr '\n' '|' 2>/dev/null < "$T/alerts.txt" || echo нет), метка: $([ -e "$T/hb/devmap-selfheal" ] && echo есть || echo нет)"
+verdict "$(grep -q -- '--resolve' "$T/alerts.txt" 2>/dev/null && echo 0 || echo 1)" \
+    "сосед: упавший прогон тревогу не снимает" "тревоги: $(tr '\n' '|' 2>/dev/null < "$T/alerts.txt")"
+new_stand
+stub_alert_task
+map_text test wip 1 1 0 > "$T/model-map.yaml"
+run_daemon "$T" >/dev/null
+verdict "$(grep -qx -- '--resolve devmap-selfheal:agent-failed' "$T/alerts.txt" 2>/dev/null && echo 1 || echo 0)" \
+    "успешный прогон снимает тревогу devmap-selfheal:agent-failed" \
+    "тревоги: $(tr '\n' '|' 2>/dev/null < "$T/alerts.txt" || echo нет), rc=$(cat "$T/rc")"
+verdict "$(grep -q -- '--key' "$T/alerts.txt" 2>/dev/null && echo 0 || echo 1)" \
+    "сосед: успешный прогон тревогу не заводит" "тревоги: $(tr '\n' '|' 2>/dev/null < "$T/alerts.txt")"
+
 echo
 echo "всего путей: $total, неудач: $bad"
 [ "$bad" = 0 ]

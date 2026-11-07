@@ -59,7 +59,9 @@ FORBIDDEN_NOT_LISTED = (
 # Ярус 2: в описи есть, заменяется раскладкой, но не снимается. Опись нужна, чтобы
 # знать, что файл наш; снять его нельзя, потому что неполная сборка пакета без
 # project-settings.json или без хука иначе сняла бы стражей — а они держат И-1/И-2.
-FORBIDDEN_LISTED = (".claude/settings.json", "scripts/hooks/*")
+# instance.yaml — роль этой копии: кладётся шаблоном только при отсутствии, потом
+# выпадает из плана, и опись не должна снять его как «лишний».
+FORBIDDEN_LISTED = (".claude/settings.json", "scripts/hooks/*", "harness/self/instance.yaml")
 
 
 def _matches(path: str, masks: tuple) -> bool:

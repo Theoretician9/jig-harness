@@ -73,12 +73,10 @@ msgs=()
 # любая другая работа, она должна исполняться, вплоть до следующего блокера».
 # Хук называет её ИМЕНЕМ на завершении хода: «свободной работы нет» перестаёт
 # быть выводом из головы — прибор отвечает раньше, чем смена успеет так решить.
+next_work=""
 if [ -f "$project_dir/dev-map.yaml" ]; then
   next_work=$(python3 "$project_dir/scripts/work-queue.py" \
       "$project_dir/dev-map.yaml" --следующая 2>/dev/null | head -1)
-  case "$next_work" in
-    "СЛЕДУЮЩАЯ РАБОТА:"*) msgs+=("${next_work#СЛЕДУЮЩАЯ РАБОТА: } — бери её, если стоишь") ;;
-  esac
 fi
 
 # Неотправленные коммиты — напоминание, но ТОЛЬКО когда отправка вообще
@@ -88,32 +86,6 @@ fi
 # который просит невозможного, учит себя не слушать.
 ahead=$(git rev-list --count '@{u}..HEAD' 2>/dev/null || echo 0)
 if [ "${ahead:-0}" -gt 0 ]; then
-    confirm_log="${LOG_DIR}/confirmations.jsonl"
-    # Порог берётся из УЖЕ загруженного конфига: свой sed по зашитому пути был
-    # второй правдой о конфиге и на чужой машине читал пустоту.
-    max_age_min=${CONFIRM_MAX_AGE_MIN:-60}
-    fresh_yes=$(python3 - "$confirm_log" "$max_age_min" <<'PYEOF' 2>/dev/null || echo нет
-import datetime, json, sys
-журнал, порог = sys.argv[1], int(sys.argv[2])
-последняя = None
-try:
-    with open(журнал, encoding="utf-8") as f:
-        for строка in f:
-            строка = строка.strip()
-            if строка:
-                try:
-                    последняя = json.loads(строка)
-                except Exception:
-                    pass
-except OSError:
-    print("нет"); sys.exit()
-if not последняя or not последняя.get("ts"):
-    print("нет"); sys.exit()
-метка = datetime.datetime.fromisoformat(последняя["ts"])
-возраст = (datetime.datetime.now(метка.tzinfo) - метка).total_seconds() / 60
-print("да" if возраст <= порог else "нет")
-PYEOF
-)
     # Спрашиваем ту же ручку, что и сторож выката: PUSH_NEEDS_OWNER=0 значит
     # «владелец отпустил push, согласия не спрашивать» (его решение 03.09.2026).
     # Улика 12.09.2026: ключ стоял в 0, deploy_guard отвечал «согласие есть», а
@@ -121,15 +93,13 @@ PYEOF
     # по-разному, и напоминание врало. То же самое в ту же ночь нашлось в
     # стороже сессий про лимит.
     # Спрашиваем ИСТОЧНИК, а не читаем ключ своими руками: копия суждения
-    # расходится с оригиналом молча. Вызов дешёвый — 0,11 с, довод
-    # «--не-тратить» не расходует согласие владельца.
+    # расходится с оригиналом молча. Вызов дешёвый — 0,11 с; без --просить кнопку
+    # он не просит и в сеть не ходит, а кнопка не тратится: её гасит само действие.
     if python3 "${project_dir:-$PROJECT_DIR}/scripts/deploy_guard.py" --действие push \
-            --только-согласие --не-тратить >/dev/null 2>&1; then
+            --только-согласие >/dev/null 2>&1; then
         msgs+=("не отправлено в удалённый репозиторий: $ahead коммит(ов) — git push (сторож выката: можно)")
-    elif [ "$fresh_yes" = "да" ]; then
-        msgs+=("не отправлено в удалённый репозиторий: $ahead коммит(ов) — git push (через ворота)")
     else
-        msgs+=("$ahead коммит(ов) ждут отправки: согласия владельца свежее ${max_age_min} мин нет — спроси «да» и не пушь до него")
+        msgs+=("$ahead коммит(ов) ждут отправки: нужна кнопка «Да» владельца, текст не засчитывается — python3 scripts/ask-consent.py --вид пуш --предмет \"<удалённый> <ветка>\" --почему …; не пушь до неё")
     fi
 fi
 
@@ -180,44 +150,87 @@ fi
 # подсчёт строк status по регулярке). Ветка yq убрана (В-6): apt ставит
 # python-yq с ДРУГИМ синтаксисом — мёртвый код, который однажды молча врал бы.
 devmap="dev-map.yaml"
+notes=()
+abandoned=0
+active_ids=" "
 if [ -f "$devmap" ]; then
-  queue=$(python3 - "$devmap" <<'PY' 2>/dev/null
-import re, sys
-path = sys.argv[1]
+  # «Работа идёт» — след свежее порога: коммит с трейлером Dev-Map: <id> или
+  # правка .tasks/<id>/журнал.md. Без этого хук требовал «доведи» от задачи,
+  # по которой смена только что закоммитила, и сигнал горел на каждом ходе.
+  # Порог — данные (DEVMAP_TRACE_FRESH_MIN), не число в коде.
+  wip_report=$(python3 - "$devmap" "${DEVMAP_TRACE_FRESH_MIN:-120}" <<'PY' 2>/dev/null
+import os, re, subprocess, sys, time
+path, fresh_min = sys.argv[1], int(sys.argv[2])
 try:
     import yaml
-    def walk(x):
-        n = 0
+    loader = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
+    def walk(x, out):
         if isinstance(x, dict):
-            # wip с НАЗВАННЫМ блокером — не незакрытая работа, а честное
-            # ожидание. Пережито 12.08.2026: владелец прислал первую задачу
-            # архивом, который не прошёл через Bot API; задача начата, блокер
-            # записан в карту — а хук всё равно требовал «доведи до test или
-            # назови блокер». Требование невыполнимо: назвать блокер он не
-            # проверял, и сигнал горел бы до конца задачи. Тот же класс, что
-            # уже чинили здесь 11.08 сужением до wip, — сигнал без различения.
-            # Пустая строка блокировкой не считается: так же считает work-queue.py.
-            if str(x.get("status")) == "wip" and not str(x.get("blocked") or "").strip():
-                n += 1
+            if str(x.get("status")) == "wip":
+                out.append(x)
             for v in x.values():
-                n += walk(v)
+                walk(v, out)
         elif isinstance(x, list):
             for v in x:
-                n += walk(v)
-        return n
-    print(walk(yaml.safe_load(open(path, encoding="utf-8"))))
+                walk(v, out)
+        return out
+    cards = walk(yaml.load(open(path, encoding="utf-8"), Loader=loader), [])
 except Exception:
+    # Нет PyYAML или битая карта: считаем все wip брошенными — лишнее
+    # напоминание честнее молчания.
+    text = open(path, encoding="utf-8").read()
+    print("ABANDONED\t%d" % len(re.findall(r"""status:\s*["']?wip\b""", text)))
+    sys.exit()
+
+now = time.time()
+last_trace = {}
+log = subprocess.run(
+    ["git", "log", "--since=%d minutes ago" % (fresh_min * 4), "--format=%ct\t%(trailers:key=Dev-Map,valueonly,separator=%x20)"],
+    capture_output=True, text=True).stdout
+for line in log.splitlines():
+    ts, _, ids = line.partition("\t")
+    for token in ids.replace(",", " ").split():
+        if ts.isdigit():
+            last_trace[token] = max(last_trace.get(token, 0), int(ts))
+for card in cards:
+    cid = str(card.get("id") or "")
+    journal = os.path.join(os.path.dirname(os.path.abspath(path)), ".tasks", cid, "журнал.md")
     try:
-        text = open(path, encoding="utf-8").read()
-        # Запасная ветка (нет PyYAML) blocked не различает — считает все wip.
-        # Это честнее молчания: лучше лишнее напоминание, чем пропущенная работа.
-        print(len(re.findall(r"""status:\s*["']?wip\b""", text)))
-    except Exception:
+        last_trace[cid] = max(last_trace.get(cid, 0), int(os.stat(journal).st_mtime))
+    except OSError:
         pass
+for card in cards:
+    cid = str(card.get("id") or "?")
+    age = int((now - last_trace[cid]) / 60) if cid in last_trace else None
+    blocked = " ".join(str(card.get("blocked") or "").split())
+    age_text = "-" if age is None else str(age)
+    if blocked:
+        print("BLOCKED\t%s\t%s\t%s" % (cid, age_text, blocked))
+    elif age is not None and age <= fresh_min:
+        print("ACTIVE\t%s\t%s" % (cid, age_text))
+    else:
+        print("ABANDONED\t1")
 PY
 )
-  [[ "${queue:-}" =~ ^[0-9]+$ ]] && [ "$queue" -gt 0 ] && msgs+=("незакрытая работа в dev-map.yaml: $queue задач(и) в статусе wip — доведи до test или назови блокер")
+  while IFS=$'\t' read -r kind cid age text; do
+    case "$kind" in
+      ACTIVE)    notes+=("идёт: $cid, последний след ${age} мин назад"); active_ids+="$cid " ;;
+      BLOCKED)   notes+=("ждёт: $cid — $text (последний след: $([ "$age" = "-" ] && echo 'не найден' || echo "${age} мин назад"))"); active_ids+="$cid " ;;
+      ABANDONED) abandoned=$((abandoned + ${cid:-0})) ;;
+    esac
+  done <<<"$wip_report"
+  [ "$abandoned" -gt 0 ] && msgs+=("незакрытая работа в dev-map.yaml: $abandoned задач(и) в статусе wip — доведи до test или назови блокер")
 fi
+
+# Следующую работу не требуем, если она уже идёт или названо, чего она ждёт.
+case "$next_work" in
+  "СЛЕДУЮЩАЯ РАБОТА:"*)
+    next_id=${next_work#СЛЕДУЮЩАЯ РАБОТА: }; next_id=${next_id%% *}
+    case "$active_ids" in
+      *" $next_id "*) ;;
+      *) msgs+=("${next_work#СЛЕДУЮЩАЯ РАБОТА: } — бери её, если стоишь") ;;
+    esac ;;
+esac
 
 # Накопленные входящие: ОДИН сортированный список на рубеже хода. Толчок о
 # каждом сообщении идёт сразу (дверь scripts/lib/pane.sh); свод страхует то,
@@ -228,7 +241,12 @@ if [ -f "$project_dir/scripts/inbox-digest.py" ]; then
   svodka=$(python3 "$project_dir/scripts/inbox-digest.py" 2>/dev/null || true)
 fi
 
-[ ${#msgs[@]} -eq 0 ] && [ -z "$svodka" ] && { отметить_конец_хода; exit 0; }
+# Заметки («идёт», «ждёт») информируют и ход не блокируют.
+if [ ${#msgs[@]} -eq 0 ] && [ -z "$svodka" ]; then
+  for n in "${notes[@]}"; do echo "  · $n" >&2; done
+  отметить_конец_хода
+  exit 0
+fi
 
 # stderr + exit 2 (В-1): stdout Stop-хука модель не видит; код 2 блокирует
 # завершение, и stderr попадает модели — хвосты будут прочитаны, не потеряны.
@@ -236,5 +254,6 @@ fi
   echo "=== перед завершением ==="
   [ -n "$svodka" ] && printf '%s\n' "$svodka"
   for m in "${msgs[@]}"; do echo "  ⚠ $m"; done
+  for n in "${notes[@]}"; do echo "  · $n"; done
 } >&2
 exit 2

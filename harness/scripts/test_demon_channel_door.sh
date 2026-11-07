@@ -50,7 +50,9 @@ chmod +x "$STAND/proekt/scripts/tg_send.sh"
 call_wrapper() {  # $1 = файл обёртки, $2 = код двери; печатает «0|отказ;вызовов curl»
     local rc=0 calls
     : > "$CURL_LOG"
-    DOOR_CODE="$2" PROJECT_DIR="$STAND/proekt" TG_CHAT_ID="$CHAT_STENDA" \
+    # LOG_DIR задан: без него ветка отказа (вложение в $LOG_DIR) падала на
+    # unbound, и «отказ, curl 0» выходил из падения, а не из кода обёртки.
+    LOG_DIR="$STAND" DOOR_CODE="$2" PROJECT_DIR="$STAND/proekt" TG_CHAT_ID="$CHAT_STENDA" \
     TG_TOKEN_FILE="$STAND/klyuch" STAND_CURL_LOG="$CURL_LOG" \
     PATH="$STAND/bin:$PATH" \
         bash -c 'set -euo pipefail; say() { :; }; source "$1"; tg_send "весть стенда"' \

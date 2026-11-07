@@ -183,6 +183,41 @@ def chapter_task_problems(plan: dict) -> list:
             for task, paths in chapter_tasks(plan).items() if len(paths) > 1]
 
 
+def orphan_problems(plans: dict, cards: dict, pid: str) -> list:
+    """Карточки, чья глава лежит в плане pid, но главы (или самого плана) в плане нет."""
+    return [f"сирота: карточка {cid} ссылается на главу {card['глава']}, которой нет в плане {pid}"
+            for cid, card in cards.items()
+            if str(card.get("глава") or "").split("/")[0] == pid
+            and chapter_of(plans, card["глава"]) is None]
+
+
+def closed_plan_line(plan: dict, cards: dict) -> str | None:
+    """Владелец плана закрыт, а задачи его глав открыты: строка предупреждения с перечнем."""
+    if (cards.get(plan.get("владелец")) or {}).get("status") != "done":
+        return None
+    prefix = f"{plan['id']}/"
+    open_ids = [cid for cid, card in cards.items()
+                if str(card.get("глава") or "").startswith(prefix) and card.get("status") != "done"]
+    return (f"план закрыт с открытыми задачами: {plan['id']} (владелец {plan.get('владелец')}): "
+            + ", ".join(open_ids)) if open_ids else None
+
+
+def message_chapter(text: str, cards: dict, plans: dict):
+    """(задача, глава) для новой карточки по первой ЯВНО названной в тексте задаче с планом:
+    владелец плана без своей главы — первая глава верхнего уровня, задача в главе —
+    корень её пути. Имя целым словом: «hr.x-y» не называет hr.x."""
+    named_at = sorted((found.start(), task) for task in cards
+                      for found in re.finditer(rf"(?<![\w.-]){re.escape(task)}(?![\w.-])", text))
+    for _, task in named_at:
+        chapter = cards[task].get("глава")
+        if chapter and chapter_of(plans, chapter):
+            return task, "/".join(chapter.split("/")[:2])
+        for pid, (plan, _path) in plans.items():
+            if plan.get("владелец") == task and not chapter and plan.get("главы"):
+                return task, f"{pid}/{plan['главы'][0]['id']}"
+    return None
+
+
 def hint_chapters(plans: dict, cards: dict, files: list, root, threshold: float) -> list:
     """Главы открытых планов с наибольшей долей пересечения ≥ порога; ничья — все."""
     scored = []
@@ -356,6 +391,21 @@ def agent_id(row: dict) -> str | None:
     return found if found and found != "-" else None
 
 
+def meta_path(payload: dict, agent: str) -> Path:
+    return (Path(str(payload.get("transcript_path") or "")).parent
+            / str(payload.get("session_id") or "") / "subagents"
+            / f"agent-{agent}.meta.json")
+
+
+def tool_use_id_of(payload: dict, agent: str) -> str:
+    """tool_use_id запуска помощника `agent` из его meta.json; пусто, если файла нет."""
+    try:
+        return str(json.loads(meta_path(payload, agent).read_text(encoding="utf-8"))
+                   .get("toolUseId") or "")
+    except (OSError, ValueError, AttributeError):
+        return ""
+
+
 def launch_tasks(launches: list) -> list:
     """Имена задач запусков окна. Анонимные дети управляющего — задача его меченого
     запуска, иначе одна задача на управляющего; анонимный запуск смены — своя задача."""
@@ -508,8 +558,10 @@ def compute_metrics(rows: list, now: float, days: float, roles: dict) -> dict:
     split_off = [d.get("правило") for d in decisions
                  if d.get("правило") in ("нагрузка", "простая") and (d.get("групп") or 0) >= 2]
     load = roles["предохранитель"]["порог_нагрузки"]
+    # Порог, по которому решение принято (зависит от режима скорости), а не нынешний из данных.
     heavy = [d for d in decisions if d.get("сложность_режет")
-             and (d.get("ёмкость") or {}).get("задач_в_работе", 0) >= load]
+             and (d.get("ёмкость") or {}).get("задач_в_работе", 0)
+             >= (d.get("ёмкость") or {}).get("порог_нагрузки", load)]
     uncut = [d for d in heavy if not str(d.get("правило")).startswith("резка_под_нагрузкой")]
     failures = sum(1 for r in hook if r.get("outcome") == "skipped"
                    and data(r).get("сбой") in ("сбой", "таймаут"))

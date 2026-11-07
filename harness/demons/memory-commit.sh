@@ -30,7 +30,7 @@ set -euo pipefail
 CONF="${HARNESS_INSTALL_CONF:-$(konf_koren)/install.conf}"
 # Пороги — из общего загрузчика, а не числом в коде (находка ревью M-09).
 # Окружение СТАРШЕ файла: так проба задаёт свой порог, не трогая боевой.
-konf_zagruzit MEMORY_COMMIT_FAILS_MAX
+konf_zagruzit MEMORY_COMMIT_FAILS_MAX MEMORY_COMMIT_LOCK_MAX
 # Значение конфига — до комментария: строка «PROJECT_DIR="…"   # каталог кода»
 # без этой обрезки приезжала в cd целиком (поймано первым же прогоном).
 znachenie() { grep -E "^$1=" "$CONF" 2>/dev/null | head -1 | cut -d= -f2- \
@@ -70,7 +70,10 @@ VYVOD="${MEMORY_COMMIT_OUT:-$LOG_DIR/memory-commit.вывод}"
 # веток выхода — функция, вызванная до своего определения, в bash молча
 # пустеет (память: функция-вызвана-до-определения).
 FAILS_FILE="$LOG_DIR/memory-commit.неудач"
-zabyt_neudachi() { rm -f "$FAILS_FILE" || say "счёт неудач не снят: $FAILS_FILE"; }
+GATES_FILE="$FAILS_FILE.gates"   # имена гейтов серии — живут и гаснут вместе со счётом
+# Занятый индекс ведёт СВОЙ счёт: в счёт гейтов блокировка не идёт.
+LOCK_FILE="$LOG_DIR/memory-commit.индекс-занят"
+zabyt_neudachi() { rm -f "$FAILS_FILE" "$GATES_FILE" "$LOCK_FILE" || say "счёт неудач не снят: $FAILS_FILE"; }
 
 # ── пауза владельца: демон, который ПИШЕТ, на паузе молчит ──────────────────
 # Ревью спеки остановки 21.09.2026 (CRITICAL 4): владелец нажал «стоп», а
@@ -93,9 +96,13 @@ cd "$PROJECT_DIR"
 # механизмом. Прополка работает только при переполнении и ничего не теряет:
 # длинная цитата уезжает в свою запись памяти, в указаниях остаётся начало и
 # ссылка. Отказ прополки не мешает коммиту: память важнее её объёма.
-if [ -x "$PROJECT_DIR/scripts/weed-the-orders.py" ]; then
+# Скрипт зовётся через python3, бит запуска ему не нужен: проверка `-x` на
+# файле с правами 644 молча отключала прополку.
+if [ -f "$PROJECT_DIR/scripts/weed-the-orders.py" ]; then
     python3 "$PROJECT_DIR/scripts/weed-the-orders.py" 2>&1 | sed 's/^/    /' || \
         say "прополка указаний отказала — продолжаю коммит"
+else
+    say "прополки нет: $PROJECT_DIR/scripts/weed-the-orders.py"
 fi
 
 # Что изменилось в памяти: и правки, и новые записи.
@@ -106,6 +113,7 @@ CHANGED="$(git -c core.quotepath=false status --porcelain -- "$MEMORY_SUBDIR" 2>
 if [ -z "$CHANGED" ]; then
     say "правок памяти нет"
     zabyt_neudachi        # не отказ гейта — счёт начинается заново (M-02)
+    python3 "$PROJECT_DIR/scripts/board.py" --снять память-индекс-занят >/dev/null 2>&1 || true
     # Память закоммитила смена или файл вернули: беды нет, карточка не нужна.
     if [ -f "$PROJECT_DIR/scripts/alert-task.py" ]; then
         python3 "$PROJECT_DIR/scripts/alert-task.py" --resolve memory-commit:blocked </dev/null >/dev/null 2>&1 || true
@@ -181,6 +189,7 @@ if git commit -o "$MEMORY_SUBDIR" -m "$MSG" >"$VYVOD" 2>&1; then
     # пульса называл живого мёртвым.
     zabyt_neudachi
     python3 "$PROJECT_DIR/scripts/board.py" --снять память-не-коммитится >/dev/null 2>&1 || true
+    python3 "$PROJECT_DIR/scripts/board.py" --снять память-индекс-занят >/dev/null 2>&1 || true
     # Карточка о той же беде гаснет там же, где снят долг с доски; нет писателя —
     # сторож не падает.
     if [ -f "$PROJECT_DIR/scripts/alert-task.py" ]; then
@@ -209,7 +218,35 @@ else
     sed 's/^/    /' $VYVOD | tail -20
     # Причина в сообщении владельцу — та, что видна в выводе: имя красного
     # гейта. «Не прошли проверки» без имени заставляет его спрашивать меня.
-    GATE_NAME=$(grep -m1 "GATE FAIL" $VYVOD | sed 's/.*GATE FAIL: //')
+    # sed, а не grep|sed: пустой результат (отказ не гейтом) для grep — код 1,
+    # и под set -e с pipefail он ронял сторожа до метки пульса.
+    GATE_NAME="$(sed -n '/GATE FAIL/{s/.*GATE FAIL: //;p;q}' "$VYVOD")"
+    # Сначала красный гейт: его текст может содержать слово index.lock (X2), и
+    # тогда это всё равно гейт. Занятым индекс считается, только если гейт не
+    # назван и git сказал свой точный текст отказа блокировки.
+    if [ -z "$GATE_NAME" ] && grep -q "index.lock': File exists" "$VYVOD" 2>/dev/null; then
+        # Гейты не запускались вовсе: счёт гейтов и их тревога не при чём, но
+        # блокировка, которую никто не снимет, не должна молчать вечно.
+        LOCK_ROW=$(cat "$LOCK_FILE" 2>/dev/null || echo 0)
+        case "$LOCK_ROW" in ""|*[!0-9]*) LOCK_ROW=0 ;; esac
+        LOCK_ROW=$((LOCK_ROW + 1))
+        LOCK_MAX="${MEMORY_COMMIT_LOCK_MAX:-6}"
+        printf '%s\n' "$LOCK_ROW" > "$LOCK_FILE" || say "счёт занятых индексов не записался"
+        say "индекс занят другим процессом ($LOCK_ROW) — не отказ гейта, повторю на следующем обходе"
+        if [ "$LOCK_ROW" -ge "$LOCK_MAX" ]; then
+            python3 "$PROJECT_DIR/scripts/board.py" --сказать память-индекс-занят \
+                "правка памяти не уходит в гит: индекс занят ${LOCK_ROW} обходов подряд" \
+                >/dev/null 2>&1 || say "доска не приняла запись о долге"
+            if [ "$LOCK_ROW" = "$LOCK_MAX" ] && [ -x "$PROJECT_DIR/scripts/tg_send.sh" ]; then
+                bash "$PROJECT_DIR/scripts/tg_send.sh" \
+                    "Правка памяти не уходит в код: индекс занят ${LOCK_ROW} обходов подряд — чужой процесс держит блокировку. Долг записан смене на доску." >/dev/null 2>&1 || true
+            fi
+        fi
+        mkdir -p "$HEARTBEAT_DIR" && : > "$HEARTBEAT_DIR/memory-commit"
+        exit 0
+    fi
+    # Серия может состоять из РАЗНЫХ гейтов: владелец и доска слышат все, без
+    # повторов — «a, a» читается как два отказа.
 
     # Счёт неудач ПОДРЯД. Владелец 27.09.2026 о прежнем тексте: «И написано
     # "разберусь". В итоге это доходит то того что разбираешься?» — не
@@ -237,20 +274,28 @@ else
     # под set -e до отправки, и владелец молчал обход за обходом (M-03).
     printf '%s\n' "$FAILS_ROW" > "$FAILS_FILE" || say "счёт неудач не записался"
 
+    # Новая серия (в том числе после повреждённого счёта) — имена прежней не
+    # наследует.
+    [ "$FAILS_ROW" = 1 ] && rm -f "$GATES_FILE"
+    if [ -n "$GATE_NAME" ] && ! grep -qxF "$GATE_NAME" "$GATES_FILE" 2>/dev/null; then
+        printf '%s\n' "$GATE_NAME" >> "$GATES_FILE" || say "имя гейта не записалось"
+    fi
+    GATES_LIST="$(paste -sd, "$GATES_FILE" 2>/dev/null | sed 's/,/, /g' || true)"
+
     if [ "$FAILS_ROW" = 1 ] && [ -x "$PROJECT_DIR/scripts/tg_send.sh" ]; then
         bash "$PROJECT_DIR/scripts/tg_send.sh" \
-            "Правку памяти с панели пока не сохранил в хранилище кода: красный гейт${GATE_NAME:+ «$GATE_NAME»}. Файл цел, повторю сам на следующем обходе — делать ничего не нужно." --task memory-commit:blocked >/dev/null 2>&1 || true
+            "Правку памяти с панели пока не сохранил в хранилище кода: красный гейт${GATES_LIST:+ «$GATES_LIST»}. Файл цел, повторю сам на следующем обходе — делать ничего не нужно." --task memory-commit:blocked >/dev/null 2>&1 || true
     fi
 
     if [ "$FAILS_ROW" -ge "$FAILS_MAX" ]; then
         # Долг на доску: стартовый отчёт смены её читает, и преемник увидит
         # беду, даже если канал никто не открывал.
         python3 "$PROJECT_DIR/scripts/board.py" --сказать память-не-коммитится \
-            "правка памяти не уходит в гит ${FAILS_ROW} обходов подряд, красный гейт${GATE_NAME:+ «$GATE_NAME»}" \
+            "правка памяти не уходит в гит ${FAILS_ROW} обходов подряд, красный гейт${GATES_LIST:+ «$GATES_LIST»}" \
             >/dev/null 2>&1 || say "доска не приняла запись о долге"
         if [ "$FAILS_ROW" = "$FAILS_MAX" ] && [ -x "$PROJECT_DIR/scripts/tg_send.sh" ]; then
             bash "$PROJECT_DIR/scripts/tg_send.sh" \
-                "Правка памяти не уходит в код уже ${FAILS_ROW} обходов подряд: красный гейт${GATE_NAME:+ «$GATE_NAME»} сам не чинится. Это уже не ожидание — долг записан смене на доску." >/dev/null 2>&1 || true
+                "Правка памяти не уходит в код уже ${FAILS_ROW} обходов подряд: красный гейт${GATES_LIST:+ «$GATES_LIST»} сам не чинится. Это уже не ожидание — долг записан смене на доску." >/dev/null 2>&1 || true
         fi
     fi
     # Метка — про ПРОГОН, а не про удачу (M-05): обход состоялся и решение

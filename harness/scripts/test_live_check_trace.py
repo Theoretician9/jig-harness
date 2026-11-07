@@ -104,7 +104,7 @@ def двор(состояние: dict, *, след: str | None = ШАПКА + "�
          слова_владельца: list | None = None,
          юниты: dict | None = None) -> pathlib.Path:
     """Свой двор: реестр, классы, состояние, карта, два следа и ДВА носителя мутаций."""
-    путь = pathlib.Path(tempfile.mkdtemp(prefix="след-"))
+    путь = pathlib.Path(tempfile.mkdtemp(prefix="проба-след-"))
     (путь / "mechanisms.yaml").write_text(
         yaml.dump([МЕХАНИЗМ, ПРОБА_D, ГЕЙТ_C1, ОБРАБОТЧИК_B2],
                   allow_unicode=True), encoding="utf-8")

@@ -482,7 +482,9 @@ cd "$(git rev-parse --show-toplevel)"
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 # core.quotepath=false: кириллические имена («память/») иначе приходят
 # экранированными и ломают дальнейшие git-команды по имени файла.
-CHANGED=$(git -c core.quotepath=false diff --cached --name-only --diff-filter=ACM)
+# --diff-filter=d: всё, кроме удалённых. Переименованный (R) и сменивший тип (T)
+# файл несёт новое содержимое, и фильтр ACM пропускал его мимо проверок.
+CHANGED=$(git -c core.quotepath=false diff --cached --name-only --diff-filter=d)
 HEAD_SHA=$(git rev-parse --short HEAD 2>/dev/null || echo "initial")
 
 # Временные копии staged-содержимого (К-4): проверяется то, что коммитится, —
@@ -495,6 +497,22 @@ staged_copy() {  # staged-файл → печатает путь копии со
     printf '%s\n' "$out"
 }
 
+# Снимок индекса для гейтов, что обходят диск: рабочее дерево общее для всех
+# исполнителей, и чужой неиндексированный файл не должен краснить мой коммит.
+# checkout-index берёт $GIT_INDEX_FILE — при `commit -o` это временный индекс.
+SNAP_DIR="$STAGE_TMP/snapshot"
+mkdir -p "$SNAP_DIR"
+git checkout-index -a --prefix="$SNAP_DIR/" \
+    || fail "снимок_индекса"
+SNAP_GIT_DIR="$(git rev-parse --absolute-git-dir)"
+# GIT_DIR нужен реестру журналов: базу долга он читает из HEAD, а снимок — не репозиторий.
+# GIT_INDEX_FILE хук получает ОТНОСИТЕЛЬНЫМ (.git/index): из каталога снимка он
+# указал бы в никуда и git ls-files вернул бы пусто — гейт судил бы ноль файлов.
+SNAP_INDEX="$(realpath "${GIT_INDEX_FILE:-$SNAP_GIT_DIR/index}")"
+на_снимке() {  # команда... — гейт с корнем проверки = снимок индекса
+    GIT_DIR="$SNAP_GIT_DIR" GIT_INDEX_FILE="$SNAP_INDEX" "$@"
+}
+
 echo "[pre-commit] staged:"
 echo "$CHANGED" | sed 's/^/  /'
 
@@ -503,21 +521,34 @@ echo "$CHANGED" | sed 's/^/  /'
 "$SCRIPT_DIR/check-secrets.sh" --staged "$PWD" || fail "secrets"
 
 # ── 2. Гигиена контекста: STATE.md, единственность памяти, @-include ────────
-python3 "$SCRIPT_DIR/check-context-hygiene.py" --repo "$PWD" || fail "context_hygiene"
+python3 "$SNAP_DIR/scripts/check-context-hygiene.py" --repo "$SNAP_DIR" || fail "context_hygiene"
 
 # ── 2б. Подробности карточки не раздувают карту ─────────────────────────────
 # Карта грузится в контекст каждой сессии; длинный summary читают один раз при
 # разборе задачи, а платят за него на каждом шаге.
-гейт "прополка_карты" python3 "$SCRIPT_DIR/weed-the-map.py" --проверить
+гейт "прополка_карты" python3 "$SNAP_DIR/scripts/weed-the-map.py" --проверить
 
 # ── 2в. Писатель карты берёт общий лок ──────────────────────────────────────
-гейт "писатели_карты" python3 "$SCRIPT_DIR/check-map-writers.py"
+гейт "писатели_карты" python3 "$SNAP_DIR/scripts/check-map-writers.py"
 
 # ── 2г. Журналы: одна дверь записи, реестр ↔ код ────────────────────────────
 # Прямая дозапись в журнал мимо emit и журнал без строки реестра краснят коммит;
 # долг (journals.yaml) только сокращается. Диск и потери судит прогон ворот.
-гейт "писатели_журналов" python3 "$SCRIPT_DIR/check-event-writers.py"
-гейт "реестр_журналов" python3 "$SCRIPT_DIR/check-event-writers.py" --registry
+гейт "писатели_журналов" на_снимке python3 "$SNAP_DIR/scripts/check-event-writers.py" --root "$SNAP_DIR"
+гейт "реестр_журналов" на_снимке python3 "$SNAP_DIR/scripts/check-event-writers.py" --root "$SNAP_DIR" --registry
+
+# ── 2г-1. Библиотека процессов ↔ источники запуска ──────────────────────────
+# На КАЖДОМ коммите, не только при правке библиотеки: новый демон, хук или строка крона
+# без записи ломают библиотеку, не трогая её файлов.
+# --project-dir — боевой префикс: живой crontab пишет пути проекта, а не снимка. Код 3 судьи
+# (источник недоступен) — не 77, гейт красный: пустой живой список не выдаётся за «чисто».
+гейт "библиотека_процессов" на_снимке python3 "$SNAP_DIR/scripts/check-process-library.py" --root "$SNAP_DIR" --project-dir "${PROJECT_DIR:-$PWD}"
+
+# ── 2д. system-jobs.yaml порождён из process-library.yaml ───────────────────
+# Расписание правят в библиотеке; ручная правка блока или забытая перегенерация краснят коммит.
+if printf '%s\n' "$CHANGED" | grep -qE '^(harness/config/(system-jobs|process-library)\.yaml|scripts/build-system-jobs\.py|scripts/lib/process_library\.py)$'; then
+    гейт "сборка_system-jobs" python3 "$SNAP_DIR/scripts/build-system-jobs.py" --check
+fi
 
 # ── 3. Синтаксис staged-скриптов — по содержимому индекса (К-4) ─────────────
 while IFS= read -r f; do
@@ -573,19 +604,19 @@ ADDED=$(git -c core.quotepath=false diff --cached --name-only --diff-filter=AR)
 # Перевод имён файлов на латиницу оставил 171 импорт продукта указывать на
 # исчезнувшее имя (формы «from .модуль import» и «from пакет.модуль import»).
 # Линтер этого не видит — он проверяет имена, а не существование модуля.
-гейт "семена" python3 "$SCRIPT_DIR/check-seed-templates.py"
-гейт "импорты" python3 "$SCRIPT_DIR/check-imports.py"
+гейт "семена" python3 "$SNAP_DIR/scripts/check-seed-templates.py"
+гейт "импорты" на_снимке python3 "$SNAP_DIR/scripts/check-imports.py"
 
 # ── 3е2. Конфиг читают общим загрузчиком, а не голым source ────────────────
 # Голый `source` конфига делает файл СТАРШЕ окружения: проба, задающая ключ
 # в окружении, играет на боевом. Так 12.09.2026 «/model fable» ушла в рабочую
 # панель агента — сессия сменила модель посреди работы.
-гейт "загрузка_конфига" python3 "$SCRIPT_DIR/check-config-loading.py"
+гейт "загрузка_конфига" python3 "$SNAP_DIR/scripts/check-config-loading.py"
 
 # ── 3е3. Функция оболочки определена выше своего вызова ────────────────────
 # bash читает файл сверху вниз: вызов выше определения уходит в PATH, печатает
 # «command not found» и возвращает пусто. shellcheck такого правила не имеет.
-гейт "функция_до_определения" python3 "$SCRIPT_DIR/check-function-before-definition.py"
+гейт "функция_до_определения" python3 "$SNAP_DIR/scripts/check-function-before-definition.py"
 
 # ── 3е-2. Скил не отстал от своей главы ─────────────────────────────────────
 # Скил — дословная копия куска главы, а генератор зовут КОМАНДОЙ. Правка главы
@@ -599,12 +630,12 @@ fi
 # ── 3ж. Расписания и юниты зовут существующие файлы ─────────────────────────
 # Переименование файла в репозитории ломает вызов в /etc/cron.d и systemd
 # молча: гейты судят репозиторий, а расписания живут вне его.
-гейт "внешние_вызовы" python3 "$SCRIPT_DIR/check-external-callers.py"
+гейт "внешние_вызовы" на_снимке python3 "$SNAP_DIR/scripts/check-external-callers.py"
 
 # ── 3з. Имя продукта не просачивается в харнес ──────────────────────────────
 # Судится СПИСОК КОММИТА, а не всё дерево: гейт ворот проверяет целиком, а
 # здесь важно не пустить новое вхождение (владелец 12.09.2026).
-printf '%s\n' "$CHANGED" | python3 "$SCRIPT_DIR/check-harness-clean.py" --список \
+printf '%s\n' "$CHANGED" | python3 "$SNAP_DIR/scripts/check-harness-clean.py" --список \
     || fail "харнес_не_чист"
 
 # ── 3в. Задача не исчезает из карты молча ───────────────────────────────
@@ -697,7 +728,7 @@ echo "[pre-commit] все гейты пройдены"
 # Коммит — рубеж, на котором несрочное сообщение владельца ждёт прочтения
 # (диспетчер шаг не прерывает). Напоминание держала память смены, и 13.10.2026
 # сообщение пролежало 10 минут через три коммита. Коммит не валит — называет.
-inbox_unread=$(find "$LOG_DIR/inbox" -maxdepth 1 -type f -name '*.txt' 2>/dev/null | wc -l)
+inbox_unread=$({ find "$LOG_DIR/inbox" -maxdepth 1 -type f -name '*.txt' 2>/dev/null || true; } | wc -l)
 [ "$inbox_unread" -gt 0 ] \
   && echo "[pre-commit] ВХОДЯЩИЕ: $inbox_unread непрочитанных в $LOG_DIR/inbox — прочитай до следующего шага"
 exit 0

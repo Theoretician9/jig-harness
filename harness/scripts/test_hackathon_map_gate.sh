@@ -165,6 +165,33 @@ printf '# ORDERS стенда\n' > "$REPO/память/ORDERS.md"
 printf '# MEMORY стенда\n' > "$REPO/память/MEMORY.md"
 repo_git() { GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
              git -C "$REPO" -c user.name=proba -c user.email=p@p "$@"; }
+# Шаг «библиотека_процессов» стоит раньше карты и судит живые источники запуска, а
+# случаю 9 нужен гейт до карты. Источники стенда порождены библиотекой его копии:
+# crontab и systemctl в PATH отдают их файлы, хуки и файлы агентов кладутся в дерево.
+python3 - "$REPO" "$STAND" <<'PY'
+import json, sys
+from pathlib import Path
+repo, stand = Path(sys.argv[1]), Path(sys.argv[2])
+records = json.loads((repo / "harness/config/process-library.json").read_text(encoding="utf-8"))["процессы"]
+active = [r for r in records if not str(r.get("статус", "")).startswith("снят")]
+(stand / "crontab.txt").write_text("".join(
+    f"* * * * * {repo}/scripts/run-background.sh {r['id']} -- true\n" for r in active if r.get("запуск") == "крон"),
+    encoding="utf-8")
+units = {u for r in active for u in r.get("юниты", [])}
+units |= {f"harness-{r['id']}.service" for r in active if r.get("запуск") == "служба" and not r.get("юниты")}
+(stand / "units.txt").write_text("".join(f"{u}\n" for u in sorted(units)), encoding="utf-8")
+for rel in (f for r in active for f in r.get("файлы", []) if not f.startswith("/")):
+    if not (repo / rel).exists():
+        (repo / rel).parent.mkdir(parents=True, exist_ok=True)
+        (repo / rel).write_text("# файл стенда\n", encoding="utf-8")
+hooks = [{"command": f'"$CLAUDE_PROJECT_DIR/{f}"'} for r in active if r.get("запуск") == "хук" for f in r.get("файлы", [])]
+(repo / ".claude").mkdir(exist_ok=True)
+(repo / ".claude/settings.json").write_text(json.dumps({"hooks": {"PreToolUse": [{"hooks": hooks}]}}), encoding="utf-8")
+PY
+mkdir -p "$STAND/bin"
+printf '#!/bin/sh\ncat "%s/crontab.txt"\n' "$STAND" > "$STAND/bin/crontab"
+printf '#!/bin/sh\ncat "%s/units.txt"\n' "$STAND" > "$STAND/bin/systemctl"
+chmod +x "$STAND/bin/crontab" "$STAND/bin/systemctl"
 card hr.o plan "" | write_map "$REPO/dev-map.yaml"
 repo_git init -q
 repo_git add -A
@@ -172,7 +199,7 @@ repo_git commit -qm "стенд pre-commit" --no-verify
 { card hr.o plan ""; card hr.h test хакатон; } | write_map "$REPO/dev-map.yaml"
 repo_git add dev-map.yaml
 OUT=$(cd "$REPO" && LOG_DIR="$STAND/log" GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
-      timeout 400 bash scripts/pre-commit-gate.sh 2>&1)
+      PATH="$STAND/bin:$PATH" PROJECT_DIR="$REPO" timeout 400 bash scripts/pre-commit-gate.sh 2>&1)
 RC=$?
 printf '%s\n' "$OUT" | tail -4 | sed 's/^/      /'
 case_check "условие: гейт дошёл до схемы карты (валидатор схемы сказал своё)" "да" "$(says '[dev-map] схема в порядке')"

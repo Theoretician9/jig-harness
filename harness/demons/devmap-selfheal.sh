@@ -147,6 +147,16 @@ konf_zagruzit
 : "${PROJECT_DIR:?пуст PROJECT_DIR}" "${LOG_DIR:?пуст LOG_DIR}" "${HEARTBEAT_DIR:?пуст HEARTBEAT_DIR}"
 
 say() { printf '%s  %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"; }
+# Метка жизни — про ПРОГОН: честный отказ с причиной в журнале тоже прогон,
+# иначе сторож метки зовёт мёртвым демона, который жив и сказал, почему не справился.
+alive() { mkdir -p "$HEARTBEAT_DIR" && touch "$HEARTBEAT_DIR/devmap-selfheal"; }
+
+# Тревога-карточка для модели: метка жизни про прогон, а не про исход, и без
+# карточки демон, не способный чинить карту каждую ночь, остаётся для сторожей зелёным.
+alert_task() {  # $@ = доводы писателя: --key K --title T --text X | --resolve K
+    [ -f "$PROJECT_DIR/scripts/alert-task.py" ] || return 0
+    python3 "$PROJECT_DIR/scripts/alert-task.py" "$@" </dev/null >/dev/null 2>&1 || true
+}
 
 # ── пауза владельца: демон заводит карточки и ПОДНИМАЕТ АГЕНТА ──────────────
 # Ревью спеки остановки 21.09.2026 (CRITICAL 4): на паузе владельца этот демон
@@ -247,13 +257,39 @@ PY
 # Карточки, чей статус после прогона другой, чем до, и карточки, которых не
 # стало: снимок «до» взят под общим локом карты, а в архив карточку переносит
 # приёмка под тем же локом, так что пропавшую убрала модель. Новая — не смена.
-смененные_статусы() {  # $1 — снимок «до»
-    python3 - "$1" <(statusy_kart) <<'PY'
-import sys
+#
+# Единственная законная смена: plan -> test у карточки, в которой модель назвала
+# SHA коммита из выборки (аргумент $2 — файл SHA). Работа по плановой карточке
+# уже сделана коммитом, и держать её в «plan» значит врать дашборду; без
+# привязанного коммита это самовольная смена статуса.
+# Нечитаемая модельная карта — маркер MAP_UNREADABLE вместо падения: вызывающий
+# откатывает к снимку, а не обрывает скрипт под set -e.
+смененные_статусы() {  # $1 — снимок «до», $2 — файл с SHA выборки
+    python3 - "$1" <(statusy_kart) "$2" "$DEVMAP" <<'PY'
+import json, re, sys, yaml
 def читать(путь):
     return dict(строка.split(" ", 1) for строка in open(путь, encoding="utf-8").read().splitlines() if строка)
+def collect_cards(node, found):
+    if isinstance(node, dict):
+        if "id" in node and "status" in node:
+            found[node["id"]] = json.dumps(node, ensure_ascii=False, default=str)
+        for value in node.values():
+            collect_cards(value, found)
+    elif isinstance(node, list):
+        for value in node:
+            collect_cards(value, found)
+    return found
+try:
+    card_texts = collect_cards(yaml.safe_load(open(sys.argv[4], encoding="utf-8")), {})
+except yaml.YAMLError:
+    print("MAP_UNREADABLE")
+    sys.exit(0)
 до, после = читать(sys.argv[1]), читать(sys.argv[2])
-print(" ".join(f"{id}({до[id]}->{после.get(id, 'удалена')})" for id in до if до[id] != после.get(id)))
+shas = open(sys.argv[3], encoding="utf-8").read().split()
+def is_legit(id):
+    return (до[id], после.get(id)) == ("plan", "test") and any(
+        re.search("(?<![0-9a-f])" + sha[:8], card_texts.get(id, "")) for sha in shas)
+print(" ".join(f"{id}({до[id]}->{после.get(id, 'удалена')})" for id in до if до[id] != после.get(id) and not is_legit(id)))
 PY
 }
 
@@ -275,14 +311,41 @@ fi
 # harness.conf (regex-альтернатива); пустое значение отключает фильтр.
 # `devmap:` — коммит ЭТОГО демона: трейлера он не несёт, и без своего префикса
 # демон считал бы собственную работу пропуском на каждом круге.
-SVC_PREFIXES="${DEVMAP_SERVICE_PREFIXES-передача:|состояние:|состояние и память:|devmap:}"
-ITEMS=$(git -C "$PROJECT_DIR" log $RANGE --no-merges --format='%H%x09%s%x09%(trailers:key=Dev-Map,valueonly)' 2>/dev/null \
+SVC_PREFIXES="${DEVMAP_SERVICE_PREFIXES-передача|рубеж смены|состояние:|состояние и память:|devmap:|правка памяти с панели:}"
+# Коммит, чей SHA (первые 8 знаков) назван в карте или её архиве, уже заведён:
+# сверка вручную записывает SHA в карточки, а водораздел при этом стоит на месте,
+# и без этого признака каждая ночь заново отдавала бы модели сто разобранных
+# коммитов. Граница только слева: в карте SHA пишут и по 8, и по 10, и по 40
+# знаков, а справа граница отвергла бы все длиннее восьми. Фильтр на python:
+# awk C-локали не понижает регистр кириллицы, а префиксы пишутся без учёта регистра.
+# Сбой фильтра НЕ превращается в «карта полна»: пустая выборка двигает водораздел.
+ITEMS=$(git -C "$PROJECT_DIR" log $RANGE --no-merges --format='%H%x09%s%x09%(trailers:key=Dev-Map,valueonly)' \
         | tr -d '\000-\010\013\014\016-\037' \
-        | awk -F'\t' -v svc="$SVC_PREFIXES" '
-            $1 == "" || $3 != "" { next }
-            svc != "" && $2 ~ ("^(" svc ")") { skipped++; next }
-            { print "- " substr($2,1,200) "  [коммит " substr($1,1,10) " без трейлера Dev-Map]" }
-            END { if (skipped) printf "# служебных отсеяно: %d\n", skipped > "/dev/stderr" }') || ITEMS=""
+        | python3 -c '
+import re, sys
+svc, *map_paths = sys.argv[1:]
+maps_text = ""
+for path in map_paths:
+    try:
+        maps_text += open(path, encoding="utf-8").read()
+    except FileNotFoundError:
+        pass
+service_re = re.compile("^(" + svc + ")", re.IGNORECASE) if svc else None
+skipped = 0
+for line in sys.stdin.read().splitlines():
+    fields = (line.split("\t") + ["", "", ""])[:3]
+    sha, subject, trailer = fields
+    if not sha or trailer:
+        continue
+    named = re.search("(?<![0-9a-f])" + sha[:8], maps_text)
+    if (service_re and service_re.match(subject)) or named:
+        skipped += 1
+        continue
+    print("- " + subject[:200] + "  [коммит " + sha[:10] + " без трейлера Dev-Map]")
+if skipped:
+    print("# отсеяно служебных и уже в карте: %d" % skipped, file=sys.stderr)
+' "$SVC_PREFIXES" "$DEVMAP" "$PROJECT_DIR/docs/dev-map-archive.yaml") \
+    || { say "сверка коммитов не удалась (git или фильтр) — карту не трогаю, водораздел на месте"; alive; exit 1; }
 
 if [ "$MODE" = "список" ]; then
     printf '%s\n' "$ITEMS"
@@ -366,7 +429,10 @@ if [ "${AGENT_RC:-0}" -eq 77 ]; then
     # каждый прогон повторит то же (случай 13.09.2026: карта не чинилась
     # двое суток молча).
     say "починка пропущена: лимит подписки — до сброса прогоны вхолостую, владельцу сказано"
-    : >"$HEARTBEAT_DIR/devmap-selfheal" 2>/dev/null || true
+    alive
+    # Флаг повтора: limit-watch, сняв метку лимита, запустит демона ещё раз в
+    # тот же день, а не через сутки — ночной прогон по лимиту иначе терялся.
+    : > "$LOG_DIR/devmap/retry-after-limit"
     exit 0
 fi
 if [ "${AGENT_RC:-0}" -ne 0 ]; then
@@ -375,6 +441,10 @@ if [ "${AGENT_RC:-0}" -ne 0 ]; then
     else
         say "починка НЕ удалась (код $AGENT_RC) — водораздел на месте, попробую в следующий раз"
     fi
+    alive
+    alert_task --key devmap-selfheal:agent-failed \
+        --title "devmap-selfheal: агент починки карты не отработал (код $AGENT_RC)" \
+        --text "Код $AGENT_RC, журнал $LOG_DIR/devmap-selfheal.log; водораздел не двигался, пропуски копятся."
     exit 1
 fi
 
@@ -393,12 +463,18 @@ if [ -n "$(git -C "$PROJECT_DIR" status --porcelain -- "$ARCHIVE")" ]; then
     COMMIT_PATHS+=("$ARCHIVE")
 fi
 if [ -n "$(git -C "$PROJECT_DIR" status --porcelain -- dev-map.yaml)" ]; then
-    CHANGED=$(смененные_статусы "$STATUSES_BEFORE")
+    CHANGED=$(смененные_статусы "$STATUSES_BEFORE" <(printf '%s\n' "$ITEMS" | grep -oP 'коммит \K[0-9a-f]{10}')) \
+        || CHANGED=MAP_UNREADABLE
     if [ -n "$CHANGED" ]; then
         REJECTED="$LOG_DIR/devmap/rejected-$(date +%Y%m%d-%H%M%S).yaml"
         cp -p "$DEVMAP" "$REJECTED"
         cp -p "$MAP_BEFORE" "$DEVMAP"
-        say "коммита нет: агент сменил статус или удалил существующие карточки: $CHANGED — карта возвращена к снимку до модели, отвергнутая лежит в $REJECTED, водораздел на месте"
+        if [ "$CHANGED" = MAP_UNREADABLE ]; then
+            say "карта после модели не читается — возвращена к снимку до модели, отвергнутая лежит в $REJECTED, водораздел на месте"
+        else
+            say "коммита нет: агент сменил статус или удалил существующие карточки: $CHANGED — карта возвращена к снимку до модели, отвергнутая лежит в $REJECTED, водораздел на месте"
+        fi
+        alive
         exit 1
     fi
     git -C "$PROJECT_DIR" add -- "${COMMIT_PATHS[@]}"
@@ -407,6 +483,7 @@ if [ -n "$(git -C "$PROJECT_DIR" status --porcelain -- dev-map.yaml)" ]; then
         say "карта закоммичена${FOREIGN_EDIT:+ (вместе с чужой правкой, сказано в сообщении)}"
     else
         say "коммит карты НЕ прошёл — правка в рабочем дереве, водораздел на месте"
+        alive
         exit 1
     fi
 else
@@ -415,4 +492,5 @@ fi
 
 advance
 say "починка завершена"
+alert_task --resolve devmap-selfheal:agent-failed
 touch "$HEARTBEAT_DIR/devmap-selfheal"

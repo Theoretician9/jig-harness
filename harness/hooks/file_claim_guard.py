@@ -16,21 +16,37 @@ $LOG_DIR/заявки-на-файлы.jsonl (events.emit, событие file.cl
 помощник пишет: своя заявка старше половины окна обновляется следующей записью.
 
 Bash заявляет то, что видно в тексте команды: перенаправление `>`/`>>`/`&>`,
-`tee`, `sed -i`. Не видно: запись изнутри python/скриптов, cp/mv/git, пути в
-переменных и подстановках.
+`tee`, `sed -i`. Не видно: запись изнутри скриптов, cp/mv/git, пути в переменных
+и подстановках. Исключение — исключительный путь в теле here-doc или аргументе
+`python3 -c`: он считается записью, если рядом есть признак записи (write_text,
+write_bytes, open(…, 'w'|'a'), .write(, yaml.dump, json.dump, shutil.copy,
+os.replace); чтение (cat, grep, yaml.safe_load, read_text) записью не считается.
 
 Хук не роняет запись никогда: любая своя ошибка — код 0 и строка skipped.
 Заявлять имеет смысл только пути дерева проекта и пакета: черновики в /tmp
 журнал не засоряют.
+
+Исключительные пути (FILE_CLAIM_EXCLUSIVE, от корня дерева; тот же путь есть и в
+проекте, и в пакете — это один замок) не предупреждают, а отказывают кодом 2:
+package_sync сверяет файл пакета с индексом проекта ЦЕЛИКОМ, и две задачи с
+ханками в одном общем конфиге не могут закоммитить его по отдельности. Держатель —
+задача: у помощника метка «Часть:» его запуска (meta.json → toolUseId → строка
+agent.launch → launch_plan_lib.mark_task), у главной сессии — «смена». Замок
+снимается сам, когда путь совпал с HEAD и в проекте, и в пакете; по времени он не
+снимается, «брошено» только называется иначе. Законная дверь на один путь —
+`--door <путь> 'причина'` на 15 минут. Своя ошибка хука по-прежнему код 0: отказ
+бывает только по доказанному занятию.
 """
 from __future__ import annotations
 
 import datetime as dt
+import fcntl
 import functools
 import json
 import os
 import re
 import shlex
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -38,6 +54,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
 import config                                            # noqa: E402
 import events                                            # noqa: E402
+import launch_plan_lib as plan                           # noqa: E402
 
 # Имя журнала стоит литералом и в emit(): ворота G2 узнают писателя по нему.
 JOURNAL = "заявки-на-файлы"
@@ -46,6 +63,18 @@ CLAIM_EVENT = "file.claim"
 WARN_EVENT = "file.claim.warn"
 WINDOW_KEY = "FILE_CLAIM_MIN"
 SHARED_KEY = "FILE_CLAIM_SHARED"
+EXCLUSIVE_KEY = "FILE_CLAIM_EXCLUSIVE"
+REFUSED_EVENT = "file.claim.refused"
+DOOR_EVENT = "file.claim.door"
+DOOR_NAME = "file-claim.door"
+LOCK_NAME = "file-claim.lock"
+DOOR_TTL_S = 15 * 60
+DOOR_REASON_MIN = 10
+SHIFT = "смена"
+NO_AGENT = "-"
+LAUNCH_JOURNAL = "вызовы-агентов"
+LAUNCH_EVENT = "agent.launch"
+GIT_TIMEOUT_S = 3
 # Окно в час — сотни заявок; хвоста в 1 МБ хватает с запасом, а журнал за
 # месяц читать на каждой записи дорого.
 TAIL_BYTES = 1 << 20
@@ -54,8 +83,11 @@ REDIRECTS = (">", ">>", ">|", "&>", "&>>")
 OPERATOR_CHARS = set("();<>|&")
 UNEXPANDED = set("$`*?~")
 HEREDOC = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
+WRITE_MARK = re.compile(r"\.write_text\(|\.write_bytes\(|\.write\(|\bopen\([^)]*['\"][wax]\+?b?['\"]"
+                        r"|yaml\.(?:safe_)?dump|json\.dump|shutil\.copy|os\.replace")
 
 
+@functools.lru_cache(maxsize=None)
 def setting(name: str) -> str:
     """Ключ установленного harness.conf, иначе — конфига дерева."""
     tree_conf = config.корень_дерева(__file__) / "harness" / "config" / "harness.conf"
@@ -78,8 +110,9 @@ def current_task() -> str:
     return task if source in ("env", "map") and task else "-"
 
 
-def record(event: str, outcome: str, session: str, data: dict) -> None:
-    events.emit(SRC, event, outcome, journal="заявки-на-файлы", task=current_task(),
+def record(event: str, outcome: str, session: str, data: dict, task: str | None = None) -> None:
+    events.emit(SRC, event, outcome, journal="заявки-на-файлы",
+                task=task if task is not None else current_task(),
                 session=session or None, data=data)
 
 
@@ -118,6 +151,38 @@ def strip_heredocs(command: str) -> str:
     return "\n".join(kept)
 
 
+def heredoc_bodies(command: str) -> str:
+    """Тела here-doc одним текстом: скрипт в теле может писать, хотя `>` в нём не пишет."""
+    bodies, ends = [], []
+    for line in command.split("\n"):
+        if ends:
+            if line.strip() == ends[0]:
+                ends.pop(0)
+            else:
+                bodies.append(line)
+            continue
+        ends += [m.group(2) for m in HEREDOC.finditer(line)]
+    return "\n".join(bodies)
+
+
+def script_targets(command: str) -> list:
+    """Исключительные пути, названные в скрипте (here-doc или `python3 -c`) вместе с
+    признаком записи: путь от корня проекта — замок один для проекта и пакета."""
+    lexer = shlex.shlex(strip_heredocs(command).replace("\n", " ; "), posix=True,
+                        punctuation_chars=True)
+    lexer.whitespace_split = True
+    try:
+        tokens = list(lexer)
+    except ValueError:
+        tokens = []
+    bodies = [heredoc_bodies(command)] + [
+        tokens[i + 1] for i in range(1, len(tokens) - 1) if tokens[i] == "-c"
+        and any(os.path.basename(t).startswith("python") for t in tokens[max(0, i - 4):i])]
+    root = str(config.корень_дерева(__file__))
+    return [os.path.join(root, rel) for rel in setting(EXCLUSIVE_KEY).split()
+            if any(rel in body and WRITE_MARK.search(body) for body in bodies)]
+
+
 def bash_targets(command: str) -> list:
     """Пути, в которые команда пишет по своему тексту; разобрать нельзя — пусто."""
     lexer = shlex.shlex(strip_heredocs(command).replace("\n", " ; "), posix=True,
@@ -154,7 +219,8 @@ def targets(payload: dict) -> list:
     if tool in PATH_FIELD:
         raw = [str(args.get(PATH_FIELD[tool]) or "")]
     elif tool == "Bash":
-        raw = bash_targets(str(args.get("command") or ""))
+        command = str(args.get("command") or "")
+        raw = bash_targets(command) + script_targets(command)
     else:
         return []
     cwd = str(payload.get("cwd") or os.getcwd())
@@ -164,8 +230,9 @@ def targets(payload: dict) -> list:
             if any(p.startswith(root.rstrip("/") + "/") for root in roots)]
 
 
-def recent_rows(now: float, window_s: float) -> list:
-    """Строки хука за окно; к строке добавлен её возраст `_age` в секундах."""
+def recent_rows(now: float, window_s: float | None) -> list:
+    """Строки хука за окно (None — весь хвост); к строке добавлены время `_at` и
+    возраст `_age` в секундах."""
     try:
         with journal_path().open("rb") as fh:
             fh.seek(0, os.SEEK_END)
@@ -177,11 +244,12 @@ def recent_rows(now: float, window_s: float) -> list:
     for line in text.splitlines():
         try:
             row = json.loads(line)
-            age = now - dt.datetime.fromisoformat(row["ts"]).timestamp()
+            at = dt.datetime.fromisoformat(row["ts"]).timestamp()
         except (ValueError, KeyError, TypeError):
             continue
-        if isinstance(row, dict) and row.get("src") == SRC and age <= window_s:
-            row["_age"] = age
+        age = now - at
+        if isinstance(row, dict) and row.get("src") == SRC and (window_s is None or age <= window_s):
+            row["_at"], row["_age"] = at, age
             rows.append(row)
     return rows
 
@@ -217,19 +285,13 @@ def warning(path: str, others: dict, shared: bool, number: int) -> str:
             f"Предупреждение №{number} по этому пути.")
 
 
-def decide(payload: dict) -> str:
-    """Текст предупреждения или пусто; заявки и предупреждения — строками журнала."""
-    agent = str(payload.get("agent_id") or "")
-    if not agent:
-        return ""
-    paths = targets(payload)
-    if not paths:
-        return ""
+def warn_others(paths: list, payload: dict) -> str:
+    """Предупреждения о чужих заявках на обычные и общие пути; заявки — строками журнала."""
+    agent, session = str(payload["agent_id"]), str(payload.get("session_id") or "")
     window_s = window_seconds()
     shared = setting(SHARED_KEY).split()
     rows = recent_rows(time.time(), window_s)
     claims = holders(rows)
-    session = str(payload.get("session_id") or "")
     texts = []
     for path in paths:
         others = {a: r for a, r in claims.get(path, {}).items() if a != agent}
@@ -249,18 +311,260 @@ def decide(payload: dict) -> str:
     return "\n\n".join(texts)
 
 
+# ───────────────────────── исключительный замок ─────────────────────────
+
+@functools.lru_cache(maxsize=1)
+def tree_roots() -> tuple:
+    return config.корень_дерева(__file__), config.katalog_paketa()
+
+
+def tree_rel(path: str) -> str | None:
+    """Путь от корня проекта или пакета: ключ замка один для обоих деревьев."""
+    for root in tree_roots():
+        prefix = str(root).rstrip("/") + "/"
+        if path.startswith(prefix):
+            return path[len(prefix):]
+    return None
+
+
+def exclusive_rel(path: str) -> str | None:
+    """Путь от корня дерева, если он в FILE_CLAIM_EXCLUSIVE."""
+    rel = tree_rel(path)
+    return rel if rel in setting(EXCLUSIVE_KEY).split() else None
+
+
+def git(root, *args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True,
+                          timeout=GIT_TIMEOUT_S)
+
+
+def in_head(root, rel: str) -> bool:
+    return git(root, "cat-file", "-e", f"HEAD:{rel}").returncode == 0
+
+
+def lock_state(rel: str) -> tuple[bool, float, float] | None:
+    """(грязно ли в проекте или в пакете, граница = старший из двух коммитов пути,
+    предпоследний коммит пути: до него заявка — прошлый эпизод, а не хвост).
+
+    None — пути нет в HEAD проекта: `git diff HEAD` не видит неотслеживаемый файл и
+    отвечал бы «чист», замок такому пути не годится. Пакета или файла в нём нет —
+    судим по одному проекту."""
+    project, package = tree_roots()
+    if not in_head(project, rel):
+        return None
+    sides = [project] + ([package] if in_head(package, rel) else [])
+    dirty = False
+    for root in sides:
+        code = git(root, "diff", "--quiet", "HEAD", "--", rel).returncode
+        if code not in (0, 1):
+            raise RuntimeError(f"git diff в {root}: код {code}")
+        dirty = dirty or code == 1
+    if not dirty:
+        return False, 0.0, 0.0
+    commits = [git(root, "log", "-2", "--format=%ct", "--", rel).stdout.split() for root in sides]
+    return (True, min(float(c[0]) for c in commits),
+            min(float(c[1]) if len(c) > 1 else 0.0 for c in commits))
+
+
+def launch_index() -> dict:
+    """Вызов (tool_use_id) → первая строка запуска помощника с ним."""
+    index: dict = {}
+    rows = plan.read_rows(Path(events.log_dir()) / f"{LAUNCH_JOURNAL}.jsonl")
+    for row in rows:
+        data = row.get("data")
+        call = data.get("вызов") if isinstance(data, dict) else None
+        if row.get("event") == LAUNCH_EVENT and call:
+            index.setdefault(call, row)
+    return index
+
+
+def launch_task(payload: dict, agent: str) -> str | None:
+    """Задача помощника по метке «Часть:» его запуска, иначе — запуска родителя."""
+    call = plan.tool_use_id_of(payload, agent)
+    if not call:
+        if plan.meta_path(payload, agent).exists():
+            raise ValueError("meta.json без toolUseId")
+        return None
+    index = launch_index()
+    row = index.get(call)
+    if row is None:
+        return None
+    return plan.mark_task(row) or plan.mark_task(
+        index.get((row.get("data") or {}).get("родитель")) or {})
+
+
+def holder_of(payload: dict) -> dict:
+    """Кто пишет: задача, ключ агента в заявках и тип. Смена — своя «задача»."""
+    agent = str(payload.get("agent_id") or "")
+    if not agent:
+        return {"task": SHIFT, "agent": NO_AGENT, "type": None}
+    return {"task": launch_task(payload, agent) or f"агент:{agent}", "agent": agent,
+            "type": payload.get("agent_type") or None}
+
+
+def is_mine(row: dict, who: dict) -> bool:
+    """Своя заявка — той же задачи или того же агента: старые строки (task="-")
+    не должны запирать собственного держателя."""
+    return row.get("task") == who["task"] or (row.get("data") or {}).get("агент") == who["agent"]
+
+
+def door_reason(rel: str) -> str:
+    try:
+        door = json.loads((Path(events.log_dir()) / DOOR_NAME).read_text(encoding="utf-8"))
+        if door.get("путь") == rel and float(door.get("до") or 0) >= time.time():
+            return str(door.get("почему") or "").strip()
+    except (OSError, ValueError, AttributeError, TypeError):
+        pass
+    return ""
+
+
+def refusal_kind(claims: list, who: dict, bounds: tuple, window_s: float):
+    """(вид отказа или "", заявки держателя). claims — заявки на путь, без дверных;
+    bounds — (граница, предпоследний коммит пути)."""
+    boundary, prev = bounds
+    live = [r for r in claims if r["_at"] > boundary]
+    if not live:
+        # Граница отсекла всё: ханки либо свои после частичного коммита (своя последняя
+        # заявка — после предпоследнего коммита), либо ничьи.
+        own_tail = claims and is_mine(claims[-1], who) and claims[-1]["_at"] > prev
+        return ("" if own_tail else "без-заявки"), []
+    others = [r for r in live if not is_mine(r, who)]
+    if not others:
+        return "", []
+    holder = others[-1].get("task")
+    kind = "занято" if min(r["_age"] for r in others) < window_s else "брошено"
+    return kind, [r for r in others if r.get("task") == holder]
+
+
+def holder_summary(held: list) -> dict:
+    data = held[-1].get("data") or {}
+    return {"задача": held[-1].get("task"), "агент": data.get("агент"), "тип": data.get("тип"),
+            "с": dt.datetime.fromtimestamp(held[0]["_at"]).strftime("%H:%M"),
+            "мин_назад": int(held[-1]["_age"] // 60)}
+
+
+def refusal_text(rel: str, kind: str, held: dict | None) -> str:
+    if held:
+        agent = SHIFT if held["агент"] == NO_AGENT else f"помощник {held['агент'][:8]}"
+        who = f"{agent}, {held['тип'] or 'тип не назван'}, с {held['с']}"
+        state = (f"последняя запись {held['мин_назад']} мин назад" if kind == "занято" else
+                 f"молчит {held['мин_назад']} мин — ханки брошены, решение за оркестратором")
+        head = f"{rel} держит задача {held['задача']} ({who}, {state})."
+    else:
+        head = (f"{rel}: ханки записаны мимо хука, держатель неизвестен; если они твои — "
+                f"дверь с причиной.")
+    return (f"{head} Общий конфиг правит одна задача за раз: её ханки не закоммичены, а "
+            f"package_sync сверяет файл целиком.\n"
+            f"Что делать: дождаться её коммита (замок снимется сам, когда файл и пакетная "
+            f"пара совпадут с HEAD) или договориться через оркестратора. Кто что держит: "
+            f"python3 scripts/who-writes.py. Законная дверь на {DOOR_TTL_S // 60} минут:\n"
+            f"python3 scripts/hooks/file_claim_guard.py --door {rel} 'причина'\n"
+            f"Дверь на чужие ханки не открывай — это снова общий коммит; верни управляющему "
+            f"вариант: ждать, взять другую часть, попросить смену закоммитить за держателя.")
+
+
+def judge_exclusive(paths: dict, states: dict, who: dict, session: str) -> tuple[str, int]:
+    """Решение по исключительным путям {путь: rel}: (текст, код). Отказ по любому пути
+    отказывает команду целиком и заявок не пишет — отказанный держателем не становится."""
+    window_s = window_seconds()
+    rows = [r for r in recent_rows(time.time(), None)
+            if r.get("event") == CLAIM_EVENT and r.get("outcome") == "ok"
+            and not (r.get("data") or {}).get("дверь")]
+    refusals, grants, reminders = [], [], []
+    for path, rel in paths.items():
+        dirty, boundary, prev = states[path]
+        claims = [r for r in rows if tree_rel((r.get("data") or {}).get("путь") or "") == rel]
+        kind, held = refusal_kind(claims, who, (boundary, prev), window_s) if dirty else ("", [])
+        reason = door_reason(rel) if kind else ""
+        if kind and not reason:
+            refusals.append((path, rel, kind, held))
+            continue
+        mine_live = [r for r in claims if dirty and r["_at"] > boundary and is_mine(r, who)]
+        if reason or not mine_live or mine_live[-1]["_age"] > window_s / 2:
+            grants.append((path, reason))
+        if not reason and not mine_live:
+            reminders.append(rel)
+    base = {"агент": who["agent"], "тип": who["type"]}
+    for path, rel, kind, held in refusals:
+        summary = holder_summary(held) if held else None
+        record(REFUSED_EVENT, "refused", session,
+               {"путь": path, "вид": kind, "держатель": summary, **base}, task=who["task"])
+    if refusals:
+        return "\n\n".join(refusal_text(rel, kind, holder_summary(held) if held else None)
+                           for _, rel, kind, held in refusals), 2
+    for path, reason in grants:
+        record(CLAIM_EVENT, "ok", session,
+               {"путь": path, **base, **({"дверь": reason} if reason else {})}, task=who["task"])
+    return "".join(
+        f"Ты держишь общий конфиг {rel}: закоммить свои строки отдельным коммитом сразу "
+        f"(проект и пакет), другие задачи ждут твоего коммита.\n" for rel in reminders).strip(), 0
+
+
+def decide(payload: dict) -> tuple[str, int]:
+    """(текст, код): код 2 — отказ, текст идёт в stderr; иначе текст — additionalContext."""
+    agent = str(payload.get("agent_id") or "")
+    session = str(payload.get("session_id") or "")
+    paths = targets(payload)
+    exclusive = {p: rel for p in paths if (rel := exclusive_rel(p))}
+    plain = [p for p in paths if p not in exclusive]
+    texts = []
+    if exclusive:
+        lock = Path(events.log_dir()) / LOCK_NAME
+        lock.parent.mkdir(parents=True, exist_ok=True)
+        with lock.open("a") as fh:
+            fcntl.flock(fh, fcntl.LOCK_EX)
+            states = {p: lock_state(rel) for p, rel in exclusive.items()}
+            for path in [p for p, st in states.items() if st is None]:
+                record(CLAIM_EVENT, "skipped", session,
+                       {"путь": path, "почему": "путь не в HEAD проекта: замок не годится"})
+                exclusive.pop(path)
+            if exclusive:
+                text, code = judge_exclusive(exclusive, states, holder_of(payload), session)
+                if code:
+                    return text, code
+                texts.append(text)
+    if agent and plain:
+        texts.append(warn_others(plain, payload))
+    return "\n\n".join(t for t in texts if t), 0
+
+
+def open_door(path: str, reason: str) -> int:
+    reason = reason.strip()
+    if len(reason) < DOOR_REASON_MIN:
+        print(f"дверь не открыта: причина короче {DOOR_REASON_MIN} знаков", file=sys.stderr)
+        return 1
+    absolute = os.path.normpath(os.path.join(os.getcwd(), path))
+    rel = exclusive_rel(absolute)
+    if rel is None:
+        print(f"дверь не открыта: {path} не в {EXCLUSIVE_KEY}", file=sys.stderr)
+        return 1
+    until = int(time.time()) + DOOR_TTL_S
+    door = Path(events.log_dir()) / DOOR_NAME
+    door.parent.mkdir(parents=True, exist_ok=True)
+    door.write_text(json.dumps({"путь": rel, "почему": reason, "до": until},
+                               ensure_ascii=False), encoding="utf-8")
+    record(DOOR_EVENT, "ok", "", {"путь": rel, "почему": reason, "до": until})
+    print(f"дверь на {rel} открыта на {DOOR_TTL_S // 60} минут: {reason}")
+    return 0
+
+
 def main() -> int:
+    if "--door" in sys.argv:
+        args = sys.argv[sys.argv.index("--door") + 1:]
+        return open_door(args[0] if args else "", args[1] if len(args) > 1 else "")
     try:
         payload = json.load(sys.stdin)
-        text = decide(payload) if isinstance(payload, dict) else ""
+        text, code = decide(payload) if isinstance(payload, dict) else ("", 0)
     except Exception as exc:  # noqa: BLE001 — своя ошибка хука не роняет запись
         record(CLAIM_EVENT, "skipped", "", {"почему": f"{type(exc).__name__}: {exc}"[:300]})
         return 0
-    if text:
+    if code:
+        print(text, file=sys.stderr)
+    elif text:
         print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse",
                                                  "additionalContext": text}},
                          ensure_ascii=False))
-    return 0
+    return code
 
 
 if __name__ == "__main__":

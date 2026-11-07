@@ -730,8 +730,9 @@ def case_h10() -> None:
     judged = subprocess.run([sys.executable, str(HERE / "lib" / "patterns.py"), "--вердикт-согласия",
                              asked_word.group(1) if asked_word else ""],
                             capture_output=True, text=True, timeout=60)
-    PROBE.check("H10", "ответ из текста вопроса судья диспетчера признаёт (any)",
-                asked_word is not None and judged.stdout.strip() == "any",
+    # «да, убрать» — ответ на названное действие: судья отдаёт вид «адресовано».
+    PROBE.check("H10", "ответ из текста вопроса судья диспетчера признаёт (адресовано)",
+                asked_word is not None and judged.stdout.strip() == "адресовано",
                 f"слово {asked_word and asked_word.group(1)!r}, судья: {judged.stdout.strip()!r} {judged.stderr.strip()[:100]!r}")
     for n, word in ((3, "файла"), (5, "файлов")):
         text, asked = LH.question_text([f"harness/ст{i}.md" for i in range(n)], ceiling)

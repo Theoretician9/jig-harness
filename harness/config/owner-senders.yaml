@@ -24,23 +24,32 @@ pryamoj_api:
   scripts/check-secret-in-logs.py: ищет секреты В ТЕКСТАХ, адрес API — образец поиска
   scripts/hooks/guard_bash.py: судит команды, адрес API — образец запрета
   scripts/check-owner-senders.py: сам судья — адрес API в нём образец поиска
-  harness/demons/dispatcher-stall-watch.sh: owner-only, тревога о самом приёме канала — прямой запрос, потому что сломан именно тракт, по которому идут вести; работы для модели за ней нет, чинит сторож приёма
+  harness/demons/dispatcher-stall-watch.sh: owner-only, тревога о самом приёме канала — прямой запрос, потому что сломан именно тракт, по которому идут вести; работы для модели за ней нет, чинит сторож приёма; страж ответа владельцу шлёт через дверь tg_send.sh
+  scripts/test_dispatcher_speed.sh: стенд пробы — свой HTTP-сервер на localhost (TG_API_BASE) вместо Bot API, подставной токен; владельцу не пишет
+  scripts/test_process_dispatcher.py: «curl …/getUpdates» — подставная строка процесса в таблице пробы диспетчера процессов, запроса к Bot API не делает
 
 # Файлы, которым разрешён ключ «--несмотря-на-лимит»: их весть обязана дойти,
 # пока лимит держится. Владелец разрешил ровно смену сессии («ну кроме там
 # смены сессии, это ладно») и то, что говорит о самом лимите.
 nesmotrya_na_limit:
   harness/demons/limit-watch.sh: весть о самом лимите и об его обновлении
-  harness/demons/session-warden.sh: смена сессии, ротация и «нужны ваши руки»
+  harness/demons/session-warden.sh: смена сессии, ротация и «нужны ваши руки» и весть о самом лимите (ветка 6б)
   scripts/tg_send.sh: сама дверь — разбирает ключ
   harness/panel/confirmation.py: ответ на нажатие владельца — код подтверждения и исход переключения
   harness/panel/server.py: вход запасным кодом и промахи входа — о своём действии он узнаёт сразу
+  harness/demons/sentinel.sh: весть о перезагрузке сервера — сообщение о самом рестарте, не обход тишины про лимит (решение оркестратора 05.11, владелец отдал вопрос ему)
+  scripts/test_sentinel_after_restart.py: проба sentinel — проверяет, что весть после рестарта уходит с ключом
+  scripts/test_server_restart_window.sh: проба окна рестарта — проверяет, что весть sentinel уходит с ключом при держащемся лимите
   scripts/test_limit_silence.sh: проба правила зовёт дверь обоими исходами
   scripts/test_limit_watch.sh: стенд пробы повторяет разбор ключей боевой дверью
   scripts/test_warden_blocked_idle.sh: стенд пробы повторяет разбор ключей боевой дверью
   scripts/test_pane_door_pause.sh: стенд пробы повторяет разбор ключей боевой дверью
   scripts/test_pane_lock_instant.sh: стенд пробы повторяет разбор ключей боевой дверью
+  scripts/test_warden_limit_silence.sh: стенд пробы, подставная дверь принимает ключ вести о лимите (ветка 6б сторожа сессий)
   scripts/check-owner-senders.py: сам судья — ключ в нём образец поиска
+  harness/demons/speed_mode.py: весть судьи скорости о лимите — ОДНО сообщение со временем обновления, дальше тишина (план сообщения не шлёт второе при том же лимите). Слово владельца 17.10.2026 — «Просто одно сообщение - упёрся в лимит подписки, лимит обновится в 15:10, после обновления продолжу»; остальные вести судьи (не про лимит) идут без ключа
+  scripts/test_speed_mode.py: стенд пробы судьи скорости — проверяет, что весть о лимите уходит с ключом, а прочие без него; дверь подставная
+  scripts/test_consent_buttons.py: стенд пробы дверей согласия — подставной curl, сообщение владельцу не уходит; проверяет, что страж подписи с вопросом о «да» держит и с ключом
 
 # ── Третий вопрос: что за вестью — работа модели или только сведение ────────
 # Владелец 25.10.2026: «сторож гигиены например, шлёт сообщение только мне, и
@@ -64,10 +73,14 @@ model_task:
   harness/demons/acceptance-watch.sh:
     - {kind: card, key: "acceptance-watch:crash", why: "аварии приёмки (упала, карта не прошла валидатор после архива) — работа модели; волна 3"}
     - {kind: owner-only, why: "итог приёмки (принято / провал) — смена статусов в карте уже сама работа"}
+  harness/demons/checks-stream.sh:
+    - {kind: owner-only, why: "итог потока проверок не чаще раза в сутки и только при неудаче (ключ красный и после отдыха, лимит, сбой агента, битая карта) — работа по тревогам уже лежит карточками, новой задачи весть не создаёт"}
   harness/demons/check-builder.sh:
     - {kind: card, key: "check-builder:map-damaged", why: "порча карты строителем — срочная работа модели; волна 3"}
   harness/demons/disk-cleanup.sh:
     - {kind: card, key: "disk-cleanup:full", why: "диск занят после уборки — работа модели; волна 1"}
+  harness/demons/dispatcher-stall-watch.sh:
+    - {kind: owner-only, why: "весть о его же сообщении без ответа — сколько ждёт и взято ли; ответить смену будят хук конца хода и толчки 6а"}
   harness/demons/extensions-watch.sh:
     - {kind: card, key: "extensions-watch:failed", why: "сбой расширения (RC != 0) — фраза «смотрю» обещает работу, которой ни у кого нет; волна 3"}
   harness/demons/heartbeat-watch.sh:
@@ -83,6 +96,10 @@ model_task:
   harness/demons/nightly-gates.sh:
     - {kind: card, key: "nightly-gates:red", why: "красный итог ночных ворот — работа модели; волна 1"}
     - {kind: card, key: "nightly-gates:broken", why: "обрыв ночного прогона — работа модели; волна 1"}
+  harness/demons/nightly-mutations.sh:
+    - {kind: card, key: "nightly-mutations:red", why: "дыры полного прогона мутаций — проверка не видит поломки, работа модели"}
+    - {kind: card, key: "nightly-mutations:broken", why: "прогон мутаций без итога, упёрся в предел или выронил записи — поломка прибора, работа модели"}
+    - {kind: owner-only, why: "жёлтое «прогнано K из N, дыр нет» — сведение, остаток добьёт следующий прогон через кэш"}
   harness/demons/product-health.sh:
     - {kind: card, key: "product-health:trouble", why: "служба продукта сообщает о беде (линия продукта); волна 3"}
   harness/demons/project-revision.sh:
@@ -93,11 +110,18 @@ model_task:
   harness/demons/server-hygiene.sh:
     - {kind: card, key: "server-hygiene:violations", why: "нарушения потолков машины — пример владельца; волна 1"}
     - {kind: card, key: "server-hygiene:check-broken", why: "проверка гигиены сломана — работа модели; волна 1"}
+  scripts/restore-probe.sh:
+    - {kind: card, key: "restore-probe:failed", why: "дамп не восстановился или проба не проведена — копии нельзя считать годными, разбор причины — работа модели"}
+  harness/demons/resource-report.sh:
+    - {kind: owner-only, why: "суточная сводка ресурсов — для сведения, работы для модели нет"}
   harness/demons/session-warden.sh:
     - {kind: kick, why: "agent_prompt рядом с вестью при живом агенте: пульс, простой, inbox, ротация"}
     - {kind: card, key: "session-warden:no-agent", why: "ветки «агента нет / поднять не удалось / ротация не закрылась / пинок не дошёл» — причину аварии новая смена иначе не узнает; волна 3"}
     - {kind: card, key: "session-warden:inbox-stuck", why: "сообщение владельца отдано сессии трижды и всё лежит во входящих — сессия его не берёт; работа модели; волна 3"}
     - {kind: card, key: "session-warden:two-agents", why: "два основных агента сразу, одно и то же устоявшееся время — две смены пишут в одно дерево; работа модели (one-shift.sh); карточка снимается, когда агент один"}
+    - {kind: card, key: "session-warden:speed-unanswered", why: "несколько пинков «возьми задачи» подряд, а в работе не прибавилось — смена не берёт задачи сама; работа модели — разобраться почему; карточка заводится вестью --task"}
+  harness/demons/speed_mode.py:
+    - {kind: owner-only, why: "весть о смене числа задач одновременно (режим урезан блокером или вернулся) и о лимите — сведение, режим вернётся сам; работы для модели за ней нет"}
   harness/demons/stack-watch.sh:
     - {kind: owner-only, why: "недельная сводка свежести стека — сведение; работу по ней ведёт карточка hr.stack-freshness-monitor"}
   harness/demons/update-watch.sh:
@@ -112,8 +136,6 @@ model_task:
     - {kind: owner-only, why: "аварийный канал на случай сломанного харнеса, зовётся руками"}
   scripts/hooks/pause_guard.py:
     - {kind: owner-only, why: "ответ «стою» на его же команду паузы"}
-  scripts/protected-delete.py:
-    - {kind: owner-only, why: "вопрос «удалить файл?»; ответ исполняет код scripts/protected-delete.py"}
   scripts/publish.sh:
     - {kind: owner-only, why: "информирование о публикации по его слову: задача уже была словом владельца"}
   scripts/spec_approval.py:
@@ -132,6 +154,7 @@ not_senders:
   scripts/check-owner-senders.py: сам судья — имя двери в его описании и данных
   scripts/lib/gates_check.sh: tg_send.sh в комментарии о резке строки по букве; пишет только журнал секунд
   scripts/gates.sh: упоминание двери в комментарии о правилах переписки
+  scripts/hooks/channel_reply_guard.py: имя двери в подсказке отказа — сам владельцу не пишет
   scripts/install-probe.sh: tg_send в шаблоне поиска утечек стенда установки
   scripts/mutation-probe.sh: слово tg_send в комментарии о причинах ложных «дыр» прибора
   scripts/stack_freshness.py: пишет отметки после отправки; сам дверь не зовёт
