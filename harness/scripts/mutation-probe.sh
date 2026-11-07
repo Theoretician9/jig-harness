@@ -137,6 +137,7 @@ declare -A CLEAN_RC=()
     # system-jobs, tmp-sweep); без него чистая копия красна ещё до мутации.
     # harness ~5 МБ — копия целиком дешевле списка нужных файлов.
     if [ "$1" = scripts ] && [ -d harness ]; then корень_в_копию harness; fi
+    if [ "$1" = scripts ] && [ -f dev-map.yaml ]; then cp -a dev-map.yaml "$TMP/дерево/"; fi
 }
 
 # Какие копии уже испорчены мутациями: «оригинал<TAB>копия» по строке.
