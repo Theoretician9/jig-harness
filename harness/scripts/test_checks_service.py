@@ -25,10 +25,10 @@ process-library.yaml, таймер ПОРОЖДАЕТСЯ из него: тай�
   4 run-background.sh при off: запись с признаком идёт (след-файл) и пишет
     process.start/end; без признака — process.skip, следа нет;
   5 USTANOVIT.sh --dry-run пишет срез, юниты, узкую строку sudoers и
-    daemon-reload, но не enable/start; строка службы в 50-agent — ровно
-    daemon-reload и шесть форм на таймер (с enable --now / disable --now), без
-    `*`; в «ОСТАЛОСЬ РУКАМИ» агенту названо sudo systemctl enable --now
-    harness-<id>.timer по каждому id, без root-шагов;
+    daemon-reload; строка службы в 50-agent — ровно daemon-reload и шесть форм
+    на таймер (с enable --now / disable --now), без `*`; установщик сам
+    включает все таймеры (включить_таймеры) и проверяет «все включены», в
+    «ОСТАЛОСЬ РУКАМИ» таймеров нет;
   6 перевод календаря: формы крона вне живой библиотеки (*/n в дне и месяце,
     день недели от 0, список с 7, шаг в минутах) systemd принимает, и два
     ближайших срабатывания совпадают с кроном; непереводимые — ValueError;
@@ -214,7 +214,8 @@ def stand_env(stand: Path, yaml_path: Path, json_path: Path, conf: Path) -> dict
     env.update(HARNESS_HOME=str(stand / "home"), HARNESS_INSTALL_CONF=str(stand / "install.conf"),
                HARNESS_CONF=str(conf), LOG_DIR=str(stand / "log"),
                HARNESS_PROCESS_LIBRARY=str(yaml_path), HARNESS_PROCESS_LIBRARY_JSON=str(json_path),
-               PYTHONDONTWRITEBYTECODE="1")
+               PYTHONDONTWRITEBYTECODE="1",
+               HARNESS_PROCESS_LIBRARY_LOCAL="/nonexistent/harness-probe/process-library.local.json")
     return env
 
 
@@ -463,24 +464,18 @@ def judge_installer(stand: Path, yaml_path: Path, json_path: Path, ids: list, ce
             f"«*» {'есть' if '*' in checks_line else 'нет'}"] if checks_line else ["строки с daemon-reload нет"])
     manual = re.search(r"^=+ ОСТАЛОСЬ РУКАМИ.*?$(.*?)(?=^=+ |\Z)", done.stdout, re.M | re.S)
     manual = manual.group(1) if manual else ""
-    wanted = [f"sudo systemctl enable --now harness-{pid}.timer" for pid in ids]
-    timer_lines = [line.strip() for line in manual.splitlines() if re.search(r"harness-\S+\.timer", line)]
-    rooty = [line for line in timer_lines if re.search(r"\broot\b|sudo -i|sudo su\b|\bsu -|sudo bash", line)]
-    denied = sorted({m.group(1) for m in re.finditer(r"sudo (systemctl [^;&|,«»\"']+?harness-[\w-]+\.timer)", manual)
-                     if "/usr/bin/" + m.group(1) not in granted})
-    report(bool(ids) and bool(manual) and not [w for w in wanted if w not in manual] and not rooty and not denied,
-           "5 «ОСТАЛОСЬ РУКАМИ»: агенту — sudo systemctl enable --now harness-<id>.timer по каждому id, "
-           "без root-шагов, каждая команда разрешена 50-agent",
-           ([f"нет «{w}»" for w in wanted if w not in manual][:3] + [f"root-шаг: {r}" for r in rooty][:2]
-            + [f"не разрешено 50-agent: {d}" for d in denied][:2]) or ["блока «ОСТАЛОСЬ РУКАМИ» нет"])
+    enabled = " ".join(c for _, c in commands if c.startswith("включить_таймеры"))
+    missing_timers = [f"harness-{pid}.timer" for pid in ids if f"harness-{pid}.timer" not in enabled]
+    report(bool(ids) and bool(enabled) and not missing_timers,
+           "5 установщик сам включает таймер каждой проверки (enable --now), без ручного шага владельцу",
+           missing_timers or ["вызова включить_таймеры нет"])
+    report("все_таймеры_включены" in done.stdout and not re.search(r"harness-\S+\.timer", manual),
+           "5 проба «все таймеры включены» есть, в «ОСТАЛОСЬ РУКАМИ» таймеров не осталось",
+           ["пробы нет" if "все_таймеры_включены" not in done.stdout else "таймер остался руками"])
     last_unit = max((order[p] for p in want if p in order), default=None)
     reload_after = [n for n, c in commands if "systemctl daemon-reload" in c and last_unit is not None and n > last_unit]
     report(bool(ids) and not missing and bool(reload_after), "5 daemon-reload после записи юнитов",
            ["нет daemon-reload после последнего юнита"])
-    names = "|".join(re.escape(x) for x in ["checks"] + ids) or "checks"
-    started = [c for _, c in commands
-               if re.search(r"systemctl\b[^;&|]*\b(enable|start|restart)\b[^;&|]*harness-(" + names + r")\b", c)]
-    report(bool(ids) and not started, "5 таймеры и срез НЕ включаются (ни enable, ни start)", started)
 
 
 # ── перевод календаря вне живой библиотеки ────────────────────────────────

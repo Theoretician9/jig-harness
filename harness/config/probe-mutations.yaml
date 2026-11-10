@@ -615,7 +615,7 @@
     - 's@^    bash "$RUN_BG" --разрешён "$id" >/dev/null 2>&1; rc=$?$@    rc=0@'
     - 's@^    elif \[ "$age_min" -gt $((period_min \* mult)) \]; then$@    fi; if [ "$age_min" -gt $((period_min * mult)) ]; then@'
     - 's@^выключены выключателем: $OFF_N"$@"@'
-    - 's@then id="${name%%.\*}"@then id="$name"@'
+    - 's@then name="${name%%.\*}"@then name="$name"@'
     мутация_случай:
     - служебная строка <synthetic> уходит владельцу в разбивке по моделям
     - вложение уходит без расширения .md, и телеграм отдаёт файл без типа
@@ -1257,6 +1257,11 @@
     - 's/^    if ask:$/    if True:/'
     - 's/^    seeded = \[p for p in removed if p in journal.seed_paths\]$/    seeded = removed/'
     - 's/^        хвост += _removed_words(forward_archive)$/        pass/'
+    - 's@^    if off:$@    if False:@'
+    - 's@^        if довезти:$@        if False:@'
+    - 's@^            if итог.get("довезти"):$@            if False:@'
+    - 's@timeout=предел_ворот())@timeout=1800)@'
+    - 's@^        except OSError as беда:$@        except ValueError as беда:@'
     мутация_случай:
     - файл, правленный ЗДЕСЬ, уходит в «обновить» — правка владельца затирается молча
     - красная самопроверка не откатывает пакет — обновление остаётся на сломанном коммите
@@ -1299,6 +1304,11 @@
     - '--затравка отправляет вопрос — показ без отправки сломан (UZ6)'
     - '«Убрал по истории пакета» по всем «снят», без пометки журнала — снятое по описи сосчитано историей (UZ7)'
     - 'владельцу не сказано, что убрано по истории и по описи (UZ7)'
+    - 'R1 root-часть: выключенный таймер не назван пробелом'
+    - 'R3 root-часть не доехала, а владельцу команда установщика не названа'
+    - 'R5 root-часть: --поставить не печатает команду установщика'
+    - 'V3 предел ворот обновления снова зашит, ключ UPDATE_GATES_TIMEOUT_SEC не действует'
+    - 'V2 беда записи версии роняет постановку, владелец не извещён'
   scripts/test_layout_door.py:
     механизм: scripts/layout-door.py
     доказательство: python3 scripts/test_layout_door.py
@@ -1784,11 +1794,15 @@
     - s/    elif число > 1 and "g" not in флаги:/    elif False:/
     - s/if всего == 0:/if False:/
     - 's/    if готово.returncode != 0:/    if False:/'
+    - 's/проба\.split("#")\[0\], f"{проба}: {случай}"/проба, f"{проба}: {случай}"/'
+    - 's/^    if \[ "\$1" = scripts \] \&\& \[ -f dev-map.yaml \]; then cp -a dev-map.yaml "\$TMP\/дерево\/"; fi$/    :/'
     мутация_случай:
     - отставший от кода текст мутации не называется — дыра выглядит покрытием
     - текст в двух местах не называется неоднозначным, sed садится не туда
     - пустая таблица мутаций читается как успех
     - выражение, которое sed не принимает, снова проходит сверку молча
+    - ключ записи «проба#суффикс» уходит путём пробы целиком — мутацию некуда подставить
+    - карта проекта не копируется в стенд — проба из копии красна на чистой копии
   scripts/././test_probe_mutations.sh:
     # Кэш зелёных мутаций (hr.nightly-mutation-probe-growth): каждая мутация
     # выбивает одну часть ключа или срока, и проба обязана позвать себя заново.
@@ -3429,7 +3443,7 @@
     доказательство: python3 scripts/test_boot_check.py
     подмена: HARNESS_BOOT_CHECK
     мутация:
-    - 's@return ("ok", "active") if word == "active" else ("red", word)@return ("ok", "active")@'
+    - 's@^    if word == "active":$@    if True:@'
     - 's@^    if down:$@    if False:@'
     - 's@    if up < int(entry.get("не_меньше") or 0):@    if False:@'
     - 's@    if out.startswith(mark\["ядро_ожидаемое"\]):@    if True:@'
@@ -4495,8 +4509,8 @@
     - 's@ --несмотря-на-лимит --task session-warden:no-agent \\$@ --несмотря-на-лимит \\@'
     - 's@--task session-warden:no-agent && date +%s > "\$DEAD_STAMP" || say "сигнал о поднятой@\&\& date +%s > "$DEAD_STAMP" || say "сигнал о поднятой@'
     - 's@-H tmux attach -t \$TMUX_SESSION" \\$@-H tmux attach -t $TMUX_SESSION" || say "и сигнал не ушёл"; : \\@'
-    - 's@^            alert_task --resolve session-warden:no-agent$@            :@'
-    - 's@^            alert_task --resolve session-warden:no-agent$@            alert_task --key session-warden:no-agent --title x --text x@'
+    - 's@^                alert_task --resolve session-warden:no-agent$@                :@'
+    - 's@^                alert_task --resolve session-warden:no-agent$@                alert_task --key session-warden:no-agent --title x --text x@'
     мутация_случай:
     - 'session-warden w1-no-session-start-fails: весть «поднять её командой» зовёт с ключом «session-warden:no-agent»'
     - 'session-warden w2-no-session-revived: весть «поднял заново» зовёт с ключом «session-warden:no-agent»'
@@ -5128,6 +5142,48 @@
     - 'П-О4: дверь новее сообщения закрывает'
     - 'П-О4: дверь с моментом позже «сейчас» не закрывает'
     - 'П-О4: дверь старше «сейчас» на 31 мин закрывает навсегда'
+  # ── hr.alert-self-sensors-attention: срок ответа, дверь стража, случай «код» у меток ──
+  scripts/././././test_delivery_marks.sh:
+    # delivery-latency.py: срок ответа из OWNER_REPLY_MAX_MIN, --на @эпоха, вердикт просрочки, сетка и --порог.
+    механизм: scripts/delivery-latency.py
+    доказательство: bash scripts/././././test_delivery_marks.sh --случай просрочено
+    подмена: из-копии
+    мутация:
+    - 's@    return int(SETTINGS.get("OWNER_REPLY_MAX_MIN") or 5) \* 60@    return 5 * 60@'
+    - 's@срок ответа {reply_within_sec() // 60} мин@срок ответа 30 мин@'
+    - 's#    if text.startswith("@"):#    if False:#'
+    - 's@    word = "ПРОВАЛ" if rows else "ПРОЙДЕН"@    word = "ПРОЙДЕН"@'
+    - 's@        if current - seen:@        if current:@'
+    - 's@            within = (args.threshold \* 60) if args.threshold else reply_within_sec()@            within = reply_within_sec()@'
+    мутация_случай:
+    - 'П-О8: срок из ключа OWNER_REPLY_MAX_MIN=10 — 6 мин ПРОЙДЕН'
+    - 'П-О8: --без-ответа читает тот же срок — «срок ответа 5 мин»'
+    - 'П-О7: --на @эпоха, сообщение 6 мин — ПРОВАЛ, код 1, n=1'
+    - 'П-О7: --на @эпоха, сообщение 6 мин — ПРОВАЛ, код 1, n=1'
+    - 'П-О9: сетка N=5 — сработок 3, эпизодов 2, n=3'
+    - 'П-О9: сетка --порог 10 — сработок 1, эпизодов 1'
+  scripts/hooks/././test_channel_reply_guard.sh:
+    # channel_reply_guard.py: срок двери «ответ не нужен» 30 мин и подсказка владельцу в stderr.
+    механизм: scripts/hooks/channel_reply_guard.py
+    доказательство: bash scripts/hooks/././test_channel_reply_guard.sh
+    подмена: CHANNEL_REPLY_GUARD_UNDER_TEST
+    мутация:
+    - 's/^DOOR_MAX_AGE_S = 30 \* 60$/DOOR_MAX_AGE_S = 120 * 60/'
+    - 's/, max_age=DOOR_MAX_AGE_S)/)/'
+    - 's/^    print(MESSAGE.format(door=Path(log_dir) \/ channel_reply.DOOR_FILE), file=sys.stderr)$/    pass/'
+    мутация_случай:
+    - '(о) метка старше срока (60 мин > 30) — не дверь (код 2)'
+    - '(о) метка старше срока (60 мин > 30) — не дверь (код 2)'
+    - '(а) stderr велит ответить владельцу через tg_send.sh'
+  scripts/././././././test_probe_stand_sweep.sh:
+    # test_delivery_marks.sh: случай «код» в списке --случай, его зовёт следующий прогон стенда меток.
+    механизм: scripts/test_delivery_marks.sh
+    доказательство: bash scripts/././././././test_probe_stand_sweep.sh --случай метки
+    подмена: из-копии
+    мутация:
+    - 's@    case "$ONLY" in диспетчер|прибор|просрочено|живые|код) ;;@    case "$ONLY" in диспетчер|прибор|просрочено|живые) ;;@'
+    мутация_случай:
+    - 'следующий прогон: процессов стенда, убитого KILL — 0'
   # ── hr.remove-message-interception-mechanism: голос отдельным обработчиком ──
   scripts/test_voice_worker.sh:
     # tg-dispatcher.sh: голос уходит обработчику, подбор итога, дубль, пауза, судья секретов.
@@ -5425,7 +5481,7 @@
     - 's@if "пишет_только" not in role:@if True:@'
     - 's@if target in NULL_SINKS or target.startswith(LOG_DIR_PREFIX):@if True:@'
     - 's@return "" if sub in role.get("git", \[\]) else@return "" if True else@'
-    - 's@return "" if script in role.get("скрипты", \[\]) else@return "" if True else@'
+    - 's@return "" if script_allowed(call, role) else@return "" if True else@'
     - 's@return "" if name in role.get("команды", \[\]) else@return "" if True else@'
     - 's@    if role is None:@    if False:@'
     - 's@    record("ok", str(payload.get("session_id") or ""),@    (lambda *a, **k: None)("ok", str(payload.get("session_id") or ""),@'
@@ -5914,7 +5970,7 @@
     доказательство: bash scripts/test_pre_commit_snapshot.sh
     подмена: PRE_COMMIT_GATE_UNDER_TEST
     мутация:
-    - 's@^    || fail "снимок_индекса"$@    || true@'
+    - 's@^    || { fail "снимок_индекса"; подвести; }@    || true@'
     - 's#^    GIT_DIR="$SNAP_GIT_DIR" GIT_INDEX_FILE="$SNAP_INDEX" "$@"$#    GIT_INDEX_FILE="$SNAP_INDEX" "$@"#'
     - 's@^гейт "прополка_карты" python3 "$SNAP_DIR/scripts/weed-the-map.py" --проверить@гейт "прополка_карты" python3 "$PWD/scripts/weed-the-map.py" --проверить@'
     - 's@^гейт "импорты" на_снимке python3 "$SNAP_DIR/scripts/check-imports.py"@гейт "импорты" python3 "$SNAP_DIR/scripts/check-imports.py"@'
@@ -7412,9 +7468,9 @@
     доказательство: python3 harness/../scripts/test_checks_service.py
     подмена: HARNESS_USTANOVIT
     мутация:
-    - 's@^  делай "systemctl daemon-reload"  # служба потока проверок: таймеры лежат выключенными$@  делай "systemctl daemon-reload \&\& systemctl enable --now harness-checks-stream.timer"@'
+    - 's@^  делай "включить_таймеры ${timer_units\[\*\]}"$@  :@'
     мутация_случай:
-    - '5 таймеры и срез НЕ включаются (USTANOVIT делает enable --now)'
+    - '5 установщик сам включает таймер каждой проверки (enable --now)'
   # ── hr.process-dispatcher §А.3 (часть А2): генератор system-jobs.yaml из библиотеки ──
   scripts/test_build_system_jobs.py:
     механизм: scripts/build-system-jobs.py
@@ -7472,7 +7528,7 @@
     - 's@kids = max(0, p\["kids"\] - old\["kids"\] - sum(gone\[m\]\["own"\] + gone\[m\]\["kids"\] for m in members)) / TICK@kids = max(0, p["kids"] - old["kids"]) / TICK@'
     - 's@^        result\[pid\] = (max(0, p\["own"\] - old\["own"\]) / TICK) + kids$@        result[pid] = (max(0, p["own"] - old["own"]) / TICK)@'
     - 's/"группы": fold(out), "остаток": rest, "ужатие": shrunk}, state/"группы": fold(out), "остаток": {}, "ужатие": shrunk}, state/'
-    - 's/^            return argv\[i + 1\]$/            return None/'
+    - 's/^            return None if word.startswith("-") else word$/            return None/'
     - 's@"cg": cgroup, "start"@"cg": "/system.slice/" + cgroup.rsplit("/", 1)[-1] if cgroup.endswith(".service") else cgroup, "start"@'
     - 's/^        os.rename(path, path + ".1")$/        pass/'
     - 's/elif kind\[pid\] == "dispatcher" and p\["sid"\] == pid and any(/elif kind[pid] == "dispatcher" and False and any(/'
@@ -7480,6 +7536,11 @@
     - 's/return os.path.basename(path or argv\[0\])/return argv[2] if len(argv) > 2 else os.path.basename(path or argv[0])/'
     - 's/^        old = prev_procs.get(proc_key(p))$/        old = prev_procs.get(proc_key(p)) or {"own": 0, "kids": 0}/'
     - 's/^    return any(seconds > capacity for seconds in cpu) or sum(cpu) > capacity \* CAPACITY_SLACK$/    return False/'
+    - 's/^    if not argv:$/    if False:/'
+    - 's/^        except Exception as error:  # noqa: BLE001 — сбой одного процесса не должен стоить всего прохода$/        except ZeroDivisionError as error:/'
+    - 's/^            return None if word.startswith("-") else word$/            return word/'
+    - 's/callers\[tuple(argv\[argv.index("--") + 1:\])\] = pid/callers[tuple(argv[argv.index("--"):])] = pid/'
+    - 's/^        if ident in rules\["ids"\]:$/        if False:/'
     мутация_случай:
     - '1 ярлык без «прогон» → два прогона слиты'
     - '2 без правила sid → внук ушёл в «неразмечено»'
@@ -7494,6 +7555,11 @@
     - '§В.4 командная строка в журнал: имя корня крона — вся строка `sh -c` с доводом-секретом'
     - 'авария 24ч: родитель без прошлого значения (pid 1 после выкладки) отдаёт весь cutime хвостом сироты'
     - 'ограничитель окна выключен: невозможная строка журнала входит в «--за 24ч» и витрину'
+    - 'Н1 пустой argv без охраны → IndexError в bare_name, проход упал'
+    - 'Н1 сбой разметки одного процесса роняет весь проход'
+    - 'Н2 флаг «--разрешён» после run-background.sh стал id группы'
+    - 'Н3 argv вызывающего systemd-run не совпал с корнем run-uNNN → сырое имя юнита'
+    - 'Н4 служба среза проверок без ветки id обёртки → сырое имя юнита'
   scripts/././test_process_dispatcher.py:
     механизм: harness/demons/resource_report.py
     доказательство: python3 scripts/././test_process_dispatcher.py
@@ -7788,6 +7854,94 @@
     - 'тревога с неизвестным префиксом остаётся днём (неизвестное — авария)'
     - '--проверки печатает только тревоги проверок, без аварий и обычных задач'
     - 'днём «ждут:» не называет тревогу проверки'
+  # ── Пробы без вызывающего перед выпуском 0.9.2: мутации прогнаны на копии дерева пакета ──
+  scripts/test_session_state_containers.sh:
+    механизм: scripts/hooks/session_state.sh
+    доказательство: bash scripts/test_session_state_containers.sh
+    подмена: SESSION_STATE_SH
+    мутация:
+    - 's@\[1-9\]\[0-9\]\*@[0-9]*@'
+    - 's@docker ps --filter status=restarting@true@'
+    мутация_случай:
+    - 'exited(0) — не сбой'
+    - 'restarting — сбой'
+  scripts/test_ack_retry.sh:
+    механизм: scripts/tg-dispatcher.sh
+    доказательство: bash scripts/test_ack_retry.sh
+    подмена: HARNESS_DISPATCHER
+    мутация:
+    - 's@^        \[ "\$try" -lt 3 \] || break$@        break@'
+    - 's@^        \[ "\$rc" -ne 0 \] || break$@        :@'
+    мутация_случай:
+    - 'сеть упала раз, потом ушло'
+    - 'ответ API с ошибкой не повторяется'
+  scripts/test_precommit_accumulates.sh:
+    механизм: scripts/pre-commit-gate.sh
+    доказательство: bash scripts/test_precommit_accumulates.sh
+    подмена: PRECOMMIT_UNDER_TEST
+    мутация:
+    - 's@^    GATE_FAILURES+=("\$1")$@    GATE_FAILURES=("$1")@'
+    - 's@^    GATE_FAILURES+=("\$1")$@    GATE_FAILURES+=("$1"); exit 1@'
+    мутация_случай:
+    - 'в итоговом списке нет первый_гейт'
+    - 'в итоговом списке нет второй_гейт'
+  scripts/test_installer_units.sh:
+    # Установщик живёт в пакете (вне дерева проекта): одинокая копия, дверь USTANOVIT_UNDER_TEST.
+    механизм: /home/user/starter/STARTER-PACKAGE/USTANOVIT.sh
+    доказательство: bash scripts/test_installer_units.sh
+    подмена: USTANOVIT_UNDER_TEST
+    мутация:
+    - 's@^Environment=PANEL_SECRETS_DIR=/var/lib/harness/panel-state$@Environment=PANEL_SECRETS_DIR=@'
+    мутация_случай:
+    - 'dispatcher: PANEL_SECRETS_DIR в шаблоне'
+  scripts/test_installer_paths.sh:
+    механизм: /home/user/starter/STARTER-PACKAGE/USTANOVIT.sh
+    доказательство: bash scripts/test_installer_paths.sh
+    подмена: USTANOVIT_UNDER_TEST
+    мутация:
+    - 's@^    mv "\$dst" "\$dst.bak-\$stamp"$@    cp -a "$dst" "$dst.bak-$stamp"@'
+    - 's@ -x \.git -x __pycache__ -x ''\*\.pyc'' @ -x .git @'
+    - 's@ && git -C "\$dst" merge-base --is-ancestor @ \&\& false \&\& git -C "$dst" merge-base --is-ancestor @'
+    мутация_случай:
+    - 'убранного новой версией файла в копии агента нет'
+    - '__pycache__ вызвал .bak'
+    - 'источник старше копии: копию откатило'
+  scripts/test_warden_no_transcripts.sh:
+    механизм: harness/demons/session-warden.sh
+    доказательство: bash scripts/test_warden_no_transcripts.sh
+    подмена: HARNESS_SESSION_WARDEN
+    мутация:
+    - 's@^    panel_watch$@    :@'
+    мутация_случай:
+    - 'БОЛЬНОЙ СЛУЧАЙ: транскриптов нет, сессии нет — подъём начат, а не тихий выход'
+  scripts/test_agent_pane_log.sh:
+    механизм: harness/demons/session-warden.sh
+    доказательство: bash scripts/test_agent_pane_log.sh
+    подмена: HARNESS_SESSION_WARDEN
+    мутация:
+    - 's@^    early_exit_alarm$@    :@'
+    мутация_случай:
+    - 'БОЛЬНОЙ СЛУЧАЙ: агент вышел сразу после запуска — владельцу тревога'
+  scripts/test_first_task_product_path.sh:
+    механизм: scripts/hooks/session_state.sh
+    доказательство: bash scripts/test_first_task_product_path.sh
+    подмена: SESSION_STATE_SH
+    мутация:
+    - 's@"${PRODUCT_PATH:-}" "${PROJECT_NAME:-}"@"${PRODUCT_DIR:-}" "${PROJECT_NAME:-}"@'
+    - 's@^elif role != "агент самого харнеса" and not product:@elif not product:@'
+    мутация_случай:
+    - 'БОЛЬНОЙ СЛУЧАЙ: задано только имя compose (PRODUCT_DIR) — путь всё равно требуется'
+    - 'наша копия-харнес без продукта — молчит'
+  scripts/test_session_known_failed.sh:
+    механизм: scripts/hooks/session_state.sh
+    доказательство: bash scripts/test_session_known_failed.sh
+    подмена: SESSION_STATE_UNDER_TEST
+    мутация:
+    - 's@grep -vxF -f <(printf@grep -vF -f <(printf@'
+    - 's@echo "известный отказ хоста (не чинится харнесом): @true "@'
+    мутация_случай:
+    - 'похожее имя гасится как известный отказ'
+    - 'известный отказ не назван вовсе'
 без_мутаций:
   .tasks/: 'пробы задач до шага «код»: переезжают в scripts/ вместе с кодом и там получают запись'
   UNIFIED/templates/: 'шаблон книги для чужого проекта: механизма в этом дереве у него нет'

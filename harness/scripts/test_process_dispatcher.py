@@ -26,9 +26,11 @@ STATE_DIR, HARNESS_EVENTS_STATE, HARNESS_CONF, HARNESS_INSTALL_CONF.
     python3 scripts/test_process_dispatcher.py            # снимки, быстро
     python3 scripts/test_process_dispatcher.py --живой    # плюс больной случай §В.7 на живой машине
 """
+import contextlib
 import datetime as dt
 import fcntl
 import importlib.util
+import io
 import json
 import os
 import re
@@ -189,6 +191,9 @@ class World:
                         PROCESS_LOAD_STATE=str(self.logs / "process-load.state.json"),
                         HARNESS_CONF=str(self.conf), HARNESS_INSTALL_CONF=str(self.dir / "install.conf"),
                         HARNESS_TASK="-")
+        # Слой установки машины пробе не хозяин: свой путь, файла по умолчанию нет.
+        self.layer_path = self.dir / "process-library.local.json"
+        self.env["HARNESS_PROCESS_LIBRARY_LOCAL"] = str(self.layer_path)
         self.env.pop("CLAUDE_CODE_SESSION_ID", None)
 
     def doors(self, proc_dir, cg_dir) -> list:
@@ -438,10 +443,15 @@ def case_argv_id():
            [f"группы: {sorted({g.get('id') for g in data_of(rows).get('группы') or []})}"] + why(rc, out, rows))
 
 
-@case("7. юнит по хвосту cgroup → claude LXC в claude-session")
+@case("7. юнит по хвосту cgroup → claude LXC в claude-session; запись чужого контейнера — из слоя установки")
 def case_lxc():
     w = World("p7")
-    lxc_cg = "/lxc.payload.sample-25/system.slice/harness-agent.service"
+    w.layer_path.write_text(dumps_library({"процессы": [
+        {"id": "probe-lxc", "название": "Проба: чужой контейнер", "класс": "сторонний", "запуск": "контейнер",
+         "статус": "работает", "файлы": ["/srv/probe-lxc"],
+         "доля_нагрузки": {"приписка": {"способ": "cgroup", "признак": "lxc.payload.probelxc"},
+                           "замер": "не измерено"}}]}), encoding="utf-8")
+    lxc_cg = "/lxc.payload.probelxc/system.slice/harness-agent.service"
     session_env = {"CLAUDE_CODE_SESSION_ID": "sess-host"}
 
     def world(cpu_host, cpu_lxc):
@@ -451,10 +461,10 @@ def case_lxc():
                      cpu=(cpu_lxc, 0, 0, 0), rss_mb=200)]
     w.sample(1000.0, world(10.0, 20.0), {AGENT: 10.0, lxc_cg: 20.0})
     rc, out, rows = w.sample(1060.0, world(11.0, 22.0), {AGENT: 11.0, lxc_cg: 22.0})
-    lxc, host = cpu_of(rows, "lxc-sample-25"), cpu_of(rows, "claude-session")
+    lxc, host = cpu_of(rows, "probe-lxc"), cpu_of(rows, "claude-session")
     report(near(lxc, 2.0, 0.1) and near(host, 1.0, 0.1),
-           "корзина по ПОЛНОМУ пути: lxc-sample-25 2,0 с, claude-session 1,0 с",
-           [f"lxc-sample-25={lxc}, claude-session={host}"] + why(rc, out, rows))
+           "корзина по ПОЛНОМУ пути: probe-lxc 2,0 с, claude-session 1,0 с",
+           [f"probe-lxc={lxc}, claude-session={host}"] + why(rc, out, rows))
 
 
 @case("8. нет ротации")
@@ -1101,6 +1111,165 @@ def case_cron_daemon_subtree():
            [f"A={a}", f"C={neighbour}"] + why(rc, out, rows))
     bad = capacity_breaches(rows1 + rows2 + rows)
     report(not bad, "ограничитель строки на заданиях крона: группа и Σ ≤ ёмкости окна", bad)
+
+
+# ───────────────────────── hr.zapuskov-none-net-informacii-znachit ─────────────────────────
+# Модуль берётся рядом с диспетчером: дверь HARNESS_PROCESS_DISPATCHER уводит на копию и его.
+PROCESS_LOAD = DISPATCHER.parent / "lib" / "process_load.py"
+CHECKS_SLICE = "/harness.slice/harness-checks.slice"
+
+
+def group_ids(rows: list) -> list:
+    return sorted(str(g.get("id")) for g in data_of(rows).get("группы") or [])
+
+
+def library_names(w: World) -> dict:
+    return {r["id"]: r.get("название") for r in json.loads(w.library_path.read_text(encoding="utf-8"))["процессы"]}
+
+
+@case("Н1а. bare_name([]) — пустой argv (процесс исчез или зомби) роняет разбор IndexError")
+def case_bare_name_empty():
+    module = load_module("process_load_probe", PROCESS_LOAD)
+    try:
+        name = module.bare_name([])
+    except Exception as error:  # noqa: BLE001 — проба называет падение
+        name = f"{type(error).__name__}: {error}"
+        report(False, "bare_name([]) не падает", [name])
+        return
+    report(isinstance(name, str) and bool(name.strip()), "bare_name([]) не падает и даёт непустую строку",
+           [f"bare_name([]) = {name!r}"])
+
+
+@case("Н1б. корень крона с пустым argv (зомби в момент замера) → проход упал, минута замера потеряна")
+def case_cron_root_empty_argv():
+    w = World("zombie")
+
+    def world(cpu):
+        # Ребёнок CRON с sid = pid и пустым cmdline: так выглядит sh задания, завершившийся между listdir и чтением.
+        return [INIT, cron_daemon(100.0)] + cron_job(1, "A", cpu) + [
+            cron_child(302), proc(2000, 302, 2000, "sh", [], CRON)]
+    rc1, out1, _ = w.sample(1000.0, world(0.0), {CRON: 5.0})
+    rc, out, rows = w.sample(1060.0, world(1.5), {CRON: 6.5})
+    a = cpu_of(rows, "probe-burner", "1001")
+    report(rc1 == 0 and rc == 0 and len(rows) == 1 and near(a, 1.5, 0.05),
+           "оба прохода rc 0, выборка есть, сосед probe-burner 1001 размечен = 1,5 с",
+           [f"проход 1 rc={rc1} «{out1.splitlines()[-1][:120] if out1 else ''}»", f"probe-burner={a}"]
+           + why(rc, out, rows))
+    empty = [i for i in group_ids(rows) if not i.strip() or i == "крон:"]
+    report(bool(rows) and not empty, "у корня с пустым argv имя группы не пустое (не «крон:»)",
+           [f"группы: {group_ids(rows)}"] + why(rc, out, rows))
+
+
+@case("Н1в. сбой разметки одного корня (любое исключение) → разметка соседей и весь проход потеряны")
+def case_find_root_isolated():
+    module = load_module("process_load_isolated", PROCESS_LOAD)
+    real = module.bare_name
+
+    def broken(argv, comm=""):
+        # Неизвестный будущий сбой разбора: охрана должна держать любой тип, не только IndexError.
+        if any("broken.sh" in a for a in argv):
+            raise RuntimeError("проба")
+        return real(argv, comm)
+
+    module.bare_name = broken
+    base = Path(tempfile.mkdtemp(prefix="pd-isolated-", dir=TMP))
+    snapshot = [INIT, CRON_D, cron_child(301), proc(1000, 301, 1000, "sh", ["/bin/sh", "-c", "/opt/job.sh"], CRON),
+                cron_child(302), proc(2000, 302, 2000, "sh", ["/bin/sh", "-c", "/opt/broken.sh"], CRON)]
+    proc_dir, cg_dir = write_snapshot(base, 1000.0, snapshot, {CRON: 1.0})
+    rules = module.load_rules(probe_library(TMP))
+    snap = module.scan(str(proc_dir), str(cg_dir), rules)
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        labels = module.label_procs(snap, {}, rules, str(proc_dir), module.Transcripts(str(base), 1000.0))
+    neighbour = (labels.get(1000) or ("",))[0]
+    said = err.getvalue()
+    report(neighbour == "крон:job.sh" and "2000" in said and "RuntimeError" in said,
+           "сосед размечен «крон:job.sh», сбой назван в stderr: pid 2000 и тип исключения",
+           [f"сосед 1000: {neighbour!r}", f"stderr: {said.strip()[:160]!r}"])
+
+
+@case("Н2. `run-background.sh --разрешён <id>` внутри задания → флаг «--разрешён» стал id группы")
+def case_allowed_flag_not_id():
+    w = World("allowed")
+    task = [str(TMP / "burner.sh"), "A"]
+
+    def world(cpu, asked):
+        # session-warden.sh:1012, heartbeat-watch.sh:466: задание спрашивает обёртку, пойдёт ли другой
+        # запуск. Это вопрос, не прогон: CPU вопроса — того задания, что спросило.
+        return [INIT, CRON_D, cron_child(301),
+                proc(1000, 301, 1000, "sh", ["/bin/sh", "-c", f"{WRAPPER} probe-burner -- {' '.join(task)}"], CRON),
+                proc(1001, 1000, 1000, "run-background.", ["/bin/bash", str(WRAPPER), "probe-burner", "--", *task],
+                     CRON),
+                burner(1002, 1001, 1000, (cpu, 0, 0, 0)),
+                proc(1003, 1002, 1000, "run-background.", ["bash", str(WRAPPER), "--разрешён", "project-revision"],
+                     CRON, cpu=(asked, 0, 0, 0), start=1030.0)]
+    w.sample(1000.0, world(0.0, 0.0)[:-1], {CRON: 5.0})
+    rc, out, rows = w.sample(1060.0, world(2.0, 0.3), {CRON: 7.3})
+    flags = [i for i in group_ids(rows) if i.startswith("-")]
+    a = cpu_of(rows, "probe-burner", "1001")
+    report(bool(rows) and not flags and near(a, 2.3, 0.05),
+           "нет группы с id-флагом; вопрос --разрешён в строке спросившего probe-burner 1001 (2,0 + 0,3 с)",
+           [f"id-флаги: {flags}", f"probe-burner={a}", f"группы: {group_ids(rows)}"] + why(rc, out, rows))
+
+
+@case("Н3. transient-юнит run-uNNN.service среза проверок → сырое имя юнита вместо id библиотеки")
+def case_checks_slice_transient():
+    w = World("runu")
+    unit = CHECKS_SLICE + "/run-u4242.service"
+    task = [str(TMP / "burner.sh"), "A"]
+    sliced = ["/bin/bash", str(w.project / "scripts" / "mutation-probe.sh"), "--probe"]
+    # Тело юнита — как его ставит checks-slice-wrapper.sh: flock держит очередь, bash исполняет команду.
+    unit_cmd = ["/usr/bin/flock", "-E", "75", "-w", "1800", "/run/lock/harness-checks-slice.lock", "/bin/bash", "-c",
+                'own="$1"; shift; exec "$@"', "_", "/run/lock/harness-checks-slice.lock.owner", *sliced]
+
+    def world(cpu):
+        # Звонящий в cron.service ждёт юнит (systemd-run --wait); юнит сам — ребёнок pid 1 в срезе.
+        return [INIT, CRON_D, cron_child(301),
+                proc(1000, 301, 1000, "sh", ["/bin/sh", "-c", f"{WRAPPER} probe-burner -- {' '.join(task)}"], CRON),
+                proc(1001, 1000, 1000, "run-background.", ["/bin/bash", str(WRAPPER), "probe-burner", "--", *task],
+                     CRON),
+                burner(1002, 1001, 1000),
+                proc(1003, 1002, 1000, "run-in-checks-s",
+                     ["bash", str(HERE / "run-in-checks-slice.sh"), *sliced], CRON),
+                proc(1004, 1003, 1000, "sudo", ["sudo", "-n", "/usr/local/sbin/harness-run-in-checks",
+                                                "--run-max-min", "120", "--lock-wait-min", "30", str(w.project),
+                                                "HARNESS_TASK=-", "--", *sliced], CRON),
+                proc(1005, 1004, 1000, "systemd-run",
+                     ["/usr/bin/systemd-run", "--quiet", "--slice=harness-checks.slice", "--uid=agent", "--collect",
+                      "--wait", "--pipe", "-p", "RuntimeMaxSec=7200", f"--working-directory={w.project}",
+                      "--setenv=HARNESS_TASK=-", "--", *unit_cmd], CRON),
+                proc(5000, 1, 5000, "flock", unit_cmd, unit),
+                proc(5001, 5000, 5000, "bash", sliced, unit, cpu=(cpu, 0, 0, 0), rss_mb=60)]
+    w.sample(1000.0, world(0.0), {CRON: 5.0, unit: 10.0})
+    rc, out, rows = w.sample(1060.0, world(3.0), {CRON: 5.0, unit: 13.0})
+    known = library_names(w)
+    raw = [i for i in group_ids(rows) if i.startswith("run-u")]
+    # Звонящий сам не жжёт: всё CPU под id библиотеки — это CPU юнита.
+    owned = round(sum(float(g.get("cpu_с") or 0) for g in data_of(rows).get("группы") or [] if g.get("id") in known), 3)
+    report(bool(rows) and not raw and near(owned, 3.0, 0.05),
+           "CPU юнита среза (3,0 с) под id библиотеки (звонящего или запущенного), групп «run-u…» нет",
+           [f"run-u: {raw}", f"под id библиотеки={owned}", f"группы: {group_ids(rows)}"] + why(rc, out, rows))
+
+
+@case("Н4. служба проверок harness-nightly-gates.service в срезе → строка без записи и названия библиотеки")
+def case_checks_service_named():
+    w = World("nightly")
+    unit = CHECKS_SLICE + "/harness-nightly-gates.service"
+    gates = str(w.project / "harness" / "demons" / "nightly-gates.sh")
+
+    def world(cpu):
+        # ExecStart юнита: run-background.sh nightly-gates -- nightly-gates.sh (systemctl cat).
+        return [INIT, proc(7001, 1, 7001, "run-background.", ["bash", str(WRAPPER), "nightly-gates", "--", gates], unit),
+                proc(7002, 7001, 7001, "nightly-gates.s", ["/bin/bash", gates], unit, cpu=(cpu, 0, 0, 0), rss_mb=80)]
+    w.sample(1000.0, world(0.0), {unit: 100.0})
+    rc, out, rows = w.sample(1060.0, world(4.0), {unit: 104.0})
+    known = library_names(w)
+    carrier = [g for g in data_of(rows).get("группы") or [] if near(g.get("cpu_с"), 4.0, 0.05)]
+    ok = len(carrier) == 1 and carrier[0].get("id") in known and bool(known.get(carrier[0].get("id")))
+    report(bool(rows) and ok and "harness-nightly-gates.service" not in group_ids(rows),
+           "CPU юнита (4,0 с) под записью библиотеки с названием (nightly-gates), не под сырым именем юнита",
+           [f"носитель: {[(g.get('id'), known.get(g.get('id'))) for g in carrier]}",
+            f"группы: {group_ids(rows)}"] + why(rc, out, rows))
 
 
 # ───────────────────────── живой больной случай §В.7 ─────────────────────────

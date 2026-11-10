@@ -229,8 +229,10 @@ EOF
             HARNESS_PANEL_STATE="$DS/panel" python3 "$PAUSE_PY" --идёт-ли \
                 || { echo "ПРОБА: pause.py не поставил паузу на стенде — проверять нечего"; exit 1; }
         fi
+        # Пауза между повторами квитанции — время живой сети; стенд её не ждёт,
+        # иначе (г) гасит диспетчер раньше строки «не ушла». Повторы судит test_ack_retry.sh.
         stand_env env -u HARNESS_LOG_DIR PROBA_TMUX_LOG="$DS/tmux-calls" \
-            HARNESS_PANEL_STATE="$DS/panel" \
+            HARNESS_PANEL_STATE="$DS/panel" KVITANCIYA_PAUZA_S=0 \
             HARNESS_INSTALL_CONF="$DS/install.conf" HARNESS_CONF="$DS/harness.conf" \
             TG_API_BASE="http://127.0.0.1:$port" \
             setsid nohup bash "$DISPATCHER" > "$DS/dispatcher.out" 2>&1 < /dev/null &

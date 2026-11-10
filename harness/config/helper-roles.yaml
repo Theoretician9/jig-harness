@@ -21,7 +21,13 @@
     # Bash управляющего: первое слово каждой команды — из списка; git — только
     # перечисленные подкоманды; перенаправление — только в пишет_только.
     команды: [ls, cat, head, tail, grep, rg, wc, date, sleep, test, echo, printf, stat, find, sort, uniq, cut, true, pwd]
-    скрипты: ["scripts/who-writes.py", "scripts/gates-snapshot.sh", "scripts/model-for.sh"]
+    # Запись «путь --флаг …» пускает скрипт только с перечисленными флагами (любой другой в argv —
+    # отказ): launch-plan.py читает план, который требует launch_plan_guard, а --прижить,
+    # --закрепить, --отметить пишут в карту; spec_approval.py --состояние читает, --отправить пишет
+    # владельцу. Запись без флагов пускает любые.
+    скрипты: ["scripts/who-writes.py", "scripts/gates-snapshot.sh", "scripts/model-for.sh",
+             "scripts/launch-plan.py --json --строка --нужен-план --проверить-план --метрики --сутки --карта --планы",
+             "scripts/spec_approval.py --состояние"]
     git: [status, log, diff, show, branch, rev-parse, ls-files]
 
 # Вывод роли и потолка исполнителей кодом (launch-plan.py). Первая подошедшая

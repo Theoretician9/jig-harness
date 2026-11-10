@@ -33,6 +33,7 @@ HARNESS_CONF="${HARNESS_CONF:-$(konf_koren)/harness.conf}"
 # .git/hooks симлинком, и dirname дал бы .git/hooks, где библиотеки нет.
 # Поймано первым же коммитом после правки, 12.09.2026.
 konf_zagruzit PROJECT_DIR LOG_DIR TMUX_SESSION SECRETS_DIR AGENT_START_CMD
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/lib/agent_pane_log.sh"
 
 TMUX_SESSION="${TMUX_SESSION:-agent}"
 AGENT_START_CMD="${AGENT_START_CMD:-claude --dangerously-skip-permissions}"
@@ -62,7 +63,11 @@ raised=0
     # при этом не теряется — session-warden различает оболочку в панели
     # отдельной веткой (смена_состоялась → «оболочка»), она была там всегда.
     tmux new-session -d -s "$1" -c "$2"
+    # Запись панели включается ДО команды: выход агента сразу после ввода — как
+    # раз тот случай, ради которого она нужна.
+    [ -z "${LOG_DIR:-}" ] || pane_log_attach "$1" "$LOG_DIR"
     tmux send-keys -t "$1" "$3" Enter
+    [ -z "${LOG_DIR:-}" ] || agent_started_mark "$LOG_DIR"
     echo "сессия '$1' поднята с оболочкой, агент запущен вводом: $3"
 }
 

@@ -396,5 +396,18 @@ progon "$STAND/w2.out"
 case_check "W2 прополки нет — об этом сказано" \
     "да" "$(grep -q 'прополки нет' "$STAND/w2.out" && echo да || echo нет)"
 
+echo "── БОЛЬНОЙ СЛУЧАЙ нового сервера: каталог памяти целиком не в гите ──"
+# `git status --porcelain` сворачивает неотслеженный каталог в «?? память/», и
+# сверка состава искала в коммите файл с именем каталога — ложная «БЕДА».
+zelenyj_gejt
+git -C "$PROJECT" rm -r -q --cached память
+git -C "$PROJECT" commit -q -m "память убрана из гита (условие пробы)"
+printf 'запись нового сервера\n' > "$PROJECT/память/новый-сервер.md"
+progon "$STAND/dir-untracked.out"
+case_check "каталог целиком неотслеженный: ложной БЕДЫ нет" \
+    "0" "$(grep -c 'БЕДА' "$STAND/dir-untracked.out" || true)"
+case_check "каталог целиком неотслеженный: запись в коммите" \
+    "да" "$(git -C "$PROJECT" -c core.quotepath=false show --name-only --format= HEAD | grep -q 'новый-сервер.md' && echo да || echo нет)"
+
 printf '\nПАМЯТЬ-В-ГИТ: путей %d, неудач %d\n' "$CASES_PATHS" "$CASES_FAILED"
 [ "$CASES_FAILED" -eq 0 ]

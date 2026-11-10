@@ -293,6 +293,49 @@ def case_threshold_multiplier(tmp: Path) -> None:
           rc != 0 and "Утренняя сводка" not in out, f"rc={rc}; вывод: {out[-700:]}")
 
 
+def case_failing_last_run(tmp: Path) -> None:
+    print("— S4: свежая метка, но последний запуск вышел кодом вне законных — падающий —")
+    stand = tmp / "s4"
+    stand.mkdir()
+    tree = build_tree(stand, door_code=1)
+    log_dir, hb = stand / "log", stand / "hb"
+    log_dir.mkdir()
+    hb.mkdir()
+    passport(stand / "install.conf", tree, log_dir, hb)
+    names = "crashy steady healed paused verdict wrongcode"
+    (stand / "harness.conf").write_text(f'HEARTBEAT_PERIODS="{" ".join(n + ":10" for n in names.split())}"\n',
+                                        encoding="utf-8")
+    for name in (".install-stamp", *names.split()):
+        (hb / name).touch()
+    # Законные коды — ДАННЫЕ библиотеки: общие (пауза) и поле записи (вердикт демона).
+    library = stand / "process-library.json"
+    library.write_text(json.dumps({"общие_законные_коды_выхода": [78], "процессы": [
+        {"id": "verdict", "законные_коды_выхода": [1]},
+        {"id": "wrongcode", "законные_коды_выхода": [1]}]}, ensure_ascii=False), encoding="utf-8")
+
+    def end(ident: str, rc: int) -> str:
+        return json.dumps({"event": "process.end", "data": {"id": ident, "pid": 1, "rc": rc}}) + "\n"
+    # healed: упал, потом вышел чисто — судится ПОСЛЕДНИЙ запуск.
+    (log_dir / "process-runs.jsonl").write_text(
+        end("crashy", 1) + end("steady", 0) + end("healed", 1) + end("healed", 0)
+        + end("paused", 78) + end("verdict", 1) + end("wrongcode", 2), encoding="utf-8")
+    env = base_env(stand) | {"HARNESS_INSTALL_CONF": str(stand / "install.conf"),
+                             "HARNESS_CONF": str(stand / "harness.conf"), "HEARTBEAT_DRY_SEND": "1",
+                             "HARNESS_PROCESS_LIBRARY_JSON": str(library)}
+    rc, out = run(["bash", str(tree / "harness" / "demons" / "heartbeat-watch.sh")], env)
+    said = f"rc={rc}; вывод: {out[-900:]}"
+
+    def falls(name: str) -> bool:
+        return any(line.startswith(f"• {name} — ПАДАЕТ") for line in out.splitlines())
+    check("S4·crashy (rc=1, кода в библиотеке нет) — падающий, назван в сводке", falls("crashy"), said)
+    check("S4·wrongcode (rc=2, законен только 1) — падающий", falls("wrongcode"), said)
+    check("S4·steady (rc=0) не падающий", not falls("steady"), said)
+    check("S4·healed (упал, затем rc=0) не падающий", not falls("healed"), said)
+    check("S4·paused (rc=78, общий законный код) не падающий", not falls("paused"), said)
+    check("S4·verdict (rc=1, законен по полю записи) не падающий", not falls("verdict"), said)
+    check("S4·сводка: МЁРТВЫХ 2, живых 4", "живых 4, МЁРТВЫХ 2" in out, said)
+
+
 def main() -> int:
     print(f"демон: {DEMON}")
     if not DEMON.is_file():
@@ -302,7 +345,7 @@ def main() -> int:
         os.chmod(tmp, 0o700)
         tmp_path = Path(tmp).resolve()
         for case in (case_selftest_stays_in_stand, case_resolve_names_outside_table,
-                     case_threshold_multiplier):
+                     case_threshold_multiplier, case_failing_last_run):
             try:
                 case(tmp_path)
             except Exception as exc:  # noqa: BLE001 — упавший стенд — неудача пробы, а не зелёный

@@ -80,6 +80,13 @@ def load_json(path: Path, default):
         return default
 
 
+def read_library(args) -> dict:
+    """Библиотека для чтения: файл пакета плюс слой установки. Писать надо в файл пакета
+    (to_library), поэтому слитый вид туда не идёт."""
+    import process_library       # noqa: PLC0415
+    return process_library.with_local_layer(load_json(Path(args.library), {}))
+
+
 def replace_atomically(path: Path, text: str) -> None:
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".")
     with os.fdopen(fd, "w", encoding="utf-8") as handle:
@@ -110,7 +117,7 @@ def collect(args) -> int:
     max_mb = float(setting("PROCESS_LOAD_MAX_MB", str(DEFAULT_MAX_MB)))
     for name in process_load.RUN_FILES:
         process_load.rotate(str(logs / f"{name}.jsonl"), max_mb)
-    rules = process_load.load_rules(load_json(Path(args.library), {}))
+    rules = process_load.load_rules(read_library(args))
     state_path = Path(os.environ.get("PROCESS_LOAD_STATE") or logs / "process-load.state.json")
     snap = process_load.scan(args.proc, args.cgroup, rules)
     prev = load_json(state_path, None)
@@ -136,7 +143,7 @@ def hottest_unparsed(args, snap: dict, prev, rules: dict):
     prev_procs = (prev or {}).get("procs", {})
     labels = process_load.label_procs(snap, prev_procs, rules, args.proc,
                                       process_load.Transcripts(args.transcripts, time.time()))
-    known = {r["id"] for r in load_json(Path(args.library), {}).get("процессы", [])}
+    known = {r["id"] for r in read_library(args).get("процессы", [])}
     cpu, _ = process_load.cpu_seconds(snap, prev_procs)
     lost = [p for pid, p in snap["procs"].items() if p["cg"] != process_load.ROOT_CGROUP
             and (pid in labels and labels[pid] is None or pid not in labels and snap["buckets"][p["cg"]][0] not in known)]
@@ -254,7 +261,7 @@ def token_cells(ident: str, tokens: dict) -> list:
 
 
 def show_now(args) -> int:
-    rules = process_load.load_rules(load_json(Path(args.library), {}))
+    rules = process_load.load_rules(read_library(args))
     first = process_load.scan(args.proc, args.cgroup, rules)
     _, state = process_load.attribute(None, first, rules, args.proc,
                                       process_load.Transcripts(args.transcripts, time.time()))
@@ -292,7 +299,7 @@ def show_window(args, label: str) -> int:
     hours, now = HOURS[label], time.time()
     agg = process_load.aggregate(process_load.read_lines(args.logs), now, hours)
     shares = process_load.window_shares(args.logs, args.transcripts, args.proc, agg,
-                                        load_json(Path(args.library), {}), now, hours)
+                                        read_library(args), now, hours)
     tokens = shares["tokens"]
     print(switch_line())
     print(f"данных {round(agg['hours'])} ч из {hours}; отброшено строк со сбоем замера: {agg['dropped']}")
@@ -406,7 +413,7 @@ def view_window(args, hours: float, now: float, library: dict, accuracy: dict):
 
 def build_view(args) -> dict:
     now = time.time()
-    library = load_json(Path(args.library), {})
+    library = read_library(args)
     accuracy = {r["id"]: (r.get("доля_нагрузки") or {}).get("приписка", {}).get("способ")
                 for r in library.get("процессы", [])}
     windows = {name: view_window(args, hours, now, library, accuracy) for name, hours in VIEW_WINDOWS}

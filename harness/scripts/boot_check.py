@@ -121,7 +121,17 @@ def run(argv: list, timeout: int, cwd: str | None = None) -> tuple[int, str]:
 def check_unit(entry, mark):
     code, out = run(["systemctl", "is-active", entry["юнит"]], STEP_SEC)
     word = out.splitlines()[-1] if out else f"код {code}"
-    return ("ok", "active") if word == "active" else ("red", word)
+    if word == "active":
+        return "ok", "active"
+    if not entry.get("необязательный"):
+        return "red", word
+    # Чужую систему установка вправе не ставить (nginx в контейнере, фаервол — ufw), а is-active
+    # у отсутствующего юнита тоже «inactive»; LoadState отличает «нет» от «стоит». Свой
+    # отсутствующий юнит — раскладка не довела дело, это красный.
+    _, load = run(["systemctl", "show", "-p", "LoadState", "--value", entry["юнит"]], STEP_SEC)
+    if load.strip() == "not-found":
+        return "skip", "не установлен"
+    return "red", word
 
 
 def check_tmux(entry, mark):

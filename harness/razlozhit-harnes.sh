@@ -15,6 +15,21 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONF="${HARNESS_INSTALL_CONF:-/etc/harness/install.conf}"
 
+# Файлы пакета, которых раскладка сознательно не кладёт «по имени» в одноимённый
+# каталог проекта. Единственный список: и копирование (config/, hooks/), и
+# проверка раскладки --selftest читают его, а не маски расширений — маска
+# молча теряла файлы нового типа (process-library.json, *.jsonl в hooks/).
+LAYOUT_NOT_LAID=(
+  config/harness.conf         # кладётся отдельной строкой ниже: образец затирает прежний
+  config/logrotate-harness    # его место — /etc/harness, не проект
+  hooks/project-settings.json # кладётся как .claude/settings.json
+)
+not_laid() {  # $1=путь относительно пакета → 0, если в списке исключений
+  local x
+  for x in "${LAYOUT_NOT_LAID[@]}"; do [[ "$x" == "$1" ]] && return 0; done
+  return 1
+}
+
 if [[ "${1:-}" == "--selftest" ]]; then
   T=$(mktemp -d)
   # временный конфиг — больной случай: раскладка не должна требовать sudo и сети
@@ -61,6 +76,67 @@ EOF
            "$T/proj/harness/panel/server.py"; do
     [[ -f "$f" ]] || { echo "SELFTEST: нет $f"; ok_flag=0; }
   done
+  # Полнота раскладки: каждый файл пакета в раскладываемых каталогах лежит в
+  # проекте или назван в LAYOUT_NOT_LAID. Судит find по пакету и по проекту, а не
+  # маски копирования: сверка теми же масками слепа к файлам, которых маска не знает.
+  # Пара «каталог пакета : каталог проекта»; scripts/ — рекурсивно, остальное плоско.
+  n_pkg=0
+  for pair in config:harness/config hooks:scripts/hooks demons:harness/demons \
+              panel:harness/panel agents:.claude/agents scripts:scripts; do
+    src="${pair%%:*}"; dst="${pair#*:}"
+    # Плоские каталоги копируются глобом «*», он скрытых файлов (.gitkeep) не берёт
+    # и класть их в проект незачем — не судим; scripts/ идёт lay_tree и берёт всё.
+    depth=(-maxdepth 1 ! -name '.*'); [[ "$src" == scripts ]] && depth=()
+    [[ -d "$HERE/$src" ]] || { echo "SELFTEST: нет каталога пакета $src — полнота не судится"; ok_flag=0; continue; }
+    while IFS= read -r -d '' f; do
+      rel="${f#"$HERE/$src/"}"; n_pkg=$((n_pkg+1))
+      not_laid "$src/$rel" && continue
+      [[ -e "$T/proj/$dst/$rel" ]] || { echo "SELFTEST: файл пакета $src/$rel не доехал до проекта ($dst/$rel) и не назван в LAYOUT_NOT_LAID"; ok_flag=0; }
+    done < <(find "$HERE/$src" ${depth[@]+"${depth[@]}"} -name __pycache__ -prune -o -type f -print0)
+  done
+  (( n_pkg > 0 )) || { echo "SELFTEST: проверка полноты не нашла ни одного файла пакета"; ok_flag=0; }
+  # Перенос «замер» библиотеки процессов: у живого файла замер заполнен у a и b
+  # и есть лишняя запись c, у a ещё и правлено «название». После раскладки замер a, b
+  # прежний, c нет, «название» — пакетное. Больной вид: замер сброшен в «не измерено».
+  LIB="$T/proj/harness/config/process-library.json"
+  python3 -B - "$LIB" <<'PY'
+import json, sys
+path = sys.argv[1]
+lib = json.load(open(path, encoding="utf-8"))
+recs = [r for r in lib["процессы"] if "доля_нагрузки" in r]
+for r in recs[:2]:
+    r["доля_нагрузки"]["замер"] = {"дата": "2026-01-01", "неделя": {"id": r["id"]}}
+recs[0]["название"] = "СТАРОЕ"
+extra = json.loads(json.dumps(recs[0])); extra["id"] = "c-extra"
+lib["процессы"].append(extra)
+open(path, "w", encoding="utf-8").write(json.dumps(lib, indent=2, ensure_ascii=False) + "\n")
+PY
+  run_stand "$T/install.conf" "$T/harness.conf" >/dev/null || true
+  lib_verdict=$(python3 -B - "$LIB" "$HERE/config/process-library.json" <<'PY'
+import json, sys
+new = json.load(open(sys.argv[1], encoding="utf-8"))
+pkg = json.load(open(sys.argv[2], encoding="utf-8"))
+recs = [r for r in pkg["процессы"] if "доля_нагрузки" in r]
+by_id = {r["id"]: r for r in new["процессы"]}
+bad = []
+for r in recs[:2]:
+    got = by_id.get(r["id"], {}).get("доля_нагрузки", {}).get("замер")
+    if got != {"дата": "2026-01-01", "неделя": {"id": r["id"]}}:
+        bad.append(f"замер {r['id']} не перенесён: {got!r}")
+if "c-extra" in by_id:
+    bad.append("запись c-extra, которой нет в пакете, осталась")
+if by_id[recs[0]["id"]]["название"] != recs[0]["название"]:
+    bad.append("«название» не пакетное")
+if len(new["процессы"]) != len(pkg["процессы"]):
+    bad.append("число записей не равно пакетному")
+print("; ".join(bad))
+PY
+)
+  if [[ -z "$lib_verdict" ]]; then
+    echo "  ок    замер process-library.json перенесён по id, лишняя запись снята, поля пакета на месте"
+  else
+    echo "  ПЛОХО замер process-library.json: $lib_verdict"; ok_flag=0
+  fi
   # БОЛЬНОЙ СЛУЧАЙ C4: перезапись обязана менять inode. cp -f писал в тот же
   # номер файла, а его в этот момент исполняет живой диспетчер канала — bash
   # дочитывал подменённый на ходу скрипт и ломался на середине.
@@ -143,6 +219,48 @@ EOF
     || { echo "SELFTEST: затёрт живой CLAUDE.md проекта"; ok_flag=0; }
   [[ -f "$T/proj/harness/CLAUDE.md" ]] \
     || { echo "SELFTEST: эталон harness/CLAUDE.md не доставлен"; ok_flag=0; }
+  # Продукт со своим CLAUDE.md и своим settings.json: после двух раскладок строка
+  # импорта личности одна, свои ключи и хук продукта на месте, хуки харнеса есть.
+  # Больной вид: импорта нет (личность не грузится) или settings продукта заменён.
+  printf 'правила продукта без перевода строки' > "$T/proj/CLAUDE.md"
+  cat > "$T/proj/.claude/settings.json" <<'JSON'
+{"myKey": {"a": 1}, "permissions": {"allow": ["Bash(ls)"]},
+ "hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "product-own-hook.sh"}]}],
+           "MyEvent": [{"hooks": [{"type": "command", "command": "product-event.sh"}]}]}}
+JSON
+  run_stand "$T/install.conf" "$T/harness.conf" >/dev/null || true
+  run_stand "$T/install.conf" "$T/harness.conf" >/dev/null || true
+  merge_verdict=$(python3 -B - "$T/proj" <<'PY'
+import json, sys
+proj = sys.argv[1]
+bad = []
+text = open(f"{proj}/CLAUDE.md", encoding="utf-8").read()
+if not text.startswith("правила продукта без перевода строки\n"):
+    bad.append("текст продукта в CLAUDE.md тронут")
+if text.count("@harness/self/core.json") != 1:
+    bad.append(f"импорт личности встречается {text.count('@harness/self/core.json')} раз (ждали 1)")
+st = json.load(open(f"{proj}/.claude/settings.json", encoding="utf-8"))
+if st.get("myKey") != {"a": 1} or st["permissions"].get("allow") != ["Bash(ls)"]:
+    bad.append("свои ключи продукта потеряны")
+cmds = [h["command"] for g in st["hooks"].get("PreToolUse", []) for h in g["hooks"]]
+if "product-own-hook.sh" not in cmds:
+    bad.append("хук продукта потерян")
+if not any("guard_bash.py" in c for c in cmds):
+    bad.append("хука guard_bash.py харнеса нет")
+if cmds.count([c for c in cmds if "guard_bash.py" in c][0] if any("guard_bash.py" in c for c in cmds) else "") > 1:
+    bad.append("хук харнеса задвоен")
+if "MyEvent" not in st["hooks"]:
+    bad.append("чужое событие потеряно")
+if st["permissions"].get("defaultMode") != "bypassPermissions":
+    bad.append("defaultMode харнеса не выставлен")
+print("; ".join(bad))
+PY
+)
+  if [[ -z "$merge_verdict" ]]; then
+    echo "  ок    CLAUDE.md и settings.json продукта: импорт один, свои ключи и хуки на месте, хуки харнеса добавлены"
+  else
+    echo "  ПЛОХО слияние с продуктом: $merge_verdict"; ok_flag=0
+  fi
   grep -q "живой gitignore" "$T/proj/.gitignore" || { echo "SELFTEST: затёрт живой .gitignore"; ok_flag=0; }
 
   # ── БОЛЬНОЙ СЛУЧАЙ: образец harness.conf в проекте ────────────────────────
@@ -750,6 +868,28 @@ PY
   [[ -z "$temps" ]] || bad+=("временные файлы в harness/self/: $(tr '\n' ' ' <<<"$temps")")
   case_result "self-г)" "источник = цель: instance.yaml побайтно и по правам прежний, временных рядом нет" ${bad[@]+"${bad[@]}"}
 
+  # self-д) старый образец пакета на другом проекте → шаблон и .old-*; своя
+  #   заполненная личность (в т.ч. с пробелами в имени) и имя установки — цел.
+  #   Ловит: чужая личность остаётся навсегда; отложенный файл удаляется;
+  #   заполненная личность отодвигается на каждой раскладке.
+  C=$(new_case self-e); P="$C/proj"; bad=()
+  mkdir -p "$P/harness/self"
+  for sample in project project; do
+    rm -f "$P"/harness/self/instance.yaml.old-*
+    printf 'копия: %s\nроль: агент самого харнеса\n' "$sample" > "$P/harness/self/instance.yaml"
+    rc=0; out=$(run_stand "$C/install.conf" "$C/harness.conf" 2>&1) || rc=$?
+    [[ $rc -eq 0 ]] || bad+=("«$sample»: код $rc (ждали 0)")
+    cmp -s "$P/harness/self/instance.yaml" "$SELF_INSTANCE" || bad+=("образец «$sample» не заменён шаблоном")
+    grep -q '^роль: агент самого харнеса' "$P"/harness/self/instance.yaml.old-* 2>/dev/null \
+      || bad+=("образец «$sample»: старый файл не отложен в instance.yaml.old-*")
+  done
+  for own in 'копия: Магазин цветов' 'копия: стенд'; do
+    printf '%s\nроль: своя\n' "$own" > "$P/harness/self/instance.yaml"
+    rc=0; out=$(run_stand "$C/install.conf" "$C/harness.conf" 2>&1) || rc=$?
+    [[ "$(sed -n 2p "$P/harness/self/instance.yaml")" == "роль: своя" ]] || bad+=("«$own»: заполненная личность затронута")
+  done
+  case_result "self-д)" "старый образец на другом проекте → шаблон и .old-*; своя личность → файл цел" ${bad[@]+"${bad[@]}"}
+
   # ══ Ф-б: опись раскладки <проект>/.layout-manifest — случаи фб-а…фб-и ══════
   # Опись судится здесь своим разбором байт, не модулем описи: самотест не верит
   # тому, кого проверяет. Пакеты-копии A/B/… лежат в $FB; проект каждого случая —
@@ -784,15 +924,19 @@ def body(project):
         if len(fields) == 3:
             print(f"{fields[2]}\t{fields[0]}\t{fields[1]}")
 
-def expected(plan_out, *live):
-    """Ожидаемое тело по плану двери: без группы skills и без имён LIVE_SETTINGS."""
+def expected(plan_out, project, *live):
+    """Ожидаемое тело по плану двери: без группы skills и без имён LIVE_SETTINGS.
+    Источник-слияние (замер библиотеки, settings) лежал во временном каталоге
+    раскладчика и после неё удалён: его blob берётся у файла проекта, который
+    дверь только что записала из него."""
     skip = {f"harness/config/{name}" for name in live}
     for record in Path(plan_out).read_bytes().decode("utf-8").split("\0"):
         if not record:
             continue
         group, src, dest = record.split("\t")
         if group != "skills" and dest not in skip:
-            print(f"{dest}\t{blob(src)}\t{group}")
+            source = Path(src) if Path(src).exists() else Path(project) / dest
+            print(f"{dest}\t{blob(source)}\t{group}")
 
 def add(project, *pairs):
     """Дописать в тело строки (путь, группа) с blob файла проекта, тело — по пути."""
@@ -861,7 +1005,7 @@ PY
   rc=0; out=$(run_pkg "$HERE" "$C" HARNESS_LAYOUT_PLAN_OUT="$C/план.tsv" 2>&1) || rc=$?
   [[ $rc -eq 0 ]] || bad+=("код $rc (ждали 0): $(tail -2 <<<"$out" | tr '\n' ' ')")
   if [[ -s "$C/план.tsv" ]]; then
-    python3 -B "$FB/manifest.py" expected "$C/план.tsv" $LIVE_NAMES | LC_ALL=C sort > "$C/ждали"
+    python3 -B "$FB/manifest.py" expected "$C/план.tsv" "$P" $LIVE_NAMES | LC_ALL=C sort > "$C/ждали"
     tr '\0' '\n' < "$C/план.tsv" | cut -f1,3 > "$C/назначения"
   else
     bad+=("плана двери $C/план.tsv нет — тело судить не с чем"); : > "$C/ждали"; : > "$C/назначения"
@@ -2462,6 +2606,8 @@ for plan, root in zip(sys.argv[2::2], sys.argv[3::2]):
     for record in records:
         group, src, dest = record.split("\t")
         rel = os.path.relpath(os.path.realpath(src), root)
+        if rel.startswith("..") and os.path.basename(src) == "process-library.json":
+            rel = "harness/config/process-library.json"  # результат слияния замера во временном каталоге раскладки
         if rel.startswith(".."):
             wrong.append(f"{src}: источник вне корня пакета")
             continue
@@ -2612,7 +2758,8 @@ fi
 # без копии, и «проект не тронут» при отказе было нечем доказать.
 PLAN=$(mktemp)
 MARKS=""
-trap 'rm -f "$PLAN"; [[ -z "$MARKS" ]] || rm -rf "$MARKS"' EXIT
+LIBTMP=$(mktemp -d)
+trap 'rm -f "$PLAN"; rm -rf "$LIBTMP"; [[ -z "$MARKS" ]] || rm -rf "$MARKS"' EXIT
 
 plan_add() {  # $1=группа  $2=источник  $3=путь в проекте
   printf '%s\t%s\t%s\0' "$1" "$2" "${3#"$PROJECT_DIR/"}" >> "$PLAN"
@@ -2665,18 +2812,91 @@ polozhit_fajl config "$HERE/config/harness.conf" "$PROJECT_DIR/harness/config/ha
 LIVE_SETTINGS="pipeline.yaml queue.yaml models.yaml audit.yaml live-check-state.yaml"   # имя латиницей: bash не берёт кириллические имена
 # live-check-state.yaml — записи живой проверки ЭТОЙ установки: затирание
 # заменило бы их заготовкой из пакета, то есть потеряло бы работу (И-1).
-for f in "$HERE"/config/*.yaml "$HERE"/config/*.txt "$HERE"/config/*.gz; do
+for f in "$HERE"/config/*; do
   [[ -f "$f" ]] || continue
   name="$(basename "$f")"
+  not_laid "config/$name" && continue
   if [[ " $LIVE_SETTINGS " == *" $name "* ]] && [[ -f "$PROJECT_DIR/harness/config/$name" ]]; then
     echo "  $name — настройки владельца, не трогаю"
     continue
   fi
+  if [[ "$name" == process-library.json ]]; then
+    # Поле «замер» пишет живой process-dispatcher --в-библиотеку; пакет несёт
+    # «не измерено». Голая укладка сбрасывала бы замер каждым обновлением:
+    # переносим его по id записи, остальное — из пакета (записей, которых в
+    # пакете нет, не переносим). Файл пакета не в каноническом оформлении
+    # dispatcher'а (indent=2), поэтому идёт через шаг и на чистой установке: иначе
+    # вторая раскладка «перекрывала» бы его одним переформатированием.
+    # Не вышло — кладём пакетный файл как раньше.
+    if python3 -B - "$PROJECT_DIR/harness/config/$name" "$f" "$LIBTMP/$name" <<'PY'
+import json, sys
+old_path, pkg_path, out_path = sys.argv[1:4]
+try:
+    old = json.load(open(old_path, encoding="utf-8"))
+except FileNotFoundError:
+    old = {"процессы": []}
+pkg = json.load(open(pkg_path, encoding="utf-8"))
+measured = {r["id"]: r["доля_нагрузки"]["замер"] for r in old["процессы"]
+            if "замер" in r.get("доля_нагрузки", {})}
+for r in pkg["процессы"]:
+    if r["id"] in measured and "доля_нагрузки" in r:
+        r["доля_нагрузки"]["замер"] = measured[r["id"]]
+with open(out_path, "w", encoding="utf-8") as fh:
+    fh.write(json.dumps(pkg, indent=2, ensure_ascii=False) + "\n")
+PY
+    then
+      f="$LIBTMP/$name"
+    else
+      echo "  $name — замер из прежнего файла не перенесён (файл не разобран), кладу пакетный"
+    fi
+  fi
   polozhit_fajl config "$f" "$PROJECT_DIR/harness/config/$name"
 done
 # код — всегда обновляется
-polozhit_v hooks "$PROJECT_DIR/scripts/hooks" "$HERE"/hooks/*.py "$HERE"/hooks/*.sh
-polozhit_fajl settings "$HERE/hooks/project-settings.json" "$PROJECT_DIR/.claude/settings.json"
+HOOK_FILES=()
+for f in "$HERE"/hooks/*; do
+  not_laid "hooks/$(basename "$f")" || HOOK_FILES+=("$f")
+done
+polozhit_v hooks "$PROJECT_DIR/scripts/hooks" ${HOOK_FILES[@]+"${HOOK_FILES[@]}"}
+# settings.json продукта — не наш файл: слияние вместо замены. Хуки харнеса
+# добавляются (по команде внутри matcher), ключи и хуки продукта остаются;
+# permissions.defaultMode берётся харнесовский — подтверждения некому нажимать.
+# Когда слитое равно пакетному, кладётся сам файл пакета: байты и сверка с пакетом
+# прежние, и повторная раскладка ничего не «перекрывает» переформатированием.
+SETTINGS_SRC="$HERE/hooks/project-settings.json"
+if python3 -B - "$PROJECT_DIR/.claude/settings.json" "$SETTINGS_SRC" "$LIBTMP/settings.json" <<'PY'
+import json, sys
+old_path, pkg_path, out_path = sys.argv[1:4]
+try:
+    old = json.load(open(old_path, encoding="utf-8"))
+except FileNotFoundError:
+    old = {}
+pkg = json.load(open(pkg_path, encoding="utf-8"))
+merged = dict(old)
+for key, val in pkg.items():
+    if key not in ("hooks", "permissions"):
+        merged.setdefault(key, val)
+merged["permissions"] = {**old.get("permissions", {}), **pkg.get("permissions", {})}
+hooks = merged["hooks"] = {ev: list(groups) for ev, groups in old.get("hooks", {}).items()}
+for event, groups in pkg["hooks"].items():
+    have = hooks.setdefault(event, [])
+    for group in groups:
+        mine = next((g for g in have if g.get("matcher") == group.get("matcher")), None)
+        if mine is None:
+            have.append(group)
+            continue
+        known = {h.get("command") for h in mine.get("hooks", [])}
+        mine["hooks"] = mine.get("hooks", []) + [h for h in group["hooks"] if h.get("command") not in known]
+if merged != pkg:
+    with open(out_path, "w", encoding="utf-8") as fh:
+        fh.write(json.dumps(merged, indent=2, ensure_ascii=False) + "\n")
+PY
+then
+  [[ ! -f "$LIBTMP/settings.json" ]] || SETTINGS_SRC="$LIBTMP/settings.json"
+else
+  echo "  .claude/settings.json продукта не разобран как JSON — кладу пакетный (прежний уйдёт копией)"
+fi
+polozhit_fajl settings "$SETTINGS_SRC" "$PROJECT_DIR/.claude/settings.json"
 # Свои типы помощников (omitClaudeMd: старт без CLAUDE.md проекта): оболочка
 # читает их только из <проект>/.claude/agents.
 lay_tree agents "$HERE"/agents "$PROJECT_DIR/.claude/agents"
@@ -2753,6 +2973,28 @@ polozhit_fajl harness-top "$HERE"/CLAUDE.md "$PROJECT_DIR/harness/CLAUDE.md"
 # core.json — общее ядро копий, затирается всегда. instance.yaml — роль ЭТОЙ
 # копии, живые данные: кладётся шаблоном пакета только когда у цели его нет.
 polozhit_fajl self "$HERE/self/core.json" "$PROJECT_DIR/harness/self/core.json"
+# Старый образец пакета нёс личность самого харнеса. На чужом проекте это ложь:
+# файл откладывается рядом, кладётся пустой шаблон. Любая иная заполненная
+# личность — своя, её, например «Магазин цветов», не трогаем.
+inst="$PROJECT_DIR/harness/self/instance.yaml"
+if [[ -f "$inst" ]] && python3 - "$inst" "${PROJECT_NAME:-}" <<'PY'
+import sys, yaml
+try:
+    d = yaml.safe_load(open(sys.argv[1], encoding="utf-8")) or {}
+except Exception:
+    sys.exit(1)
+if not isinstance(d, dict):
+    sys.exit(1)
+# «project» — образец публичной 0.9.1, «project» — внутренний
+old_sample = (str(d.get("копия") or "").strip() in ("project", "project")
+          and str(d.get("роль") or "").strip() == "агент самого харнеса")
+sys.exit(0 if old_sample and sys.argv[2] and sys.argv[2] != "project" else 1)
+PY
+then
+  inst_old="$inst.old-$(date +%F-%H%M%S)"
+  mv "$inst" "$inst_old"
+  echo "  harness/self/instance.yaml — старый образец харнеса на проекте «$PROJECT_NAME», отложен в $(basename "$inst_old"), кладу шаблон"
+fi
 if [[ -f "$PROJECT_DIR/harness/self/instance.yaml" ]]; then
   echo "  harness/self/instance.yaml — роль этой копии, не трогаю"
 else
@@ -2858,7 +3100,23 @@ if [[ ! -f "$PROJECT_DIR/CLAUDE.md" ]]; then
   cp -f "$HERE"/CLAUDE.md "$PROJECT_DIR/CLAUDE.md"
   echo "CLAUDE.md создан из заготовки пакета (чистая установка)"
 else
-  echo "CLAUDE.md проекта не тронут (живой файл); эталон — harness/CLAUDE.md"
+  # В CLAUDE.md продукта дописываются только недостающие строки-импорты из
+  # CLAUDE.md пакета (личность, STATE, память): без них агент не загружает
+  # личность. Целиком @harness/CLAUDE.md не годится — вложенные @-пути
+  # считаются от каталога того файла, и импорты из harness/ ломались бы.
+  # У раскладки «с нуля» файл равен пакетному, дописывать нечего — идемпотентно.
+  mapfile -t IMPORTS < <(grep -E '^@' "$HERE"/CLAUDE.md | sed 's/[[:space:]]*$//')
+  MISSING=()
+  for line in "${IMPORTS[@]}"; do
+    grep -qxF -- "$line" "$PROJECT_DIR/CLAUDE.md" || MISSING+=("$line")
+  done
+  if (( ${#MISSING[@]} )); then
+    [[ -z "$(tail -c1 "$PROJECT_DIR/CLAUDE.md")" ]] || echo >> "$PROJECT_DIR/CLAUDE.md"
+    { echo; echo "<!-- харнес: личность агента и память -->"; printf '%s\n' "${MISSING[@]}"; } >> "$PROJECT_DIR/CLAUDE.md"
+    echo "CLAUDE.md проекта: дописаны импорты харнеса (${#MISSING[@]}); остальное не тронуто"
+  else
+    echo "CLAUDE.md проекта не тронут (живой файл, импорты харнеса на месте); эталон — harness/CLAUDE.md"
+  fi
 fi
 
 # живые данные — только если ещё нет
@@ -2904,16 +3162,12 @@ fi
 
 # Ротация логов харнеса. Заведено 10.09.2026 по ревизии: без неё $LOG_DIR
 # дорос до 121 МБ, а отдельные логи — до 7 МБ, и события в них тонули.
-# Тот же порядок, что у конфига порогов: живой файл не затирается, нет прав —
-# говорим, какой командой это чинится (П-11).
+# Только сверка: ставит файл установщик (П-11).
 if [[ "${HARNESS_SELFTEST:-0}" == 1 ]]; then
   : # /etc в селфтесте неприкосновенен
-elif [[ ! -f /etc/logrotate.d/harness ]]; then
-  if cp "$HERE/config/logrotate-harness" /etc/logrotate.d/harness 2>/dev/null; then
-    echo "ротация логов положена в /etc/logrotate.d/harness"
-  else
-    echo "ВНИМАНИЕ: нет прав на /etc/logrotate.d — выполните: sudo cp '$HERE/config/logrotate-harness' /etc/logrotate.d/harness"
-  fi
+elif ! cmp -s "$HERE/config/logrotate-harness" /etc/logrotate.d/harness; then
+  # /etc раскладчику (agent) не писать: файл ставит установщик под root, здесь только сверка.
+  echo "ВНИМАНИЕ: /etc/logrotate.d/harness нет или он не совпадает с пакетом — ставит установщик: sudo bash USTANOVIT.sh --resume"
 fi
 
 # pre-commit: симлинк, если репозиторий уже есть

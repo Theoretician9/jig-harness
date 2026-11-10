@@ -416,6 +416,38 @@ else
     sluchaj "БОЛЬНОЙ СЛУЧАЙ: выборка из одной записи — копия несёт harness/, чистая зелёная, мутация поймана" 1 "код $RC, вывод: $(printf '%s' "$OUT" | tr '\n' '|' | cut -c1-300)"
 fi
 
+# ── БОЛЬНОЙ СЛУЧАЙ 07.11.2026: ключ «проба#суффикс», проба читает карту проекта ──
+# test_events_cli.py#lib (Ф1б-1…6): суффикс записи уходил путём пробы — «мутацию
+# некуда подставить»; после этого чистая копия краснела: проба читает
+# ROOT/dev-map.yaml, а в копию шли только scripts/ и harness/.
+printf 'KARTA: 1\n' > "$ROOTS/dev-map.yaml"
+printf 'PRIZNAK=1\n' > "$ROOTS/scripts/mehanizm_karty.sh"
+cat > "$ROOTS/scripts/proba_karty.sh" <<'PROBA'
+#!/usr/bin/env bash
+here="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
+grep -q '^KARTA: 1$' "$here/../dev-map.yaml" || exit 1
+. "$here/mehanizm_karty.sh"
+[ "${PRIZNAK:-}" = 1 ]
+PROBA
+cat > "$ROOTS/probe-mutations.yaml" <<'YAML'
+пробы:
+  scripts/proba_karty.sh#suffiks:
+    механизм: scripts/mehanizm_karty.sh
+    мутация: 's/^PRIZNAK=1/PRIZNAK=0/'
+    мутация_случай: 'проба с суффиксом читает карту'
+    доказательство: bash scripts/proba_karty.sh
+    подмена: из-копии
+YAML
+env -u MECH_FILTER LOG_DIR="$ROOTS" MUT_CACHE_DAYS=0 \
+    HARNESS_INVARIANTS="$ROOTS/invariants.yaml" HARNESS_PROBE_MUTATIONS="$ROOTS/probe-mutations.yaml" \
+    timeout 120 bash "$ROOTS/scripts/mutation-probe.sh" --механизм scripts/mehanizm_karty.sh > "$ROOTS/vyvod.txt" 2>&1
+RC=$?; OUT=$(cat "$ROOTS/vyvod.txt")
+if [ "$RC" = 0 ] && printf '%s' "$OUT" | grep -q "покраснели как надо 1, дыр 0"; then
+    sluchaj "БОЛЬНОЙ СЛУЧАЙ: запись «проба#суффикс» из копии, карта проекта в копии — мутация поймана" 0 ""
+else
+    sluchaj "БОЛЬНОЙ СЛУЧАЙ: запись «проба#суффикс» из копии, карта проекта в копии — мутация поймана" 1 "код $RC, вывод: $(printf '%s' "$OUT" | tr '\n' '|' | cut -c1-300)"
+fi
+
 AFTER=$(md5sum "$LIVE_INV" "$LIVE_PROBES" 2>/dev/null)
 if [ "$BEFORE" = "$AFTER" ]; then
     sluchaj "боевые носители не тронуты" 0 ""

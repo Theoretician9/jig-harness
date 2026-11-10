@@ -24,7 +24,8 @@
 Прогон:
     limit_mark.py --поставить limit|nemota|blocked   # 0 — поставил, 1 — уже стояла
     limit_mark.py --стоит-ли                 # 0 — метка есть (ЛЮБАЯ)
-    limit_mark.py --лимит-держится           # 0 — держится ЛИМИТ (вопрос двери канала)
+    limit_mark.py --лимит-держится [--транскрипт <путь>]   # 0 — держится ЛИМИТ (вопрос двери канала)
+    limit_mark.py --снять-после-входа [--транскрипт <путь>] # 0 — метку снял: после неё сменили вход
     limit_mark.py --повод                    # печатает повод стоящей метки; 1 — метки нет
     limit_mark.py --снять [--не-удалять] [--транскрипт <путь|sid>]   # печатает: <простой_мин> <повод> <весть>
     limit_mark.py --ответ-после-метки --транскрипт <путь|sid>   # 0 — работа после метки была
@@ -179,7 +180,36 @@ def прочитать() -> tuple[int, str, int]:
     return когда, повод, сброс
 
 
-def лимит_держится() -> bool:
+def вход_после(путь: str | None, момент: float) -> bool:
+    """Был ли в транскрипте смены успешный `/login` НОВЕЕ момента.
+
+    Лимит принадлежит входу: после смены входа отказ старого аккаунта ничего
+    не говорит о новом. Признак — вывод команды «Login successful» с временем
+    записи; голый текст в чужих записях (ответ модели, цитата) не считается.
+    """
+    if not путь:
+        return False
+    судья = _судья()
+    for запись in судья._lines(путь, ("Login successful",)):
+        сообщение = запись.get("message")
+        текст = сообщение.get("content") if isinstance(сообщение, dict) else None
+        if запись.get("type") != "user" or not isinstance(текст, str) \
+                or "<local-command-stdout>Login successful" not in текст:
+            continue
+        когда = судья._epoch(запись.get("timestamp"))
+        if когда is not None and когда > момент:
+            return True
+    return False
+
+
+def транскрипт_смены() -> str | None:
+    """Транскрипт СМЕНЫ проекта (не headless-прогона); нет каталога — None."""
+    судья = _судья()
+    папка = судья.project_transcripts()
+    return судья.shift_transcript(папка) if папка else None
+
+
+def лимит_держится(транскрипт: str | None = None) -> bool:
     """Держится ли ЛИМИТ прямо сейчас — вопрос двери канала, не «есть ли файл».
 
     Три различения, каждое куплено находкой ревью 17.10.2026 (F-01):
@@ -202,12 +232,32 @@ def лимит_держится() -> bool:
     когда, повод, _ = прочитать()
     if повод != "limit":
         return False
-    return int((time.time() - когда) // 60) < УСТАРЕЛА_МИН
+    if int((time.time() - когда) // 60) >= УСТАРЕЛА_МИН:
+        return False
+    return not вход_после(транскрипт or транскрипт_смены(), когда)
+
+
+def снять_после_входа(транскрипт: str | None = None) -> bool:
+    """Снять метку лимита, если после неё сменили вход. True — снята.
+
+    Замкнутый круг 09.11.2026: метку снимает только ответ смены, а смену к
+    ответу будит толчок, который метка же и закрыла.
+    """
+    if not файл().exists() or прочитать()[1] != "limit":
+        return False
+    if not вход_после(транскрипт or транскрипт_смены(), прочитать()[0]):
+        return False
+    for имя in (ИМЯ, ПИНОК):
+        try:
+            (каталог() / имя).unlink()
+        except OSError:
+            pass
+    return True
 
 
 def _час(сброс: int) -> str:
     """Час обновления в 24-часовом формате и в поясе ВЛАДЕЛЬЦА."""
-    момент = datetime.datetime.fromtimestamp(сброс, datetime.UTC)
+    момент = datetime.datetime.fromtimestamp(сброс, datetime.timezone.utc)
     пояс = пояс_владельца()
     if пояс:
         try:
@@ -444,6 +494,32 @@ def _selftest() -> int:
             проба("и поле сброса у такой метки нулевое", прочитать()[2], 0)
             снять()
 
+            # БОЛЬНОЙ СЛУЧАЙ 09.11.2026: метка встала за секунды до /login, и
+            # толчки владельца закрывались до сброса лимита СТАРОГО входа.
+            def вход(секунд_назад: float) -> str:
+                момент = datetime.datetime.fromtimestamp(
+                    time.time() - секунд_назад, datetime.timezone.utc)
+                return json.dumps({"type": "user", "timestamp": момент.isoformat(), "message": {
+                    "role": "user",
+                    "content": "<local-command-stdout>Login successful</local-command-stdout>"}}) + "\n"
+            смена = Path(двор) / "вход.jsonl"
+            смена.write_text(вход(600), encoding="utf-8")
+            файл().write_text(f"{int(time.time()) - 300} limit 0\n", encoding="utf-8")
+            проба("вход ДО метки — лимит держится", лимит_держится(str(смена)), True)
+            проба("вход ДО метки — метка не снимается", снять_после_входа(str(смена)), False)
+            смена.write_text(вход(600) + вход(100), encoding="utf-8")
+            проба("БОЛЬНОЙ СЛУЧАЙ: вход ПОСЛЕ метки — лимит не держится",
+                  лимит_держится(str(смена)), False)
+            проба("вход ПОСЛЕ метки — метка снимается", снять_после_входа(str(смена)), True)
+            проба("и файла метки больше нет", файл().exists(), False)
+            смена.write_text(json.dumps({"type": "assistant", "timestamp": datetime.datetime.now(
+                datetime.timezone.utc).isoformat(), "message": {"role": "assistant",
+                "content": "<local-command-stdout>Login successful"}}) + "\n", encoding="utf-8")
+            файл().write_text(f"{int(time.time()) - 300} limit 0\n", encoding="utf-8")
+            проба("цитата про вход вне вывода команды входом не считается",
+                  лимит_держится(str(смена)), True)
+            снять()
+
             # Простой — от последней РАБОТЫ до первой после метки, а не от метки.
             def запись(минут_назад: float) -> str:
                 момент = datetime.datetime.fromtimestamp(
@@ -503,7 +579,10 @@ def main() -> int:
         return 0
     if "--лимит-держится" in доводы:
         # Вопрос двери канала: 0 — лимит держится, владельцу молчим.
-        return 0 if лимит_держится() else 1
+        return 0 if лимит_держится(_довод(доводы, "--транскрипт") or None) else 1
+    if "--снять-после-входа" in доводы:
+        # 0 — метка снята: вход сменили после неё, лимит старого аккаунта не в счёт.
+        return 0 if снять_после_входа(_довод(доводы, "--транскрипт") or None) else 1
     if "--сброс-стоящей" in доводы:
         if not файл().exists():
             return 1

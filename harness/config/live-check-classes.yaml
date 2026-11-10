@@ -885,3 +885,23 @@
     класс: D
   "scripts/test_events_gates.py":
     класс: D
+  "scripts/test_session_state_containers.sh":
+    класс: D
+  "scripts/test_ack_retry.sh":
+    класс: D
+  "scripts/test_precommit_accumulates.sh":
+    класс: D
+  "scripts/test_installer_units.sh":
+    класс: D
+  "scripts/test_installer_paths.sh":
+    класс: D
+  "scripts/test_warden_no_transcripts.sh":
+    класс: D
+  "scripts/test_agent_pane_log.sh":
+    класс: D
+  "scripts/test_first_task_product_path.sh":
+    класс: D
+  "scripts/test_session_known_failed.sh":
+    класс: D
+  "scripts/lib/agent_pane_log.sh":
+    класс: C2

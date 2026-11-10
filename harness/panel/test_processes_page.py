@@ -505,6 +505,7 @@ with tempfile.TemporaryDirectory(prefix="proba-processy-") as tmp:
         PANEL_SECRETS_DIR=str(secrets), PANEL_STATE_DIR=str(logs),
         HARNESS_PROCESS_LIBRARY=str(libdir / "process-library.yaml"),
         HARNESS_PROCESS_LIBRARY_JSON=str(libdir / "process-library.json"),
+        HARNESS_PROCESS_LIBRARY_LOCAL="/nonexistent/harness-probe/process-library.local.json",
         HARNESS_USTROJSTVO=str(libdir / "mechanisms.yaml"),
         PANEL_CGROUP_CHECKS=str(cgroup), PANEL_SYSTEMCTL=str(systemctl))
     view_path = logs / "process-dispatcher-view.json"
@@ -863,7 +864,8 @@ with tempfile.TemporaryDirectory(prefix="proba-processy-") as tmp:
     # 12. Высота на телефоне 390×844 в браузере: живая библиотека, витрина полного размера.
     live_records = json.loads(SOURCE_JSON.read_text(encoding="utf-8"))["процессы"]
     live_pairs = [(r["id"], r["название"]) for r in live_records][:57]
-    door = {"HARNESS_PROCESS_LIBRARY": str(SOURCE_YAML), "HARNESS_PROCESS_LIBRARY_JSON": str(SOURCE_JSON)}
+    door = {"HARNESS_PROCESS_LIBRARY": str(SOURCE_YAML), "HARNESS_PROCESS_LIBRARY_JSON": str(SOURCE_JSON),
+            "HARNESS_PROCESS_LIBRARY_LOCAL": "/nonexistent/harness-probe/process-library.local.json"}
     if SOURCE_MECHANISMS:
         door["HARNESS_USTROJSTVO"] = str(SOURCE_MECHANISMS)
     saved = {k: os.environ[k] for k in door}

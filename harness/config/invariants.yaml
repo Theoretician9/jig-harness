@@ -39,7 +39,7 @@
     признак: "дамп завершён"
     срок_дней: 2
     мутация:
-      - "s/tail -c 4096 \"$1\" 2>\\/dev\\/null | grep -q 'PostgreSQL database dump complete'/true/"
+      - "s#^    tail -c 4096 \"$1\" 2>/dev/null | grep -qF -- \"$(dump_end_marker \"$1\")\"$#    true#"
       - "s#^    \\[ \"$ne_smog\" = 0 \\]$#    return 0#"
       - "s#^if \\[ \"${ROT_OTKAZ:-0}\" != 0 \\]; then$#if false; then#"
       - "s#^             -name \"$OWN_COPY_MASK\" 2>/dev/null)$#             2>/dev/null)#"

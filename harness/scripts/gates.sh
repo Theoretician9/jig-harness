@@ -123,6 +123,16 @@ for item in checks:
         "$(date -Is)" "$REZHIM" "$GREEN" "$RED" >> "$ITOG_LOG" 2>/dev/null || true
     exit "$RED"
 fi
+# Производные документы на свежей установке не лежат: раскладчик их не кладёт,
+# собирает их только update.py. Без этого первые же ночные ворота краснеют на
+# «документ разошёлся с реестром», хотя расходиться нечему — документа просто
+# нет. Собираем ТОЛЬКО отсутствующий: существующий, правленный руками, должен
+# остаться красным.
+for sborka in "build-registry-doc.py:docs/УСТРОЙСТВО-ХАРНЕСА.md" \
+              "build-live-check-list.py:docs/живая-проверка-механизмов.md"; do
+    [ -e "$ROOT/${sborka#*:}" ] || python3 "scripts/${sborka%%:*}" >/dev/null 2>&1 \
+        || echo "первая сборка ${sborka#*:} не удалась — гейт ниже покажет причину"
+done
 # Корень — аргументом: без него гейт берёт PROJECT_DIR паспорта и в прогоне по
 # снимку судил бы живое дерево.
 проверка "секреты"        bash scripts/check-secrets.sh "$ROOT"
@@ -159,6 +169,13 @@ fi
 проверка "кто на порту"   python3 scripts/test_who_is_on_port.py
 проверка "права наружу"   bash scripts/test_panel_root.sh
 проверка "установка docker" bash scripts/test_install_docker.sh
+проверка "шаблоны юнитов установщика" bash scripts/test_installer_units.sh
+проверка "пути установщика на обновлении" bash scripts/test_installer_paths.sh
+проверка "хук копит провалы" bash scripts/test_precommit_accumulates.sh
+проверка "контейнеры в отчёте старта" bash scripts/test_session_state_containers.sh
+проверка "первая задача: путь продукта" bash scripts/test_first_task_product_path.sh
+проверка "известный отказ хоста" bash scripts/test_session_known_failed.sh
+проверка "повтор квитанции" bash scripts/test_ack_retry.sh
 проверка "глубина автоматом" python3 scripts/test_depth_automatic.py
 проверка "задание и метка" python3 scripts/check-job-and-mark.py
 проверка "метка-самотест" python3 scripts/check-job-and-mark.py --selftest
@@ -621,6 +638,9 @@ if [ "${1:-}" = "--всё" ]; then
     # Пульс сторожа слышен владельцу (03.11.2026): судья лимита не держит ложную метку,
     # сторож сам шлёт статус, «молчу» пишется в лог с причиной. Своя tmux-сессия — за --всё.
     проверка "пульс сторожа" bash scripts/test_warden_pulse.sh
+    # Сторож без транскриптов и журнал панели агента: свои tmux-сессии на стенде — за --всё.
+    проверка "сторож без транскриптов" bash scripts/test_warden_no_transcripts.sh
+    проверка "журнал панели агента" bash scripts/test_agent_pane_log.sh
     # Уборка стендов проб диспетчера (04.11.2026): прерванная проба не оставляет
     # диспетчеров-сирот. Гоняет пять проб с настоящим диспетчером — минуты, за --всё.
     проверка "уборка стендов проб" bash scripts/test_probe_stand_sweep.sh

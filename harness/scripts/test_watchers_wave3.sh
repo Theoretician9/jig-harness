@@ -533,8 +533,10 @@ stubs_session-warden() {
     cat > "$p/scripts/start-agent.sh" <<SH
 #!/usr/bin/env bash
 # Пусковой скрипт стенда: ok — сессия с подставным агентом, иначе отказ.
+# Агент в каталоге проекта, как у боевого start-agent.sh: иначе сторож законно
+# зовёт «запущен не из проекта» и шаг судит не ту ветку.
 [ "\${STAND_START:-fail}" = ok ] || exit 1
-tmux new-session -d -s proba-w3 "$s/claude 900"
+tmux new-session -d -s proba-w3 -c "$p" "$s/claude 900"
 SH
     chmod +x "$p/scripts/start-agent.sh"
     cat >> "$s/harness.conf" <<CONF

@@ -914,8 +914,7 @@ def обновления() -> dict:
     экране обязаны различаться.
     """
     версия = {}
-    файл = Path(os.environ.get("HARNESS_VERSION_FILE")
-                or Path(settings.конф.конфиг()["STATE_DIR"]) / "версия-харнеса")
+    файл = Path(settings.конф.version_file())
     try:
         версия = json.loads(файл.read_text(encoding="utf-8"))
     except (OSError, ValueError):

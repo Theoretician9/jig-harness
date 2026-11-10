@@ -737,7 +737,13 @@ def outside_line(row, part, neighbours, conf=None):
     effect = f"задевает {' и '.join(touches)}" if touches else part.get("риск", "")
     door = part.get("установка") or {}
     own = door.get("дверь") == "окно-ротации" and (conf or {}).get(door.get("ключ", ""), "") == "1"
-    decision = "встанет сама при ближайшей смене сессии без помощников" if own else "решаешь ты"
+    # Дверь «окно-ротации» при выключенном ключе значит одно: у агента нет права
+    # на перезагрузку. «Решаешь ты» молчало бы о том, КАК, и звучало бы так, будто
+    # агент может, но спрашивает.
+    reboot_by_owner = door.get("дверь") == "окно-ротации" and not own
+    decision = ("встанет сама при ближайшей смене сессии без помощников" if own
+                else "перезагрузить может только ты, командой `sudo reboot` на сервере" if reboot_by_owner
+                else "решаешь ты")
     return f"Вне номеров: {row['имя']}{waiting} ({row['текущая']} → {row['свежая']}), {effect} — {decision}."
 
 

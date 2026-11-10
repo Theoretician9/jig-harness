@@ -61,7 +61,53 @@ fi
     LC_ALL=C.UTF-8 awk -v n="$1" '{print substr($0, 1, n)}'
 }
 
+# Сессия, запущенная не из PROJECT_DIR, не загружает CLAUDE.md, память и скилы
+# проекта: агент работает вслепую и не знает об этом. Предупреждение — первой
+# строкой, пока оно не утонуло в отчёте.
+own_dir=$(readlink -f "$project_dir" 2>/dev/null || echo "$project_dir")
+# Подкаталог проекта — свой: claude поднимается по дереву к CLAUDE.md проекта.
+if [ -n "$project_dir" ] && case "$(pwd -P)/" in "$own_dir"/*) false ;; *) true ;; esac; then
+  echo "⚠⚠⚠ СЕССИЯ ЗАПУЩЕНА НЕ ИЗ $project_dir (сейчас: $(pwd -P)): CLAUDE.md, память и скилы проекта НЕ загружены. Скажи владельцу и перезапусти: cd $project_dir && claude"
+fi
+
 echo "=== $project_name: состояние на старте сессии ==="
+
+# --- ПЕРВАЯ ЗАДАЧА НОВОЙ УСТАНОВКИ: личность копии пуста ---
+# Пакет кладёт instance.yaml пустым: личность «строитель харнеса» на чужом
+# проекте ложна. Заполняет агент после вопроса владельцу в канале —
+# интерактивных вопросов в терминале нет. Путь к коду продукта нужен только
+# копии-проекту: у агента самого харнеса продукта нет, PRODUCT_PATH пуст законно.
+# PRODUCT_DIR — имя compose-проекта, а не путь: его заполненность пути не заменяет.
+# Старым образцом считается «копия: project» (внутренний) или «копия:
+# project» (публичная 0.9.1) + роль агента харнеса на установке с другим именем (тот же признак, что у раскладки); любая иная
+# заполненная личность своя. Ошибка чтения — молчим (fail-open).
+if [ -n "$project_dir" ]; then
+  first_task=$(python3 - "$project_dir/harness/self/instance.yaml" "${PRODUCT_PATH:-}" "${PROJECT_NAME:-}" <<'PY' 2>/dev/null
+import sys, yaml
+path, product, name = sys.argv[1], sys.argv[2].strip(), sys.argv[3].strip()
+try:
+    data = yaml.safe_load(open(path, encoding="utf-8")) or {}
+except OSError:
+    sys.exit(0)
+empty = [k for k in ("копия", "роль", "цель") if not str(data.get(k) or "").strip()]
+role = str(data.get("роль") or "").strip()
+if empty:
+    print("instance.yaml пуст: " + ", ".join(empty))
+elif (str(data["копия"]).strip() in ("project", "project") and role == "агент самого харнеса"
+      and name and name != "project"):
+    print("instance.yaml — старый образец пакета (агент самого харнеса) на проекте «%s»" % name)
+elif role != "агент самого харнеса" and not product:
+    print("PRODUCT_PATH пуст (путь к коду продукта не задан)")
+PY
+)
+  if [ -n "$first_task" ]; then
+    echo "‼ ПЕРВАЯ ЗАДАЧА, ДО ВСЕГО ОСТАЛЬНОГО ($first_task):"
+    echo "  спроси владельца в канале назначение копии (что за проект, какая цель)"
+    echo "  и путь к коду продукта; запиши ответ в harness/self/instance.yaml"
+    echo "  (копия, роль, цель, обратная_связь) и в PRODUCT_PATH (harness.conf)."
+    echo "  Вопросов в терминале не задавай — только через канал владельца."
+  fi
+fi
 
 # --- ПАУЗА ВЛАДЕЛЬЦА: первой строкой, до всего остального ---
 # 21.09.2026 владелец нажал «паузу», а смена работала ещё полчаса. Физически её
@@ -190,12 +236,26 @@ fi
 
 # --- упавшие systemd-юниты ---
 if command -v systemctl >/dev/null 2>&1; then
-  failed_units=$(systemctl list-units --failed --no-legend --plain 2>/dev/null | awk '{print $1}' | tr '\n' ' ')
+  # Известный отказ — юнит хостинга (cloud-init на bootcmd), чинить который харнесу нечем:
+  # перечень в данных boot-check.yaml, он не краснит смену, но и не скрыт.
+  known_units=$(python3 - "$project_dir/harness/config/boot-check.yaml" <<'PY' 2>/dev/null
+import sys, yaml
+try:
+    for юнит in (yaml.safe_load(open(sys.argv[1], encoding="utf-8")) or {}).get("известный_отказ") or []:
+        print(юнит)
+except OSError:
+    pass
+PY
+)
+  all_failed=$(systemctl list-units --failed --no-legend --plain 2>/dev/null | awk '{print $1}')
+  failed_units=$(printf '%s\n' "$all_failed" | grep -vxF -f <(printf '%s\n' "$known_units") | grep . | tr '\n' ' ' || true)
+  known_failed=$(printf '%s\n' "$all_failed" | grep -xF -f <(printf '%s\n' "$known_units") | grep . | tr '\n' ' ' || true)
   if [ -n "${failed_units// /}" ]; then
     echo "⚠ упавшие systemd-юниты: $failed_units"
   else
     echo "systemd: упавших юнитов нет"
   fi
+  [ -z "${known_failed// /}" ] || echo "известный отказ хоста (не чинится харнесом): $known_failed"
 else
   echo "⚠ systemctl недоступен — состояние юнитов не проверено"
 fi
@@ -203,7 +263,8 @@ fi
 # --- контейнеры (если docker есть) ---
 if command -v docker >/dev/null 2>&1; then
   down=$( { docker ps --filter status=restarting --format '{{.Names}}(restarting)' 2>/dev/null; \
-           docker ps -a --filter status=exited --format '{{.Names}}(exited)' 2>/dev/null; } | tr '\n' ' ')
+           docker ps -a --filter status=exited --format '{{.Names}} {{.Status}}' 2>/dev/null \
+             | sed -n 's/^\([^ ]*\) Exited (\([1-9][0-9]*\)).*/\1(exited \2)/p'; } | tr '\n' ' ')
   if [ -n "${down// /}" ]; then
     echo "⚠ контейнеры не в строю: $down"
   else

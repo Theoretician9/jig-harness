@@ -212,6 +212,12 @@ def panel_state_dir() -> str:
     return конфиг()["PANEL_STATE_DIR"]
 
 
+def version_file() -> str:
+    """Версию пишет обновление от имени агента, а STATE_DIR принадлежит root:
+    место — каталог состояния панели (агентский, панель его и читает)."""
+    return os.environ.get("HARNESS_VERSION_FILE") or os.path.join(panel_state_dir(), "версия-харнеса")
+
+
 def backup_dir() -> Path:
     """Каталог копий — из ключа BACKUP_DIR, умолчания нет.
 

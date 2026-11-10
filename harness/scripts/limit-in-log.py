@@ -560,8 +560,8 @@ def _selftest() -> int:
           лимит_в_тексте("connection reset by peer") is None)
 
     сейчас = time.time()
-    давно = datetime.datetime.fromtimestamp(сейчас - 1800, datetime.UTC).isoformat()
-    недавно = datetime.datetime.fromtimestamp(сейчас - 120, datetime.UTC).isoformat()
+    давно = datetime.datetime.fromtimestamp(сейчас - 1800, datetime.timezone.utc).isoformat()
+    недавно = datetime.datetime.fromtimestamp(сейчас - 120, datetime.timezone.utc).isoformat()
 
     with tempfile.TemporaryDirectory() as врем:
         путь = os.path.join(врем, "проба.jsonl")

@@ -47,6 +47,7 @@ say() { printf '%s  %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"; }
 # в диспетчере канала, а третьей копией стали бы у ежеминутного сторожа лимита;
 # подключается ВЫШЕ самотеста, потому что самотест их и зовёт.
 source "$HARNESS_SCRIPTS/lib/pane.sh"
+source "$HARNESS_SCRIPTS/lib/agent_pane_log.sh"
 
 # ── диалог «Background work is running» перехватывает «/exit» ───────────────
 # Улика 09.09.2026 (снимок владельца): «/exit» подан, а вместо выхода — вопрос
@@ -1008,8 +1009,9 @@ knopka_revizii() {  # $1 = файл-флага, $2 = путь демона ре�
     # панель, снимает сторож — и обещание «в ближайшую проверку» правдиво.
     [ -f "$1" ] || return 0
     # Выключатель фоновых: погашенный запуск не должен съесть кнопку молча.
+    # HARNESS_SCRIPTS, а не PROJECT_DIR: самотест зовёт её до загрузки паспорта.
     local gate=0
-    "$PROJECT_DIR/scripts/run-background.sh" --разрешён project-revision || gate=$?
+    "$HARNESS_SCRIPTS/run-background.sh" --разрешён project-revision || gate=$?
     if [ "$gate" -eq 1 ]; then
         say "кнопка ревизии: ревизия отложена выключателем — флаг остаётся"
         return 0
@@ -1020,7 +1022,7 @@ knopka_revizii() {  # $1 = файл-флага, $2 = путь демона ре�
         return 1
     fi
     say "кнопка ревизии: запускаю $2 --сейчас"
-    setsid nohup "$PROJECT_DIR/scripts/run-background.sh" project-revision -- bash "$2" --сейчас >> "$LOG_DIR/project-revision.log" 2>&1 < /dev/null &
+    setsid nohup "$HARNESS_SCRIPTS/run-background.sh" project-revision -- bash "$2" --сейчас >> "$LOG_DIR/project-revision.log" 2>&1 < /dev/null &
     return 0
 }
 
@@ -1142,6 +1144,60 @@ check_two_agents() {
     return 0
 }
 
+# Агент вышел вскоре после ввода команды запуска — владельцу тревога с хвостом
+# панели. Время выхода — по последней записи в журнал панели: сторож приходит
+# раз в 10 минут и сам момент выхода не видит. Говорится один раз на метку
+# запуска, и ДО повторного подъёма: он перезапишет метку.
+early_exit_alarm() {
+    local started="$LOG_DIR/$AGENT_STARTED_NAME" told="$LOG_DIR/agent-early-exit.told" file="$LOG_DIR/$AGENT_PANE_LOG_NAME"
+    local at last tail_text
+    [ -s "$started" ] && [ -s "$file" ] || return 0
+    at=$(cat "$started" 2>/dev/null); [[ "$at" =~ ^[0-9]+$ ]] || return 0
+    [ "$(cat "$told" 2>/dev/null)" = "$at" ] && return 0
+    if tmux has-session -t "$TMUX_SESSION" 2>/dev/null && pane_is_agent "$(pane_cmd)"; then return 0; fi
+    last=$(stat -c '%Y' "$file")
+    # Вывод должен быть ПОСЛЕ ввода команды: иначе это хвост прошлого запуска.
+    [ "$last" -ge "$at" ] && [ $(( last - at )) -le "$AGENT_EARLY_EXIT_SEC" ] || return 0
+    tail_text=$(pane_log_tail "$LOG_DIR" 15)
+    if tg_send "Агент вышел через $(( last - at < 0 ? 0 : last - at )) с после запуска (порог ${AGENT_EARLY_EXIT_SEC} с) — он не удержался в панели. Последние строки панели:
+${tail_text:-(журнал панели пуст)}" --несмотря-на-лимит --task session-warden:early-exit; then
+        printf '%s' "$at" > "$told"
+    else
+        say "тревога о раннем выходе агента не ушла — повторю в следующем круге"
+    fi
+    return 0
+}
+
+# Каталог, из которого запущен claude в панели; пусто — агента в панели нет.
+# Берётся у самого процесса (/proc/<pid>/cwd): панель и оболочка могут стоять в
+# одном каталоге, а claude — запущен из другого.
+agent_cwd() {
+    local queue pid first
+    queue=$(tmux display-message -p -t "$TMUX_SESSION" '#{pane_pid}' 2>/dev/null) || return 0
+    while [ -n "$queue" ]; do
+        pid="${queue%% *}"; first="$queue"
+        [ "$first" = "$pid" ] && queue="" || queue="${first#* }"
+        case "$(cat "/proc/$pid/comm" 2>/dev/null)" in
+            claude|node) readlink "/proc/$pid/cwd" 2>/dev/null; return 0 ;;
+        esac
+        queue="$queue $(pgrep -P "$pid" 2>/dev/null | tr '\n' ' ')"
+        queue="${queue# }"
+    done
+    return 0
+}
+
+# 0 — claude в панели запущен не из PROJECT_DIR (AGENT_CWD — где он стоит).
+agent_cwd_wrong() {
+    local cwd
+    AGENT_CWD=""
+    cwd=$(agent_cwd)
+    [ -n "$cwd" ] || return 1
+    # Подкаталог проекта — свой: claude поднимается по дереву к CLAUDE.md проекта.
+    case "$cwd/" in "$(readlink -f "$PROJECT_DIR")"/*) return 1 ;; esac
+    AGENT_CWD="$cwd"
+    return 0
+}
+
 # Подъём агента после ротации (Б-4а). Команда запуска — только в оболочку:
 # в чужой процесс (редактор, зависший claude) её слать так же опасно.
 #
@@ -1195,8 +1251,10 @@ start_agent() {
             # вместе с агентом и выбрасывает приаттаченного владельца из tmux
             # (улика 13.08.2026 — та же, что в scripts/start-agent.sh).
             tmux new-session -d -s "$TMUX_SESSION" -c "$PROJECT_DIR" 8>&- || return 1
+            pane_log_attach "$TMUX_SESSION" "$LOG_DIR"
             pane_command keys "$zapusk" Enter || return 1
         fi
+        agent_started_mark "$LOG_DIR"
         while [ "$waited" -lt "$AGENT_START_TIMEOUT_SEC" ]; do
             sleep 5; waited=$((waited + 5))
             case "$(pane_cmd)" in claude|node) say "агент поднялся вместе с сессией за ${waited}с"; return 0 ;; esac
@@ -1204,13 +1262,15 @@ start_agent() {
         say "сессия поднята, но агента в панели нет за ${AGENT_START_TIMEOUT_SEC}с (там: $(pane_cmd))"
         return 1
     fi
+    pane_log_attach "$TMUX_SESSION" "$LOG_DIR"
     cmd=$(pane_cmd)
     case "$cmd" in
         claude|node) say "в панели уже claude/node — агент запущен без меня"; return 0 ;;
         # Мёртвой панели ввод не отдать: её оживляют respawn, а не send-keys.
         мертва)
             say "панель пережила выход агента (remain-on-exit) — оживляю её командой запуска"
-            tmux respawn-pane -t "$TMUX_SESSION" -c "$PROJECT_DIR" "$zapusk" 8>&- || return 1 ;;
+            tmux respawn-pane -t "$TMUX_SESSION" -c "$PROJECT_DIR" "$zapusk" 8>&- || return 1
+            agent_started_mark "$LOG_DIR" ;;
         bash|sh|zsh|dash)
             say "запускаю агента: $AGENT_START_CMD"
             # Строка оболочки очищается ДО команды. В ней мог остаться висячий
@@ -1221,7 +1281,11 @@ start_agent() {
             # агент не поднялся за 120с, работа стояла 27 минут.
             pane_command keys C-c || true
             sleep "${PANE_ENTER_DELAY:-0.7}"
-            pane_command keys "$zapusk" Enter || return 1 ;;
+            # cd в команде: оболочка панели могла остаться в чужом каталоге
+            # (владелец запускал claude из ~), а claude берёт CLAUDE.md и
+            # память из каталога, где он запущен.
+            pane_command keys "cd '$PROJECT_DIR' && $zapusk" Enter || return 1
+            agent_started_mark "$LOG_DIR" ;;
         *) say "в панели '$cmd' — не оболочка, команду запуска не шлю"; return 1 ;;
     esac
     while [ "$waited" -lt "$AGENT_START_TIMEOUT_SEC" ]; do
@@ -1530,7 +1594,7 @@ if [ "${1:-}" = "--selftest" ]; then
         printf '  ПЛОХО стенд оболочки не поднялся во второй раз\n'; ok_flag=0
     else
         LOG_DIR="$T/log" TMUX_SESSION="$SES" AGENT_START_CMD="echo VSTAL > '$PODYOM'" \
-            AGENT_PROC_ROOT="$T/proc" AGENT_MAINPID=0 AGENT_START_TIMEOUT_SEC=5 start_agent >/dev/null 2>&1 || true
+            PROJECT_DIR="$T" AGENT_PROC_ROOT="$T/proc" AGENT_MAINPID=0 AGENT_START_TIMEOUT_SEC=5 start_agent >/dev/null 2>&1 || true
         if [ -s "$PODYOM" ]; then
             printf '  ок    start_agent сбрасывает строку: команда подъёма доходит целой\n'
         else
@@ -1566,7 +1630,7 @@ if [ "${1:-}" = "--selftest" ]; then
         fi
         : > "$NOSITEL_OUT"
         LOG_DIR="$T/log" TMUX_SESSION="$SES_N" AGENT_START_CMD="printenv CLAUDE_CODE_OAUTH_TOKEN > '$NOSITEL_OUT'" \
-            AGENT_PROC_ROOT="$T/proc" AGENT_MAINPID=0 AGENT_START_TIMEOUT_SEC=5 start_agent >/dev/null 2>&1 || true
+            PROJECT_DIR="$T" AGENT_PROC_ROOT="$T/proc" AGENT_MAINPID=0 AGENT_START_TIMEOUT_SEC=5 start_agent >/dev/null 2>&1 || true
         sleep 1.5
         if [ -s "$NOSITEL_OUT" ]; then
             printf '  ПЛОХО start_agent поднял агента С чужим носителем входа — работа уйдёт на чужую подписку\n'; ok_flag=0
@@ -2563,6 +2627,8 @@ konf_zagruzit
 # Пороги с дефолтами: конфиг мог быть скопирован до появления этих ключей.
 AGENT_START_CMD="${AGENT_START_CMD:-claude --dangerously-skip-permissions}"
 AGENT_START_TIMEOUT_SEC="${AGENT_START_TIMEOUT_SEC:-120}"
+# Выход агента раньше этого срока после ввода команды запуска — тревога с хвостом панели.
+AGENT_EARLY_EXIT_SEC="${AGENT_EARLY_EXIT_SEC:-300}"
 SERVICE_LOCKS_SUBDIR="${SERVICE_LOCKS_SUBDIR:-services}"
 # Пороги присмотра за панелью — ЗДЕСЬ, после загрузки конфига. Стояли выше,
 # и общий загрузчик (окружение старше файла) возвращал их ПОСЛЕ source: четыре
@@ -2932,9 +2998,15 @@ reboot_last_failed() {  # $1=ожидаемое ядро
 
 # 7-й довод способ_ротации: встала бы перезагрузка. Помощников и ход точка в
 # rotate_full спросит сама, здесь они «нет, как у решения о ротации».
+# Перезагрузка при смене разрешена ключом, но не когда причина смены — чужой
+# каталог запуска: он лечится новой сессией, а не перезагрузкой машины.
+reboot_switch() {
+    if [ "${CWD_ROTATION:-0}" = 1 ]; then printf '0\n'; else printf '%s\n' "${AUTO_REBOOT_IN_ROTATION:-0}"; fi
+}
+
 reboot_would_fit() {
     local paused=0 pause_rc=0 busy=0 busy_out busy_rc=0 need expected hours
-    [ "${AUTO_REBOOT_IN_ROTATION:-0}" = 1 ] || { printf '0\n'; return 0; }
+    [ "$(reboot_switch)" = 1 ] || { printf '0\n'; return 0; }
     # Без команды перезагрузки не будет: тяжёлый путь ради неё ротации не нужен.
     [ -n "${REBOOT_CMD:-}" ] || { printf '0\n'; return 0; }
     работа_на_паузе || pause_rc=$?
@@ -3241,34 +3313,138 @@ fi
 беречь_сессию
 check_two_agents || true
 
+# ── 6б. Агент выпал в оболочку — самостоятельное состояние ──────────────────
+# Не «не смогли доставить», а «работать некому». Порядок: засечь время →
+# уважить приаттаченного владельца → по порогу поднять агента той же командой,
+# что и ротация (AGENT_START_CMD) → сказать владельцу, но не чаще кулдауна.
+panel_watch() {
+    early_exit_alarm
+    pane_log_trim "$LOG_DIR" "${AGENT_PANE_LOG_MAX_KB:-5120}"
+    PANE_STATE="$LOG_DIR/agent-pane.since"
+    DEAD_STAMP="$LOG_DIR/agent-pane.told"
+    if tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
+        PANE_NOW=$(pane_cmd)
+        CLIENTS=$(tmux list-clients -t "$TMUX_SESSION" 2>/dev/null | grep -c . || true)
+        # Часы «агента нет с» заводятся ДО решения. Пока их заводила только ветка
+        # «ждём», приаттаченный клиент останавливал и часы: отсчёт начинался заново
+        # после его отключения, и порог не наступал никогда.
+        pane_is_agent "$PANE_NOW" || [ -s "$PANE_STATE" ] || date +%s > "$PANE_STATE"
+        SINCE=0
+        [ -f "$PANE_STATE" ] && SINCE=$(cat "$PANE_STATE" 2>/dev/null || echo 0)
+        # Простой панели: tmux помнит время последней активности сессии. Живой
+        # человек за клиентом её обновляет, забытый ssh-клиент — нет.
+        PANE_ACTIVITY=$(tmux display-message -p -t "$TMUX_SESSION" '#{window_activity}' 2>/dev/null || echo 0)
+        PANE_IDLE_MIN=$(( ( $(date +%s) - ${PANE_ACTIVITY:-0} ) / 60 ))
+        [ "$PANE_IDLE_MIN" -lt 0 ] && PANE_IDLE_MIN=0
+        case "$(решение_по_панели "$PANE_NOW" "${CLIENTS:-0}" "$SINCE" "$(date +%s)" "$PANE_IDLE_MIN" "$OWNER_WAITING")" in
+            ok)
+                [ -f "$PANE_STATE" ] && rm -f "$PANE_STATE" "$DEAD_STAMP"
+                say "в панели '$PANE_NOW' — агент на месте"
+                alert_task --resolve session-warden:no-agent
+                alert_task --resolve session-warden:early-exit
+                ;;
+            человек)
+                say "в панели '$PANE_NOW', но к сессии подключён владелец (клиентов: $CLIENTS, простой ${PANE_IDLE_MIN} мин) — не вмешиваюсь"
+                ;;
+            сказать)
+                # Человек в панели работает — команду туда не шлём. Но агента нет
+                # дольше порога, и молчать об этом нельзя: харнес стоит.
+                MIN_OUT=$(( ( $(date +%s) - SINCE ) / 60 ))
+                say "агента нет ${MIN_OUT} мин, но в панели работает человек (простой ${PANE_IDLE_MIN} мин) — не вмешиваюсь, говорю в канал"
+                TELL=1
+                if [ -f "$DEAD_STAMP" ]; then
+                    AGE_MIN=$(( ( $(date +%s) - $(stat -c '%Y' "$DEAD_STAMP") ) / 60 ))
+                    [ "$AGE_MIN" -lt "$AGENT_DEAD_COOLDOWN_MIN" ] && TELL=0
+                fi
+                if [ "$TELL" = 1 ]; then
+                    tg_send "Агента нет ${MIN_OUT} мин: в tmux-панели '$PANE_NOW'. Сам не поднимаю — в панели кто-то работает (последняя активность ${PANE_IDLE_MIN} мин назад), команда испортила бы ваш ввод. Запустить: «$AGENT_START_CMD»." \
+                        && date +%s > "$DEAD_STAMP" \
+                        || say "сигнал о простое агента не ушёл"
+                fi
+                ;;
+            ждём)
+                [ -s "$PANE_STATE" ] || date +%s > "$PANE_STATE"
+                say "в панели '$PANE_NOW' (не claude) — засёк время, порог ${AGENT_DEAD_MIN} мин"
+                ;;
+            поднять)
+                MIN_OUT=$(( ( $(date +%s) - SINCE ) / 60 ))
+                say "агент выпал в оболочку: в панели '$PANE_NOW' уже ${MIN_OUT} мин, клиентов нет — поднимаю"
+                if start_agent; then
+                    jlog "agent_revived" "${SESSION_ID:-?}" "панель '$PANE_NOW' ${MIN_OUT} мин, поднят $AGENT_START_CMD"
+                    подхватить_работу || true
+                    rm -f "$PANE_STATE"
+                    # Сигнал владельцу — с кулдауном: беда та же, спам ни к чему.
+                    TELL=1
+                    if [ -f "$DEAD_STAMP" ]; then
+                        AGE_MIN=$(( ( $(date +%s) - $(stat -c '%Y' "$DEAD_STAMP") ) / 60 ))
+                        [ "$AGE_MIN" -lt "$AGENT_DEAD_COOLDOWN_MIN" ] && TELL=0
+                    fi
+                    if [ "$TELL" = 1 ]; then
+                        tg_send "Агент выпадал в оболочку (в панели было '$PANE_NOW' ${MIN_OUT} мин) — поднял сам командой «$AGENT_START_CMD». Если это вы выходили из сессии: выход из tmux — Ctrl+B затем D, а Ctrl+C закрывает агента." \
+                            && date +%s > "$DEAD_STAMP" \
+                            || say "сигнал о выпавшем агенте не ушёл — агент при этом поднят"
+                    fi
+                else
+                    jlog "agent_revive_failed" "${SESSION_ID:-?}" "команда «$AGENT_START_CMD» не подняла claude"
+                    tg_send "Агент выпал в оболочку, и поднять его командой «$AGENT_START_CMD» не удалось за ${AGENT_START_TIMEOUT_SEC}с. Нужны ваши руки: sudo -u $AGENT_USER -H tmux attach -t $TMUX_SESSION" \
+                        --task session-warden:no-agent || say "и сигнал не ушёл"
+                    WARDEN_RC=1
+                fi
+                ;;
+        esac
+    else
+        # Сессии нет вовсе — с тех пор как её создают КОМАНДОЙ, это обычный вид
+        # смерти агента: вышел — закрылась панель, а с ней и сессия. Юнит её не
+        # вернёт (штатный выход = rc 0, у юнита Restart=on-failure), значит это
+        # работа сторожа. Раньше здесь была только строчка в лог — самый глухой
+        # вид простоя из возможных.
+        say "tmux-сессии '$TMUX_SESSION' нет — агента нет вовсе, поднимаю сессию с агентом"
+        if start_agent; then
+            jlog "agent_revived" "${SESSION_ID:-?}" "сессии не было — поднята вместе с агентом ($AGENT_START_CMD)"
+            подхватить_работу || true
+            TELL=1
+            if [ -f "$DEAD_STAMP" ]; then
+                AGE_MIN=$(( ( $(date +%s) - $(stat -c '%Y' "$DEAD_STAMP") ) / 60 ))
+                [ "$AGE_MIN" -lt "$AGENT_DEAD_COOLDOWN_MIN" ] && TELL=0
+            fi
+            if [ "$TELL" = 1 ]; then
+                tg_send "Сессии агента не было совсем (панель закрылась вместе с ним) — поднял заново командой «$AGENT_START_CMD»." \
+                    --task session-warden:no-agent && date +%s > "$DEAD_STAMP" || say "сигнал о поднятой сессии не ушёл"
+            fi
+        else
+            jlog "agent_revive_failed" "${SESSION_ID:-?}" "сессии не было, поднять её с агентом не удалось"
+            refusal_hint
+            WARDEN_RC=1
+        fi
+    fi
+}
+
 # ── 1. Найти транскрипт текущей сессии ЭТОГО проекта ────────────────────────
 # Claude Code пишет JSONL-транскрипты в ~/.claude/projects/<кодир-путь>/<uuid>.jsonl,
 # где <кодир-путь> — PROJECT_DIR с заменой «/» на «-». Свежайший файл берём
 # СТРОГО из каталога этого проекта (Б-4д): «свежайший вообще» подсовывал
 # крошечный JSONL headless-прогона чужого каталога, и замер окна врал.
 PROJECTS_DIR="${CLAUDE_PROJECTS_DIR:-/home/$AGENT_USER/.claude/projects}"
-if [ ! -d "$PROJECTS_DIR" ]; then
-    say "каталога транскриптов $PROJECTS_DIR нет — агент ещё не запускался, надзирать не за чем"
-    touch "$HEARTBEAT_DIR/session-warden"
-    exit 0
-fi
 PROJECT_TRANSCRIPTS=""
 # Второй кандидат — на случай кодирования «все не-алфавитно-цифровые → -»
 # (так кодируют свежие версии Claude Code; точки и подчёркивания тоже в дефис).
 for enc in "${PROJECT_DIR//\//-}" "$(printf '%s' "$PROJECT_DIR" | sed 's/[^a-zA-Z0-9]/-/g')"; do
     if [ -d "$PROJECTS_DIR/$enc" ]; then PROJECT_TRANSCRIPTS="$PROJECTS_DIR/$enc"; break; fi
 done
-if [ -z "$PROJECT_TRANSCRIPTS" ]; then
-    say "в $PROJECTS_DIR нет каталога проекта $PROJECT_DIR — сессий этого проекта ещё не было"
-    touch "$HEARTBEAT_DIR/session-warden"
-    exit 0
-fi
-TRANSCRIPT=$(find "$PROJECT_TRANSCRIPTS" -mindepth 1 -maxdepth 1 -name '*.jsonl' -type f -printf '%T@ %p\n' 2>/dev/null \
+TRANSCRIPT=""
+[ -z "$PROJECT_TRANSCRIPTS" ] || TRANSCRIPT=$(find "$PROJECT_TRANSCRIPTS" -mindepth 1 -maxdepth 1 -name '*.jsonl' -type f -printf '%T@ %p\n' 2>/dev/null \
              | sort -nr | head -1 | cut -d' ' -f2- || true)
 if [ -z "$TRANSCRIPT" ]; then
-    say "транскриптов в $PROJECT_TRANSCRIPTS нет — сессий ещё не было"
-    touch "$HEARTBEAT_DIR/session-warden"
-    exit 0
+    # «Нет транскриптов» — не повод молчать: на свежей установке при мёртвой
+    # панели некому и нечем поднять агента, кроме этого прогона. Живость панели
+    # проверяется ДО поиска транскриптов; без них остальные шаги (окно, компакты,
+    # ротация) смысла не имеют.
+    say "транскриптов проекта $PROJECT_DIR в $PROJECTS_DIR нет — сессий ещё не было; панель проверяю"
+    WARDEN_RC=0
+    OWNER_WAITING=0
+    panel_watch
+    [ "$WARDEN_RC" != 0 ] || touch "$HEARTBEAT_DIR/session-warden"
+    exit "$WARDEN_RC"
 fi
 SESSION_ID=$(basename "$TRANSCRIPT" .jsonl)
 # Смена — не обязательно самый свежий файл: судья работы и принадлежность флага
@@ -3321,12 +3497,27 @@ fi
 # -ge, не -gt (Б-4г): обещано «больше одного компакта подряд запрещено» —
 # достигнутый потолок MAX_COMPACTS уже означает ротацию.
 NEED_ROTATE=0; REASON=""
+agent_cwd_wrong || true   # заполняет AGENT_CWD; он же ведёт ротацию на тяжёлый путь
+WRONG_CWD_MARK="$LOG_DIR/agent-wrong-cwd.rotated"
+CWD_ROTATION=0
+[ -n "$AGENT_CWD" ] || rm -f "$WRONG_CWD_MARK"
 if [ "$FORCE_ROTATE" = 1 ]; then
     # Ротацию запросил сам агент (`--rotate-now`). Пороги и антиповтор — про
     # то, когда сторож решает САМ; здесь решение уже принято, и подавить его
     # значило бы вернуть агента к единственному оставшемуся способу уйти —
     # выходу без смены (улика 11.08.2026, 22:51: вышел сам, преемника нет).
     NEED_ROTATE=1; REASON="ротацию запросил агент (--rotate-now)"
+elif [ -n "$AGENT_CWD" ] && [ -e "$WRONG_CWD_MARK" ]; then
+    # Ротация по этой причине уже была, а каталог прежний: вторая такая же
+    # ничего не изменит и пойдёт по кругу. Говорим владельцу, не вращаем.
+    say "агент всё ещё запущен не из $PROJECT_DIR (из $AGENT_CWD) после ротации — вторую не делаю, говорю владельцу"
+    alarm_once agent-wrong-cwd-still "Агент и после перезапуска запущен не из $PROJECT_DIR, а из $AGENT_CWD: CLAUDE.md, память и скилы проекта не загружены. Повторно не перезапускаю — нужны ваши руки: cd $PROJECT_DIR && claude" session-warden:wrong-cwd
+elif [ -n "$AGENT_CWD" ]; then
+    # Сессия без CLAUDE.md, памяти и скилов проекта: чинится только новой
+    # сессией, запущенной из PROJECT_DIR (start_agent входит туда сам).
+    NEED_ROTATE=1; CWD_ROTATION=1; REASON="агент запущен не из $PROJECT_DIR, а из $AGENT_CWD"
+    : > "$WRONG_CWD_MARK"
+    alarm_once agent-wrong-cwd "Агент запущен не из $PROJECT_DIR, а из $AGENT_CWD: CLAUDE.md, память и скилы проекта не загружены. Перезапускаю смену в верном каталоге." session-warden:wrong-cwd
 elif [ "$COMPACTS" -gt 0 ] && [ "$COMPACTS" -ge "$MAX_COMPACTS" ]; then
     NEED_ROTATE=1; REASON="компактов $COMPACTS ≥ потолка $MAX_COMPACTS"
 elif [ "$FILL_PCT" -ge "$CTX_ROTATE_PCT" ]; then
@@ -3854,7 +4045,7 @@ rotate_full() {
                     case "$rb_busy_rc" in 0) rb_busy=0 ;; 1) rb_busy="${rb_busy_out#занята: }" ;; *) rb_busy="?" ;; esac
                     read -r rb_need rb_kernel < <(reboot_needed)
                     rb_hours=$(awk '{print int($1 / 3600)}' /proc/uptime)
-                    rb_word=$(reboot_window_verdict "${AUTO_REBOOT_IN_ROTATION:-0}" "${STACK_NEIGHBOURS:-}" "$rb_paused" "$act" "$rb_tasks" "$rb_helpers" "$rb_busy" "$rb_need" "$rb_hours" "${REBOOT_MIN_GAP_HOURS:-24}" "$(reboot_last_failed "$rb_kernel")") || rb_rc=$?
+                    rb_word=$(reboot_window_verdict "$(reboot_switch)" "${STACK_NEIGHBOURS:-}" "$rb_paused" "$act" "$rb_tasks" "$rb_helpers" "$rb_busy" "$rb_need" "$rb_hours" "${REBOOT_MIN_GAP_HOURS:-24}" "$(reboot_last_failed "$rb_kernel")") || rb_rc=$?
                     say "перезагрузка при смене: $rb_word"
                     if [ "$rb_rc" = 0 ]; then
                         reboot_for_rotation "$rb_kernel" "$REASON" || rb_rc=$?
@@ -3990,6 +4181,8 @@ if [ "$NEED_ROTATE" = 1 ]; then
             # Метки нет — процесс живёт с раскладки или дольше суток: тяжёлый путь.
             HOURS_SINCE_FULL=999
         fi
+        # Каталог claude меняет только перезапуск процесса, не «/clear».
+        [ -z "$AGENT_CWD" ] || HOURS_SINCE_FULL=999
         MODE=$(способ_ротации "$HOOKS_CHANGED" "$VERSION_CHANGED" "$HOURS_SINCE_FULL" \
                                 "${FULL_RESTART_MAX_HOURS:-24}" 0 "$FORCE_ROTATE" "$(reboot_would_fit)")
         say "способ смены: $MODE (хуки=$HOOKS_CHANGED версия=$VERSION_CHANGED часов_с_полного=$HOURS_SINCE_FULL принудительно=$FORCE_ROTATE)"
@@ -4689,105 +4882,8 @@ speed_kick_step
 knopka_revizii "$LOG_DIR/revizia/запуск" "$PROJECT_DIR/harness/demons/project-revision.sh"
 
 # ── 6б. Агент выпал в оболочку — самостоятельное состояние ──────────────────
-# Не «не смогли доставить», а «работать некому». Порядок: засечь время →
-# уважить приаттаченного владельца → по порогу поднять агента той же командой,
-# что и ротация (AGENT_START_CMD) → сказать владельцу, но не чаще кулдауна.
-PANE_STATE="$LOG_DIR/agent-pane.since"
-DEAD_STAMP="$LOG_DIR/agent-pane.told"
-if tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
-    PANE_NOW=$(pane_cmd)
-    CLIENTS=$(tmux list-clients -t "$TMUX_SESSION" 2>/dev/null | grep -c . || true)
-    # Часы «агента нет с» заводятся ДО решения. Пока их заводила только ветка
-    # «ждём», приаттаченный клиент останавливал и часы: отсчёт начинался заново
-    # после его отключения, и порог не наступал никогда.
-    pane_is_agent "$PANE_NOW" || [ -s "$PANE_STATE" ] || date +%s > "$PANE_STATE"
-    SINCE=0
-    [ -f "$PANE_STATE" ] && SINCE=$(cat "$PANE_STATE" 2>/dev/null || echo 0)
-    # Простой панели: tmux помнит время последней активности сессии. Живой
-    # человек за клиентом её обновляет, забытый ssh-клиент — нет.
-    PANE_ACTIVITY=$(tmux display-message -p -t "$TMUX_SESSION" '#{window_activity}' 2>/dev/null || echo 0)
-    PANE_IDLE_MIN=$(( ( $(date +%s) - ${PANE_ACTIVITY:-0} ) / 60 ))
-    [ "$PANE_IDLE_MIN" -lt 0 ] && PANE_IDLE_MIN=0
-    case "$(решение_по_панели "$PANE_NOW" "${CLIENTS:-0}" "$SINCE" "$(date +%s)" "$PANE_IDLE_MIN" "$OWNER_WAITING")" in
-        ok)
-            [ -f "$PANE_STATE" ] && rm -f "$PANE_STATE" "$DEAD_STAMP"
-            say "в панели '$PANE_NOW' — агент на месте"
-            alert_task --resolve session-warden:no-agent
-            ;;
-        человек)
-            say "в панели '$PANE_NOW', но к сессии подключён владелец (клиентов: $CLIENTS, простой ${PANE_IDLE_MIN} мин) — не вмешиваюсь"
-            ;;
-        сказать)
-            # Человек в панели работает — команду туда не шлём. Но агента нет
-            # дольше порога, и молчать об этом нельзя: харнес стоит.
-            MIN_OUT=$(( ( $(date +%s) - SINCE ) / 60 ))
-            say "агента нет ${MIN_OUT} мин, но в панели работает человек (простой ${PANE_IDLE_MIN} мин) — не вмешиваюсь, говорю в канал"
-            TELL=1
-            if [ -f "$DEAD_STAMP" ]; then
-                AGE_MIN=$(( ( $(date +%s) - $(stat -c '%Y' "$DEAD_STAMP") ) / 60 ))
-                [ "$AGE_MIN" -lt "$AGENT_DEAD_COOLDOWN_MIN" ] && TELL=0
-            fi
-            if [ "$TELL" = 1 ]; then
-                tg_send "Агента нет ${MIN_OUT} мин: в tmux-панели '$PANE_NOW'. Сам не поднимаю — в панели кто-то работает (последняя активность ${PANE_IDLE_MIN} мин назад), команда испортила бы ваш ввод. Запустить: «$AGENT_START_CMD»." \
-                    && date +%s > "$DEAD_STAMP" \
-                    || say "сигнал о простое агента не ушёл"
-            fi
-            ;;
-        ждём)
-            [ -s "$PANE_STATE" ] || date +%s > "$PANE_STATE"
-            say "в панели '$PANE_NOW' (не claude) — засёк время, порог ${AGENT_DEAD_MIN} мин"
-            ;;
-        поднять)
-            MIN_OUT=$(( ( $(date +%s) - SINCE ) / 60 ))
-            say "агент выпал в оболочку: в панели '$PANE_NOW' уже ${MIN_OUT} мин, клиентов нет — поднимаю"
-            if start_agent; then
-                jlog "agent_revived" "${SESSION_ID:-?}" "панель '$PANE_NOW' ${MIN_OUT} мин, поднят $AGENT_START_CMD"
-                подхватить_работу || true
-                rm -f "$PANE_STATE"
-                # Сигнал владельцу — с кулдауном: беда та же, спам ни к чему.
-                TELL=1
-                if [ -f "$DEAD_STAMP" ]; then
-                    AGE_MIN=$(( ( $(date +%s) - $(stat -c '%Y' "$DEAD_STAMP") ) / 60 ))
-                    [ "$AGE_MIN" -lt "$AGENT_DEAD_COOLDOWN_MIN" ] && TELL=0
-                fi
-                if [ "$TELL" = 1 ]; then
-                    tg_send "Агент выпадал в оболочку (в панели было '$PANE_NOW' ${MIN_OUT} мин) — поднял сам командой «$AGENT_START_CMD». Если это вы выходили из сессии: выход из tmux — Ctrl+B затем D, а Ctrl+C закрывает агента." \
-                        && date +%s > "$DEAD_STAMP" \
-                        || say "сигнал о выпавшем агенте не ушёл — агент при этом поднят"
-                fi
-            else
-                jlog "agent_revive_failed" "${SESSION_ID:-?}" "команда «$AGENT_START_CMD» не подняла claude"
-                tg_send "Агент выпал в оболочку, и поднять его командой «$AGENT_START_CMD» не удалось за ${AGENT_START_TIMEOUT_SEC}с. Нужны ваши руки: sudo -u $AGENT_USER -H tmux attach -t $TMUX_SESSION" \
-                    --task session-warden:no-agent || say "и сигнал не ушёл"
-                WARDEN_RC=1
-            fi
-            ;;
-    esac
-else
-    # Сессии нет вовсе — с тех пор как её создают КОМАНДОЙ, это обычный вид
-    # смерти агента: вышел — закрылась панель, а с ней и сессия. Юнит её не
-    # вернёт (штатный выход = rc 0, у юнита Restart=on-failure), значит это
-    # работа сторожа. Раньше здесь была только строчка в лог — самый глухой
-    # вид простоя из возможных.
-    say "tmux-сессии '$TMUX_SESSION' нет — агента нет вовсе, поднимаю сессию с агентом"
-    if start_agent; then
-        jlog "agent_revived" "${SESSION_ID:-?}" "сессии не было — поднята вместе с агентом ($AGENT_START_CMD)"
-        подхватить_работу || true
-        TELL=1
-        if [ -f "$DEAD_STAMP" ]; then
-            AGE_MIN=$(( ( $(date +%s) - $(stat -c '%Y' "$DEAD_STAMP") ) / 60 ))
-            [ "$AGE_MIN" -lt "$AGENT_DEAD_COOLDOWN_MIN" ] && TELL=0
-        fi
-        if [ "$TELL" = 1 ]; then
-            tg_send "Сессии агента не было совсем (панель закрылась вместе с ним) — поднял заново командой «$AGENT_START_CMD»." \
-                --task session-warden:no-agent && date +%s > "$DEAD_STAMP" || say "сигнал о поднятой сессии не ушёл"
-        fi
-    else
-        jlog "agent_revive_failed" "${SESSION_ID:-?}" "сессии не было, поднять её с агентом не удалось"
-        refusal_hint
-        WARDEN_RC=1
-    fi
-fi
+# Тело — функция panel_watch выше: её же зовёт шаг 1, когда транскриптов нет.
+panel_watch
 
 # Метка heartbeat — ТОЛЬКО при полном успехе прогона.
 if [ "$WARDEN_RC" = 0 ]; then

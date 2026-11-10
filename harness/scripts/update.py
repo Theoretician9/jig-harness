@@ -44,6 +44,7 @@ import config as конф_модуль                              # noqa: E402
 import layout_journal                                     # noqa: E402
 import layout_history                                     # noqa: E402
 import release_notes                                      # noqa: E402
+import process_library                                    # noqa: E402
 
 КОРЕНЬ = Path(__file__).resolve().parent.parent
 
@@ -52,8 +53,7 @@ def файл_версии() -> Path:
     """Версия — состояние, которое пишет код, а не человек: ей не место в
     конфиге. Путь спрашивается в момент обращения, а не при импорте: проверка
     выставляет своё окружение уже после того, как модуль загружен."""
-    return Path(os.environ.get("HARNESS_VERSION_FILE")
-                or Path(конф_модуль.конфиг()["STATE_DIR"]) / "версия-харнеса")
+    return Path(конф_модуль.version_file())
 
 
 def пакет() -> Path:
@@ -251,6 +251,40 @@ def _спросить_владельца(текст: str) -> int:
         return 1
 
 
+# Root-часть установки: обновление её не ставит — у него нет root. Чего нет на
+# машине, то довозит повтор установщика, и владельцу называется одна команда.
+# Каталог sudoers.d агенту закрыт (0750): правила читаются по копии, которую
+# установщик кладёт для гейтов (шаг 12).
+def timer_enabled(unit: str) -> bool:
+    try:
+        return subprocess.run(["systemctl", "is-enabled", "--quiet", unit],
+                              capture_output=True, timeout=20).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def root_part_gaps(etc: Path = Path("/etc"), enabled=timer_enabled) -> list[str]:
+    """Чего из root-части установки нет — по пункту на пробел."""
+    gaps = []
+    rights = etc / "harness" / "sudo-rights.txt"
+    try:
+        if "/sudoers.d/harness-agent-" not in rights.read_text(encoding="utf-8"):
+            gaps.append("нет прав агента /etc/sudoers.d/harness-agent-*")
+    except OSError:
+        gaps.append(f"нет копии прав {rights}")
+    if not (etc / "logrotate.d" / "harness").is_file():
+        gaps.append(f"нет {etc / 'logrotate.d' / 'harness'}")
+    timers = [f"harness-{i}.timer" for i in process_library.checks_ids()] + ["harness-sentinel.timer"]
+    off = [unit for unit in timers if not enabled(unit)]
+    if off:
+        gaps.append(f"не включены таймеры: {', '.join(off)}")
+    return gaps
+
+
+def root_part_command(каталог: Path) -> str:
+    return f"sudo bash {каталог}/USTANOVIT.sh --resume"
+
+
 def каталог_копий() -> Path:
     return конф_модуль.backup_dir()
 
@@ -328,13 +362,27 @@ def красные_из_вывода(текст: str) -> Counter | None:
     return красные
 
 
+# Обычные ворота (без --всё) на свежей 4-ядерной машине шли 44–58 мин: предел —
+# данные установки, а не число в коде.
+ПРЕДЕЛ_ВОРОТ_УМОЛЧАНИЕ = 5400
+
+
+def предел_ворот() -> int:
+    значение = конф_модуль.конфиг(конф_модуль.путь_harness_conf()).get("UPDATE_GATES_TIMEOUT_SEC", "")
+    return int(значение) if str(значение).isdigit() else ПРЕДЕЛ_ВОРОТ_УМОЛЧАНИЕ
+
+
+def слова_о_пределе_ворот() -> str:
+    return f"предел {предел_ворот()} с — ключ UPDATE_GATES_TIMEOUT_SEC в harness.conf"
+
+
 def прогнать_ворота() -> Counter | None:
     """Самопроверка харнеса: счёт красных имён. Код возврата не судим: жёлтые
     проверки в него не входят. Оборванный пределом прогон — не прочитанный
     итог, то есть None."""
     try:
         готово = subprocess.run(["bash", str(КОРЕНЬ / "scripts" / "gates.sh")],
-                                capture_output=True, text=True, timeout=1800)
+                                capture_output=True, text=True, timeout=предел_ворот())
     except subprocess.TimeoutExpired:
         return None
     return красные_из_вывода(готово.stdout)
@@ -360,7 +408,8 @@ def _замок_постановки():
 
 
 def поставить(*, разложить=None, перезапустить=None, проверить=None,
-              сказать=None, спросить=None, reset_own=False, host=None) -> dict:
+              сказать=None, спросить=None, reset_own=False, host=None,
+              сверить_корень=None) -> dict:
     """Поставить обновление под замком постановки; занят — отказ словами."""
     сказать = сказать or (lambda текст: None)
     with _замок_постановки() as взят:
@@ -370,7 +419,8 @@ def поставить(*, разложить=None, перезапустить=No
             return {"поставлено": False, "беда": причина}
         return _поставить_под_замком(разложить=разложить, перезапустить=перезапустить,
                                      проверить=проверить, сказать=сказать, спросить=спросить,
-                                     reset_own=reset_own, host=host)
+                                     reset_own=reset_own, host=host,
+                                     сверить_корень=сверить_корень)
 
 
 def _count_own_commits(каталог: Path, public: str) -> int | None:
@@ -460,7 +510,8 @@ def _branch_words(own_count: int, name: str) -> str:
 
 
 def _поставить_под_замком(*, разложить, перезапустить, проверить, сказать,
-                          спросить=None, reset_own=False, host=None) -> dict:
+                          спросить=None, reset_own=False, host=None,
+                          сверить_корень=None) -> dict:
     """Поставить обновление: ворота до → копия → пакет вперёд → раскладка → проверка.
 
     Не прошло — откат на прежний коммит, версия НЕ меняется, владельцу сказано
@@ -471,6 +522,7 @@ def _поставить_под_замком(*, разложить, переза�
     перезапустить = перезапустить or _перезапустить_службы
     проверить = проверить or прогнать_ворота
     спросить = спросить or _спросить_владельца
+    сверить_корень = сверить_корень or root_part_gaps
     начало = datetime.now().astimezone()
 
     каталог = пакет()
@@ -504,7 +556,7 @@ def _поставить_под_замком(*, разложить, переза�
     # РАНЬШЕ копии: правка пакета, сделанная за его минуты, обязана в неё попасть.
     красные_до = проверить()
     if красные_до is None:
-        return отказ("ворота до обновления не дали итога — пакет не тронут")
+        return отказ(f"ворота до обновления не дали итога ({слова_о_пределе_ворот()}) — пакет не тронут")
     # Выкат мог начаться за время прогона, а первая проверка его не видела.
     if _занят_выкат():
         return отказ("идёт выкат — обновление подождёт")
@@ -548,16 +600,28 @@ def _поставить_под_замком(*, разложить, переза�
     if причина is None:
         orphans_text, orphans = _orphan_report((forward_archive, rollback_archive))
         строка = f"красных {sum(новые.values())}, все были до обновления"
-        записать_версию(ответ["коммит"])
+        # Беда записи версии не смеет съесть весть об уже поставленном обновлении.
+        try:
+            записать_версию(ответ["коммит"])
+            версия_беда = ""
+        except OSError as беда:
+            версия_беда = f" Версию записать не удалось ({беда}): панель покажет прежнюю."
         хвост = ("" if not исходы["расхождения"] else
                  f" Не тронуто (правлено здесь и в обновлении): "
                  f"{', '.join(исходы['расхождения'][:5])}")
         хвост += _слова_об_упавших(упавшие) + branch_text + orphans_text
-        хвост += _removed_words(forward_archive)
+        хвост += _removed_words(forward_archive) + версия_беда
         сказать(_with_release_note(
             f"Харнес обновлён до {ответ['коммит'][:7]}. Проверки: {строка}.{хвост}", каталог))
+        # Отдельным сообщением: потолок заметок выпуска не смеет срезать команду.
+        пробелы = сверить_корень()
+        довезти = root_part_command(каталог) if пробелы else None
+        if довезти:
+            сказать(f"Часть установки, которую ставит только root, не доехала: {'; '.join(пробелы)}. "
+                    f"Обновление её не ставит — запустите одну команду: {довезти}")
         _ask_about_seed(_seed_paths_since(начало), спросить)
-        return {"поставлено": True, "коммит": ответ["коммит"], "проверки": строка,
+        return {"поставлено": True, "коммит": ответ["коммит"], "проверки": строка, "довезти": довезти,
+                "версия записана": not версия_беда,
                 "копия": str(копия), "расхождения": исходы["расхождения"],
                 "упавшие сборщики": упавшие, "архив раскладки": str(forward_archive),
                 "оборванные": orphans, **branch_info}
@@ -634,7 +698,7 @@ def _разложить_и_проверить(разложить, перезап
     except Exception as беда:
         return раскладка_ок, упавшие, f"исключение после слияния: {type(беда).__name__}: {беда}", None
     if красные_после is None:
-        return раскладка_ок, упавшие, "ворота после обновления не дали итога", None
+        return раскладка_ок, упавшие, f"ворота после обновления не дали итога ({слова_о_пределе_ворот()})", None
     новые = sorted(красные_после - красные_до)
     if новые:
         return раскладка_ок, упавшие, f"новые красные: {', '.join(новые)}", новые
@@ -1091,6 +1155,8 @@ def main(argv: list) -> int:
         if итог.get("поставлено"):
             print(f"[обновление] поставлено: {итог['коммит'][:7]}; "
                   f"проверки: {итог['проверки']}")
+            if итог.get("довезти"):
+                print(f"[обновление] root-часть установки не доехала — запустите: {итог['довезти']}")
             return 0
         print(f"[обновление] не поставлено: {итог.get('беда')}", file=sys.stderr)
         return 1

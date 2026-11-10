@@ -78,6 +78,40 @@ def target_ok(target: str, role: dict) -> bool:
     return any(target.endswith("/" + name) or target == name for name in role.get("пишет_только", []))
 
 
+def git_subcommand(args: list) -> str:
+    """Подкоманда git после глобальных флагов; флаг, выполняющий чужой код, возвращается как есть.
+
+    `-c diff.external=…` и `--config-env`, `--exec-path` превращают чтение в запуск произвольной
+    команды, поэтому подкомандой они не станут и не попадут в список разрешённых. У `-C <путь>`
+    аргумент — отдельное слово.
+    """
+    it = iter(args)
+    for word in it:
+        if word == "-C":
+            next(it, None)
+        elif word.startswith(("-c", "--config-env", "--exec-path")):
+            return word
+        elif not word.startswith("-"):
+            return word
+    return ""
+
+
+def script_allowed(call: list, role: dict) -> bool:
+    """Запись списка «скрипты» — путь (любые флаги) или «путь --флаг …»: у второго вида звать
+    можно только с перечисленными флагами, любой другой флаг в argv — отказ.
+
+    Нужен там, где у скрипта есть и чтение, и запись (spec_approval.py: --состояние читает,
+    --отправить пишет владельцу; launch-plan.py: --прижить и --закрепить пишут в карту).
+    Проверяются ВСЕ слова argv: скрипт ищет свой режим в любом месте строки.
+    """
+    flags = {w for w in call[1:] if w.startswith("-")}
+    for entry in role.get("скрипты", []):
+        path, *allowed = entry.split()
+        if call[:1] == [path] and (not allowed or flags <= set(allowed)):
+            return True
+    return False
+
+
 def segment_verdict(words: list, role: dict) -> str:
     """Причина отказа для одной простой команды или пусто."""
     while words and words[0] in WRAPPERS:
@@ -86,11 +120,13 @@ def segment_verdict(words: list, role: dict) -> str:
         return ""
     name = os.path.basename(words[0])
     if name == "git":
-        sub = next((w for w in words[1:] if not w.startswith("-")), "")
+        sub = git_subcommand(words[1:])
         return "" if sub in role.get("git", []) else f"git {sub or '?'} пишет в дерево"
     if name in ("python3", "bash", "sh"):
-        script = next((w for w in words[1:] if not w.startswith("-")), "")
-        return "" if script in role.get("скрипты", []) else f"{name} {script[:40]}: скрипт вне списка"
+        script_at = next((i for i, w in enumerate(words) if i and not w.startswith("-")), 0)
+        call = words[script_at:]
+        script = call[0] if call else ""
+        return "" if script_allowed(call, role) else f"{name} {script[:40]}: скрипт вне списка"
     return "" if name in role.get("команды", []) else f"{name}: команда вне списка чтения"
 
 

@@ -154,6 +154,9 @@ def поставить_без_падения(**доводы) -> dict:
     if ("спросить" not in доводы
             and "спросить" in inspect.signature(обновление.поставить).parameters):
         доводы["спросить"] = question_guard
+    if ("сверить_корень" not in доводы
+            and "сверить_корень" in inspect.signature(обновление.поставить).parameters):
+        доводы["сверить_корень"] = lambda: []
     try:
         return обновление.поставить(**доводы)
     except Exception as беда:  # noqa: BLE001 — любой сбой здесь и есть находка
@@ -665,7 +668,7 @@ try:
     СРОК, NGINX, НОВАЯ = "срок входа", "nginx отвечает", "новый гейт обновления"
     счёт_обновлений = [0]
 
-    def постановка(до, после) -> dict:
+    def постановка(до, после, **ещё) -> dict:
         """Одно обновление в публичной ветке и постановка с подменой ворот."""
         счёт_обновлений[0] += 1
         номер = счёт_обновлений[0]
@@ -679,7 +682,7 @@ try:
         версия_было = обновление.версия_установки().get("коммит")
         итог = поставить_без_падения(
             разложить=lambda **_: разложено.append(1) or РАЗЛОЖЕНО,
-            перезапустить=lambda: True, проверить=ворота, сказать=сказано.append)
+            перезапустить=lambda: True, проверить=ворота, сказать=сказано.append, **ещё)
         return {"итог": итог, "сказано": " | ".join(сказано), "зовы": ворота.зовы,
                 "было": было, "стало": гит("rev-parse", "HEAD", где=пакет).stdout.strip(),
                 "новый": гит("rev-parse", "HEAD", где=исток).stdout.strip(),
@@ -782,6 +785,167 @@ try:
 
     р = постановка(Counter({ДУБЛЬ: 2}), Counter({ДУБЛЬ: 2}))
     судить_проход("до {X:2} после {X:2}", р, 2)
+
+    print("── root-часть установки после обновления: одна команда установщика ──")
+    # Обновление ставит файлы механики, но не sudoers, таймеры и logrotate: их ставит
+    # только установщик под root. Чего нет — владельцу одна команда, и только тогда.
+    def root_case(name, judge):
+        try:
+            troubles = judge()
+        except Exception as беда:  # noqa: BLE001 — сбой случая и есть находка
+            troubles = [f"исключение {type(беда).__name__}: {беда}"]
+        (путь_плохо(f"{name}: {'; '.join(troubles)}") if troubles else путь_ок(name))
+
+    библиотека_спец = importlib.util.spec_from_file_location(
+        "библиотека_процессов", КОРЕНЬ / "scripts" / "lib" / "process_library.py")
+    библиотека = importlib.util.module_from_spec(библиотека_спец)
+    библиотека_спец.loader.exec_module(библиотека)
+    timer_ids = библиотека.checks_ids()
+    timers = [f"harness-{i}.timer" for i in timer_ids] + ["harness-sentinel.timer"]
+
+    def root_stand(rights=True, agent_rules=True, logrotate=True) -> Path:
+        etc = Path(tempfile.mkdtemp(prefix="корень-"))
+        (etc / "harness").mkdir()
+        (etc / "logrotate.d").mkdir()
+        if rights:
+            rule = "# файл: /etc/sudoers.d/harness-agent-readonly\n" if agent_rules else "# файл: /etc/sudoers.d/50-agent\n"
+            (etc / "harness" / "sudo-rights.txt").write_text(rule + "agent ALL=(root) NOPASSWD: /usr/bin/ss -ltnp\n", encoding="utf-8")
+        if logrotate:
+            (etc / "logrotate.d" / "harness").write_text("/var/log/harness/*.log {}\n", encoding="utf-8")
+        return etc
+
+    def case_root_gaps():
+        troubles = []
+        if not timer_ids:
+            return ["список таймеров службы проверок пуст — судить нечем"]
+        if обновление.root_part_gaps(etc=root_stand(), enabled=lambda unit: True) != []:
+            troubles.append("всё на месте, а пробелы названы")
+        for name, stand, needle in (
+                ("нет копии прав", root_stand(rights=False), "sudo-rights.txt"),
+                ("нет правил агента", root_stand(agent_rules=False), "sudoers.d/harness-agent-"),
+                ("нет logrotate", root_stand(logrotate=False), "logrotate.d/harness")):
+            gaps = обновление.root_part_gaps(etc=stand, enabled=lambda unit: True)
+            if len(gaps) != 1 or needle not in gaps[0]:
+                troubles.append(f"{name}: ждали один пробел с «{needle}», вышло {gaps!r}")
+        asked = []
+        for off in timers:
+            gaps = обновление.root_part_gaps(etc=root_stand(),
+                                             enabled=lambda unit, off=off: asked.append(unit) or unit != off)
+            if len(gaps) != 1 or off not in gaps[0]:
+                troubles.append(f"выключен {off}: вышло {gaps!r}")
+        if not set(timers) <= set(asked):
+            troubles.append(f"спрошены не все таймеры: {sorted(set(timers) - set(asked))}")
+        return troubles
+    root_case("R1 root-часть: всё на месте — тишина; каждый пробел (права, копия прав, logrotate, таймер) назван", case_root_gaps)
+
+    def case_timer_enabled():
+        bin_dir = Path(tempfile.mkdtemp(prefix="systemctl-"))
+        (bin_dir / "systemctl").write_text(
+            '#!/bin/sh\n[ "$1 $2 $3" = "is-enabled --quiet harness-on.timer" ]\n', encoding="utf-8")
+        (bin_dir / "systemctl").chmod(0o755)
+        was = os.environ["PATH"]
+        os.environ["PATH"] = f"{bin_dir}:{was}"
+        try:
+            got = (обновление.timer_enabled("harness-on.timer"), обновление.timer_enabled("harness-off.timer"))
+        finally:
+            os.environ["PATH"] = was
+        return [] if got == (True, False) else [f"is-enabled прочитан неверно: {got}"]
+    root_case("R2 root-часть: включённость таймера спрашивается у systemctl is-enabled", case_timer_enabled)
+
+    команда = f"sudo bash {обновление.пакет()}/USTANOVIT.sh --resume"
+    р = постановка(Counter(), Counter(), сверить_корень=lambda: ["нет /etc/logrotate.d/harness"])
+    if (р["итог"].get("поставлено") is True and р["сказано"].count(команда) == 1
+            and р["итог"].get("довезти") == команда and "logrotate.d/harness" in р["сказано"]):
+        путь_ок("R3 root-часть не доехала: владельцу названа ОДНА команда установщика и чего нет")
+    else:
+        путь_плохо(f"R3 root-часть не доехала: {р['итог']} · {р['сказано'][-300:]!r}")
+    р = постановка(Counter(), Counter(), сверить_корень=lambda: [])
+    if р["итог"].get("поставлено") is True and "USTANOVIT" not in р["сказано"] and not р["итог"].get("довезти"):
+        путь_ок("R4 root-часть на месте: об установщике ни слова")
+    else:
+        путь_плохо(f"R4 root-часть на месте, а установщик назван: {р['итог']} · {р['сказано'][-200:]!r}")
+
+    прежний_поставить = обновление.поставить
+    обновление.поставить = lambda **к: {"поставлено": True, "коммит": "abcdef0123", "проверки": "красных 0",
+                                         "довезти": команда}
+    вывод_cli = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(вывод_cli):
+            обновление.main(["--поставить"])
+    finally:
+        обновление.поставить = прежний_поставить
+    if вывод_cli.getvalue().count(команда) == 1:
+        путь_ок("R5 root-часть: --поставить печатает команду установщика в свой вывод")
+    else:
+        путь_плохо(f"R5 root-часть: в выводе --поставить нет команды: {вывод_cli.getvalue()!r}")
+
+    print("── версия пишется туда, куда пишет агент; беда записи не глушит весть ──")
+    # Живая установка 09.11: STATE_DIR принадлежит root, update.py идёт от агента —
+    # PermissionError после раскладки, версия не записана, владелец не извещён.
+    def case_version_place():
+        troubles = []
+        was = os.environ.pop("HARNESS_VERSION_FILE", None)
+        try:
+            ждём = Path(обновление.конф_модуль.panel_state_dir()) / "версия-харнеса"
+            if обновление.файл_версии() != ждём:
+                troubles.append(f"версия не в каталоге состояния панели: {обновление.файл_версии()} ≠ {ждём}")
+            ждём.parent.mkdir(parents=True, exist_ok=True)
+            обновление.записать_версию("feedc0de" * 5)
+            panel = subprocess.run(
+                [sys.executable, "-c",
+                 "import sys; sys.path.insert(0, sys.argv[1]); import state; "
+                 "print(state.обновления().get('версия', {}).get('коммит', ''))",
+                 str(КОРЕНЬ / "harness" / "panel")],
+                capture_output=True, text=True, timeout=60, env=dict(os.environ))
+            if panel.stdout.strip() != "feedc0de" * 5:
+                troubles.append(f"панель читает версию не оттуда: {panel.stdout.strip()!r} {panel.stderr.strip()[-200:]!r}")
+        finally:
+            if was is not None:
+                os.environ["HARNESS_VERSION_FILE"] = was
+        return troubles
+    root_case("V1 версия: пишет обновление и читает панель в одном месте — каталоге состояния панели", case_version_place)
+
+    закрытый = врем / "версия-закрыта"
+    закрытый.mkdir()
+    прежний_файл = os.environ.get("HARNESS_VERSION_FILE")
+    os.environ["HARNESS_VERSION_FILE"] = str(закрытый / "версия-харнеса")
+    закрытый.chmod(0o555)
+    try:
+        р = постановка(Counter(), Counter(), сверить_корень=lambda: [])
+    finally:
+        закрытый.chmod(0o755)
+        if прежний_файл is None:
+            os.environ.pop("HARNESS_VERSION_FILE", None)
+        else:
+            os.environ["HARNESS_VERSION_FILE"] = прежний_файл
+    if (р["итог"].get("поставлено") is True and "Харнес обновлён" in р["сказано"]
+            and "Версию записать не удалось" in р["сказано"] and р["итог"].get("версия записана") is False):
+        путь_ок("V2 версия не записалась: владелец всё равно извещён об обновлении и о беде записи")
+    else:
+        путь_плохо(f"V2 версия не записалась: {р['итог']} · {р['сказано'][-300:]!r}")
+
+    def case_gates_limit():
+        troubles, пределы = [], []
+        прежний_запуск = обновление.subprocess.run
+        def запуск(*а, **к):
+            пределы.append(к.get("timeout"))
+            raise subprocess.TimeoutExpired(а[0] if а else "gates", к.get("timeout") or 0)
+        обновление.subprocess.run = запуск
+        try:
+            set_stand_key("UPDATE_GATES_TIMEOUT_SEC", "4321")
+            if обновление.прогнать_ворота() is not None:
+                troubles.append("оборванные пределом ворота дали итог")
+            set_stand_key("UPDATE_GATES_TIMEOUT_SEC", "не число")
+            обновление.прогнать_ворота()
+        finally:
+            обновление.subprocess.run = прежний_запуск
+            set_stand_key("UPDATE_GATES_TIMEOUT_SEC", "5400")
+        if пределы != [4321, обновление.ПРЕДЕЛ_ВОРОТ_УМОЛЧАНИЕ]:
+            troubles.append(f"предел ворот не из ключа harness.conf: {пределы}")
+        if "UPDATE_GATES_TIMEOUT_SEC" not in обновление.слова_о_пределе_ворот():
+            troubles.append("отказ по пределу не называет ключ")
+        return troubles
+    root_case("V3 ворота обновления: предел — ключ UPDATE_GATES_TIMEOUT_SEC, мусор — умолчание, отказ называет ключ", case_gates_limit)
 
     print("── заметки выпуска: строка «Что нового» в сообщении об обновлении ──")
     # hr.release-notes-human-language: сообщение «Харнес обновлён» несёт первую строку
@@ -3451,7 +3615,8 @@ try:
             try:
                 result_b = обновление.поставить(
                     **{"разложить": adapter([]), "перезапустить": lambda: True,
-                       "проверить": gates(Counter()), "сказать": said_b.append})
+                       "проверить": gates(Counter()), "сказать": said_b.append,
+                       "сверить_корень": lambda: []})
             except Exception as trouble:  # noqa: BLE001
                 result_b = {"исключение": f"{type(trouble).__name__}: {trouble}"}
         troubles += [f"HARNESS_TG_SEND=\"\": {t}" for t in

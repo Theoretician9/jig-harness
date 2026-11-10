@@ -155,7 +155,7 @@ DONE_LIST=(); CHECKED_LIST=(); FAILED_LIST=()
 printf 'FAILED=%s\n' "${#FAILED_LIST[@]}"; printf 'F: %s\n' "${FAILED_LIST[@]}"
 EOF
     } > "$T/step.sh"
-    PATH="$T/bin:$PATH" DRY=0 RESUME="$2" HARNESS_SRC="$T/pkg" STAMP_DIR="$T/stamps" \
+    PATH="$T/bin:$PATH" DRY=0 RESUME="$2" SELF=USTANOVIT.sh HARNESS_SRC="$T/pkg" STAMP_DIR="$T/stamps" \
         AGENT_USER="$AGENT" STATE_DIR="$T/var/voice-root" \
         bash -c 'set -Eeuo pipefail; source "$0"' "$T/step.sh" 2>&1
 }

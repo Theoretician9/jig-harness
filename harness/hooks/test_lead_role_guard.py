@@ -89,6 +89,11 @@ with tempfile.TemporaryDirectory() as tmp:
     for cmd in ["ls -la /var/www", "git status --short", "git log --oneline | head -5",
                 "grep -rn foo scripts | wc -l", "python3 scripts/who-writes.py",
                 "bash scripts/gates-snapshot.sh",
+                "python3 scripts/launch-plan.py hr.x", "python3 scripts/launch-plan.py hr.x --json",
+                "python3 scripts/launch-plan.py --нужен-план hr.x", "python3 scripts/launch-plan.py --метрики",
+                "python3 scripts/spec_approval.py --состояние hr.x",
+                "git -C /var/www/project log --oneline -3", "git -C /tmp/x status --short",
+                "git -C /tmp/x show HEAD",
                 f"echo решение >> {J}",
                 f"cat >> {J} <<'EOF'\nrm -rf x; touch y && git push\nEOF",
                 "setsid nohup bash scripts/gates-snapshot.sh > /var/log/harness/g.log 2>&1 < /dev/null &",
@@ -97,7 +102,14 @@ with tempfile.TemporaryDirectory() as tmp:
     for cmd in ["git commit -m x", "git push origin master", "rm -rf /tmp/x", "ls; rm x",
                 "echo hi > file.txt", f"echo hi > {J}.bak", "sed -i s/a/b/ f", "python3 -c 'print(1)'",
                 "ls | xargs rm", "cat x | tee y", "ls $(rm x)", "ls `rm x`", "ls && touch z",
-                "bash scripts/deploy.sh", "git checkout -- a.py"]:
+                "bash scripts/deploy.sh", "git checkout -- a.py",
+                "python3 scripts/spec_approval.py --отправить hr.x", "python3 scripts/spec_approval.py --состояние --отправить hr.x",
+                "python3 scripts/spec_approval.py --отправить hr.x --состояние", "python3 scripts/spec_approval.py --selftest",
+                "python3 scripts/launch-plan.py --прижить hr.x план/глава", "python3 scripts/launch-plan.py --закрепить hr.x",
+                "python3 scripts/launch-plan.py --отметить id хорошо", "python3 scripts/launch-plan.py hr.x --json --прижить a b",
+                "git -c diff.external=/tmp/evil.sh diff", "git -c core.fsmonitor=/tmp/e status",
+                "git --config-env=core.pager=X log", "git --exec-path=/tmp/e status", "git -C /tmp/x -c core.pager=x log",
+                "git -C /tmp/x commit -m x", "git -C /tmp/x push", "git -c core.x=y reset --hard"]:
         check(f"отказ: {cmd[:50]}", 2, code(bash(LEAD, cmd)))
 
     print("управляющий: Agent")

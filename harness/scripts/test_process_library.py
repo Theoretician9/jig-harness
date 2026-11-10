@@ -49,6 +49,8 @@ SETTINGS_PATH = Path(os.environ.get("HARNESS_CLAUDE_SETTINGS") or ROOT / ".claud
 GIT_HOOKS = Path(os.environ.get("HARNESS_GIT_HOOKS_DIR") or ROOT / ".git" / "hooks")
 DISPATCHER = Path(os.environ.get("HARNESS_TG_DISPATCHER") or HERE / "tg-dispatcher.sh")
 MECHANISMS_PATH = Path(os.environ.get("HARNESS_MECHANISMS") or CONFIG / "mechanisms.yaml")
+# Боевой слой установки не должен подмешиваться в судимый реестр: дверь на заведомо несуществующий путь.
+os.environ["HARNESS_PROCESS_LIBRARY_LOCAL"] = "/nonexistent/harness-probe/process-library.local.json"
 
 CLASSES = {"фоновый", "по внутреннему действию", "сторонний"}
 LAUNCHES = {"крон", "таймер", "загрузка", "служба", "хук", "агент-сессии",
@@ -58,7 +60,7 @@ JOB_FIELDS = ("расписание", "команда", "журнал", "есл�
 MIRRORED = ("метки", "запас-порога", "метки_без_задания")
 INTERNAL = "по внутреннему действию"
 REQUIRED_IDS = ("sentinel", "process-dispatcher", "helpers", "ask-the-model", "claude-session",
-                "sample-18", "lxc-sample-25", "logrotate-harness")
+                "logrotate-harness")
 
 paths = failures = 0
 
@@ -343,6 +345,68 @@ dangling = [f"{r.get('id')}: {m}" for r in linked if isinstance(r["механи�
             for m in r["механизмы"] if str(m) not in mechanism_ids]
 report(bool(linked) and bool(mechanism_ids) and not dangling,
        "каждый id в `механизмы` есть в mechanisms.yaml", dangling)
+
+print("── 11. слой установки: слияние по id ──")
+# Слой правит человек руками, а читают его крон и панель: любой вид порчи — строка
+# в stderr с путём и пакетный реестр, иначе один опечатанный файл роняет всех читателей.
+BROKEN_LAYERS = {
+    "не JSON": lambda path: path.write_text("{не json", encoding="utf-8"),
+    "запись без id": lambda path: path.write_text(
+        json.dumps({"процессы": [{"название": "х"}]}, ensure_ascii=False), encoding="utf-8"),
+    "список наверху": lambda path: path.write_text("[]", encoding="utf-8"),
+    "каталог вместо файла": lambda path: path.mkdir(),
+    "нечитаемый файл": lambda path: (path.write_text("{}", encoding="utf-8"), path.chmod(0)),
+}
+
+
+def registry_with_stderr(base: Path):
+    captured = tempfile.TemporaryFile(mode="w+", encoding="utf-8")
+    saved_stderr, sys.stderr = sys.stderr, captured
+    try:
+        return [r["id"] for r in process_library.registry(base)["процессы"]], "", captured
+    except Exception as raised:
+        return [], f"упал: {type(raised).__name__}: {raised}", captured
+    finally:
+        sys.stderr = saved_stderr
+        captured.seek(0)
+
+
+with tempfile.TemporaryDirectory(prefix="pl-layer-") as layer_dir:
+    base_path, layer_path = Path(layer_dir) / "base.json", Path(layer_dir) / "layer.local.json"
+    base_path.write_text(json.dumps({"процессы": [
+        {"id": "probe-a", "название": "пакетная А"}, {"id": "probe-b", "название": "пакетная Б"}]}), encoding="utf-8")
+    saved_door = os.environ.get("HARNESS_PROCESS_LIBRARY_LOCAL")
+    os.environ["HARNESS_PROCESS_LIBRARY_LOCAL"] = str(layer_path)
+    try:
+        without = [(r["id"], r["название"]) for r in process_library.registry(base_path)["процессы"]]
+        report(without == [("probe-a", "пакетная А"), ("probe-b", "пакетная Б")],
+               "слоя нет — реестр как в пакете", [str(without)])
+        layer_path.write_text(json.dumps({"процессы": [
+            {"id": "probe-b", "название": "слой Б"}, {"id": "probe-c", "название": "слой В"}]}), encoding="utf-8")
+        merged = [(r["id"], r["название"]) for r in process_library.registry(base_path)["процессы"]]
+        report(merged == [("probe-a", "пакетная А"), ("probe-b", "слой Б"), ("probe-c", "слой В")],
+               "слой заменяет запись по id на месте и дописывает новую", [str(merged)])
+        for kind, spoil in BROKEN_LAYERS.items():
+            spoiled = Path(layer_dir) / kind.replace(" ", "-") / "layer.local.json"
+            spoiled.parent.mkdir()
+            spoil(spoiled)
+            if spoiled.is_file() and os.access(spoiled, os.R_OK) and spoiled.stat().st_mode & 0o777 == 0:
+                print(f"пропуск · битый слой «{kind}»: под root режим 0 читается")
+                continue
+            os.environ["HARNESS_PROCESS_LIBRARY_LOCAL"] = str(spoiled)
+            ids, error, captured = registry_with_stderr(base_path)
+            said = captured.read()
+            problems = [error] if error else []
+            if not error and ids != ["probe-a", "probe-b"]:
+                problems.append(f"реестр {ids}")
+            if str(spoiled) not in said:
+                problems.append(f"в stderr нет пути слоя: {said.strip()[:200]!r}")
+            report(not problems, f"битый слой «{kind}»: не падает, реестр пакета, путь слоя в stderr", problems)
+    finally:
+        if saved_door is None:
+            os.environ.pop("HARNESS_PROCESS_LIBRARY_LOCAL")
+        else:
+            os.environ["HARNESS_PROCESS_LIBRARY_LOCAL"] = saved_door
 
 print(f"БИБЛИОТЕКА ПРОЦЕССОВ: путей {paths}, неудач {failures}")
 if failures:

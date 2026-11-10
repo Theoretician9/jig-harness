@@ -18,13 +18,14 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
-from config import из_файла, путь_install_conf  # noqa: E402
+from config import из_файла, корень_машины, путь_install_conf  # noqa: E402
 
 КОРЕНЬ = Path(__file__).resolve().parent.parent
 # Расписания и юниты зовут дерево ПАСПОРТА; в прогоне по снимку файлы ищутся
 # в снимке, иначе ни один путь не совпал бы с корнем и гейт молча зеленел.
 ЗОВУТ = Path(из_файла(путь_install_conf()).get("PROJECT_DIR") or КОРЕНЬ).resolve()
 РАСШИРЕНИЯ = (".sh", ".py")
+КОПИЯ_ПРАВ = Path(os.environ.get("HARNESS_SUDO_RIGHTS_COPY") or f"{корень_машины()}/sudo-rights.txt")
 
 
 def строки_расписаний():
@@ -52,6 +53,11 @@ def строки_расписаний():
             if перечень.returncode == 0:
                 права = [Path("/etc/sudoers.d") / имя
                          for имя in перечень.stdout.split()]
+            elif КОПИЯ_ПРАВ.is_file():
+                # Установщик кладёт читаемую копию выданных прав: корневые файлы
+                # агенту не прочесть, а слепой гейт выглядел бы чистым.
+                for строка in КОПИЯ_ПРАВ.read_text(encoding="utf-8", errors="replace").splitlines():
+                    yield str(КОПИЯ_ПРАВ), строка
             else:
                 print("[внешние вызовы] ВНИМАНИЕ: список /etc/sudoers.d не получен — "
                       "права sudo не проверены")

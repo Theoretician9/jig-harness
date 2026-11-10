@@ -62,6 +62,13 @@ MARKER='не-секрет'
 # Отсев узкий: значение целиком — цифры, точки и обычный суффикс версии.
 VERSIYA='(token|secret|passwd|password|api_?key)[A-Za-z0-9_-]*[[:space:]]*[:=][[:space:]]*"?v?[0-9]+(\.[0-9]+)+([-+][0-9A-Za-z.]+)?"?[[:space:]]*$'
 
+# Лимит — не секрет: значение — счёт токенов модели или размер, а не ключ.
+# Отсев узкий и привязан к ИМЕНИ в начале присваивания (хвост строки его не гасит): имя
+# кончается на «tokens» (мн. число — счёт) или на слово-меру, значение целиком из цифр.
+# Одиночное имя TOKEN с числом и любой буквенно-цифровой токен по-прежнему красные.
+# Сравнение без учёта регистра (имена в .env заглавные), поэтому -i у вызова.
+CHISLO='^[^:]*:[0-9]+:[[:space:]]*(export[[:space:]]+)?["'"'"']?[A-Za-z0-9_.-]*(tokens|(token|secret|passwd|password|api_?key)[A-Za-z0-9_-]*_(limit|max|min|size|count|ttl|len|timeout))["'"'"']?[[:space:]]*[:=][[:space:]]*"?[0-9]+"?[[:space:]]*$'
+
 # Находка печатается как «СЕКРЕТ? путь:строка: вид [скрыто]» — значение в вывод
 # не идёт: вывод гейта оседает в журналах ворот, в выводе publish.sh и в
 # транскрипте сессии, а напечатанный секрет и есть утечка (И-3). Вид узнаётся
@@ -280,7 +287,7 @@ run_scan_inner() {  # $1 = каталог репо, $2 = режим all|staged, 
         echo "check-secrets: git grep упал (код $rc) — секреты НЕ проверены"
         fail=1
     else
-        hits=$(grep -v "$MARKER" "$TMPD/patterns.out" | grep -vE "$VERSIYA" || true)
+        hits=$(grep -v "$MARKER" "$TMPD/patterns.out" | grep -vE "$VERSIYA" | grep -viE "$CHISLO" || true)
     fi
     if [ -n "$hits" ]; then
         mask_findings <<< "$hits"
@@ -943,6 +950,22 @@ SHIM
         rm -rf "$S"; return "$ok"
     }
 
+    # Случай 29. Числовой лимит у имени с TOKENS — не секрет; настоящий токен рядом и
+    # одиночный TOKEN с числом — красные.
+    sluchai_chislovoj_limit() {
+        printf "CTX_WINDOW_TOKENS=800000\nMAX_TOKEN_LIMIT=5000\n" > "$T/lim.env"  # не-секрет
+        printf "ADMIN_TOKEN=a9f3k2x7q1\nAPI_TOKEN=123456789\nDB_PASSWORD=123456 # password_len=6\n" >> "$T/lim.env"  # не-секрет: стенд самотеста
+        git -C "$T" add lim.env >/dev/null 2>&1
+        local vyvod; vyvod=$(run_scan "$T" all "" "$KONF_PUSTOJ" 2>&1 || true)
+        rm -f "$T/lim.env"; git -C "$T" rm -q --cached lim.env
+        if printf %s "$vyvod" | grep -qE 'lim.env:[12]:'; then
+            echo "  числовой лимит принят за секрет"; return 1
+        fi
+        printf %s "$vyvod" | grep -q 'lim.env:3:' || { echo "  отсев лимитов проглотил буквенно-цифровой токен"; return 1; }
+        printf %s "$vyvod" | grep -q 'lim.env:4:' || { echo "  отсев лимитов проглотил TOKEN с числом"; return 1; }
+        printf %s "$vyvod" | grep -q 'lim.env:5:' || { echo "  хвост строки погасил настоящий пароль"; return 1; }
+    }
+
     # ТАБЛИЦА СЛУЧАЕВ. Число печатается из её длины: рукописное «N/7» уже
     # разъезжалось с действительностью, и заметить это было некому.
     SLUCHAI=(
@@ -974,6 +997,7 @@ SHIM
         "сбой git — красный во всех ветках:sluchai_sboj_git"
         "временные файлы не остаются после прогона и SIGTERM:sluchai_tmp_ne_ostayotsya"
         "каталог ключей: глубина, симлинки, JSON, Telegram, нечитаемый, пустой:sluchai_katalog_formy"
+        "числовой лимит TOKENS не секрет, токены рядом — красные:sluchai_chislovoj_limit"
     )
 
     vsego=${#SLUCHAI[@]}

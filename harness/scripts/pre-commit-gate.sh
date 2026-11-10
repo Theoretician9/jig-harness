@@ -422,9 +422,22 @@ journal() {  # вердикт, имя-гейта
         >> "$GATES_LOG" 2>/dev/null || echo "[pre-commit] журнал $GATES_LOG недоступен (гейт не затронут)"
 }
 
+# Провалы копятся и печатаются списком в конце: остановка на первом заставляла
+# чинить по одному и перезапускать весь хук (на свежей установке — пять кругов
+# по ~8 минут). Возврат нулевой нарочно: `проверка || fail` под set -e иначе
+# оборвал бы хук на первом же красном.
+GATE_FAILURES=()
 fail() {
     echo "[pre-commit] GATE FAIL: $1" >&2
-    journal fail "$1"
+    GATE_FAILURES+=("$1")
+    return 0
+}
+
+подвести() {  # печатает все провалы прогона, ненулевой код при хотя бы одном
+    [ "${#GATE_FAILURES[@]}" -eq 0 ] && return 0
+    journal fail "$(IFS=,; echo "${GATE_FAILURES[*]}")"
+    echo "[pre-commit] КОММИТ ОСТАНОВЛЕН: красных гейтов ${#GATE_FAILURES[@]}:" >&2
+    printf '  - %s\n' "${GATE_FAILURES[@]}" >&2
     exit 1
 }
 
@@ -465,7 +478,7 @@ if [ "${1:-}" = "--selftest-yellow" ]; then
         || { echo "САМОТЕСТ ПРОВАЛЕН: жёлтый гейт остановил коммит"; exit 1; }
     # БОЛЬНОЙ СЛУЧАЙ: красный обязан валить — иначе жёлтое состояние проглотит всё.
     RC_RED=0
-    ( гейт "проба-красная" bash -c 'echo сломалось; exit 2' >/dev/null 2>&1 ) || RC_RED=$?
+    ( гейт "проба-красная" bash -c 'echo сломалось; exit 2' >/dev/null 2>&1; подвести >/dev/null 2>&1 ) || RC_RED=$?
     [ "$RC_RED" = 1 ] \
         || { echo "САМОТЕСТ ПРОВАЛЕН: красный гейт коммит не остановил (код $RC_RED)"; exit 1; }
     # БОЛЬНОЙ СЛУЧАЙ: боевой контекст. Коммит зовёт гейт ПРЯМО, а обе пробы
@@ -503,7 +516,7 @@ staged_copy() {  # staged-файл → печатает путь копии со
 SNAP_DIR="$STAGE_TMP/snapshot"
 mkdir -p "$SNAP_DIR"
 git checkout-index -a --prefix="$SNAP_DIR/" \
-    || fail "снимок_индекса"
+    || { fail "снимок_индекса"; подвести; }   # без снимка остальные гейты судили бы пустоту
 SNAP_GIT_DIR="$(git rev-parse --absolute-git-dir)"
 # GIT_DIR нужен реестру журналов: базу долга он читает из HEAD, а снимок — не репозиторий.
 # GIT_INDEX_FILE хук получает ОТНОСИТЕЛЬНЫМ (.git/index): из каталога снимка он
@@ -555,7 +568,7 @@ while IFS= read -r f; do
     [ -z "$f" ] && continue
     case "$f" in
         *.sh)
-            SC=$(staged_copy "$f") || fail "index_read:$f"
+            SC=$(staged_copy "$f") || { fail "index_read:$f"; continue; }
             if command -v shellcheck >/dev/null 2>&1; then
                 shellcheck -S error "$SC" || fail "shellcheck:$f"
             else
@@ -565,7 +578,7 @@ while IFS= read -r f; do
             fi
             ;;
         *.py)
-            SC=$(staged_copy "$f") || fail "index_read:$f"
+            SC=$(staged_copy "$f") || { fail "index_read:$f"; continue; }
             python3 -m py_compile "$SC" || fail "py_syntax:$f"
             ;;
     esac
@@ -723,6 +736,7 @@ fi
 # правило без носителя, поэтому здесь код.
 printf '%s\n' "$CHANGED" | python3 "$SCRIPT_DIR/compare-with-package.py" || fail "package_sync"
 
+подвести
 journal pass ""
 echo "[pre-commit] все гейты пройдены"
 # Коммит — рубеж, на котором несрочное сообщение владельца ждёт прочтения

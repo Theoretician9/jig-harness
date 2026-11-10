@@ -101,7 +101,12 @@ check = cases.check
 # Заглушки читают своё поведение из файлов стенда: случай меняет файл, а не код.
 STUB_SYSTEMCTL = """#!/bin/sh
 echo "$*" >> "$STUB/systemctl.calls"
+if [ "$1" = show ]; then
+    if grep -qx "${5}" "$STUB/notfound" 2>/dev/null; then echo not-found; else echo loaded; fi
+    exit 0
+fi
 [ "$1" = is-active ] || exit 1
+if grep -qx "$2" "$STUB/notfound" 2>/dev/null; then echo inactive; exit 3; fi
 if grep -qx "$2" "$STUB/inactive" 2>/dev/null; then echo inactive; exit 3; fi
 echo active
 """
@@ -311,8 +316,8 @@ def section_green(tmp: Path, port: int) -> None:
     check("reboot-last.json: поля метки сохранены", "6.8.0-147", record.get("ядро_ожидаемое"))
     check("reboot-last.json: время проверки — число", True, isinstance(record.get("проверено"), int))
     check("в STATE_DIR ничего не писалось (B-1)", False, (st.base / "no-state").exists())
-    check("systemctl звали только is-active (ничего не поднимает и не гасит)", [],
-          [c for c in st.calls("systemctl") if not c.startswith("is-active ")])
+    check("systemctl звали только is-active и show LoadState (ничего не поднимает и не гасит)", [],
+          [c for c in st.calls("systemctl") if not c.startswith(("is-active ", "show -p LoadState "))])
     check("sudo/reboot/shutdown не звались", [], st.calls("forbidden"))
 
 
@@ -330,8 +335,37 @@ def section_red_unit(tmp: Path, port: int) -> None:
           tail(lines).startswith("НЕ ПОДНЯЛСЯ") and "проба-юнит-из-данных" in tail(lines))
     check("reboot-last.json: итог «красный»", "красный", st.last_record().get("итог"))
     check("метка снята и при красном", False, st.marker.exists())
-    check("красный юнит не поднимали (только is-active)", [],
-          [c for c in st.calls("systemctl") if not c.startswith("is-active ")])
+    check("красный юнит не поднимали (только is-active и show)", [],
+          [c for c in st.calls("systemctl") if not c.startswith(("is-active ", "show -p LoadState "))])
+
+
+def section_unit_not_installed(tmp: Path, port: int) -> None:
+    print("── ЮНИТА НЕТ НА УСТАНОВКЕ: необязательный — «не установлен», свой — КРАСНЫЙ ──")
+    st = Stand(tmp / "unit-not-found", port)
+    st.put_marker()
+    optional = json.loads(json.dumps(GOOD_LIST))
+    optional["проверки"][1]["необязательный"] = True
+    st.write_list(optional)
+    (st.stub / "notfound").write_text("proba-unit-from-data\n", encoding="utf-8")
+    rc, lines = st.run()
+    row = line_of(lines, "проба-юнит-из-данных")
+    check("необязательный not-found юнит — не красный (код 0)", 0, rc)
+    check("строка необязательного not-found юнита — «не установлен»", True,
+          "не установлен" in row and "КРАСНЫЙ" not in row)
+    # Раскладка не поставила агента — это не «поднялся».
+    st = Stand(tmp / "own-unit-not-found", port)
+    st.put_marker()
+    (st.stub / "notfound").write_text("harness-agent\n", encoding="utf-8")
+    rc, lines = st.run()
+    check("свой not-found юнит (без признака) — КРАСНЫЙ, код 1", (1, True),
+          (rc, line_of(lines, "агент").startswith("агент: КРАСНЫЙ")))
+    # Установленный и остановленный по-прежнему красный: рядом, в другом стенде.
+    st = Stand(tmp / "unit-inactive", port)
+    st.put_marker()
+    (st.stub / "inactive").write_text("proba-unit-from-data\n", encoding="utf-8")
+    rc, lines = st.run()
+    check("установленный inactive юнит — КРАСНЫЙ, код 1", (1, True),
+          (rc, line_of(lines, "проба-юнит-из-данных").startswith("проба-юнит-из-данных: КРАСНЫЙ")))
 
 
 def section_red_kinds(tmp: Path, port: int) -> None:
@@ -703,6 +737,9 @@ def section_data() -> None:
     for unit in ("harness-agent", "harness-dispatcher", "harness-panel", "harness-firewall",
                  "harness-sentinel.timer", "cron", "docker", "nginx"):
         check(f"юнит {unit} в перечне подъёма", True, unit in units)
+    optional = sorted(e.get("юнит") for e in entries if e.get("необязательный") is True)
+    check("необязательны только чужие системы: стена, docker, nginx", ["docker", "harness-firewall", "nginx"],
+          optional)
     kinds = [e.get("вид") for e in entries]
     for kind in ("tmux", "ответ_сессии", "ядро", "http", "команда"):
         check(f"вид «{kind}» в перечне", True, kind in kinds)
@@ -762,7 +799,7 @@ def main() -> int:
     threading.Thread(target=server.serve_forever, daemon=True).start()
     try:
         with tempfile.TemporaryDirectory(prefix="boot-check-probe-") as tmp:
-            for section in (section_green, section_red_unit, section_red_kinds, section_answer,
+            for section in (section_green, section_red_unit, section_unit_not_installed, section_red_kinds, section_answer,
                             section_marker_rule, section_no_marker, section_broken_list, section_busy,
                             section_busy_real_data, section_site_keys, section_containers_real_data):
                 try:

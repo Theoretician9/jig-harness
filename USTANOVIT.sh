@@ -29,6 +29,19 @@
 
 set -Eeuo pipefail
 
+# Свежий VPS в первые минуты держит замок apt (cloud-init, unattended-upgrades):
+# голый apt-get падал «Could not get lock», и установка вставала на ровном месте.
+# Функция перекрывает имя во всех командах скрипта (в том числе внутри делай/eval),
+# а текст «apt-get install …» в командах остаётся прежним для сверки со стеком.
+export DEBIAN_FRONTEND=noninteractive
+APT_LOCK_WAIT=600
+apt-get() { command apt-get -o "DPkg::Lock::Timeout=$APT_LOCK_WAIT" "$@"; }
+
+дождаться_cloud_init() { # cloud-init первой загрузки держит apt; ждём его конца, но не дольше предела
+  command -v cloud-init >/dev/null 2>&1 || return 0
+  timeout "${CLOUD_INIT_WAIT:-600}" cloud-init status --wait >/dev/null 2>&1 || true
+}
+
 # ---------------------------------------------------------------- обвязка ----
 
 # trap ERR: set -e не имеет права ронять установку молча. Любая упавшая
@@ -39,7 +52,8 @@ trap 'rc=$?;
   cmd="$BASH_COMMAND"
   case "$cmd" in eval*) cmd="${CURRENT_CMD:-$cmd}" ;; esac
   printf "\nОШИБКА на шаге «%s» (код %s), упавшая команда:\n  %s\nПочини причину и запусти с --resume: sudo bash %s --resume\n" \
-    "$CURRENT_STEP" "$rc" "$cmd" "${BASH_SOURCE[0]}" >&2' ERR
+    "$CURRENT_STEP" "$rc" "$cmd" "$SELF" >&2
+  FAILED_LIST+=("ОШИБКА на шаге «$CURRENT_STEP» (код $rc): $cmd — установка прервана, дальше не шла")' ERR
 
 DRY=0
 RESUME=0
@@ -54,6 +68,12 @@ for arg in "$@"; do
 done
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SELF="$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")"
+# Установщик лежит в /root/starter/..., агент этот каталог не читает, а git и
+# python агента при старте смотрят на текущий каталог («failed to stat …
+# Permission denied» ронял самопроверку раскладчика). Все команды от агента
+# идут из каталога, который читает каждый.
+cd /
 HARNESS_SRC="$SCRIPT_DIR/harness"
 CONF="${HARNESS_INSTALL_CONF:-/etc/harness/install.conf}"
 STAMP_DIR=/var/lib/harness/install-steps
@@ -104,11 +124,13 @@ STAMP_DIR=/var/lib/harness/install-steps
   # Человек всё равно должен написать боту, чтобы канал заработал. Раз так —
   # пусть пишет один раз, а число возьмёт код: переписанный руками chat_id
   # это лишний вопрос и целый класс ошибок (указание владельца 13.09.2026).
-  local token="$1" тик id
-  скажи ""
-  скажи "  Напишите вашему боту в Telegram любое сообщение — я возьму ваш"
-  скажи "  chat_id из него сам. Жду до 120 секунд (Ctrl+C — ввести числом)."
-  for ((тик = 0; тик < 24; тик++)); do
+  local token="$1" tick id
+  # Функцию зовут в $(…): всё, что не chat_id, обязано идти в stderr, иначе подсказки
+  # попадут в значение TG_CHAT_ID. Кириллица в имени переменной bash 5.2 не принимает.
+  скажи "" >&2
+  скажи "  Напишите вашему боту в Telegram любое сообщение — я возьму ваш" >&2
+  скажи "  chat_id из него сам. Жду до 120 секунд (Ctrl+C — ввести числом)." >&2
+  for ((tick = 0; tick < 24; tick++)); do
     id=$(curl -s --max-time 10 "${TG_API_BASE:-https://api.telegram.org}/bot${token}/getUpdates" 2>/dev/null \
          | python3 -c '
 import json, sys
@@ -122,14 +144,67 @@ for о in reversed(д.get("result") or []):
         print(ч["id"]); break
 ' 2>/dev/null)
     if [[ "$id" =~ ^-?[0-9]+$ ]]; then
-      скажи "  chat_id получен из вашего сообщения: $id"
+      скажи "  chat_id получен из вашего сообщения: $id" >&2
       printf '%s\n' "$id"
       return 0
     fi
     sleep 5
   done
-  скажи "  сообщения не дождался — спрошу число"
+  скажи "  сообщения не дождался — спрошу число" >&2
   return 1
+}
+
+проверить_токен() { # $1 = токен → rc 0 принят Telegram, 1 отвергнут (ok:false), 2 ответа нет или он не JSON
+  # Неверный токен молча доезжал до шага 7 и там давал стоп после двух минут ожидания.
+  # Адрес с токеном идёт через stdin curl, а не в argv (argv виден в ps).
+  local out
+  out=$(printf 'url = "%s/bot%s/getMe"\n' "${TG_API_BASE:-https://api.telegram.org}" "$1" | curl -s --max-time 15 -K - 2>/dev/null) || return 2
+  python3 -c '
+import json, sys
+try:
+    д = json.loads(sys.stdin.read())
+except Exception:
+    sys.exit(2)
+sys.exit(0 if д.get("ok") is True else 1)
+' <<<"$out"
+}
+
+вебхук_бота() { # $1 = токен → URL вебхука на stdout, пусто если его нет или ответа нет
+  # Вебхук и getUpdates взаимно исключают друг друга: бот с вебхуком диспетчеру не отдаёт сообщений.
+  printf 'url = "%s/bot%s/getWebhookInfo"\n' "${TG_API_BASE:-https://api.telegram.org}" "$1" \
+    | curl -s --max-time 15 -K - 2>/dev/null \
+    | python3 -c '
+import json, sys
+try:
+    print((json.load(sys.stdin).get("result") or {}).get("url") or "")
+except Exception:
+    pass
+' 2>/dev/null || true
+}
+
+спросить_токен() { # читает токен в BOT_TOKEN, пока Telegram его не примет (нет связи — берём как есть)
+  local rc
+  while :; do
+    read -r -s -p "  токен бота от BotFather (вставьте, ввод скрыт): " BOT_TOKEN; echo
+    [[ -n "$BOT_TOKEN" ]] || { скажи "      токен пустой — без него канала не будет"; continue; }
+    [[ "${INSTALL_CHANNEL_CHECK:-1}" = "0" ]] && return 0
+    rc=0
+    проверить_токен "$BOT_TOKEN" || rc=$?
+    case $rc in
+      0) return 0 ;;
+      2) скажи "      Telegram не ответил — токен не проверен, беру как есть"; return 0 ;;
+      *) скажи "      Telegram отверг этот токен (getMe) — проверьте, что вставили его целиком, и введите снова" ;;
+    esac
+  done
+}
+
+предупредить_о_вебхуке() { # $1 = токен: бот с вебхуком занят, диспетчер сообщений не получит
+  local url
+  [[ "${INSTALL_CHANNEL_CHECK:-1}" = "0" ]] && return 0
+  url="$(вебхук_бота "$1")"
+  [[ -n "$url" ]] || return 0
+  скажи "  ВНИМАНИЕ: у бота стоит вебхук ($url) — бот занят другим потребителем, getUpdates диспетчера не получит ничего."
+  MANUAL_LIST+=("у бота стоит вебхук — снимите его (curl -s \"$TG_API/bot<токен>/deleteWebhook\") или возьмите другого бота, иначе входящие не дойдут")
 }
 
 спросить_путь() { # $1 = текст вопроса, $2 = значение по умолчанию; печатает путь
@@ -164,7 +239,7 @@ for о in reversed(д.get("result") or []):
   if (( DRY )); then printf '  + systemd-analyze verify %s\n' "$unit"; return 0; fi
   if ! command -v systemd-analyze >/dev/null 2>&1; then
     printf '  ПРОПУСК: systemd-analyze нет — юнит не выверен до включения\n'
-    printf '     адрес: apt-get install -y systemd; затем %s --resume\n' "${BASH_SOURCE[0]}"
+    printf '     адрес: apt-get install -y systemd; затем %s --resume\n' "$SELF"
     return 0
   fi
   printf '  проверка: systemd-analyze verify %s\n' "$unit"
@@ -198,7 +273,7 @@ MANUAL_LIST=()
 стоп() { # стоп "имя шага" "что не так" "команда диагностики"
   printf '\nСТОП на шаге «%s»: %s\n' "$1" "$2" >&2
   printf 'Диагностика: %s\n' "$3" >&2
-  printf 'После починки перезапустите: sudo bash %s --resume\n' "${BASH_SOURCE[0]}" >&2
+  printf 'После починки перезапустите: sudo bash %s --resume\n' "$SELF" >&2
   # Сводка идёт ловушкой EXIT и без этой строки печатала «Упавших шагов нет»
   # после стопа (первая установка 13.10.2026: шаг 9 встал, владелец увидел «всё хорошо»).
   FAILED_LIST+=("СТОП на шаге «$1»: $2 — установка прервана, дальше не шла")
@@ -228,6 +303,71 @@ MANUAL_LIST=()
   fi
 }
 
+записать_sudoers() { # записать_sudoers путь  (содержимое — stdin): через временный файл и visudo -cf
+  # Битый файл в sudoers.d ломает sudo целиком, а не одно правило, поэтому в
+  # /etc/sudoers.d он попадает только проверенным.
+  local path="$1" content tmp
+  content="$(cat)"
+  printf '  + записать файл %s (права 440, владелец root:root, после visudo -cf):\n' "$path"
+  printf '%s\n' "$content" | sed 's/^/    | /'
+  (( DRY )) && return 0
+  tmp="$(mktemp)"
+  printf '%s\n' "$content" > "$tmp"
+  visudo -cf "$tmp" >/dev/null || { rm -f "$tmp"; стоп "$CURRENT_STEP" "sudoers $path не прошёл visudo -cf — в sudoers.d не положен" "visudo -cf <файл>"; }
+  install -o root -g root -m 0440 "$tmp" "$path"
+  rm -f "$tmp"
+}
+
+дополнить_settings_json() { # $1=путь: дописывает наши ключи, остальное (enabledPlugins и пр.) не трогает
+  # Перезапись файла целиком стирала enabledPlugins: плагины шага 8 после
+  # обновления оставались установленными, но выключенными.
+  python3 -I - "$1" <<'PY'
+import json, shutil, sys
+путь = sys.argv[1]
+try:
+    д = json.load(open(путь, encoding="utf-8"))
+    if not isinstance(д, dict):
+        raise ValueError("не объект")
+except FileNotFoundError:
+    д = {}
+except ValueError:
+    shutil.copy2(путь, путь + ".bak-broken")  # чужое не теряем: битый файл остаётся рядом
+    д = {}
+д["language"] = "russian"
+разрешения = д.get("permissions")
+if not isinstance(разрешения, dict):
+    разрешения = {}
+разрешения["defaultMode"] = "bypassPermissions"
+д["permissions"] = разрешения
+with open(путь, "w", encoding="utf-8") as f:
+    json.dump(д, f, ensure_ascii=False, indent=2)
+    f.write("\n")
+PY
+}
+
+ос_поддерживается() { # $1=файл os-release → rc 0 для Ubuntu 22.04 и 24.04
+  ( # подоболочка: os-release кладёт в окружение свои ID и VERSION_ID
+    # shellcheck source=/dev/null
+    . "$1" 2>/dev/null || exit 1
+    [[ "${ID:-}" == ubuntu && ( "${VERSION_ID:-}" == 22.04 || "${VERSION_ID:-}" == 24.04 ) ]]
+  )
+}
+
+проверить_ос_установки() { # не Ubuntu 22.04/24.04: громко, и дальше — только по слову человека
+  local os_file="${1:-/etc/os-release}" answer
+  ос_поддерживается "$os_file" && return 0
+  скажи "ВНИМАНИЕ: установщик проверен на Ubuntu 22.04 и 24.04, а здесь: $(. "$os_file" 2>/dev/null; printf '%s' "${PRETTY_NAME:-неизвестная система}")." >&2
+  скажи "         На другой системе возможны отсутствие sudo и пакета docker-compose-v2, иная версия python." >&2
+  (( DRY )) && return 0
+  if [[ -t 0 ]]; then
+    read -r -p "  Продолжить на свой риск? [y/N] " answer
+    [[ "$answer" =~ ^[YyДд] ]] && return 0
+    скажи "остановлено по вашему слову" >&2; exit 1
+  fi
+  скажи "ввод не терминал — спросить некого: остановлено, система не из проверенных (Ubuntu 22.04/24.04)" >&2
+  exit 1
+}
+
 записать_файл() { # записать_файл путь права владелец  (содержимое — stdin)
   local path="$1" mode="$2" owner="$3" content
   content="$(cat)"
@@ -243,6 +383,231 @@ MANUAL_LIST=()
 
 отметить() { (( DRY )) || { mkdir -p "$STAMP_DIR"; touch "$STAMP_DIR/$1.done"; }; }
 уже_сделан() { (( RESUME )) && [[ -f "$STAMP_DIR/$1.done" ]]; }
+
+# ── первый коммит каркаса и заготовка журнала пакета ────────────────────────
+# Без репозитория и первого коммита три гейта красны, а ручной первый коммит на
+# свежей установке стоил пяти кругов pre-commit: хук судит импорт 677 файлов как
+# разработку. Поэтому коммит делает установщик, дверью, которая у пайплайна уже
+# есть (HARNESS_PIPELINE_FORCE + причина, строка остаётся в журнале обходов), —
+# второй двери не заводим. Запуск от агента: репозиторий и хуки принадлежат ему.
+# AS_AGENT — дверь стенда: пустое значение = без sudo (пробе нужен не root).
+APT_UPDATE="DEBIAN_FRONTEND=noninteractive apt-get update"
+
+apt_поставить() { # пакеты шага 2 и зависимости других шагов ставятся одним способом
+  DEBIAN_FRONTEND=noninteractive apt-get install -y "$@"
+}
+
+положить_пакет() { # $1=откуда, $2=куда, $3=метка: отличающаяся старая копия отодвигается целиком
+  # Слияние поверх старой копии оставляло файлы, убранные новой версией, и гейт имён
+  # останавливал первый коммит. Старое не удаляется: оно уходит рядом в .bak-<метка>.
+  local src="$1" dst="$2" stamp="$3" s_head d_head
+  # Источник старше копии агента: откат версии хуже, чем ничего не делать.
+  s_head="$(git -C "$src" rev-parse HEAD 2>/dev/null)" && d_head="$(git -C "$dst" rev-parse HEAD 2>/dev/null)" \
+    && [ "$s_head" != "$d_head" ] && git -C "$dst" merge-base --is-ancestor "$s_head" "$d_head" 2>/dev/null \
+    && { скажи "  копия агента новее источника — не трогаю: $dst"; return 0; }
+  # __pycache__ и *.pyc рождаются при каждом запуске и не считаются отличием.
+  if [ -n "$(ls -A "$dst" 2>/dev/null)" ] && ! diff -rq -x .git -x __pycache__ -x '*.pyc' "$src" "$dst" >/dev/null 2>&1; then
+    mv "$dst" "$dst.bak-$stamp"
+  fi
+  mkdir -p "$dst" && cp -a "$src/." "$dst/"
+}
+
+записать_версию_пакета() { # $1=пользователь агента, $2=каталог пакета, $3=файл версии (как у update.py)
+  # Формат тот же, что у update.py:записать_версию; без git-коммита писать нечего.
+  local commit
+  commit="$(git -C "$2" rev-parse HEAD 2>/dev/null)" || { скажи "  пакет без git — версия не записана"; return 0; }
+  запуск_от_агента "$1" python3 -I -c '
+import json, os, sys, time
+f, c = sys.argv[1], sys.argv[2]
+tmp = f + ".tmp"
+open(tmp, "w", encoding="utf-8").write(json.dumps({"коммит": c, "дата": time.strftime("%Y-%m-%d %H:%M:%S")}, ensure_ascii=False))
+os.replace(tmp, f)' "$3" "$commit"
+}
+
+запуск_от_агента() { # $1=пользователь агента, дальше команда
+  local user="$1"; shift
+  if [[ -v AS_AGENT ]]; then ${AS_AGENT:+$AS_AGENT} "$@"; else sudo -u "$user" "$@"; fi
+}
+
+личность_коммитов() { # $1=пользователь, $2=каталог репозитория: имя и почта, если не заданы
+  [[ -n "$(запуск_от_агента "$1" git -C "$2" config user.email || true)" ]] \
+    || запуск_от_агента "$1" git -C "$2" config user.email "harness-agent@localhost"
+  [[ -n "$(запуск_от_агента "$1" git -C "$2" config user.name || true)" ]] \
+    || запуск_от_агента "$1" git -C "$2" config user.name "harness-agent"
+}
+
+зафиксировать_пакет() { # $1=пользователь, $2=каталог пакета: гейт package_sync краснеет на грязном пакете
+  запуск_от_агента "$1" test -d "$2/.git" || запуск_от_агента "$1" git -C "$2" init -q
+  личность_коммитов "$1" "$2"
+  запуск_от_агента "$1" git -C "$2" add -A
+  # add -A берёт всё подряд: число файлов — вслух, секрет — отказ (судья тот же, что у хука).
+  скажи "  в коммит пакета: $(запуск_от_агента "$1" git -C "$2" diff --cached --name-only | wc -l) файл(ов)"
+  if ! (cd "$2" && запуск_от_агента "$1" bash "$2/harness/scripts/check-secrets.sh" --staged "$2" >&2); then
+    запуск_от_агента "$1" git -C "$2" reset -q
+    скажи "  в пакете есть похожее на секрет — коммит пакета не сделан"; return 1
+  fi
+  запуск_от_агента "$1" git -C "$2" diff --cached --quiet \
+    || запуск_от_агента "$1" git -C "$2" commit -q -m "Пакет как установлен (установщик)"
+}
+
+журнал_пакета_заготовка() { # печатает заготовку docs/ИЗМЕНЕНИЯ-ПАКЕТА.md с записью за сегодня
+  cat <<EOF
+# ИЗМЕНЕНИЯ-ПАКЕТА — журнал правок пакета (живёт в ПРОЕКТЕ)
+
+Каждая правка харнеса даёт здесь строку со статусом доказанности — иначе гейт
+\`scripts/compare-with-package.py\` не пропустит коммит. Строка ищется по дате
+«| ДД.ММ |», поэтому в день правки нужна строка с сегодняшней датой.
+
+Статусы: «доказано здесь» · «доказано селфтестом» · «ждёт чистого VPS».
+
+| дата | что | статус |
+|---|---|---|
+| $(date +%d.%m) | установка: каркас разложен установщиком, первый коммит сделан им же | доказано селфтестом (раскладчик) |
+EOF
+}
+
+первый_коммит_каркаса() { # $1=каталог проекта, $2=пользователь агента
+  local dir="$1" user="$2" msg
+  if запуск_от_агента "$user" git -C "$dir" rev-parse -q --verify HEAD >/dev/null 2>&1; then
+    скажи "  первый коммит уже есть — не трогаю"; return 0
+  fi
+  [[ -L "$dir/.git/hooks/pre-commit" ]] \
+    || { скажи "  pre-commit не подключён раскладчиком — первый коммит не делаю"; return 1; }
+  личность_коммитов "$user" "$dir"
+  if [[ ! -f "$dir/docs/ИЗМЕНЕНИЯ-ПАКЕТА.md" ]]; then
+    запуск_от_агента "$user" mkdir -p "$dir/docs"
+    журнал_пакета_заготовка | запуск_от_агента "$user" tee "$dir/docs/ИЗМЕНЕНИЯ-ПАКЕТА.md" >/dev/null
+  fi
+  запуск_от_агента "$user" git -C "$dir" add -A
+  msg="$(mktemp)"; chmod 644 "$msg"
+  printf 'Первый коммит каркаса харнеса (установщик)\n\nКаркас разложен razlozhit-harnes.sh; коммит сделан установщиком через\nчестную дверь пайплайна, а не разработкой.\n' > "$msg"
+  local rc=0
+  запуск_от_агента "$user" env HARNESS_PIPELINE_FORCE=1 \
+    HARNESS_PIPELINE_WHY="первый коммит каркаса: делает установщик" \
+    git -C "$dir" commit -q -F "$msg" || rc=$?
+  rm -f "$msg"
+  return "$rc"
+}
+
+# ── узкий sudoers агента на ЧТЕНИЕ для диагностики ──────────────────────────
+# Без root агент не видит ни фаервол, ни журнал юнита, ни слушающие порты, и
+# диагностика встаёт на «нужен владелец». Правила — точные строки с полными
+# путями (command -v), без звёздочек: любая лишняя опция была бы дверью на
+# запись (journalctl --rotate, ufw allow). Юниты и длины журнала перечислены.
+JOURNAL_UNITS=(harness-agent harness-dispatcher harness-panel harness-firewall harness-sentinel-boot nginx php8.3-fpm docker)
+JOURNAL_LENGTHS=(50 200)
+
+правила_чтения_sudoers() { # $1=пользователь агента → содержимое файла sudoers на stdout
+  local user="$1" jc ss ufw unit n rules=()
+  jc="$(command -v journalctl)" || { echo "нет journalctl" >&2; return 1; }
+  ss="$(command -v ss)" || { echo "нет ss" >&2; return 1; }
+  ufw="$(command -v ufw || true)"
+  # ufw ставится не нами: нет его — нет и правил на него, это не отказ установки.
+  if [[ -n "$ufw" ]]; then rules+=("$ufw status" "$ufw status verbose" "$ufw status numbered"); fi
+  rules+=("$ss -ltnp")
+  for unit in "${JOURNAL_UNITS[@]}"; do
+    for n in "${JOURNAL_LENGTHS[@]}"; do rules+=("$jc -u $unit --no-pager -n $n"); done
+  done
+  printf '# Диагностика агента: только чтение, точные команды без подстановок.\n'
+  local IFS=,
+  printf '%s ALL=(root) NOPASSWD: %s\n' "$user" "${rules[*]/#/ }"
+}
+
+# ── установка без sudo владельца: что агенту нужно от root, делает установщик ──
+# Всё ниже — функции без побочных эффектов на /etc (печатают правила на stdout
+# или работают с тем, что им передали), чтобы стенд без root мог их судить.
+
+свои_юниты() { # $1=установщик $2=каталог harness пакета, дальше id службы проверок → имена юнитов по одному
+  # Список собирается из пакета, а не пишется звёздочкой: «harness-*» в sudoers
+  # отдал бы агенту и чужой юнит с таким же началом имени.
+  local installer="$1" pkg="$2" id f; shift 2
+  {
+    grep -o 'записать_файл /etc/systemd/system/harness-[a-z-]*\.\(service\|timer\)' "$installer" | sed 's|.*/||'
+    for f in "$pkg"/panel/harness-*.service.in; do [[ -e "$f" ]] && basename "$f" .in; done
+    for id in "$@"; do printf 'harness-%s.service\nharness-%s.timer\n' "$id" "$id"; done
+  } | sort -u | grep . # пусто — провал: правило без юнитов молча ничего не даст
+}
+
+правила_юнитов_sudoers() { # $1=пользователь, дальше имена юнитов → файл sudoers на stdout
+  local user="$1" sc unit action rules=(); shift
+  sc="$(command -v systemctl)" || { echo "нет systemctl" >&2; return 1; }
+  for unit in "$@"; do
+    for action in restart start stop status; do rules+=("$sc $action $unit"); done
+  done
+  printf '# Управление своими юнитами харнеса: точные имена, без подстановок.\n'
+  local IFS=,
+  printf '%s ALL=(root) NOPASSWD: %s\n' "$user" "${rules[*]/#/ }"
+}
+
+правило_перезагрузки() { # $1=пользователь $2=harness.conf → строка sudoers на stdout, если владелец включил ключ
+  # Перезагрузку сервера агент решает сам только в окне ротации — это ключ
+  # владельца; без ключа права на reboot нет вовсе.
+  local user="$1" conf="$2" rb
+  grep -qE '^AUTO_REBOOT_IN_ROTATION="?1"?[[:space:]]*(#.*)?$' "$conf" 2>/dev/null || return 0
+  rb="$(command -v reboot)" || { echo "нет reboot" >&2; return 1; }
+  printf '# Перезагрузка в окне ротации: включена ключом AUTO_REBOOT_IN_ROTATION=1.\n'
+  # Пустые кавычки — «только без аргументов»: голое имя разрешило бы `reboot -f -f`
+  # (перезагрузка без остановки служб и синхронизации дисков).
+  printf '%s ALL=(root) NOPASSWD: %s ""\n' "$user" "$rb"
+}
+
+подсети_docker() { # IPv4-подсети всех bridge-сетей docker, по одной в строке; нет docker — пусто и rc 2
+  # Фактические подсети, а не весь 172.16/12: на хостингах с внутренней сетью или
+  # VPN в этом диапазоне (VPC 172.31/16) широкое правило отрезало бы свой же SSH,
+  # а пулы вне диапазона оно не закрывало.
+  command -v docker >/dev/null || return 2
+  local ids
+  ids="$(docker network ls --filter driver=bridge -q)" || return 2
+  [[ -n "$ids" ]] || return 0
+  # shellcheck disable=SC2086
+  docker network inspect -f '{{range .IPAM.Config}}{{println .Subnet}}{{end}}' $ids | grep -E '^[0-9]+\.[0-9.]+/[0-9]+$' | sort -u
+}
+
+закрыть_ssh_из_docker() { # rc 0 — закрыто или уже было, rc 2 — нет ufw или он не активен, rc 3 — нет docker или у него нет сетей
+  local ufw status subnets subnet rc=0
+  ufw="$(command -v ufw || true)"
+  if [[ -z "$ufw" ]]; then скажи "ufw не установлен: 22/tcp из docker-сетей не закрыт"; return 2; fi
+  status="$("$ufw" status)"
+  if ! grep -q '^Status: active' <<<"$status"; then скажи "ufw не активен: 22/tcp из docker-сетей не закрыт"; return 2; fi
+  subnets="$(подсети_docker)" || { скажи "docker не установлен или не отвечает: закрывать нечего"; return 3; }
+  [[ -n "$subnets" ]] || { скажи "у docker нет сетей с подсетью: закрывать нечего"; return 3; }
+  while read -r subnet; do
+    if awk -v s="$subnet" '$1 ~ /^22(\/tcp)?$/ && $2 == "DENY" && $3 == s {f=1} END {exit !f}' <<<"$status"; then
+      скажи "правило «deny 22/tcp из $subnet» уже есть"
+    else
+      "$ufw" insert 1 deny proto tcp from "$subnet" to any port 22 || rc=1
+    fi
+  done <<<"$subnets"
+  return $rc
+}
+
+включить_таймеры() { # имена юнитов → enable --now для каждого *.timer
+  local unit rc=0
+  for unit in "$@"; do
+    [[ "$unit" == *.timer ]] || continue
+    systemctl enable --now "$unit" || rc=1
+  done
+  return $rc
+}
+
+все_таймеры_включены() { # имена юнитов → rc 1 и перечень невключённых, если хоть один *.timer не enabled
+  local unit bad=()
+  for unit in "$@"; do
+    [[ "$unit" == *.timer ]] || continue
+    systemctl is-enabled --quiet "$unit" || bad+=("$unit")
+  done
+  (( ${#bad[@]} == 0 )) || { printf 'не включены: %s\n' "${bad[*]}"; return 1; }
+}
+
+копия_прав_для_гейта() { # $1=каталог sudoers.d → читаемая копия выданных правил на stdout
+  # /etc/sudoers.d закрыт 0750, и гейт «внешние вызовы» не видит правил;
+  # копию читает он, а не сами файлы.
+  local f
+  for f in "$1"/*; do
+    [[ -f "$f" ]] || continue
+    printf '# файл: %s\n' "$f"; cat "$f"
+  done
+}
 
 # ── сверка со спекой (П-1 ревью №2): спека и установщик расходятся молча ────
 # Классовая починка: crontab шага 9 сверяется НЕ с собственной копией таблицы,
@@ -391,7 +756,7 @@ fi
 # ------------------------------------------------------------ предпосылки ----
 
 if (( ! DRY )) && [[ "$(id -u)" != "0" ]]; then
-  скажи "нужен root: запустите  sudo bash ${BASH_SOURCE[0]}" >&2
+  скажи "нужен root: запустите  sudo bash $SELF" >&2
   exit 1
 fi
 [[ -d "$HARNESS_SRC" ]] || { скажи "рядом со скриптом нет каталога harness/ — запускайте из каталога STARTER-PACKAGE" >&2; exit 1; }
@@ -420,8 +785,12 @@ done
 
 # ------------------------------------------- опрос: все вопросы одним блоком ----
 
+# Заданное в окружении (`PROJECT_DIR=/srv/x sudo -E bash …`) не обнуляется и
+# побеждает install.conf: подсказка опроса и УСТАНОВИ-МЕНЯ обещают именно это.
+ENV_PROJECT_DIR="${PROJECT_DIR:-}"; ENV_SECRETS_DIR="${SECRETS_DIR:-}"
+ENV_AGENT_USER="${AGENT_USER:-}"; ENV_PRODUCT_PATH="${PRODUCT_PATH:-}"
 PROJECT_NAME=""; PROJECT_DIR=""; SECRETS_DIR=""; TG_CHAT_ID=""; BOT_TOKEN=""
-AGENT_USER="agent"; AUTONOMY="semi"; OWNER_TZ=""
+AGENT_USER="agent"; AUTONOMY="semi"; OWNER_TZ=""; PRODUCT_PATH=""
 # Места — ОТ КОРНЯ установки, а не зашитыми путями: корень задаётся
 # HARNESS_HOME, и на машине без права писать в /etc он лежит в доме
 # пользователя. Зашитые «/var/log/harness» ставили харнес ровно на одну машину
@@ -443,6 +812,8 @@ if [[ -r "$CONF" ]]; then
   # shellcheck source=/dev/null
   source "$CONF"
 fi
+PROJECT_DIR="${ENV_PROJECT_DIR:-$PROJECT_DIR}"; SECRETS_DIR="${ENV_SECRETS_DIR:-$SECRETS_DIR}"
+AGENT_USER="${ENV_AGENT_USER:-$AGENT_USER}"; PRODUCT_PATH="${ENV_PRODUCT_PATH:-$PRODUCT_PATH}"
 
 опрос() {
   заголовок "ОПРОС (единственный интерактив; дальше скрипт идёт без остановок)"
@@ -455,9 +826,21 @@ fi
       if (( DRY )); then
         скажи "  (dry-run: токен бота был бы запрошен — файл $TG_TOKEN_FILE пуст)"
       else
-        read -r -s -p "  токен бота от BotFather (вставьте, ввод скрыт): " BOT_TOKEN; echo
-        [[ -n "$BOT_TOKEN" ]] || { скажи "токен пуст, а $TG_TOKEN_FILE отсутствует — без него канал не собрать"; exit 1; }
+        спросить_токен
       fi
+    elif (( ! DRY )) && [[ "${INSTALL_CHANNEL_CHECK:-1}" != "0" ]]; then
+      # --resume с неверным токеном в файле: переспросить, а не отправлять править секрет руками.
+      local saved_rc=0
+      проверить_токен "$(cat "$TG_TOKEN_FILE")" || saved_rc=$?
+      if (( saved_rc == 1 )); then
+        скажи "  Telegram отверг токен из $TG_TOKEN_FILE (getMe)."
+        [[ -t 0 ]] || { скажи "  вопрос задать некому (ввод не терминал): запишите верный токен в $TG_TOKEN_FILE и повторите"; exit 1; }
+        спросить_токен
+        rm -f "$STAMP_DIR/шаг_5.done"   # шаг 5 перепишет файл токена
+      fi
+    fi
+    if (( ! DRY )); then
+      предупредить_о_вебхуке "${BOT_TOKEN:-$(cat "$TG_TOKEN_FILE" 2>/dev/null || true)}"
     fi
     return 0
   fi
@@ -490,11 +873,19 @@ fi
   SECRETS_DIR="$(нормализовать_путь "${SECRETS_DIR:-/etc/$PROJECT_NAME/secrets}")"
   скажи "      каталог кода: $PROJECT_DIR · секреты: $SECRETS_DIR"
   скажи "      (другие пути — переменными PROJECT_DIR и SECRETS_DIR перед запуском)"
+  # Продукт (его репозиторий) лежит отдельно от каталога харнеса, и агенту нужна запись туда.
+  # Необязательный: пусто — продукта на этой машине нет.
+  local why reason
   while :; do
-    read -r -s -p "  2/3 токен бота от BotFather (вставьте, ввод скрыт): " BOT_TOKEN; echo
-    [[ -n "$BOT_TOKEN" ]] && break
-    скажи "      токен пустой — без него канала не будет"
+    read -r -p "      каталог кода ПРОДУКТА, если он уже лежит на машине (абсолютный путь; пусто — продукта нет) [${PRODUCT_PATH:-пусто}]: " why
+    why="${why:-$PRODUCT_PATH}"
+    [[ -z "$why" ]] && { PRODUCT_PATH=""; break; }
+    if reason="$(путь_годен "$why")"; then PRODUCT_PATH="$(нормализовать_путь "$why")"; break; fi
+    скажи "      $reason"
   done
+  скажи "  2/3 токен бота"
+  спросить_токен
+  предупредить_о_вебхуке "$BOT_TOKEN"
   TG_CHANNEL_VARIANT="${TG_CHANNEL_VARIANT:-B}"
   [[ "$TG_CHANNEL_VARIANT" = "A" ]] && скажи "      вариант канала А — эксперимент, механика подтверждений слабее"
   # chat_id: спрашивать число у человека незачем — бот узнаёт его сам из
@@ -537,6 +928,7 @@ fi
 # Паспорт установки. Заполняется при установке, см. 00-ВВОДНЫЕ.md (§5).
 PROJECT_NAME="$PROJECT_NAME"       # имя проекта латиницей
 PROJECT_DIR="$PROJECT_DIR"         # каталог кода
+PRODUCT_PATH="$PRODUCT_PATH"       # каталог кода ПРОДУКТА (необязательный; пусто — продукта на машине нет)
 AGENT_USER="$AGENT_USER"           # системный пользователь агента
 CC_VERSION="$CC_VERSION"           # версия Claude Code, фиксируется на шаге 3
 SECRETS_DIR="$SECRETS_DIR"         # ВНЕ вебрута и репо
@@ -586,13 +978,20 @@ EOF
   уже_сделан шаг_1 && { скажи "[$step] пропуск (--resume)"; return 0; }
   заголовок "$step"
   делай "id -u $AGENT_USER >/dev/null 2>&1 || adduser --disabled-password --gecos '' $AGENT_USER"
+  # Журнал юнитов агент читает группой. Она выдаётся здесь, ДО первого запуска агента
+  # и перезапуска шага 10: группы процесс берёт при старте.
+  делай "getent group systemd-journal >/dev/null && usermod -aG systemd-journal $AGENT_USER || true"
   # panel-state — часть каркаса состояния, а не собственность шага 10: задание
   # build-board пишет в него снимок доски и проверяется ШАГОМ 9, то есть ДО
   # панели. Без каталога оно падало «No such file or directory» и объявлялось
   # находкой установки (замер 14.10.2026, проба установки с нуля). Шаг 10
   # доводит права до 2770 agent:harness-panel своим install -d.
-  делай "mkdir -p '$PROJECT_DIR' '$LOG_DIR' '$HEARTBEAT_DIR' '$STATE_DIR/panel-state' /var/backups/harness"
-  делай "chown -R $AGENT_USER:$AGENT_USER '$PROJECT_DIR' '$LOG_DIR' '$HEARTBEAT_DIR' '$STATE_DIR/panel-state' /var/backups/harness"
+  # PROJECT_DIR может быть живым репозиторием продукта: рекурсивный chown на каждом
+  # прогоне менял владельца bind-томов compose (postgres, www-data) и ронял базу.
+  # Владелец назначается только самому каталогу и только когда мы его создали.
+  делай "[ -d '$PROJECT_DIR' ] || { mkdir -p '$PROJECT_DIR' && chown $AGENT_USER:$AGENT_USER '$PROJECT_DIR'; }"
+  делай "mkdir -p '$LOG_DIR' '$HEARTBEAT_DIR' '$STATE_DIR/panel-state' /var/backups/harness"
+  делай "chown -R $AGENT_USER:$AGENT_USER '$LOG_DIR' '$HEARTBEAT_DIR' '$STATE_DIR/panel-state' /var/backups/harness"
   # Возврат файлов входа: `sudo claude` рядом делает их root-овыми, и агент
   # теряет вход. Строка обязана совпадать с команда_возврата() в
   # scripts/check-login-expiry.py буква в букву — иначе sudo откажет.
@@ -601,7 +1000,7 @@ EOF
   # Двери библиотеки (HARNESS_PROCESS_LIBRARY*) доходят до python как есть.
   # Список службы проверок читает python3 (библиотека процессов), а шаг 2 с его
   # установкой ещё впереди: на чистой машине здесь было бы «command not found».
-  делай "DEBIAN_FRONTEND=noninteractive apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y python3 python3-yaml"
+  делай "apt-get update && apt-get install -y python3 python3-yaml"
   local checks_ids checks_id checks_action checks_rules="/usr/bin/systemctl daemon-reload"
   checks_ids="$(python3 -I "$HARNESS_SRC/scripts/lib/process_library.py" checks-ids)" \
     || стоп "$step" "не прочитан список службы потока проверок" "python3 -I '$HARNESS_SRC/scripts/lib/process_library.py' checks-ids"
@@ -615,7 +1014,7 @@ EOF
   # запускает только от агента, в срезе harness-checks.slice).
   sed "s|@AGENT_USER@|$AGENT_USER|g" "$HARNESS_SRC/scripts/checks-slice-wrapper.sh" \
     | записать_файл /usr/local/sbin/harness-run-in-checks 755 root:root
-  записать_файл /etc/sudoers.d/50-agent 440 root:root <<EOF
+  записать_sudoers /etc/sudoers.d/50-agent <<EOF
 $AGENT_USER ALL=(root) NOPASSWD: /usr/bin/systemctl restart harness-agent, /usr/bin/systemctl status harness-agent, /usr/bin/systemctl restart harness-dispatcher.service, /usr/bin/systemctl restart harness-panel.service
 $AGENT_USER ALL=(root) NOPASSWD: /usr/bin/chown -hR $AGENT_USER\:$AGENT_USER /home/$AGENT_USER/.claude /home/$AGENT_USER/.claude.json
 $AGENT_USER ALL=(root) NOPASSWD: $checks_rules
@@ -627,9 +1026,17 @@ EOF
   проверка "$step" "пользователь агента отвечает" \
     "[ \"\$(sudo -u $AGENT_USER whoami)\" = '$AGENT_USER' ]" \
     "sudo -u $AGENT_USER whoami; id $AGENT_USER"
-  проверка "$step" "каталоги принадлежат агенту" \
-    "[ \"\$(stat -c '%U' '$PROJECT_DIR' '$LOG_DIR' '$HEARTBEAT_DIR' /var/backups/harness | sort -u)\" = '$AGENT_USER' ]" \
+  проверка "$step" "служебные каталоги принадлежат агенту, в каталог проекта он пишет" \
+    "[ \"\$(stat -c '%U' '$LOG_DIR' '$HEARTBEAT_DIR' /var/backups/harness | sort -u)\" = '$AGENT_USER' ] && sudo -u $AGENT_USER test -w '$PROJECT_DIR'" \
     "stat -c '%U %n' '$PROJECT_DIR' '$LOG_DIR' '$HEARTBEAT_DIR' /var/backups/harness"
+  if [[ -n "$PRODUCT_PATH" ]]; then
+    # Продукт чужой для агента: владельца и группы мы не меняем, только говорим, что поправить.
+    if (( DRY )) || sudo -u "$AGENT_USER" test -w "$PRODUCT_PATH" 2>/dev/null; then
+      DONE_LIST+=("каталог продукта $PRODUCT_PATH: агент пишет в него")
+    else
+      MANUAL_LIST+=("агент не пишет в каталог продукта $PRODUCT_PATH (владелец: $(stat -c %U:%G "$PRODUCT_PATH" 2>/dev/null || echo 'каталога нет')) — sudo usermod -aG <группа каталога> $AGENT_USER; sudo chmod -R g+rwX '$PRODUCT_PATH'; затем sudo systemctl restart harness-agent")
+    fi
+  fi
   DONE_LIST+=("пользователь $AGENT_USER, каталоги, sudoers (systemctl агента, диспетчера и панели; таймеры потока проверок; возврат своих файлов входа), /var/backups/harness")
   отметить шаг_1
 }
@@ -638,8 +1045,8 @@ EOF
   local step="шаг 2 — apt-пакеты и node"; CURRENT_STEP="$step"
   уже_сделан шаг_2 && { скажи "[$step] пропуск (--resume)"; return 0; }
   заголовок "$step"
-  делай "DEBIAN_FRONTEND=noninteractive apt-get update"
-  делай "DEBIAN_FRONTEND=noninteractive apt-get install -y git tmux curl jq python3 python3-pip python3-venv python3-yaml shellcheck ripgrep unzip logrotate"
+  делай "$APT_UPDATE"
+  делай "apt_поставить git tmux curl jq python3 python3-pip python3-venv python3-yaml shellcheck ripgrep unzip logrotate iproute2"
   делай "if command -v node >/dev/null 2>&1 && [ \"\$(node --version | sed 's/v//' | cut -d. -f1)\" -ge 20 ]; then echo 'node уже >=20 — nodesource пропущен'; else curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && DEBIAN_FRONTEND=noninteractive apt-get install -y nodejs; fi"
   # Браузер расширения playwright (базовый набор) скачивает агент без root, а
   # его системные библиотеки (libatk, libgbm, libasound…) — только root: без
@@ -677,11 +1084,14 @@ EOF
   else
     while IFS= read -r line; do FAILED_LIST+=("docker: $line"); done < "$summary"
     rm -f "$summary"
-    FAILED_LIST+=("docker не поставлен (причина — строка «ОТКАЗ docker» выше): продукт на compose не поднимется; после починки — sudo bash $0 --resume")
+    FAILED_LIST+=("docker не поставлен (причина — строка «ОТКАЗ docker» выше): продукт на compose не поднимется; после починки — sudo bash $SELF --resume")
   fi
 }
 
 шаг_2в() { # venv с faster-whisper для голосовых: scripts/transcribe_voice.py ищет его в STATE_DIR/voice/venv
+  # av 15+ ломает faster-whisper 1.2.x (на новом сервере встала av 19), поэтому потолок закреплён.
+  # --only-binary=av: под Python 3.12 у новейшей av<15 (14.4.0) колеса нет, pip собирал её из
+  # исходников и падал; с флагом берётся готовое колесо (14.2.0).
   # Голосовые — не основа: отказ pip идёт в итог громко, без отметки шага (повтор
   # доставит venv), но установку не обрывает. Всё от имени агента: диспетчер и
   # расшифровка живут им, venv от root агенту не прочесть и не обновить.
@@ -693,11 +1103,11 @@ EOF
   # строки venv агента не может создать voice/.
   if делай "install -d -o '$AGENT_USER' -g '$AGENT_USER' '$STATE_DIR/voice'" \
      && делай "sudo -u '$AGENT_USER' python3 -m venv '$venv'" \
-     && делай "sudo -u '$AGENT_USER' '$venv/bin/pip' install faster-whisper"; then
+     && делай "sudo -u '$AGENT_USER' '$venv/bin/pip' install --only-binary=av faster-whisper 'av<15'"; then
     DONE_LIST+=("голосовые: venv с faster-whisper в $venv от имени $AGENT_USER")
     отметить шаг_2в
   else
-    FAILED_LIST+=("голосовые: не вышло создать venv $venv или поставить в него faster-whisper через pip — проверьте сеть, доступ к pypi и пакет python3-venv; первое голосовое владельца не расшифруется; после починки — sudo bash $0 --resume")
+    FAILED_LIST+=("голосовые: не вышло создать venv $venv или поставить в него faster-whisper через pip — проверьте сеть, доступ к pypi и пакет python3-venv; первое голосовое владельца не расшифруется; после починки — sudo bash $SELF --resume")
   fi
 }
 
@@ -878,12 +1288,7 @@ EOF
   уже_сделан шаг_6 && { скажи "[$step] пропуск (--resume)"; return 0; }
   заголовок "$step"
   делай "mkdir -p /home/$AGENT_USER/.claude"
-  записать_файл "/home/$AGENT_USER/.claude/settings.json" 644 "$AGENT_USER:$AGENT_USER" <<'EOF'
-{
-  "language": "russian",
-  "permissions": { "defaultMode": "bypassPermissions" }
-}
-EOF
+  делай "дополнить_settings_json '/home/$AGENT_USER/.claude/settings.json'"
   делай "chown -R $AGENT_USER:$AGENT_USER /home/$AGENT_USER/.claude"
   # Каждая переменная дописывается ОТДЕЛЬНО и только если её ещё нет: общий
   # guard по первой из них на уже установленной машине либо дублировал все
@@ -906,18 +1311,21 @@ EOF
 
 шаг_7а() { # доставка и раскладка харнеса (01-SPEC §7-а)
   local step="шаг 7-а — раскладка харнеса"; CURRENT_STEP="$step"
-  уже_сделан шаг_7а && { скажи "[$step] пропуск (--resume)"; return 0; }
+  # Пропуска по отметке у шага нет: раскладка идемпотентна и идёт на каждом прогоне, иначе
+  # `--resume` поверх отметок 0.9.x оставлял бы старый каркас.
   заголовок "$step"
   local starter="/home/$AGENT_USER/starter"
   local pkg_dst="$starter/STARTER-PACKAGE"
   if [[ "$(cd "$SCRIPT_DIR" && pwd)" != "$pkg_dst" ]]; then
-    делай "mkdir -p '$pkg_dst' '$starter/UNIFIED'"
-    делай "cp -a '$SCRIPT_DIR/.' '$pkg_dst/'"
+    # Правки агента в его копии пакета не теряются: перед затиранием копия рядом.
+    делай "положить_пакет '$SCRIPT_DIR' '$pkg_dst' '$(date +%Y%m%d-%H%M%S)'"
+    делай "mkdir -p '$starter/UNIFIED'"
     делай "cp -a '$UNIFIED_SRC/.' '$starter/UNIFIED/'"
     делай "chown -R $AGENT_USER:$AGENT_USER '$starter'"
   else
     скажи "  + пакет уже лежит в $pkg_dst — копирование пропущено"
   fi
+  делай "записать_версию_пакета '$AGENT_USER' '$SCRIPT_DIR' '$STATE_DIR/panel-state/версия-харнеса'"
   # harness.conf — раскладчик от agent не имеет прав на /etc; докладываем под root, живой не затираем.
   # Стоит ДО самотеста раскладчика: раскладка поверх живого проекта берёт каталог
   # копий из ключа BACKUP_DIR, и без живого конфига самотест целится в пустоту.
@@ -932,6 +1340,9 @@ EOF
   проверка "$step" "самопроверка раскладчика зелёная" \
     "sudo -u $AGENT_USER bash '$rollout' --selftest | grep -q 'SELFTEST: зелёный'" \
     "sudo -u $AGENT_USER bash '$rollout' --selftest"
+  # Репозиторий нужен ДО раскладки: она подключает pre-commit симлинком только
+  # когда .git уже есть, и без этого агенту оставался ручной git init.
+  делай "[ -d '$PROJECT_DIR/.git' ] || sudo -u $AGENT_USER git -C '$PROJECT_DIR' init -q"
   делай "mkdir -p '$LOG_DIR' && sudo -u $AGENT_USER bash '$rollout' | tee '$LOG_DIR/install-rollout.log'"
   проверка "$step" "вывод раскладки: «UNIFIED доставлен» и «раскладка завершена»" \
     "grep -q 'UNIFIED доставлен' '$LOG_DIR/install-rollout.log' && grep -q 'раскладка завершена' '$LOG_DIR/install-rollout.log'" \
@@ -948,6 +1359,7 @@ EOF
   проверка "$step" "harness.conf принадлежит агенту, /etc/harness — root" \
     "[ -L /etc/harness/harness.conf ] && sudo -u $AGENT_USER test -w /etc/harness/agent/harness.conf && [ \"\$(stat -c %U /etc/harness /etc/harness/install.conf | sort -u)\" = root ]" \
     "ls -la /etc/harness /etc/harness/agent"
+  [[ -z "$PRODUCT_PATH" ]] || делай "sed -i --follow-symlinks 's|^PRODUCT_PATH=\"\"\$|PRODUCT_PATH=\"$PRODUCT_PATH\"|' /etc/harness/harness.conf"
   # Раскладчик идёт от agent, и в /etc/logrotate.d и /etc/sysctl.d ему не
   # писать: эти две строки владелец первой установки 13.10.2026 получил отдельным
   # root-скриптом («мне как пользователю лишние действия»). Установщик — root,
@@ -997,7 +1409,9 @@ EOF
     # пишет эталон замером, когда список пуст, — конфиг принадлежит агенту.
     скажи "  эталон аккаунта запишет сторож входа сам после OAuth-входа (check-login-expiry.py, каждые 15 мин)"
   fi
-  скажи "  (после git init агент повторит раскладку — она подключит pre-commit симлинком; это его 03-ЗАДАНИЕ)"
+  проверка "$step" "pre-commit подключён к репозиторию проекта" \
+    "[ -L '$PROJECT_DIR/.git/hooks/pre-commit' ] && [ -x '$PROJECT_DIR/.git/hooks/pre-commit' ]" \
+    "ls -l '$PROJECT_DIR/.git/hooks/'"
   # Теперь скрипт запуска на месте — можно поднимать агента. Юнит поставлен
   # шагом 4 и ждал именно этого: на чистой машине он стартовал в пустоту
   # (203/EXEC) и валил установку (живой прогон 13.09.2026).
@@ -1014,6 +1428,7 @@ EOF
     "sudo -u $AGENT_USER tmux ls | grep -q '^agent'" \
     "sudo -u $AGENT_USER tmux ls"
   DONE_LIST+=("харнес разложен в $PROJECT_DIR (+UNIFIED, +harness.conf в /etc/harness)")
+  DONE_LIST+=("git init проекта, pre-commit подключён раскладчиком")
   DONE_LIST+=("harness-agent поднят: tmux-сессия agent живёт")
   отметить шаг_7а
 }
@@ -1094,14 +1509,14 @@ EOF
     token="$(cat "$TG_TOKEN_FILE")"
     # URL с токеном уходит через stdin (curl -K -), а не в argv: argv виден в ps.
     otvet=$(printf 'url = "%s/bot%s/sendMessage"\n' "$TG_API" "$token" \
-      | curl -s -K - \
-        -d chat_id="$TG_CHAT_ID" -d text="Канал установлен. Ответьте РЕПЛАЕМ на это сообщение словом: дошло")
+      | curl -s --max-time 20 -K - \
+        -d chat_id="$TG_CHAT_ID" -d text="Канал установлен. Ответьте РЕПЛАЕМ на это сообщение словом: дошло") || otvet=""
     # «chat not found» — не поломка, а порядок: бот не может написать первым,
     # пока владелец не нажал Start. 13.10.2026 (первая установка) этот ответ рвал установку
     # стопом, и шаги 8–10 — расписание сторожей и панель — не выполнились вовсе.
     if ! sent_id=$(jq -e '.result.message_id' <<< "$otvet"); then
       if jq -e '.description | test("chat not found")' <<< "$otvet" >/dev/null 2>&1; then
-        MANUAL_LIST=("ПЕРВЫМ: открой своего бота в Telegram и нажми Start — пока этого нет, бот не может написать первым; затем: sudo bash $0 --resume (перепроверит канал)" "${MANUAL_LIST[@]}")
+        MANUAL_LIST=("ПЕРВЫМ: открой своего бота в Telegram и нажми Start — пока этого нет, бот не может написать первым; затем: sudo bash $SELF --resume (перепроверит канал)" "${MANUAL_LIST[@]}")
         скажи "  бот ещё не может писать: владелец не нажал Start (chat not found) — иду дальше, канал перепроверит --resume"
         return 0
       fi
@@ -1133,10 +1548,16 @@ EOF
     скажи "  telegram-плагин (вариант А) активируется флагом --channels при запуске агента — команда в «ОСТАЛОСЬ РУКАМИ»;"
   fi
   # Ставится ОТ ИМЕНИ АГЕНТА: плагины живут в его ~/.claude, а шаг идёт под root.
-  делай "sudo -u $AGENT_USER python3 '$PROJECT_DIR/scripts/extensions.py' поставить-базовый"
-  проверка "$step" "базовый набор расширений на месте" \
-    "sudo -u $AGENT_USER python3 '$PROJECT_DIR/scripts/extensions.py' состояние" \
-    "sudo -u $AGENT_USER python3 '$PROJECT_DIR/scripts/extensions.py' состояние"
+  # Расширения — необязательная часть (GitHub/маркетплейс бывают недоступны): сбой одного
+  # плагина не должен ронять шаги 9–12 (crontab, панель, права). Он идёт в сводку.
+  if делай "sudo -u $AGENT_USER python3 '$PROJECT_DIR/scripts/extensions.py' поставить-базовый" \
+     && делай "sudo -u $AGENT_USER python3 '$PROJECT_DIR/scripts/extensions.py' состояние"; then
+    CHECKED_LIST+=("$step: базовый набор расширений на месте")
+  else
+    FAILED_LIST+=("расширения: базовый набор поставлен не весь (вывод выше) — установка шла дальше; после починки сети: sudo -u $AGENT_USER python3 '$PROJECT_DIR/scripts/extensions.py' поставить-базовый")
+    DONE_LIST+=("базовый набор расширений: НЕ завершён (см. сводку)")
+    return 0
+  fi
   проверка "$step" "скилы и шаблоны разложены (дисциплина пайплайна)" \
     "[ -d '$PROJECT_DIR/harness/skills' ] && [ -d '$PROJECT_DIR/harness/шаблоны-задач' ]" \
     "ls '$PROJECT_DIR/harness'"
@@ -1144,8 +1565,8 @@ EOF
   отметить шаг_8
 }
 
-шаг_9() { # crontab демонов + прогон каждого в env -i (01-SPEC §9)
-  local step="шаг 9 — crontab демонов и прогоны env -i"; CURRENT_STEP="$step"
+шаг_9() { # crontab демонов, сверка со спекой (01-SPEC §9); прогоны — шаг 13
+  local step="шаг 9 — crontab демонов"; CURRENT_STEP="$step"
   уже_сделан шаг_9 && { скажи "[$step] пропуск (--resume)"; return 0; }
   заголовок "$step"
   local D="$PROJECT_DIR/harness/demons"
@@ -1198,6 +1619,18 @@ EOF
   else
     скажи "  сверка с реестром пропущена: файла нет рядом ($spec_md)"
   fi
+  DONE_LIST+=("crontab $AGENT_USER: ${#demons[@]} демонов точно по таблице §9 (набор сверен со спекой)")
+  отметить шаг_9
+}
+
+# Прогон идёт ПОСЛЕ первого коммита (шаг 11): devmap-selfheal и tokens-collector
+# читают HEAD и git-личность, и на машине без них падали с кодом 128.
+шаг_13() { # прогон каждого демона в env -i (образец §9)
+  local step="шаг 13 — прогоны демонов в env -i"; CURRENT_STEP="$step"
+  уже_сделан шаг_13 && { скажи "[$step] пропуск (--resume)"; return 0; }
+  заголовок "$step"
+  local spec_md="$SCRIPT_DIR/harness/config/system-jobs.yaml"
+  local demons=(); mapfile -t demons < <(демоны_из_спеки "$spec_md")
   скажи ""
   скажи "  прогон каждого демона в чистом окружении (как его увидит cron), образец §9:"
   # Тяжёлым демонам при ПРОВЕРКЕ подставляется лёгкая работа: цель шага —
@@ -1240,11 +1673,11 @@ EOF
     fi
   done
   скажи "  (метки heartbeat: ls -l $HEARTBEAT_DIR — успешные демоны обновили свои; полная сверка — после первых суток)"
-  DONE_LIST+=("crontab $AGENT_USER: ${#demons[@]} демонов точно по таблице §9 (набор сверен со спекой); каждый прогнан в env -i")
-  отметить шаг_9
+  DONE_LIST+=("${#demons[@]} демонов прогнаны в env -i (после первого коммита каркаса)")
+  отметить шаг_13
 }
 
-шаг_9б() { # служба потока проверок: срез с потолком и пары service+timer, без включения (спека hr.process-dispatcher §Г.1)
+шаг_9б() { # служба потока проверок: срез с потолком, пары service+timer, таймеры включены (спека hr.process-dispatcher §Г.1)
   local step="шаг 9б — служба потока проверок"; CURRENT_STEP="$step"
   уже_сделан шаг_9б && { скажи "[$step] пропуск (--resume)"; return 0; }
   заголовок "$step"
@@ -1269,19 +1702,31 @@ EOF
   for unit in "${unit_files[@]}"; do
     проверить_юнит "$step" "$unit"
   done
-  делай "systemctl daemon-reload"  # служба потока проверок: таймеры лежат выключенными
-  DONE_LIST+=("служба потока проверок: срез harness-checks.slice и ${#unit_files[@]} юнитов (таймеры выключены; включает владелец-оркестратор)")
-  # Включает агент своим узким sudo-правом (шаг 9): владельцу root-шагов не даём.
-  local checks_ids checks_id
+  делай "systemctl daemon-reload"
+  # Лежащие выключенными таймеры после перезагрузки не запускались ни разу: включает установщик.
+  local checks_ids checks_id timer_units=()
   checks_ids="$(python3 -I "$HARNESS_SRC/scripts/lib/process_library.py" checks-ids)" \
     || стоп "$step" "не прочитан список службы потока проверок" "python3 -I '$HARNESS_SRC/scripts/lib/process_library.py' checks-ids"
-  for checks_id in $checks_ids; do
-    MANUAL_LIST+=("для агента: включить таймер потока проверок — sudo systemctl enable --now harness-$checks_id.timer")
-  done
+  for checks_id in $checks_ids; do timer_units+=("harness-$checks_id.timer"); done
+  timer_units+=(harness-sentinel.timer)
+  делай "включить_таймеры ${timer_units[*]}"
+  проверка "$step" "все таймеры харнеса включены (is-enabled)" \
+    "все_таймеры_включены ${timer_units[*]}" \
+    "все_таймеры_включены ${timer_units[*]}; systemctl list-unit-files 'harness-*.timer'"
+  DONE_LIST+=("служба потока проверок: срез harness-checks.slice и ${#unit_files[@]} юнитов; все таймеры харнеса включены")
   отметить шаг_9б
 }
 
 # ------------------------------------------------------------------ финал ----
+
+шаг_11() { # первый коммит каркаса — ПОСЛЕДНИМ: гейты судят расписание и юниты, которых до шага 9 нет
+  local step="шаг 11 — первый коммит каркаса"; CURRENT_STEP="$step"
+  уже_сделан шаг_11 && { скажи "[$step] пропуск (--resume)"; return 0; }
+  заголовок "$step"
+  # Красный гейт установку не обрывает: все провалы хук печатает списком выше, а
+  # сводка называет их. Отметка шага — только при успехе, иначе --resume не повторит.
+  делай "зафиксировать_пакет '$AGENT_USER' '/home/$AGENT_USER/starter/STARTER-PACKAGE' && первый_коммит_каркаса '$PROJECT_DIR' '$AGENT_USER' && DONE_LIST+=('первый коммит каркаса сделан установщиком через честную дверь пайплайна; docs/ИЗМЕНЕНИЯ-ПАКЕТА.md — заготовкой') && отметить шаг_11 || FAILED_LIST+=('шаг 11: первый коммит каркаса не сделан (причины выше); после починки: sudo bash USTANOVIT.sh --resume')"
+}
 
 осталось_руками() {
   заголовок "ОСТАЛОСЬ РУКАМИ (только физически неавтоматизируемое)"
@@ -1314,7 +1759,7 @@ EOF
   скажи "   тогда та же сессия и авторизуется, и останется работать:"
   скажи ""
   скажи "   sudo -u $AGENT_USER -H tmux attach -t agent"
-  скажи "   $start_cmd     # ← ВНУТРИ tmux"
+  скажи "   cd $PROJECT_DIR && $start_cmd     # ← ВНУТРИ tmux; из другого каталога CLAUDE.md, память и скилы не загрузятся"
   скажи ""
   скажи "   Появится ссылка — откройте её В БРАУЗЕРЕ НА СВОЁМ КОМПЬЮТЕРЕ, войдите в"
   скажи "   аккаунт и вставьте код обратно. Вопрос о доверии к каталогу — Y."
@@ -1340,7 +1785,7 @@ EOF
     скажи ""
     скажи "   sudo -u $AGENT_USER -H tmux attach -t agent"
     скажи "   # внутри tmux (флаг --channels нужен ПРИ КАЖДОМ запуске):"
-    скажи "   claude --dangerously-skip-permissions --channels plugin:telegram@claude-plugins-official"
+    скажи "   cd $PROJECT_DIR && claude --dangerously-skip-permissions --channels plugin:telegram@claude-plugins-official"
     скажи ""
     скажи "   Затем в Telegram напишите боту ДВА сообщения — 6-символьный код придёт"
     скажи "   в ответ на ВТОРОЕ. В сессии Claude Code выполните:"
@@ -1380,7 +1825,7 @@ EOF
   скажи "   sudo -u $AGENT_USER -H tmux display-message -p -t agent '#{pane_current_command}'"
   скажи ""
   скажи "   Последняя должна печатать claude или node. Печатает bash — агент выпал"
-  скажи "   в оболочку: подключитесь и запустите «$start_cmd»,"
+  скажи "   в оболочку: подключитесь и запустите «cd $PROJECT_DIR && $start_cmd»,"
   скажи "   либо подождите — сторож поднимет сам и напишет вам."
   # Подсказки, добавленные шагами (запасной код панели, вывод наружу), печатались
   # в сводке — а файлом сохраняется только ЭТОТ блок, и подсказка оставалась в
@@ -1442,6 +1887,8 @@ EOF
   # 2. АГЕНТ в группе панели. Без этого диспетчер не прочитает внутренний ключ
   # (служба пишет его 0640 своей группой), /vnutr/token ответит 404, и команда
   # «панель» МОЛЧА не выдаст ссылку — панель есть, войти нельзя (S-01).
+  local panel_group_new=0
+  id -nG "$AGENT_USER" 2>/dev/null | grep -qw harness-panel || panel_group_new=1
   делай "id -nG $AGENT_USER | grep -qw harness-panel || usermod -aG harness-panel $AGENT_USER"
   проверка "$step" "$AGENT_USER состоит в группе harness-panel (иначе ссылка входа не выдаётся)" \
     "id -nG $AGENT_USER | grep -qw harness-panel" \
@@ -1449,7 +1896,13 @@ EOF
   # Дополнительные группы процесс берёт при СТАРТЕ: диспетчер поднят шагом 7 и
   # без перезапуска останется без группы панели — ссылка молча не выдастся
   # (ревью кода 13.09.2026, F-08).
-  делай "systemctl try-restart harness-dispatcher.service harness-agent.service"
+  # Перезапуск убивает tmux-сессию агента вместе с работающей сменой, поэтому он идёт
+  # только если группа выдана ИМЕННО сейчас: у агента, уже состоящего в группе, процессы её имеют.
+  if (( panel_group_new )); then
+    делай "systemctl try-restart harness-dispatcher.service harness-agent.service"
+  else
+    скажи "  $AGENT_USER уже в группе harness-panel — перезапуск диспетчера и агента не нужен"
+  fi
 
   # 3. Общий каталог состояния: setgid, чтобы файлы двух писателей (служба и
   # диспетчер) наследовали одну группу.
@@ -1561,6 +2014,8 @@ EOF
 # ----------------------------------------------------------------- прогон ----
 
 (( DRY )) && заголовок "РЕЖИМ --dry-run: команды печатаются, НИЧЕГО не исполняется"
+[[ -n "${TMUX:-}${STY:-}" ]] || скажи "Совет: запускайте установку в tmux или screen — обрыв SSH не убьёт её посреди apt."
+проверить_ос_установки
 опрос
 
 # Пути проверяются ПОСЛЕ опроса и ДО первого шага — на каждом запуске, включая
@@ -1569,6 +2024,17 @@ if ! сверить_пути_конфига; then
   стоп "проверка значений до шагов" \
     "путь из $CONF не годится (причина выше) — ни один шаг не начинался" \
     "grep -n 'PROJECT_DIR\|SECRETS_DIR\|LOG_DIR\|HEARTBEAT_DIR' $CONF"
+fi
+# Обрыв SSH шлёт SIGHUP и убивал установку посреди apt (dpkg оставался
+# «interrupted»). Сигнал глушится после опроса, весь вывод дублируется в файл:
+# закрытое окно не стирает ответ на «что произошло».
+if (( ! DRY )); then
+  trap '' HUP
+  mkdir -p "$LOG_DIR"
+  touch "$LOG_DIR/install.log"; chmod 640 "$LOG_DIR/install.log"
+  exec > >(tee -a "$LOG_DIR/install.log") 2>&1
+  скажи "полный вывод установки пишется в $LOG_DIR/install.log"
+  дождаться_cloud_init
 fi
 # Блок «ОСТАЛОСЬ РУКАМИ» — единственная в установке инструкция ЧЕЛОВЕКУ, и до
 # сих пор она жила только в прокрутке терминала: закрыл окно — искать негде.
@@ -1593,6 +2059,81 @@ MANUAL_FILE="$LOG_DIR/ОСТАЛОСЬ-РУКАМИ.txt"
 FINAL_DONE=0
 trap 'финал' EXIT
 
+выдать_sudoers() { # $1=шаг $2=имя файла в sudoers.d $3=команда, печатающая содержимое
+  # Файл сперва собирается и проверяется во временном месте: битый файл в
+  # sudoers.d ломает sudo целиком, а не одно правило.
+  local step="$1" name="$2" gen="$3" tmp="/tmp/harness-$2.sudoers"
+  (( DRY )) || tmp="$(mktemp)"
+  делай "$gen > '$tmp'"
+  проверка "$step" "sudoers $name корректен до установки (visudo -cf)" \
+    "visudo -cf '$tmp'" "visudo -cf '$tmp'; cat '$tmp'"
+  делай "install -o root -g root -m 0440 '$tmp' /etc/sudoers.d/$name"
+  делай "rm -f '$tmp'"
+  проверка "$step" "sudoers $name установлен и корректен" \
+    "visudo -cf /etc/sudoers.d/$name" "visudo -cf /etc/sudoers.d/$name"
+}
+
+# Без отметки .done НАМЕРЕННО: права агента растут от версии к версии пакета
+# (новые юниты, ключ AUTO_REBOOT_IN_ROTATION), и `--resume` на уже стоящей машине
+# обязан их довыдать; шаг 1 с отметкой этого не сделал бы. Всё здесь идемпотентно.
+шаг_12() { # права агента: диагностика, свои юниты, журналы, ufw, reboot по ключу, копия прав для гейта
+  local step="шаг 12 — права агента и копия прав для гейта"; CURRENT_STEP="$step"
+  заголовок "$step"
+  local checks_ids own_units=()
+  # Шаг 2 при --resume пропускается, а правила чтения требуют ss: зависимость ставится здесь.
+  command -v ss >/dev/null 2>&1 || делай "$APT_UPDATE && apt_поставить iproute2"
+  checks_ids="$(python3 -I "$HARNESS_SRC/scripts/lib/process_library.py" checks-ids)" \
+    || стоп "$step" "не прочитан список службы потока проверок" "python3 -I '$HARNESS_SRC/scripts/lib/process_library.py' checks-ids"
+  mapfile -t own_units < <(свои_юниты "$SCRIPT_DIR/USTANOVIT.sh" "$HARNESS_SRC" $checks_ids)
+  (( ${#own_units[@]} )) || стоп "$step" "не собран список своих юнитов харнеса" "ls '$HARNESS_SRC/panel'"
+  выдать_sudoers "$step" harness-agent-readonly "правила_чтения_sudoers '$AGENT_USER'"
+  выдать_sudoers "$step" harness-agent-units "правила_юнитов_sudoers '$AGENT_USER' ${own_units[*]}"
+  # Журнал читается группой, а не sudo. Группа adm не нужна: она открывает auth.log и syslog.
+  # Шаг 1 уже выдал её до запуска агента; здесь — для машин, которых этот шаг не видел. Живой агент
+  # получает группу только с новым запуском: сам его не перезапускаем (оборвали бы смену).
+  if ! id -nG "$AGENT_USER" 2>/dev/null | grep -qw systemd-journal && getent group systemd-journal >/dev/null; then
+    делай "usermod -aG systemd-journal $AGENT_USER"
+    MANUAL_LIST+=("агент получил группу systemd-journal, но живой процесс её не имеет до перезапуска — в удобный момент: sudo systemctl restart harness-agent")
+  fi
+  # Docker-сети не должны ходить на SSH хоста; нет ufw или docker — строка в сводку, не отказ.
+  if (( DRY )); then
+    скажи "  + закрыть_ssh_из_docker (ufw deny 22/tcp из фактических подсетей docker, если ufw активен)"
+  else
+    local ssh_rc=0
+    закрыть_ssh_из_docker || ssh_rc=$?
+    case $ssh_rc in
+      0) DONE_LIST+=("22/tcp закрыт для подсетей docker-сетей (ufw)") ;;
+      2) MANUAL_LIST+=("22/tcp из docker-сетей не закрыт: ufw не установлен или не включён. Когда включите ufw (сперва убедитесь, что правило для SSH есть, иначе потеряете доступ) — повторите: sudo bash $SELF --resume; шаг 12 закроет порт") ;;
+      3) MANUAL_LIST+=("22/tcp из docker-сетей не закрыт: docker не установлен или не отвечает (закрывать нечего). После установки docker и появления его сетей — повторите: sudo bash $SELF --resume; шаг 12 закроет порт") ;;
+      *) стоп "$step" "ufw не принял правило закрытия 22/tcp для подсетей docker" "ufw status numbered" ;;
+    esac
+  fi
+  local rb_tmp=/tmp/harness-agent-reboot.sudoers
+  (( DRY )) || rb_tmp="$(mktemp)"
+  делай "правило_перезагрузки '$AGENT_USER' /etc/harness/harness.conf > '$rb_tmp'"
+  if (( DRY )) || [[ -s "$rb_tmp" ]]; then
+    проверка "$step" "sudoers на перезагрузку корректен до установки (visudo -cf)" \
+      "visudo -cf '$rb_tmp'" "visudo -cf '$rb_tmp'; cat '$rb_tmp'"
+    делай "install -o root -g root -m 0440 '$rb_tmp' /etc/sudoers.d/harness-agent-reboot"
+    DONE_LIST+=("право на reboot (без аргументов) выдано: AUTO_REBOOT_IN_ROTATION=1")
+  else
+    # Ключ выключен (или снят): права на перезагрузку быть не должно.
+    делай "rm -f /etc/sudoers.d/harness-agent-reboot"
+  fi
+  делай "rm -f '$rb_tmp'"
+  # Копия лежит в каталоге root, а не в /etc/harness/agent (он агентский): запись root-ом
+  # в чужой каталог идёт по симлинку, а подмену копии агентом гейт принял бы на веру.
+  # install заменяет файл, а не пишет сквозь ссылку.
+  local rights_tmp=/tmp/harness-sudo-rights.txt
+  (( DRY )) || rights_tmp="$(mktemp)"
+  делай "копия_прав_для_гейта /etc/sudoers.d > '$rights_tmp'"
+  делай "install -o root -g root -m 0644 '$rights_tmp' /etc/harness/sudo-rights.txt"
+  делай "rm -f '$rights_tmp'"
+  проверка "$step" "копия прав для гейта принадлежит root и читается агентом" \
+    "[ \"\$(stat -c %U /etc/harness/sudo-rights.txt)\" = root ] && sudo -u $AGENT_USER test -r /etc/harness/sudo-rights.txt" \
+    "ls -l /etc/harness/sudo-rights.txt"
+}
+
 шаг_0
 шаг_1
 шаг_2
@@ -1608,4 +2149,7 @@ trap 'финал' EXIT
 шаг_9
 шаг_9б
 шаг_10
+шаг_11
+шаг_12
+шаг_13
 exit 0

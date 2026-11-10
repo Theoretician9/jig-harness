@@ -232,32 +232,41 @@ def обезличить_код(дерево: Path, паспорт: dict, пак
         "check_public_clean", КОРЕНЬ / "scripts" / "check-public-clean.py")
     судья = importlib.util.module_from_spec(спец)
     спец.loader.exec_module(судья)
-    подмена, пути, номер = {}, set(), 0
+    подмена, пути, голые, номер = {}, set(), set(), 0
     for значение, имя in судья.образцы(паспорт, пакет, КОРЕНЬ):
         if имя not in _НЕЙТРАЛЬНО:
             номер += 1
         подмена[значение.lower()] = _НЕЙТРАЛЬНО.get(имя) or f"sample-{номер}"
         if имя in _ПУТИ:
             пути.add(значение.lower())
+        if имя == "PROJECT_NAME":
+            голые.add(значение.lower())
 
-    def шаблон(ключи):
+    def шаблон(ключи, края=("", "")):
         # Длинные первыми: путь важнее имени внутри него.
-        return re.compile("|".join(re.escape(з) for з in sorted(ключи, key=len, reverse=True)),
+        return re.compile("|".join(края[0] + re.escape(з) + края[1]
+                                   for з in sorted(ключи, key=len, reverse=True)),
                           re.IGNORECASE) if ключи else None
+    # Имя установки вне пути (образец старой личности в коде) — не умолчание
+    # пути, его замена поведения не меняет; путь с тем же именем остаётся.
+    голое = шаблон(голые, (r"(?<![\w/.-])", r"(?![\w/.-])"))
     везде, в_подставных = шаблон(set(подмена) - пути), шаблон(set(подмена))
     правлено = 0
     for файл in sorted(дерево.rglob("*")):
         if (not файл.is_file() or файл.suffix == ".md" or ".git" in файл.parts
                 or файл.suffix.lower() in судья.ДВОИЧНЫЕ):
             continue
-        рабочий = в_подставных if _подставной_файл(файл) else везде
-        if рабочий is None:
+        шаги = [в_подставных] if _подставной_файл(файл) else [везде, голое]
+        шаги = [ш for ш in шаги if ш is not None]
+        if not шаги:
             continue
         try:
             текст = файл.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
             continue
-        новый = рабочий.sub(lambda м: подмена[м.group(0).lower()], текст)
+        новый = текст
+        for шаг in шаги:
+            новый = шаг.sub(lambda м: подмена[м.group(0).lower()], новый)
         if новый != текст:
             файл.write_text(новый, encoding="utf-8")
             правлено += 1
@@ -655,6 +664,16 @@ def самотест() -> int:
               "БОЛЬНОЙ: имя продукта и путь в тесте заменены")
         проба("zzprod" not in в_работе.lower() and str(проект_стенда) in в_работе,
               "БОЛЬНОЙ: в рабочем коде имя продукта заменено, путь остался")
+
+        # Голое имя установки в рабочем коде (образец старой личности) уходит,
+        # путь с тем же именем остаётся: он умолчание рабочего кода.
+        (дер / "name.sh").write_text('in ("ZzName", "project") && n != "ZzName"\n'
+                                     'D=/var/www/ZzName/x\n', encoding="utf-8")
+        обезличить_код(дер, {"PROJECT_NAME": "ZzName"}, пакет)
+        в_имени = (дер / "name.sh").read_text(encoding="utf-8")
+        проба('in ("project", "project") && n != "project"' in в_имени
+              and "/var/www/ZzName/x" in в_имени,
+              f"БОЛЬНОЙ: голое имя установки в коде заменено, путь остался ({в_имени!r})")
 
         # ── цитаты владельца (его решение 28.09.2026: обезличить) ──────────
         проект = корень / "проект"

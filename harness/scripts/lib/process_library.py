@@ -18,8 +18,14 @@ CLI:
       переписывает СВОИ необёрнутые строки crontab в обёрнутые; без --вход
       читает и пишет живой crontab (копия до правки — в $LOG_DIR или /tmp).
 
+Слой установки: записи, которые принадлежат машине, а не пакету (чужие
+контейнеры и т.п.), лежат в JSON того же вида по пути ключа PROCESS_LIBRARY_LOCAL
+из harness.conf. Файла нет — реестр как есть; есть — записи добавляются, а при
+том же id заменяют пакетные.
+
 Двери проб: HARNESS_PROCESS_LIBRARY — путь к YAML библиотеки (расписание,
-выключатель), HARNESS_PROCESS_LIBRARY_JSON — путь к JSON (свойства процессов).
+выключатель), HARNESS_PROCESS_LIBRARY_JSON — путь к JSON (свойства процессов),
+HARNESS_PROCESS_LIBRARY_LOCAL — путь к слою установки.
 """
 import os
 import re
@@ -72,11 +78,47 @@ def load(path=None) -> dict:
     return _прочитать_yaml(Path(путь))
 
 
+# Каталог агента доступен ему на запись, /etc/harness/ — нет: поэтому слой лежит здесь.
+LOCAL_LAYER_KEY = "PROCESS_LIBRARY_LOCAL"
+LOCAL_LAYER_NAME = "agent/process-library.local.json"
+
+
+def local_layer_path() -> Path:
+    # Путь слоя нужен и чтению, и пробам; держим его в одном месте, чтобы ключ конфига и дверь не расходились.
+    путь = os.environ.get("HARNESS_PROCESS_LIBRARY_LOCAL") or _checks_conf().get(LOCAL_LAYER_KEY)
+    return Path(путь or f"{_config().корень()}/{LOCAL_LAYER_NAME}")
+
+
+def with_local_layer(library: dict) -> dict:
+    """Новая библиотека: записи слоя установки заменяют пакетные по id или дописываются.
+    Слой правит человек руками, а читают его и крон, и панель: битый слой не должен
+    ронять их трейсбеком на каждом запуске, поэтому — строка в stderr и реестр пакета."""
+    import json
+    путь = local_layer_path()
+    try:
+        документ = json.loads(путь.read_text(encoding="utf-8"))
+        слой = {запись["id"]: запись for запись in layer_records(документ)}
+    except FileNotFoundError:
+        return library
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as error:
+        print(f"process_library: слой установки {путь} не прочитан ({type(error).__name__}: {error}) — "
+              "беру реестр пакета без слоя", file=sys.stderr)
+        return library
+    слитые = [слой.pop(запись["id"], запись) for запись in library.get("процессы") or []]
+    return {**library, "процессы": слитые + list(слой.values())}
+
+
+def layer_records(документ) -> list:
+    if not isinstance(документ, dict) or not isinstance(документ.get("процессы") or [], list):
+        raise ValueError("верхний уровень — не объект с «процессы»-списком")
+    return документ.get("процессы") or []
+
+
 def registry(path=None) -> dict:
     # Свойства процессов (класс, запуск, механизмы, доля нагрузки) живут в JSON, расписание — в YAML.
     import json
     путь = path or os.environ.get("HARNESS_PROCESS_LIBRARY_JSON") or _каталог_конфигов() / "process-library.json"
-    return json.loads(Path(путь).read_text(encoding="utf-8"))
+    return with_local_layer(json.loads(Path(путь).read_text(encoding="utf-8")))
 
 
 def is_exempt(process_id: str, path=None) -> bool:
@@ -191,10 +233,15 @@ def schedule_words(cron, start=None) -> str:
     return f"{cron} (как в кроне)"
 
 
-def _checks_conf() -> dict:
+def _config():
     # Под `python3 -I` каталога скрипта в sys.path нет.
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     import config
+    return config
+
+
+def _checks_conf() -> dict:
+    config = _config()
     return config.из_файла(config.путь_harness_conf())
 
 

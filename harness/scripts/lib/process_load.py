@@ -17,6 +17,7 @@ import json
 import os
 import re
 import shlex
+import sys
 from pathlib import Path
 
 TICK = os.sysconf("SC_CLK_TCK")
@@ -30,6 +31,7 @@ SPLIT_UNITS = {"/system.slice/cron.service": "cron",
 # Потоки ядра и всё без юнита: счётчик корня равен всей машине, делить им нельзя.
 ROOT_CGROUP = "/"
 CRON_NAMES = ("cron", "CRON", "crond")
+TRANSIENT_UNIT = re.compile(r"^run-u\d+\.service$")
 ASSIGNMENT = re.compile(r"^[A-Za-z_]\w*=")
 MAX_GROUPS = 80
 TINY_CPU_S = 0.05
@@ -55,9 +57,10 @@ def load_rules(library: dict) -> dict:
     """Признаки записей со способом «cgroup» → таблицы поиска.
     prefix: путь cgroup → id (юнит или LXC целиком); unit_ids: id делимых юнитов;
     tokens: слово из argv → id (docker-scope без известного пути); scripts:
-    имя скрипта порождения службы → id."""
-    rules = {"prefix": {}, "unit_ids": {}, "tokens": {}, "scripts": {}}
+    имя скрипта порождения службы → id; ids: все id библиотеки."""
+    rules = {"prefix": {}, "unit_ids": {}, "tokens": {}, "scripts": {}, "ids": set()}
     for record in library.get("процессы", []):
+        rules["ids"].add(record["id"])
         sign = (record.get("доля_нагрузки") or {}).get("приписка") or {}
         if sign.get("способ") != "cgroup":
             continue
@@ -123,11 +126,30 @@ def bucket_of(cgroup: str, procs: list, rules: dict) -> tuple:
     best = max((p for p in rules["prefix"] if cgroup == p or cgroup.startswith(p + "/")), key=len, default=None)
     if best:
         return rules["prefix"][best], best
+    for proc in procs:                      # служба среза проверок: её корень запущен обёрткой с id записи
+        ident = wrapper_id(proc["argv"])
+        if ident in rules["ids"]:
+            return ident, cgroup
     for proc in procs:
         for word, ident in rules["tokens"].items():
             if any(word in arg for arg in proc["argv"]):
                 return ident, cgroup
     return cgroup.rstrip("/").rsplit("/", 1)[-1] or "/", cgroup
+
+
+def transient_callers(procs: dict, by_cgroup: dict, buckets: dict) -> dict:
+    """cgroup transient-юнита run-uNNN.service → pid вызвавшего `systemd-run --wait … -- <argv>`:
+    вызывающий жив всё время работы юнита, а его argv после «--» равен argv корня юнита."""
+    callers = {}
+    for pid, proc in procs.items():
+        argv = proc["argv"]
+        if argv and os.path.basename(argv[0]) == "systemd-run" and "--" in argv:
+            callers[tuple(argv[argv.index("--") + 1:])] = pid
+    links = {}
+    for cg in buckets:
+        if TRANSIENT_UNIT.match(cg.rsplit("/", 1)[-1]):
+            links[cg] = next((callers[tuple(p["argv"])] for p in by_cgroup[cg] if p["argv"] and tuple(p["argv"]) in callers), None)
+    return {cg: pid for cg, pid in links.items() if pid is not None}
 
 
 def scan(proc_dir, cg_dir, rules: dict) -> dict:
@@ -136,6 +158,7 @@ def scan(proc_dir, cg_dir, rules: dict) -> dict:
     for proc in procs.values():
         by_cgroup[proc["cg"]].append(proc)
     buckets = {cg: bucket_of(cg, members, rules) for cg, members in by_cgroup.items() if cg not in SPLIT_UNITS and cg != ROOT_CGROUP}
+    links = transient_callers(procs, by_cgroup, buckets)
     paths = set(SPLIT_UNITS) | {path for _, path in buckets.values()}
     top = {}
     for entry in sorted(os.listdir(cg_dir)):
@@ -149,7 +172,7 @@ def scan(proc_dir, cg_dir, rules: dict) -> dict:
     busy = (fields[0] + fields[1] + fields[2] + fields[5] + fields[6] + fields[7]) / TICK
     return {"uptime": float(read_text(os.path.join(proc_dir, "uptime")).split()[0]), "busy": busy,
             "cores": sum(1 for line in machine if re.match(r"cpu\d+ ", line)), "procs": procs,
-            "buckets": buckets, "top": top,
+            "buckets": buckets, "links": links, "top": top,
             "cgroups": {path: cgroup_usage(cg_dir, path) for path in paths}}
 
 
@@ -158,7 +181,9 @@ def scan(proc_dir, cg_dir, rules: dict) -> dict:
 def wrapper_id(argv: list):
     for i in (0, 1):
         if len(argv) > i + 1 and os.path.basename(argv[i]) == "run-background.sh":
-            return argv[i + 1]
+            word = argv[i + 1]
+            # Флаг (`--разрешён <id>`) — вопрос к обёртке, не прогон: корня и id у него нет.
+            return None if word.startswith("-") else word
     return None
 
 
@@ -245,10 +270,12 @@ def has_session_env(proc_dir, pid: int) -> bool:
         return False
 
 
-def bare_name(argv: list) -> str:
+def bare_name(argv: list, comm: str = "") -> str:
     """Имя файла корня крона без обёртки: basename первого слова-пути в `sh -c '<строка>'` или
     `bash <файл>`. Присваивания `ИМЯ=…` и `env` пропускаются, а слова без «/» не берутся вовсе: в них
-    бывают секреты. Пути в строке нет — имя интерпретатора."""
+    бывают секреты. Пути в строке нет — имя интерпретатора; argv пуст (процесс исчез или зомби) — comm."""
+    if not argv:
+        return comm or "без-argv"
     try:
         words = shlex.split(argv[2]) if len(argv) > 2 and argv[1] == "-c" else argv[1:]
     except ValueError:
@@ -282,15 +309,15 @@ def label_procs(snap: dict, prev_procs: dict, rules: dict, proc_dir, transcripts
         ident = wrapper_id(p["argv"])
         if ident:
             make_root(pid, (ident, str(pid), None))
-    for pid, p in procs.items():                       # 2. остальные корни по юниту
+    def find_root(pid, p):                             # 2. остальные корни по юниту
         if pid in roots:
-            continue
+            return
         argv0 = argv_base(p)
         # Корень крона — только ребёнок самого cron: внук с setsid тоже имеет sid = pid, но он
         # наследует ярлык задания по правилам ниже.
         if kind[pid] == "cron" and p["sid"] == pid and procs.get(p["ppid"], {}).get("comm") in CRON_NAMES \
                 and argv0 not in CRON_NAMES and pid not in by_sid:
-            make_root(pid, ("крон:" + bare_name(p["argv"])[:60], str(pid), None))
+            make_root(pid, ("крон:" + bare_name(p["argv"], p["comm"])[:60], str(pid), None))
         elif kind[pid] == "agent" and argv0 == "claude" and "-p" not in p["argv"] and "--print" not in p["argv"]:
             make_root(pid, (rules["unit_ids"].get(p["cg"], "claude-session"), unit_name[pid], None), False)
         elif kind[pid] == "agent" and p["sid"] == pid and command_of(p["argv"]) is not None \
@@ -307,6 +334,12 @@ def label_procs(snap: dict, prev_procs: dict, rules: dict, proc_dir, transcripts
                           if os.path.basename(a) in rules["scripts"]), None)
             if ident:
                 make_root(pid, (ident, str(pid), None))
+
+    for pid, p in procs.items():
+        try:
+            find_root(pid, p)
+        except Exception as error:  # noqa: BLE001 — сбой одного процесса не должен стоить всего прохода
+            print(f"process_load: разметка pid {pid} не удалась: {type(error).__name__}", file=sys.stderr)
 
     labels = {}
 
@@ -421,6 +454,9 @@ def attribute(prev, snap: dict, rules: dict, proc_dir, transcripts: Transcripts,
     ends — (id, pid, cpu_с) process.end окна: по ним делится хвост нескольких ушедших ярлыков."""
     prev = prev or {}
     labels = label_procs(snap, prev.get("procs", {}), rules, proc_dir, transcripts)
+    for cgroup, caller in snap.get("links", {}).items():      # юнит среза проверок — под ярлыком вызвавшего
+        if labels.get(caller):
+            snap["buckets"][cgroup] = (labels[caller][0], snap["buckets"][cgroup][1])
     cpu, tails = cpu_seconds(snap, prev.get("procs", {}), ends)
     inherited = collections.Counter()                  # хвост ушедших заданий: (ярлык, cgroup ребёнка) → с
     for pid, label, cgroup, seconds in tails:

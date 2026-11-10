@@ -925,11 +925,21 @@ ack() {  # chat_id, текст
 # ответе Bot API. Текст ответа API не пишется — только его message_id и
 # description; stderr curl в журнал не идёт (там может быть адрес с токеном).
 kvitanciya() {  # chat_id, метка(TS), message_id, текст
-    local resp rc=0 tg_id err outcome=ok
-    resp=$(printf 'url = "%s/sendMessage"\n' "$API" \
-        | curl -sS --max-time 10 -K - -X POST \
-            --data-urlencode "chat_id=$1" \
-            --data-urlencode "text=$4" 2>/dev/null) || rc=$?
+    local resp rc=0 tg_id err outcome=ok try
+    # Повтор — только при отказе СЕТИ (curl rc≠0: таймаут 28, нет маршрута…).
+    # Ответ Bot API с ошибкой повторять нельзя: сообщение могло дойти, и владелец
+    # получил бы «принял» дважды. Квитанция идёт в фоне, пауза цикл не держит.
+    for try in 1 2 3; do
+        rc=0
+        resp=$(printf 'url = "%s/sendMessage"\n' "$API" \
+            | curl -sS --max-time 10 -K - -X POST \
+                --data-urlencode "chat_id=$1" \
+                --data-urlencode "text=$4" 2>/dev/null) || rc=$?
+        [ "$rc" -ne 0 ] || break
+        [ "$try" -lt 3 ] || break
+        say "квитанция на $3: сеть не ответила (curl rc=$rc), повтор $try из 2"
+        sleep "${KVITANCIYA_PAUZA_S:-3}"
+    done
     tg_id=$(printf '%s' "$resp" | jq -r '.result.message_id // empty' 2>/dev/null || true)
     if [ -z "$tg_id" ]; then
         outcome=error

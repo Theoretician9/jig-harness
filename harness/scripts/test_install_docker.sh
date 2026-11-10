@@ -307,7 +307,7 @@ printf 'FAILED=%s\n' "${#FAILED_LIST[@]}"; printf 'F: %s\n' "${FAILED_LIST[@]}"
 printf 'D: %s\n' "${DONE_LIST[@]}"
 EOF
     } > "$T/step.sh"
-    DRY=0 RESUME=1 HARNESS_SRC="$T/pkg" STAMP_DIR="$T/stamps" AGENT_USER="$AGENT" \
+    DRY=0 RESUME=1 SELF=USTANOVIT.sh HARNESS_SRC="$T/pkg" STAMP_DIR="$T/stamps" AGENT_USER="$AGENT" \
         bash -c 'set -Eeuo pipefail; source "$0"' "$T/step.sh" 2>&1
 }
 check "установщик: шаг docker в последовательности прогона" "1" "$(grep -cx 'шаг_2б' "$INSTALLER")"

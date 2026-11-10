@@ -49,13 +49,17 @@ server_has_docker_group() {
     grep '^Groups:' "$PROC_DIR/$pid/status" 2>/dev/null | tr ' \t' '\n\n' | grep -qx "$gid"
 }
 
+# Замок apt на свежем VPS держат cloud-init и unattended-upgrades: ждём его, а не падаем.
+apt-get() { command apt-get -o DPkg::Lock::Timeout=600 "$@"; }
+export DEBIAN_FRONTEND=noninteractive
+
 if docker compose version >/dev/null 2>&1; then
     echo "  docker и compose уже стоят — apt пропущен"
 else
     echo "  + apt-get install -y docker.io docker-compose-v2"
-    DEBIAN_FRONTEND=noninteractive apt-get update -qq \
+    apt-get update -qq \
         || fail "apt-get update не прошёл (вывод выше)"
-    if ! DEBIAN_FRONTEND=noninteractive apt-get install -y docker.io docker-compose-v2; then
+    if ! apt-get install -y docker.io docker-compose-v2; then
         docker_ce_hint
         fail "apt-get install docker.io docker-compose-v2 не прошёл (вывод выше)"
     fi

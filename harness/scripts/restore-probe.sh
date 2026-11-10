@@ -15,6 +15,13 @@
 # Запуск: bash scripts/restore-probe.sh [дамп]
 #         (без аргумента берётся самый свежий db-*.dump из $BACKUP_DIR)
 set -uo pipefail
+# Ручной прогон не должен будить владельца: --без-отправки печатает вердикт в
+# stdout и дверь тревоги не зовёт. Флаг снимается из аргументов до разбора дампа.
+NO_SEND=0; _args=()
+for _a in "$@"; do
+    if [ "$_a" = "--без-отправки" ]; then NO_SEND=1; else _args+=("$_a"); fi
+done
+set -- ${_args[@]+"${_args[@]}"}
 # shellcheck disable=SC1091
 source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/lib/config.sh"
 konf_zagruzit
@@ -167,6 +174,67 @@ image_template() {
     printf '%s\n' "${PROBE_DB_IMAGE_TEMPLATE-$PROBE_IMAGE_TEMPLATE_DEFAULT}"
 }
 
+# Контейнер, из которого снят дамп: имя берётся из команды дампа в BACKUP_DBS
+# («docker exec [опции] КОНТЕЙНЕР pg_dump …») по имени дампа db-ИМЯ.dump, иначе —
+# PROBE_DB_CONTAINER. Движок и образ продукта — данные установки, а не код пробы.
+container_from_command() { # $1 = команда дампа → печатает имя контейнера, rc 1 если не docker exec
+    local -a w; local t prev="" seen=0 skip=0
+    read -ra w <<< "$1"
+    for t in "${w[@]}"; do
+        if (( skip )); then skip=0; prev=$t; continue; fi
+        if (( ! seen )); then
+            [ "$t" = exec ] && [ "$prev" = docker ] && seen=1
+            prev=$t; continue
+        fi
+        case "$t" in
+            -e|-u|-w|--env|--user|--workdir|--env-file) skip=1 ;;
+            -*) ;;
+            *) printf '%s\n' "$t"; return 0 ;;
+        esac
+    done
+    return 1
+}
+
+dump_source_container() { # $1 = путь дампа
+    local base entry cmd
+    base=$(basename "$1"); base=${base#db-}; base=${base%.dump}
+    while IFS= read -r entry; do
+        entry=$(printf '%s' "$entry" | sed 's/^ *//;s/ *$//')
+        [ "${entry%%=*}" = "$base" ] || continue
+        cmd="${entry#*=}"
+        container_from_command "$cmd" && return 0
+    done <<< "${BACKUP_DBS:-}"
+    [ -n "${PROBE_DB_CONTAINER:-}" ] && printf '%s\n' "$PROBE_DB_CONTAINER"
+}
+
+# Как запущен контейнер-источник: образ, переменные, команда. Переносится БЕЛЫЙ
+# СПИСОК переменных запуска базы: чёрный список по именам пропускал бы
+# DATABASE_URL с паролем в URL, *_PWD, *_DSN. Пароль стенда свой. Из команды
+# берётся только `postgres -c имя=значение` без путей: `config_file=/etc/…`
+# указывает на файл, примонтированный в продукт, а в стенде его нет.
+# Печатает строки «I<TAB>образ», «E<TAB>NAME=VALUE», «C<TAB>аргумент команды».
+source_run_profile() { # $1 = имя контейнера-источника → rc 1, если inspect не ответил
+    docker inspect "$1" 2>/dev/null | python3 -c '
+import json, re, sys
+try:
+    c = json.load(sys.stdin)[0]["Config"]
+    print("I\t" + c["Image"])
+except Exception:
+    sys.exit(1)
+allowed = re.compile(r"(POSTGRES_(USER|DB|INITDB_ARGS|INITDB_WALDIR|HOST_AUTH_METHOD)|PGDATA|LANG|LC_[A-Z_]+|TZ)$")
+for e in c.get("Env") or []:
+    if allowed.match(e.split("=", 1)[0]):
+        print("E\t" + e)
+cmd = c.get("Cmd") or []
+if cmd[:1] == ["postgres"]:
+    print("C\tpostgres")
+    for i, a in enumerate(cmd[1:-1], 1):
+        v = cmd[i + 1]
+        if a == "-c" and "=" in v and "/" not in v:
+            print("C\t-c\nC\t" + v)
+'
+}
+
 # Текст тревоги владельцу — по виду исхода; пусто = молчать. «Не применима» —
 # решение владельца (дампов нет), тревога о нём стала бы шумом. Без кодов
 # инвариантов и путей: владелец их не открывает.
@@ -185,6 +253,10 @@ alert_owner() { # те же доводы, что у alert_message
     local msg sender="${RESTORE_PROBE_SENDER:-$PROJECT_DIR/scripts/tg_send.sh}"
     msg=$(alert_message "$@")
     [ -n "$msg" ] || return 0
+    if [ "$NO_SEND" = 1 ]; then
+        printf 'ВЕРДИКТ (без отправки): %s\n' "$msg"
+        return 0
+    fi
     # --task: за вестью есть работа модели (разобрать причину), карточка по ключу.
     "$sender" "$msg" --task restore-probe:failed >/dev/null 2>&1 && return 0
     echo "проба: тревога владельцу не ушла — дверь отказала"
@@ -476,8 +548,83 @@ PostgreSQL init process complete; ready for start up."; then
     else
         echo "  ПЛОХО живой прогон: вызовов двери $(door_calls), исход «$(printf '%s' "$vyvod_zhivoj" | tail -1)»"; ok=0
     fi
+    # ── БОЛЬНЫЙ СЛУЧАЙ 09.11.2026: образ и переменные источника, вердикт без отправки ──
+    # Заглушка docker в своём PATH: inspect отдаёт образ продукта с его переменными
+    # (среди них пароль — он в стенд не идёт), run пишет аргументы в журнал, а
+    # таблиц «поднялось» 0 — проба доходит до отказа и до тревоги.
+    dvor_stub="$dvor_zhivoj/stub"; mkdir -p "$dvor_stub"
+    cat > "$dvor_stub/docker" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$STUB_LOG"
+case "$1" in
+    inspect)
+        if [ "$2" = "-f" ]; then echo false
+        elif [ "$2" = "cf_postgres" ]; then
+            printf '[{"Config":{"Image":"product-pg:latest","Env":["POSTGRES_USER=cfuser","POSTGRES_DB=cfdb","POSTGRES_PASSWORD=zhivoj-sekret","PATH=/bin","DATABASE_URL=postgres://u:urlsekret@h/db","DB_PWD=pwdsekret","LANG=C.UTF-8"],"Cmd":["postgres","-c","config_file=/etc/postgresql/pg.conf","-c","shared_preload_libraries=pg_partman_bgw","-c","hba_file=/etc/hba.conf","--requirepass","cmdsekret"]}}]\n'  # не-секрет: поддельные значения заглушки docker, проба ждёт, что их не напечатают
+        else exit 1; fi ;;
+    logs) echo "PostgreSQL init process complete; ready for start up." ;;
+    exec) case "$*" in *information_schema*) echo 0 ;; esac ;;
+    run) while [ $# -gt 0 ]; do [ "$1" = --env-file ] && { cat "$2" > "$STUB_LOG.env"; stat -c %a "$2" > "$STUB_LOG.mode"; echo "$2" > "$STUB_LOG.path"; }; shift; done; echo stubid ;;
+esac
+exit 0
+STUB
+    chmod +x "$dvor_stub/docker"
+    printf '%s\n' 'BACKUP_DBS="cf_core_db=docker exec -i -u postgres cf_postgres pg_dump cf_core_db"' \
+        'PROBE_DB_IMAGE_TEMPLATE=""' >> "$dvor_zhivoj/harness.conf"
+    sed -i '/^PROBE_DB_IMAGE=/d' "$dvor_zhivoj/harness.conf"
+    printf 'CREATE TABLE t ();\n' > "$dvor_zhivoj/kopii/2026-11-02_0000/db-cf_core_db.dump"
+    rm -f "$dvor_zhivoj/kopii/2026-11-02_0000/db-selftest.dump"
+    stub_run() { # аргументы пробы → её stdout; журнал docker — в $dvor_stub/log
+        : > "$dvor_stub/log"; : > "$dvor_trevogi/door.log"; rm -f "$dvor_stub"/log.*
+        PATH="$dvor_stub:$PATH" STUB_LOG="$dvor_stub/log" HARNESS_CONF="$dvor_zhivoj/harness.conf" \
+            LOG_DIR="$dvor_zhivoj" HEARTBEAT_DIR="$dvor_zhivoj/metki" bash "$0" "$@" 2>&1
+    }
+    vyvod_stub=$(stub_run); run_line=$(grep '^run ' "$dvor_stub/log")
+    if printf '%s' "$run_line" | grep -q 'product-pg:latest postgres -c shared_preload_libraries=pg_partman_bgw$' \
+       && grep -qx 'POSTGRES_DB=cfdb' "$dvor_stub/log.env" && grep -qx 'LANG=C.UTF-8' "$dvor_stub/log.env"; then
+        echo "  ок    БОЛЬНОЙ СЛУЧАЙ: стенд поднят образом, переменными и командой источника"
+    else echo "  ПЛОХО run без образа/переменных источника: «$run_line»"; ok=0; fi
+    # Всё, чего нет в белом списке, — в стенд не идёт; и в argv ничего, кроме --env-file.
+    if ! cat "$dvor_stub/log" "$dvor_stub/log.env" | grep -qE 'zhivoj-sekret|urlsekret|pwdsekret|cmdsekret|DATABASE_URL|DB_PWD|requirepass' \
+       && grep -q '^POSTGRES_PASSWORD=.' "$dvor_stub/log.env" && ! printf '%s' "$run_line" | grep -q 'POSTGRES_'; then
+        echo "  ок    БОЛЬНОЙ СЛУЧАЙ: URL с паролем, *_PWD, чужие ключи Cmd не перенесены; пароль стенда свой и не в argv"
+    else echo "  ПЛОХО секрет источника перенесён или переменные в argv"; ok=0; fi
+    if ! printf '%s' "$run_line" | grep -qE 'config_file|hba_file'; then
+        echo "  ок    БОЛЬНОЙ СЛУЧАЙ: аргументы Cmd с путями к файлам продукта отброшены"
+    else echo "  ПЛОХО в стенд ушёл путь к файлу, которого там нет"; ok=0; fi
+    if [ "$(cat "$dvor_stub/log.mode")" = 600 ] && [ ! -e "$(cat "$dvor_stub/log.path")" ]; then
+        echo "  ок    env-файл с правами 0600 и удалён после запуска"
+    else echo "  ПЛОХО env-файл: права $(cat "$dvor_stub/log.mode"), остался на диске"; ok=0; fi
+    if grep -q 'exec -i harness-restore-proba-[0-9]* pg_isready -U cfuser' "$dvor_stub/log"; then
+        echo "  ок    пользователь стенда взят из POSTGRES_USER источника"
+    else echo "  ПЛОХО пользователь стенда не из переменных источника"; ok=0; fi
+    if [ "$(door_calls)" = 1 ]; then echo "  ок    обычный прогон: отказ пробы — тревога владельцу ушла"
+    else echo "  ПЛОХО обычный прогон: вызовов двери $(door_calls), ждали 1"; ok=0; fi
+    vyvod_bez=$(stub_run --без-отправки)
+    if [ "$(door_calls)" = 0 ] && printf '%s' "$vyvod_bez" | grep -q 'ВЕРДИКТ (без отправки)'; then
+        echo "  ок    БОЛЬНОЙ СЛУЧАЙ: --без-отправки — дверь не звана, вердикт в stdout"
+    else echo "  ПЛОХО --без-отправки: вызовов двери $(door_calls), вывод «$(printf '%s' "$vyvod_bez" | tail -2)»"; ok=0; fi
+    # Явная подмена образа сильнее источника.
+    : > "$dvor_stub/log"
+    printf '%s\n' 'PROBE_DB_IMAGE_TEMPLATE="my/pg:{major}"' >> "$dvor_zhivoj/harness.conf"
+    printf -- '-- Dumped by pg_dump version 17.2\nCREATE TABLE t ();\n' > "$dvor_zhivoj/kopii/2026-11-02_0000/db-cf_core_db.dump"
+    stub_run >/dev/null
+    if grep '^run ' "$dvor_stub/log" | grep -q ' my/pg:17'; then
+        echo "  ок    PROBE_DB_IMAGE_TEMPLATE остаётся явной подменой образа"
+    else echo "  ПЛОХО явный шаблон не победил образ источника"; ok=0; fi
+    # Контейнер-источник не найден inspect — прежний подбор, а не отказ.
+    sed -i 's/cf_postgres/net_takogo/' "$dvor_zhivoj/harness.conf"
+    sed -i '/^PROBE_DB_IMAGE_TEMPLATE=/d' "$dvor_zhivoj/harness.conf"
+    stub_run >/dev/null
+    if grep '^run ' "$dvor_stub/log" | grep -q 'postgis/postgis:17-3.6'; then
+        echo "  ок    БОЛЬНОЙ СЛУЧАЙ: inspect источника молчит — прежний подбор по версии дампа"
+    else echo "  ПЛОХО без inspect источника проба не вернулась к подбору по версии"; ok=0; fi
+    if [ "$(container_from_command 'docker exec -i -e A=b -u u cname pg_dump x')" = cname ] \
+       && ! container_from_command 'mysqldump -h host db' >/dev/null; then
+        echo "  ок    имя контейнера из команды дампа: опции с аргументом пропущены, не-docker — пусто"
+    else echo "  ПЛОХО разбор команды дампа"; ok=0; fi
     rm -rf "$dvor_zhivoj" "$dvor_trevogi"
-    (( ok )) && { echo "SELFTEST: зелёный (45 путей: 6 метакоманды, 5 выбор контейнера, 4 дампов нет вовсе, 2 замок ролей, 1 роли владельцев, 7 роли из GRANT/REVOKE, 2 маркер готовности, 2 жнец остатков, 2 пароль, 5 образ по версии дампа, 2 шаблон образа, 7 тревога владельцу)"; exit 0; }
+    (( ok )) && { echo "SELFTEST: зелёный (55 путей: 6 метакоманды, 5 выбор контейнера, 4 дампов нет вовсе, 2 замок ролей, 1 роли владельцев, 7 роли из GRANT/REVOKE, 2 маркер готовности, 2 жнец остатков, 2 пароль, 5 образ по версии дампа, 2 шаблон образа, 7 тревога владельцу, 10 образ и запуск источника, вердикт без отправки)"; exit 0; }
     echo "SELFTEST: КРАСНЫЙ"; exit 1
 fi
 
@@ -493,9 +640,26 @@ DUMP="${1:-$(find "$BACKUP_DIR" -name 'db-*.dump' -type f -printf '%T@ %p\n' 2>/
 # отказывала на первом шаге с 21.09).
 SVOJ_KONT=0
 if нужен_свой_контейнер "$CONT"; then
-    OBRAZ=$(image_for_dump "$DUMP" "${PROBE_DB_IMAGE:-postgis/postgis:16-3.4}" "$(image_template)")
+    # Образ и запуск: явная подмена шаблоном — первой; иначе как у контейнера, из
+    # которого снят дамп (замер 09.11.2026: чужой образ не знает расширений
+    # продукта, и целый дамп давал ложный отказ И-1); иначе прежний подбор по версии.
+    RUN_ENV=(); RUN_CMD=(); USER_DB="postgres"; OBRAZ=""
+    if [ -z "${PROBE_DB_IMAGE_TEMPLATE:-}" ]; then
+        ISTOCHNIK=$(dump_source_container "$DUMP")
+        PROFIL=""
+        [ -n "$ISTOCHNIK" ] && PROFIL=$(source_run_profile "$ISTOCHNIK")
+        while IFS=$'\t' read -r vid znach; do
+            case "$vid" in
+                I) OBRAZ="$znach" ;;
+                E) RUN_ENV+=("$znach")
+                   [ "${znach%%=*}" = POSTGRES_USER ] && USER_DB="${znach#*=}" ;;
+                C) RUN_CMD+=("$znach") ;;
+            esac
+        done <<< "$PROFIL"
+        [ -n "$OBRAZ" ] && echo "запуск как у контейнера $ISTOCHNIK: образ $OBRAZ, переменных ${#RUN_ENV[@]}"
+    fi
+    [ -n "$OBRAZ" ] || OBRAZ=$(image_for_dump "$DUMP" "${PROBE_DB_IMAGE:-postgis/postgis:16-3.4}" "$(image_template)")
     CONT="harness-restore-proba-$$"
-    USER_DB="postgres"
     echo "контейнера продукта нет — поднимаю свой ($OBRAZ, $CONT)"
     # Том ИМЕНОВАННЫЙ и с тем же префиксом: образ базы объявляет VOLUME, и
     # `docker rm` без `-v` оставлял анонимный том каждый прогон — за одну ночь
@@ -514,11 +678,16 @@ if нужен_свой_контейнер "$CONT"; then
     # обрыва на следующем прогоне, а при недельном расписании разбор почти
     # наверняка случается позже (ревью 28.09.2026, F-15).
     KONT_LOG="$LOG_DIR/проба-восстановления.контейнер.$(date +%F_%H%M).log"
-    trap 'docker logs "$CONT" > "$KONT_LOG" 2>&1 || true;
+    trap 'rm -f "${ENV_FILE:-}"; docker logs "$CONT" > "$KONT_LOG" 2>&1 || true;
           docker rm -fv "$CONT" >/dev/null 2>&1 || true;
           docker volume rm -f "$TOM" >/dev/null 2>&1 || true' INT TERM EXIT
+    # Переменные идут файлом 0600, а не -e: argv виден в `ps` всем.
+    ENV_FILE=$(mktemp); chmod 600 "$ENV_FILE"
+    { printf '%s\n' ${RUN_ENV[@]+"${RUN_ENV[@]}"}; printf 'POSTGRES_PASSWORD=%s\n' "$(пароль_пробы)"; } > "$ENV_FILE"
     ZAPUSK=$(docker run -d --name "$CONT" -v "$TOM:/var/lib/postgresql/data" \
-            -e POSTGRES_PASSWORD="$(пароль_пробы)" "$OBRAZ" 2>&1) || {
+            --env-file "$ENV_FILE" "$OBRAZ" ${RUN_CMD[@]+"${RUN_CMD[@]}"} 2>&1); RC_RUN=$?
+    rm -f "$ENV_FILE"
+    [ "$RC_RUN" = 0 ] || {
         # Причина отказа НУЖНА: без неё «контейнер не поднялся» ничем не
         # отличается от «образа нет» и «места нет».
         echo "ОТКАЗ: свой контейнер для пробы не поднялся (образ $OBRAZ): $ZAPUSK"

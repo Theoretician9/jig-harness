@@ -453,13 +453,19 @@ for name in load(sys.argv[2]).get("процессы") or {}:
 PYEOF
 )
 OFF_N=0
-switched_off() {  # $1 = имя метки; rc 0 — процесс погашен выключателем
-    local name="$1" id="$1" rc
+# Метка → id процесса; rc 1 — метка без задания (выключатель и журнал запусков её не знают).
+job_id_of() {  # $1 = имя метки; печатает id
+    local name="$1"
     if [ -z "${JOB_IDS[$name]:-}" ]; then
-        if [ -n "${JOB_IDS[${name%%.*}]:-}" ]; then id="${name%%.*}"
+        if [ -n "${JOB_IDS[${name%%.*}]:-}" ]; then name="${name%%.*}"
         elif [ -n "${NOJOB_NAMES[$name]:-}" ]; then return 1
         fi
     fi
+    printf '%s' "$name"
+}
+switched_off() {  # $1 = имя метки; rc 0 — процесс погашен выключателем
+    local name="$1" id rc
+    id=$(job_id_of "$name") || return 1
     if [ ! -f "$RUN_BG" ]; then
         say "судьи выключателя нет ($RUN_BG): $name считаю включённым"; return 1
     fi
@@ -469,6 +475,52 @@ switched_off() {  # $1 = имя метки; rc 0 — процесс погаше
         1) return 0 ;;
         *) say "судья выключателя вернул $rc по $id: $name считаю включённым"; return 1 ;;
     esac
+}
+
+# Метку демон ставит и при запуске, который затем падает трейсбеком: свежая метка
+# не доказывает здоровья. Судья здесь один — последний process.end id в журнале
+# запусков обёртки: rc вне законных кодов — демон падающий. Законные коды — данные
+# библиотеки процессов (общие + поле записи «законные_коды_выхода»): вердикт или
+# пауза не есть падение. Хвост журнала читаем, а не весь: он растёт.
+declare -A LAST_RC=()
+RUNS_LOG="$LOG_DIR/process-runs.jsonl"
+LIB_DIR="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../../scripts/lib"
+if [ -f "$RUNS_LOG" ]; then
+    # В переменную, не в подстановку процесса: сбой судьи под set -e должен быть громким.
+    RUNS_TABLE=$(python3 - "$RUNS_LOG" "$LIB_DIR" <<'PYEOF'
+import json, sys
+sys.path.insert(0, sys.argv[2])
+import process_library
+registry = process_library.registry()
+common = set(registry.get("общие_законные_коды_выхода") or [])
+legal = {rec["id"]: set(rec.get("законные_коды_выхода") or []) for rec in registry.get("процессы") or []}
+with open(sys.argv[1], "rb") as fh:
+    fh.seek(0, 2)
+    fh.seek(max(0, fh.tell() - 4000000))
+    lines = fh.read().decode("utf-8", "replace").splitlines()
+last = {}
+for line in lines:
+    if '"process.end"' not in line:
+        continue
+    try:
+        data = json.loads(line)["data"]
+        last[data["id"]] = int(data["rc"])
+    except (ValueError, KeyError, TypeError):
+        continue
+for ident, rc in last.items():
+    print(ident, 0 if rc in common or rc in legal.get(ident, ()) else rc)
+PYEOF
+)
+    while read -r rid rrc; do
+        [ -n "$rid" ] && LAST_RC[$rid]="$rrc"
+    done <<< "$RUNS_TABLE"
+fi
+failing_rc() {  # $1 = имя метки; печатает rc последнего запуска, если он ненулевой
+    local id rc
+    id=$(job_id_of "$1") || return 1
+    rc="${LAST_RC[$id]:-0}"
+    [ "$rc" != 0 ] || return 1
+    printf '%s' "$rc"
 }
 
 # Таблица: "имя:период-в-минутах …". Порог тревоги = период × множитель метки.
@@ -499,6 +551,11 @@ for entry in $HEARTBEAT_PERIODS; do
 • $name — МЁРТВ: метка ${age_min} мин при периоде ${period_min} (порог ×${mult})"
         DEAD_N=$((DEAD_N + 1))
         DEAD_NAMES+=("$name"); DEAD_LINES+=("$name — МЁРТВ: метка ${age_min} мин при периоде ${period_min} (порог ×${mult})")
+    elif bad_rc=$(failing_rc "$name"); then
+        DEAD="${DEAD}
+• $name — ПАДАЕТ: последний запуск вышел с кодом ${bad_rc} (метка свежая, но это не здоровье)"
+        DEAD_N=$((DEAD_N + 1))
+        DEAD_NAMES+=("$name"); DEAD_LINES+=("$name — ПАДАЕТ: последний запуск вышел с кодом ${bad_rc}")
     else
         ALIVE_N=$((ALIVE_N + 1))
         ALIVE_NAMES+=("$name")
