@@ -46,6 +46,31 @@ export LOG_DIR="$STAND/log" HEARTBEAT_DIR="$STAND/heartbeat"
 export TG_SEND="$STAND/bin/tg_send.sh" TG_VYHOD="$STAND/сказано.txt"
 : > "$TG_VYHOD"
 
+# Модель обёртка зовёт через носитель claude-run.sh --класс демон
+# (hr.standards-and-policy §4.4). Носитель настоящий; его сборщик и писатель
+# сигналов — подставные двери: проба не собирает живую личность и не шлёт
+# владельцу сигнал об отсутствии эталона. SBORKA_KOD≠0 — сборка не удалась.
+cat > "$STAND/bin/self-prompt.py" <<'SBORKA'
+import os, sys
+a = sys.argv[1:]
+with open(os.environ["SBORKA_SLED"], "a", encoding="utf-8") as fh:
+    fh.write(a[a.index("--класс") + 1] + "\n")
+if os.environ.get("SBORKA_KOD", "0") != "0":
+    sys.exit(int(os.environ["SBORKA_KOD"]))
+out = a[a.index("--в") + 1]
+os.makedirs(os.path.dirname(out), exist_ok=True)
+with open(out, "w", encoding="utf-8") as fh:
+    fh.write("Метка сборки: проба-демон-a1b2c3\nличность\n")
+SBORKA
+cat > "$STAND/bin/alert-task.py" <<'SIGNAL'
+import os, sys
+with open(os.environ["SIGNALY"], "a", encoding="utf-8") as fh:
+    fh.write(" ".join(sys.argv[1:]) + "\n")
+SIGNAL
+export SELF_PROMPT_PY="$STAND/bin/self-prompt.py" HARNESS_ALERT_TASK="$STAND/bin/alert-task.py"
+export SBORKA_SLED="$STAND/сборка.txt" SIGNALY="$STAND/сигналы.txt"
+: > "$SBORKA_SLED"
+
 echo "── БОЛЬНОЙ СЛУЧАЙ: недельный лимит ──"
 printf "You've hit your weekly limit · resets Sep 16, 6pm (Asia/Qostanay)\n" > "$STAND/лимит.txt"
 export CLAUDE_SCENARIJ="$STAND/лимит.txt" CLAUDE_KOD=1
@@ -195,6 +220,46 @@ bash "$OBERTKA" без-паузы -p "задание" >/dev/null 2>&1; KOD=$?
 case_check "пауза снята — модель зовётся снова" 1 "$(grep -c . "$STAND_ZOV")"
 case_check "пауза снята — лимит снова доходит до владельца" 1 "$(grep -c . "$TG_VYHOD")"
 case_check "пауза снята — код лимита прежний" 77 "$KOD"
+
+echo "── носитель: обёртка зовёт claude-run.sh --класс демон ──"
+cat > "$STAND/bin/claude" <<'CLAUDE3'
+#!/usr/bin/env bash
+printf 'зван\n' >> "$STAND_ZOV"
+printf '%s\n' "$@" > "$SLED_ARG"
+cat "$CLAUDE_SCENARIJ"
+exit "${CLAUDE_KOD:-0}"
+CLAUDE3
+chmod +x "$STAND/bin/claude"
+export SLED_ARG="$STAND/аргументы.txt"
+export CLAUDE_SCENARIJ="$STAND/ответ.txt" CLAUDE_KOD=0
+rm -f "$LOG_DIR/лимит-демонов.состояние" "$LOG_DIR/отказ-демонов.состояние" "$LOG_DIR/отказ-демонов.сказано"
+: > "$SBORKA_SLED"; : > "$SLED_ARG"
+bash "$OBERTKA" проба-носителя -p "задание" >/dev/null 2>&1; KOD=$?
+case_check "через носитель: код модели 0 отдан" 0 "$KOD"
+case_check "носитель собрал личность класса «демон»" "демон" "$(tr '\n' ' ' < "$SBORKA_SLED" | sed 's/ $//')"
+case_check "модель получила файл личности (--append-system-prompt-file)" "да" \
+     "$(grep -qx -- '--append-system-prompt-file' "$SLED_ARG" && echo да || echo нет)"
+
+# БОЛЬНОЙ СЛУЧАЙ Н-2 контракта hr.standards-and-policy: на коде 79 stdout
+# пуст, и судья лимита уходит в «поток оборван» — владелец получил бы
+# «Демоны не получают ответ модели» поверх сигнала носителя, а счёт
+# повторяющихся отказов испортился бы. Ветка 79 обязана стоять ДО судьи.
+echo "── БОЛЬНОЙ СЛУЧАЙ Н-2: носитель вернул 79 — личность не собрана ──"
+rm -f "$LOG_DIR/лимит-демонов.состояние" "$LOG_DIR/отказ-демонов.состояние" "$LOG_DIR/отказ-демонов.сказано"
+: > "$TG_VYHOD"; : > "$STAND_ZOV"; : > "$SBORKA_SLED"; : > "$LOG_DIR/claude-demon.log"
+# Дважды подряд: второй одинаковый отказ — ровно то, на что обёртка пишет владельцу.
+SBORKA_KOD=1 bash "$OBERTKA" без-личности -p "задание" >/dev/null 2>&1; KOD1=$?
+SBORKA_KOD=1 bash "$OBERTKA" без-личности -p "задание" >/dev/null 2>&1; KOD=$?
+case_check "79: сборка спрошена оба раза" 2 "$(grep -c . "$SBORKA_SLED")"
+case_check "79: код отдан как есть, не 77/78/1 (оба вызова)" "79 79" "$KOD1 $KOD"
+case_check "79: модель не звана" 0 "$(grep -c . "$STAND_ZOV")"
+case_check "79: владельцу от обёртки ни слова (сигналит носитель)" 0 "$(grep -c . "$TG_VYHOD")"
+case_check "79: в журнале обёртки «личность не собрана»" "да" \
+     "$(grep -q 'личность не собрана' "$LOG_DIR/claude-demon.log" && echo да || echo нет)"
+case_check "79: судья лимита не звался (нет «поток CLI оборван»)" "нет" \
+     "$(grep -q 'поток CLI оборван' "$LOG_DIR/claude-demon.log" && echo да || echo нет)"
+case_check "79: счёт повторяющихся отказов не тронут" "нет" \
+     "$([ -e "$LOG_DIR/отказ-демонов.состояние" ] && echo да || echo нет)"
 
 printf '\nитого путей %s, неудач %s\n' "$CASES_PATHS" "$CASES_FAILED"
 [ "$CASES_FAILED" -eq 0 ]

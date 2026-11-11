@@ -110,6 +110,14 @@ journals:
     time_field: ts
     time_kind: tz
     event_from: "field:event"
+  self-set:
+    file: self-set.jsonl
+    writers: [scripts/self-set.py]
+    time_field: ts
+    time_kind: tz
+    event_from: "field:event"
+    outcome_field: состояние
+    outcome_map: {нет: refused}
   db-drops:
     file: db-drops.jsonl
     writers: [scripts/drop-database.sh]

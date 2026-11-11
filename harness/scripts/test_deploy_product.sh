@@ -24,7 +24,7 @@ itog() {  # $1=ждём $2=вышло $3=имя
 }
 has() { printf '%s' "$1" | grep -qF -- "$2" && echo да || echo нет; }
 
-STAND=$(mktemp -d)
+STAND=$(mktemp -d -t proba-deploy-product-XXXXXX)
 trap 'rm -rf "$STAND"' EXIT
 
 HARNESS="$STAND/harnes"

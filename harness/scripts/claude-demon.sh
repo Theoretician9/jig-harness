@@ -116,7 +116,7 @@ mkdir -p "$POTOK_KAT"
 
 # Свой id сессии на каждый вызов и строка о нём ДО вызова: разрешитель токенов
 # по ней узнаёт, чей это вызов модели (транскрипт головной сессии называется id).
-SESSION_ID="$(uuidgen)"
+SESSION_ID="$(cat /proc/sys/kernel/random/uuid)"
 DOVODY=(--session-id "$SESSION_ID" "${DOVODY[@]}")
 jq -nc --arg d "$DEMON" --arg s "$SESSION_ID" --arg w "$(date -Iseconds)" \
     '{event: "demon.start", "демон": $d, session_id: $s, "когда": $w}' >>"$RASHOD"
@@ -128,8 +128,18 @@ TEKST_FAJL="$(mktemp)"
 trap 'rm -f "$VYVOD_FAJL" "$OSHIBKI_FAJL" "$SUD_FAJL" "$TEKST_FAJL"' EXIT
 # tee: сырой поток ложится в файл демона ПО ХОДУ, байт в байт; stderr отдельно,
 # чтобы его строки не попали в поток. Код берётся у первого звена конвейера.
-claude "${DOVODY[@]}" 2>"$OSHIBKI_FAJL" | tee -a "$POTOK_KAT/$DEMON.jsonl" >"$VYVOD_FAJL"
+# Модель зовётся только через носитель: он собирает личность класса «демон» и
+# сам шлёт сигнал, если не собрал.
+bash "$PROJECT_DIR/scripts/claude-run.sh" --класс демон "${DOVODY[@]}" 2>"$OSHIBKI_FAJL" | tee -a "$POTOK_KAT/$DEMON.jsonl" >"$VYVOD_FAJL"
 KOD=${PIPESTATUS[0]}
+
+# 79: личность не собрана, модель не запускалась. Это не отказ API и не лимит:
+# судью и счёт повторяющихся отказов не трогаем, владельцу не пишем (сигнал
+# уже дал носитель), код отдаём вызывающему как есть.
+if [ "$KOD" -eq 79 ]; then
+    say "$DEMON: личность не собрана (носитель вернул 79) — модель не звана"
+    exit 79
+fi
 
 # Сырой поток растёт на каждый вызов (tee -a): сверх потолка из данных остаётся
 # хвост по границе строки — последний вызов цел, начало файла (может быть

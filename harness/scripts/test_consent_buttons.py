@@ -1348,10 +1348,14 @@ def probe_kind_tables(yard: Yard) -> None:
     except (ValueError, IndexError):
         found = {"виды": done.stderr.strip()[-160:], "таблицы": {}}
     kinds = found.get("виды")
-    check("в10а) owner_word.ВИДЫ_СОГЛАСИЯ — семь видов (спека §5: + «снос-базы», «перепись»)",
-          ["удаление", "пуш", "выкат", "публикация", "спека", "снос-базы", "перепись"], kinds)
-    # Отзыв текстом — только у необратимых (спека §3); «спека» обратима (m3).
-    expected = {"ПРЕДМЕТ_ОТЗЫВА": sorted(set(kinds) - {"спека"})} if isinstance(kinds, list) else {}
+    check("в10а) owner_word.ВИДЫ_СОГЛАСИЯ — восемь видов (спека §5: + «снос-базы», «перепись»;"
+          " hr.standards-and-policy: + «слой-человека»)",
+          ["удаление", "пуш", "выкат", "публикация", "спека", "снос-базы", "перепись",
+           "слой-человека"], kinds)
+    # Отзыв текстом — только у необратимых (спека §3). «спека» обратима (m3); «слой-человека»
+    # тоже: его «Да» читает self-set.py через согласие_кнопкой, правка слоя откатывается.
+    reversible = {"спека", "слой-человека"}
+    expected = {"ПРЕДМЕТ_ОТЗЫВА": sorted(set(kinds) - reversible)} if isinstance(kinds, list) else {}
     for name in ("owner_word.py", "consent_buttons.py", "ask-consent.py"):
         tables = found["таблицы"].get(name) or {}
         check(f"в10б) {name}: таблица по виду есть, ключи == ВИДЫ_СОГЛАСИЯ", True,

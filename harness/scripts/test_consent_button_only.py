@@ -1042,9 +1042,11 @@ def name_of(node: ast.AST) -> str | None:
 
 def probe_one_judge() -> None:
     print("— один судья (AST, spec §8 m9)")
-    kinds = set(consent_kinds()) - {"спека"}
-    verdict("AST) таблица вид → файл = owner_word.ВИДЫ_СОГЛАСИЯ без «спеки»", bool(kinds) and kinds == set(JUDGE_FILES),
-            f"ВИДЫ_СОГЛАСИЯ−спека = {sorted(kinds)}, таблица = {sorted(JUDGE_FILES)}")
+    # Обратимые виды необратимой двери не имеют: «спека» и «слой-человека» судит
+    # согласие_кнопкой их потребителя (слой человека — self-set.py), а не таблица ниже.
+    kinds = set(consent_kinds()) - {"спека", "слой-человека"}
+    verdict("AST) таблица вид → файл = owner_word.ВИДЫ_СОГЛАСИЯ без обратимых", bool(kinds) and kinds == set(JUDGE_FILES),
+            f"ВИДЫ_СОГЛАСИЯ−обратимые = {sorted(kinds)}, таблица = {sorted(JUDGE_FILES)}")
     for path in sorted({p for files in JUDGE_FILES.values() for p in files}):
         tree = ast.parse(path.read_text(encoding="utf-8"))
         names = set()

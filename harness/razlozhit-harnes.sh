@@ -31,7 +31,14 @@ not_laid() {  # $1=путь относительно пакета → 0, есл�
 }
 
 if [[ "${1:-}" == "--selftest" ]]; then
-  T=$(mktemp -d)
+  T=$(mktemp -d -t proba-razlozhit-XXXXXX)
+  # Стенд весит гигабайты: обрыв по timeout (SIGTERM) или любой ранний exit не смеет его
+  # оставлять. TERM/INT переводим в exit, иначе bash умрёт, не дойдя до EXIT-ловушки.
+  # timeout шлёт TERM дважды (ребёнку и группе): второй сигнал в разгар уборки прервал бы
+  # её на полпути, поэтому уборка сначала глушит TERM/INT.
+  # chmod: стенд содержит каталоги без права записи, rm без него отказывает.
+  trap 'trap "" TERM INT; chmod -R u+w "$T" ${OUTSIDE:+"$OUTSIDE"} 2>/dev/null || true; rm -rf "$T" ${OUTSIDE:+"$OUTSIDE"}' EXIT
+  trap 'exit 143' TERM INT
   # временный конфиг — больной случай: раскладка не должна требовать sudo и сети
   cat > "$T/install.conf" <<EOF
 PROJECT_DIR="$T/proj"
@@ -111,7 +118,11 @@ extra = json.loads(json.dumps(recs[0])); extra["id"] = "c-extra"
 lib["процессы"].append(extra)
 open(path, "w", encoding="utf-8").write(json.dumps(lib, indent=2, ensure_ascii=False) + "\n")
 PY
+  # Производный документ от прежней версии: после голой раскладки он обязан сойтись.
+  mkdir -p "$T/proj/docs"; echo "# устаревший документ прежней версии" > "$T/proj/docs/живая-проверка-механизмов.md"
   run_stand "$T/install.conf" "$T/harness.conf" >/dev/null || true
+  python3 -B "$T/proj/scripts/build-live-check-list.py" --проверить >/dev/null 2>&1 \
+    || { echo "SELFTEST: после раскладки производный документ не сошёлся с --проверить"; ok_flag=0; }
   lib_verdict=$(python3 -B - "$LIB" "$HERE/config/process-library.json" <<'PY'
 import json, sys
 new = json.load(open(sys.argv[1], encoding="utf-8"))
@@ -219,8 +230,8 @@ PY
     || { echo "SELFTEST: затёрт живой CLAUDE.md проекта"; ok_flag=0; }
   [[ -f "$T/proj/harness/CLAUDE.md" ]] \
     || { echo "SELFTEST: эталон harness/CLAUDE.md не доставлен"; ok_flag=0; }
-  # Продукт со своим CLAUDE.md и своим settings.json: после двух раскладок строка
-  # импорта личности одна, свои ключи и хук продукта на месте, хуки харнеса есть.
+  # Продукт со своим CLAUDE.md и своим settings.json: после двух раскладок импортов
+  # личности нет (её даёт носитель), @STATE.md один, свои ключи и хук продукта на месте, хуки харнеса есть.
   # Больной вид: импорта нет (личность не грузится) или settings продукта заменён.
   printf 'правила продукта без перевода строки' > "$T/proj/CLAUDE.md"
   cat > "$T/proj/.claude/settings.json" <<'JSON'
@@ -237,8 +248,10 @@ bad = []
 text = open(f"{proj}/CLAUDE.md", encoding="utf-8").read()
 if not text.startswith("правила продукта без перевода строки\n"):
     bad.append("текст продукта в CLAUDE.md тронут")
-if text.count("@harness/self/core.json") != 1:
-    bad.append(f"импорт личности встречается {text.count('@harness/self/core.json')} раз (ждали 1)")
+if "@harness/self/" in text:
+    bad.append("импорт личности в CLAUDE.md есть (личность даёт носитель, ждали 0)")
+if text.count("@STATE.md") != 1:
+    bad.append(f"импорт @STATE.md встречается {text.count('@STATE.md')} раз (ждали 1)")
 st = json.load(open(f"{proj}/.claude/settings.json", encoding="utf-8"))
 if st.get("myKey") != {"a": 1} or st["permissions"].get("allow") != ["Bash(ls)"]:
     bad.append("свои ключи продукта потеряны")
@@ -257,7 +270,7 @@ print("; ".join(bad))
 PY
 )
   if [[ -z "$merge_verdict" ]]; then
-    echo "  ок    CLAUDE.md и settings.json продукта: импорт один, свои ключи и хуки на месте, хуки харнеса добавлены"
+    echo "  ок    CLAUDE.md и settings.json продукта: импортов личности нет, свои ключи и хуки на месте, хуки харнеса добавлены"
   else
     echo "  ПЛОХО слияние с продуктом: $merge_verdict"; ok_flag=0
   fi
@@ -684,7 +697,7 @@ PY
   #    снято правило стенда — самотест пишет архив вне стенда (на машине — в
   #    живой каталог копий). Живой каталог НЕ подставляется: признак тот же.
   C=$(new_case zh); P="$C/proj"; bad=()
-  OUTSIDE=$(mktemp -d)
+  OUTSIDE=$(mktemp -d -t proba-razlozhit-outside-XXXXXX)
   make_stand_conf "$C/harness.conf" "$OUTSIDE"
   foreign_deploy "$P"
   project_snapshot "$P" > "$C/до"
@@ -2973,6 +2986,10 @@ polozhit_fajl harness-top "$HERE"/CLAUDE.md "$PROJECT_DIR/harness/CLAUDE.md"
 # core.json — общее ядро копий, затирается всегда. instance.yaml — роль ЭТОЙ
 # копии, живые данные: кладётся шаблоном пакета только когда у цели его нет.
 polozhit_fajl self "$HERE/self/core.json" "$PROJECT_DIR/harness/self/core.json"
+# Слой 1 личности для носителя (scripts/claude-run.sh): стандарты и роли. Это
+# эталон пакета, как core.json: затирается всегда, правки проекта — через пакет.
+polozhit_fajl self "$HERE/self/standards.md" "$PROJECT_DIR/harness/self/standards.md"
+lay_tree self-roles "$HERE/self/roles" "$PROJECT_DIR/harness/self/roles"
 # Старый образец пакета нёс личность самого харнеса. На чужом проекте это ложь:
 # файл откладывается рядом, кладётся пустой шаблон. Любая иная заполненная
 # личность — своя, её, например «Магазин цветов», не трогаем.
@@ -3005,8 +3022,10 @@ fi
 UNIFIED_SRC=""
 # Две раскладки: в пакете главы лежат рядом, в публичной сборке — в служебном
 # подкаталоге (владелец 12.09.2026: корень не должен начинаться с исходников).
-for cand in "$HERE/../UNIFIED" "$HERE/../../UNIFIED" "$HERE/UNIFIED" \
-            "$HERE/../sluzhebnoe/UNIFIED" "$HERE/../../sluzhebnoe/UNIFIED"; do
+# Порядок — от ближнего к дальнему: соседний каталог на машине бывает старым,
+# и свой не должен уступать ему.
+for cand in "$HERE/UNIFIED" "$HERE/../UNIFIED" "$HERE/../sluzhebnoe/UNIFIED" \
+            "$HERE/../../UNIFIED" "$HERE/../../sluzhebnoe/UNIFIED"; do
   [[ -d "$cand" ]] && UNIFIED_SRC="$cand" && break
 done
 if [[ -n "$UNIFIED_SRC" ]]; then
@@ -3106,6 +3125,12 @@ else
   # считаются от каталога того файла, и импорты из harness/ ломались бы.
   # У раскладки «с нуля» файл равен пакетному, дописывать нечего — идемпотентно.
   mapfile -t IMPORTS < <(grep -E '^@' "$HERE"/CLAUDE.md | sed 's/[[:space:]]*$//')
+  # Прежние раскладки дописывали @harness/self/*: личность теперь приходит
+  # системным промптом носителя, и импорт даёт её второй раз (~3 200 токенов).
+  if grep -q '^@harness/self/' "$PROJECT_DIR/CLAUDE.md"; then
+    sed -i '/^@harness\/self\//d' "$PROJECT_DIR/CLAUDE.md"
+    echo "CLAUDE.md проекта: сняты прежние импорты личности @harness/self/*"
+  fi
   MISSING=()
   for line in "${IMPORTS[@]}"; do
     grep -qxF -- "$line" "$PROJECT_DIR/CLAUDE.md" || MISSING+=("$line")
@@ -3211,6 +3236,12 @@ if ! python3 "$PROJECT_DIR/harness/BUILD-SKILLS.py"; then
   exit 1
 fi
 
+# Производные документы (устройство, список живых проверок) собираются из
+# реестра, и голая раскладка без пересборки оставляет их от прежней версии:
+# гейт реестра краснеет побайтно. Зовём ту же пересборку, что и обновление.
+python3 "$PROJECT_DIR/scripts/update.py" --пересобрать-производные \
+  || echo "ВНИМАНИЕ: производные документы не пересобраны — python3 $PROJECT_DIR/scripts/update.py --пересобрать-производные"
+
 # Служба, чей код раскладка только что обновила, работает на старом: гейт
 # внешних вызовов краснеет, и с ним — каждый коммит. Кого перезапускать,
 # решает тот же гейт (второго счёта свежести не заводим); право на рестарт —
@@ -3231,6 +3262,22 @@ done < <(python3 "$PROJECT_DIR/scripts/check-external-callers.py" 2>/dev/null \
 if [[ "${HARNESS_SELFTEST:-0}" != 1 ]] && ! python3 "$PROJECT_DIR/scripts/bot-commands.py" --проверить >/dev/null 2>&1; then
   python3 "$PROJECT_DIR/scripts/bot-commands.py" --поставить \
     || echo "ВНИМАНИЕ: меню бота не поставлено — python3 $PROJECT_DIR/scripts/bot-commands.py --поставить"
+fi
+
+# Эталон личности (слой 1) печатает root по только что разложенной выкладке пакета:
+# манифест слоя 1 лежит только в пакете, в проект его не кладут.
+# Правило sudo спрашивается отдельно (sudo -l), а не угадывается по выводу печати: в тот же
+# поток sudo пишет и свои строки («unable to resolve host …»), и отказ self-seal за ними
+# выглядел бы отсутствием правила. Нет правила (установка старее него) — предупреждение,
+# раскладка цела; отказ самой печати — отказ раскладки.
+# Самотест раскладывает во временный каталог и живой эталон печатать не должен.
+if [[ "${HARNESS_SELFTEST:-0}" != 1 ]]; then
+  if ! sudo -n -l /usr/local/lib/harness/self-seal >/dev/null 2>&1; then
+    echo "ВНИМАНИЕ: эталон личности не напечатан — нет правила sudo на self-seal; добавьте правило и повторите раскладку"
+  elif ! sudo -n /usr/local/lib/harness/self-seal "$(cd "$HERE/.." && pwd)" >/dev/null; then
+    echo "ОТКАЗ: печать эталона личности (self-seal) не прошла — причина строкой выше" >&2
+    exit 1
+  fi
 fi
 
 echo "раскладка завершена: $PROJECT_DIR"

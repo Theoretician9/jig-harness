@@ -159,7 +159,10 @@ def ask_guard(procs: list, force: bool, state: str | None = None) -> tuple[int, 
                    AGENT_UNIT="harness-agent-probe", AGENT_USER=getpass.getuser(),
                    FAKE_TMUX_PID=str(UNIT_TMUX), STUB_LOG_DIR=str(yard / "stublog"),
                    HARNESS_LOG_DIR=str(yard / "log"), LOG_DIR=str(yard / "log"),
-                   HARNESS_CONF=str(stand_conf(yard)))
+                   HARNESS_CONF=str(stand_conf(yard)),
+                   # Без ключа стенда ворота судят согласие по /etc/harness машины:
+                   # там нет стоящего согласия — и проба красна от дерева продукта.
+                   HARNESS_OWNER_WORD_STEND="1")
         argv = [sys.executable, str(GUARD)] + (["--силой"] if force else [])
         done = subprocess.run(argv, capture_output=True, text=True, env=env,
                               check=False, timeout=120)

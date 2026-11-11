@@ -64,7 +64,7 @@ BEFORE="${W2_BEFORE_DIR:-$ROOT/.tasks/hr.watchers-report-must-create-model-task/
 LIVE_MAP="$ROOT/dev-map.yaml"
 LIVE_SHA=$(sha1sum "$LIVE_MAP" 2>/dev/null | cut -d' ' -f1)
 
-T=$(mktemp -d)
+T=$(mktemp -d -t proba-watchers-wave2-XXXXXX)
 trap 'rm -rf "$T"' EXIT
 
 # ── судья: разбор журналов двери и писателя ────────────────────────────────

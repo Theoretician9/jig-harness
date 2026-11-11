@@ -29,6 +29,7 @@
                                        [--паспорт FILE] [--конфиг FILE] [--данные FILE]
   python3 scripts/build-public.py --selftest
 """
+import hashlib
 import importlib.util
 import json
 import os
@@ -327,6 +328,20 @@ def цитаты_владельца(паспорт: dict) -> set[str]:
     return {ц.strip() for ц in _ЦИТАТА.findall(текст)}
 
 
+def записать_манифест_слоя1(дерево: Path) -> None:
+    """harness/self/MANIFEST.sha256 по СОБРАННОМУ дереву: обезличивание меняет
+    файлы ролей, и манифест по дереву пакета не сошёлся бы со сборкой, которую
+    получает пользователь. instance.yaml (слой 2) и сам манифест не входят."""
+    корень = дерево / "harness" / "self"
+    if not корень.is_dir():
+        return
+    пути = (ф.relative_to(корень).as_posix() for ф in корень.rglob("*") if ф.is_file())
+    файлы = sorted((п for п in пути if п not in ("MANIFEST.sha256", "instance.yaml")),
+                   key=lambda п: п.encode())
+    строки = [f"{hashlib.sha256((корень / п).read_bytes()).hexdigest()}  {п}\n" for п in файлы]
+    (корень / "MANIFEST.sha256").write_text("".join(строки), encoding="utf-8")
+
+
 def собрать(пакет: Path, куда: str, данные: dict, паспорт: dict, коммит: str | None = None) -> dict:
     """Собрать дерево. Путь назначения — СТРОКОЙ: Path("") молча становится «.»."""
     цель = опознать_цель(куда)
@@ -407,6 +422,8 @@ def собрать(пакет: Path, куда: str, данные: dict, пасп
         пропало = [ф for ф in (данные.get("оставить") or []) if not (дерево / ф).exists()]
         if пропало:
             raise Отказ("в сборке нет обязательного: " + ", ".join(пропало))
+
+        записать_манифест_слоя1(дерево)
 
         файлов = sum(1 for п in дерево.rglob("*") if п.is_file())
         # Метка несёт ХЭШ ПАКЕТА, а не только своё присутствие (время — в mtime

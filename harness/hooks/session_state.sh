@@ -30,6 +30,61 @@ if [ "$hook_source" = "compact" ]; then
   exit 0
 fi
 
+# --- Сверка носителя личности смены (спека §6.2, контракт Н-5) ---
+# Смена, поднятая голым claude, мимо komanda_agenta или со старым файлом
+# личности, работает без стандартов — и никто об этом не знает. Первой строкой
+# вывода, раньше всего остального: оно не должно утонуть в отчёте.
+# $PPID хука — промежуточная «sh -c», не claude (замер 10.11.2026), поэтому вверх
+# по цепочке ищется БЛИЖАЙШИЙ процесс с argv0 claude. Подстрока в доводах не
+# годится: у claude-run.sh в доводах тоже «claude». Хук стартует и у каждого
+# claude -p (демоны, приборы) — им личность не смены, и они уходят отсюда СРАЗУ,
+# без вызова сборщика: сборщик стоит секунды на каждый такой запуск.
+nearest_claude_argv() {  # заполняет SHIFT_ARGV; 1 — claude в цепочке нет
+    local root="${SESSION_PROC_ROOT:-/proc}" cur="${SESSION_PROC_START:-$PPID}" depth=0 k v next
+    SHIFT_ARGV=()
+    while [ "${cur:-0}" -gt 1 ] 2>/dev/null && [ "$depth" -lt 40 ]; do
+        [ -r "$root/$cur/cmdline" ] || return 1
+        mapfile -d '' -t SHIFT_ARGV < "$root/$cur/cmdline"
+        [ "${#SHIFT_ARGV[@]}" -gt 0 ] && [ "${SHIFT_ARGV[0]##*/}" = claude ] && return 0
+        next=""
+        while read -r k v; do [ "$k" = "PPid:" ] && { next="$v"; break; }; done < "$root/$cur/status" 2>/dev/null
+        cur="$next"; depth=$((depth + 1))
+    done
+    SHIFT_ARGV=()
+    return 1
+}
+
+# Печатает причину, если смена без личности; пусто — порядок. Код 2 — claude -p:
+# не смена, отметку не трогаем ни в какую сторону.
+shift_without_self_reason() {
+    local a prev="" file="" want got asm tmp
+    nearest_claude_argv || { echo "родитель не claude"; return 0; }
+    for a in "${SHIFT_ARGV[@]:1}"; do
+        case "$a" in -p|--print) return 2 ;; esac
+        [ "$prev" = --append-system-prompt-file ] && file="$a"
+        case "$a" in --append-system-prompt-file=*) file="${a#*=}" ;; esac
+        prev="$a"
+    done
+    [ -n "$file" ] || { echo "claude без --append-system-prompt-file (мимо komanda_agenta)"; return 0; }
+    [ -f "$file" ] || { echo "файла личности нет: $file"; return 0; }
+    [ -s "$file" ] || { echo "файл личности пуст: $file"; return 0; }
+    asm="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../self-prompt.py"
+    [ -f "$asm" ] || return 0   # сборщика нет — метку судить нечем
+    tmp=$(mktemp) || return 0
+    timeout 5 python3 "$asm" --класс оркестратор --в "$tmp" >/dev/null 2>&1
+    want=$(head -1 "$tmp" 2>/dev/null); rm -f "$tmp"
+    [ -n "$want" ] || { echo "сборщик не дал метку класса «оркестратор»"; return 0; }
+    got=$(head -1 "$file")
+    [ "$got" = "$want" ] || echo "метка файла «$got» не равна текущей сборке «$want»"
+    return 0
+}
+
+self_reason=$(shift_without_self_reason); self_rc=$?
+if [ -n "$self_reason" ]; then
+  echo "смена поднята без личности: $self_reason"
+  echo "  Поднять смену надо через komanda_agenta (scripts/lib/config.sh), иначе стандарты и роль не загружены."
+fi
+
 # Окружение старше конфига: общий загрузчик вместо голого source (улика
 # 12.09.2026 — проба с TMUX_SESSION в окружении сменила модель в РАБОЧЕЙ панели).
 # У него же живёт корень установки: зашитые «/var/log/harness» и «/etc/harness»
@@ -52,6 +107,23 @@ if [ -r "$conf_path" ]; then
   log_dir="${LOG_DIR:-$log_dir}"
 else
   echo "⚠ конфиг $conf_path недоступен — работаю со значениями по умолчанию"
+fi
+
+# Сигнал о смене без личности хук сам не шлёт: он идёт под claude, а
+# alert-task.py отказывает зовам из-под claude. Кладём отметку, сигнал по ней
+# шлёт сторож сессий на обходе. Атомарно (временный файл рядом + mv): сторож
+# читает отметку в любой момент. Порядок снимает прежнюю отметку; claude -p
+# (self_rc 2) — не смена, отметка не тронута.
+shift_mark_file="${SHIFT_SELF_MARK:-${log_dir:+$log_dir/shift-without-self.mark}}"
+if [ -n "$shift_mark_file" ] && [ "$self_rc" -ne 2 ]; then
+  if [ -n "$self_reason" ]; then
+    shift_mark_tmp=$(mktemp "$shift_mark_file.XXXXXX" 2>/dev/null) \
+      && printf '%s %s\n' "$(date +%s)" "$self_reason" > "$shift_mark_tmp" \
+      && chmod 644 "$shift_mark_tmp" \
+      && mv -f "$shift_mark_tmp" "$shift_mark_file" || rm -f "${shift_mark_tmp:-}"
+  else
+    rm -f "$shift_mark_file"
+  fi
 fi
 
 # Резка по СИМВОЛАМ, не байтам. `cut -c` считает байты и рвёт кириллицу
@@ -103,10 +175,34 @@ PY
   if [ -n "$first_task" ]; then
     echo "‼ ПЕРВАЯ ЗАДАЧА, ДО ВСЕГО ОСТАЛЬНОГО ($first_task):"
     echo "  спроси владельца в канале назначение копии (что за проект, какая цель)"
-    echo "  и путь к коду продукта; запиши ответ в harness/self/instance.yaml"
-    echo "  (копия, роль, цель, обратная_связь) и в PRODUCT_PATH (harness.conf)."
+    echo "  и путь к коду продукта; запиши ответ через python3 scripts/self-set.py <поле> <значение>"
+    echo "  (копия, роль, цель: владельцу придёт кнопка «Да»; instance.yaml руками не правится)"
+    echo "  и в PRODUCT_PATH (harness.conf)."
     echo "  Вопросов в терминале не задавай — только через канал владельца."
   fi
+fi
+
+# --- СВЕРКИ СЛОЁВ ПАМЯТИ (спека hr.standards-and-policy §5.3–§5.4) ---
+# Слой 2: правка instance.yaml мимо двери self-set.py видна по sha256 последнего «да»;
+# пустое обязательное поле — один вопрос в сутки. Слой 1: дерево против эталона;
+# эталона нет — молчим, об этом говорит сборщик личности. Сбой сверки не роняет старт.
+if [ -n "$project_dir" ]; then
+  timeout 15 python3 "$project_dir/scripts/self-set.py" --старт 2>/dev/null
+  python3 - "$project_dir/harness/self" "${SELF_ETALON_DIR:-$(konf_koren)/self}" <<'PY' 2>/dev/null
+import hashlib, sys
+from pathlib import Path
+tree, etalon = Path(sys.argv[1]), Path(sys.argv[2])
+# instance.yaml — слой 2, MANIFEST.sha256 печатает выпуск: в эталон не входят.
+SKIP = {"instance.yaml", "MANIFEST.sha256"}
+def digests(root):
+    return {p.relative_to(root).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()
+            for p in sorted(root.rglob("*")) if p.is_file() and p.relative_to(root).as_posix() not in SKIP}
+if etalon.is_dir() and tree.is_dir():
+    sealed, living = digests(etalon), digests(tree)
+    diverged = sorted(k for k in set(sealed) | set(living) if sealed.get(k) != living.get(k))
+    if diverged:
+        print("⚠ слой 1 разошёлся с эталоном: " + ", ".join(diverged))
+PY
 fi
 
 # --- ПАУЗА ВЛАДЕЛЬЦА: первой строкой, до всего остального ---

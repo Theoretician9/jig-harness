@@ -47,22 +47,24 @@ meta.json), чей транскрипт писался не позже LIVE_WIND
 Глубина вложенности: в входе хука её нет, есть только `agent_id` зовущего
 помощника. Глубину хранит `<каталог транскрипта>/<session_id>/subagents/
 agent-<agent_id>.meta.json`, поле spawnDepth (1 — помощник смены). Новый
-помощник на единицу глубже зовущего (смена — 0): глубже 2 — отказ, глубина 2
-тяжёлого типа — отказ с подсказкой harness-worker: цепочка из тяжёлых
-помощников съедает 71 тыс. токенов на каждом звене. Файла нет — глубина
+помощник на единицу глубже зовущего (смена — 0): глубже 2 — отказ. Файла нет — глубина
 неизвестна, правило молчит. Двери у глубины нет: это не число, а форма.
 
-Тяжёлый тип помощника (без типа, general-purpose, claude) грузит CLAUDE.md
-проекта со всеми @-файлами — 71 тыс. токенов на старт против 20 тыс. у
-harness-worker (.claude/agents/harness-worker.md, omitClaudeMd). Такой запуск
-получает ПРЕДУПРЕЖДЕНИЕ в additionalContext, не отказ: Explore, Plan и
-claude-code-guide легальны, а general-purpose бывает нужен. Каждое
-предупреждение — строка agent.heavy-type в том же журнале; потолок её не считает.
+Тип без собранной карточки (без типа, general-purpose, claude, Explore, Plan,
+claude-code-guide, типы плагинов) — ОТКАЗ: системный промпт встроенного типа не
+правится, личности в нём нет, а CLAUDE.md проекта он грузит целиком (71 тыс.
+токенов против 20 тыс. у карточки с omitClaudeMd). Собранные карточки — раздел
+«карточки» launch-policy.yaml (тип → класс), их тело собирает self-prompt.py
+--карточки. Последняя строка карточки «отпечаток: <метка>» сверяется с ТЕКУЩЕЙ
+сборкой класса: правка роли без пересборки — отказ «пересобери карточки». Не
+удалось собрать класс сверки — пропуск (fail-open, как у потолка). Отказ — строка
+agent.unbuilt-type исходом refused; потолок её не считает.
 """
 from __future__ import annotations
 
 import fcntl
 import functools
+import importlib.util
 import json
 import os
 import re
@@ -96,11 +98,12 @@ DOOR_REASON_MIN = 10
 REVIEW_MARK = re.compile(r"ревью|review", re.IGNORECASE)
 # Та же метка, что у launch_plan_guard.py: по ней план запуска знает задачу запуска.
 PART_LABEL = re.compile(r"Часть:\s*(?P<path>[^\s#]+)(?:#(?P<n>\d+))?")
-HEAVY_EVENT = "agent.heavy-type"
+UNBUILT_EVENT = "agent.unbuilt-type"
 UNKNOWN_CARD_EVENT = "agent.unknown-card"
 UNLABELED_EVENT = "agent.unlabeled"
-HEAVY_TYPES = ("", "general-purpose", "claude")
 LIGHT_TYPE = "harness-worker"
+SCOUT_TYPE = "harness-explorer"
+FINGERPRINT_PREFIX = "отпечаток: "
 NO_TASK = "-"
 NO_TASK_LEVEL = "без-задачи"
 MAX_DEPTH = 2
@@ -296,35 +299,80 @@ def note_resume(payload: dict) -> None:
         note(RESUME_EVENT, current_task() or NO_TASK, str(payload.get("session_id") or ""), {"вызов": call})
 
 
-def decide(payload: dict) -> tuple[int, str, str]:
-    """(код возврата, отказ, предупреждение). 0 — пропуск, 2 — отказ с причиной."""
+def card_advice(refusal: str) -> str:
+    return (f"Запуск помощника остановлен: {refusal}.\n"
+            f"Разведка и чтение — subagent_type «{SCOUT_TYPE}», работа — «{LIGHT_TYPE}»; "
+            "оба идут со своей собранной карточкой (старт 20 тыс. токенов).\n"
+            "Встроенные Explore, Plan, claude-code-guide, general-purpose и типы плагинов закрыты.")
+
+
+def decide(payload: dict) -> tuple[int, str]:
+    """(код возврата, отказ). 0 — пропуск, 2 — отказ с причиной."""
     if payload.get("tool_name") == "SendMessage":
         note_resume(payload)
-        return 0, "", ""
+        return 0, ""
     if (payload.get("tool_name") or "") not in TOOLS:
-        return 0, "", ""
+        return 0, ""
     if agent_skill_guard.решение(payload)[0]:
-        return 0, "", ""        # отказ скажет сосед; несостоявшийся запуск не считаем
+        return 0, ""            # отказ скажет сосед; несостоявшийся запуск не считаем
+    refusal = card_refusal(payload)
+    if refusal:
+        return 2, card_advice(refusal)
     lock = Path(events.log_dir()) / LOCK_NAME
     lock.parent.mkdir(parents=True, exist_ok=True)
     with lock.open("a") as fh:
         fcntl.flock(fh, fcntl.LOCK_EX)
-        code, text = judge(payload)
-    return code, text, (heavy_type_warning(payload) if code == 0 else "")
+        return judge(payload)
 
 
-def heavy_type_warning(payload: dict) -> str:
-    """Предупреждение о тяжёлом типе помощника со строкой в журнале, иначе пусто."""
+def self_prompt():
+    """Сборщик личности как модуль: метка класса считается тем же кодом, что и карточка."""
+    spec = importlib.util.spec_from_file_location("self_prompt", ROOT / "scripts" / "self-prompt.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def card_state(agent_type: str) -> tuple[bool, str]:
+    """(тип имеет собранную карточку, причина отказа по карточке или пусто).
+    Политику или сборку не прочесть — тип считается собранным и сверка молчит."""
+    try:
+        builder = self_prompt()
+        tree = Path(os.environ.get("SELF_TREE_DIR") or ROOT)
+        policy = builder.load_policy(Path(os.environ.get("LAUNCH_POLICY")
+                                          or tree / "harness" / "config" / "launch-policy.yaml"))
+        spec = (policy.get("карточки") or {}).get(agent_type)
+        if spec is None:
+            return False, ""
+        etalon = Path(os.environ.get("SELF_ETALON_DIR") or builder.DEFAULT_ETALON)
+        label = builder.build(spec["класс"], policy, etalon, tree)[0].partition("\n")[0]
+    except Exception:  # noqa: BLE001 - сверка не должна ронять запуск: без неё тип считается собранным
+        return True, ""
+    cards = Path(os.environ.get("SELF_CARDS_DIR") or tree / ".claude" / "agents")
+    try:
+        last = (cards / f"{agent_type}.md").read_text(encoding="utf-8").rstrip("\n").rpartition("\n")[2]
+    except FileNotFoundError:
+        return True, ""         # нет файла — оболочка типа не знает сама; пропажу карточки судит гейт
+    except (OSError, UnicodeDecodeError):
+        last = ""
+    if last == FINGERPRINT_PREFIX + label.removeprefix("Метка сборки: "):
+        return True, ""
+    return True, (f"карточка {agent_type} не равна текущей сборке класса «{spec['класс']}»: "
+                  f"пересобери карточки (python3 scripts/self-prompt.py --карточки --в {cards})")
+
+
+def card_refusal(payload: dict) -> str:
+    """Причина отказа по типу и карточке словами или пустая строка; отказ пишется в журнал."""
     agent_type = str((payload.get("tool_input") or {}).get("subagent_type") or "")
-    if agent_type not in HEAVY_TYPES:
-        return ""
-    events.emit(SRC, HEAVY_EVENT, "ok", journal="вызовы-агентов",
-                session=payload.get("session_id") or None,
-                data={"тип": agent_type or "-"})
-    return (f"Помощник типа «{agent_type or 'без типа'}» грузит CLAUDE.md проекта со "
-            f"STATE, ORDERS, MEMORY и TONE: старт 71 тыс. токенов. Для работы харнеса "
-            f"используй subagent_type «{LIGHT_TYPE}»: старт 20 тыс. вместо 71 тыс. "
-            "Поиск — Explore, план — Plan.")
+    built, reason = card_state(agent_type)
+    if not built:
+        reason = (f"тип «{agent_type or 'без типа'}» без собранной карточки: его системный промпт "
+                  "не правится, личности харнеса в нём нет, а CLAUDE.md проекта он грузит целиком")
+    if reason:
+        events.emit(SRC, UNBUILT_EVENT, "refused", journal="вызовы-агентов",
+                    session=payload.get("session_id") or None,
+                    data={"тип": agent_type or "-", "почему": reason})
+    return reason
 
 
 def agent_model(tool_input: dict) -> str:
@@ -359,10 +407,6 @@ def too_deep(payload: dict) -> str:
     depth = caller + 1
     if depth > MAX_DEPTH:
         return f"глубина вложенности {depth} сверх потолка {MAX_DEPTH}"
-    agent_type = str((payload.get("tool_input") or {}).get("subagent_type") or "")
-    if depth == MAX_DEPTH and agent_type in HEAVY_TYPES:
-        return (f"помощник глубины {depth} типа «{agent_type or 'без типа'}» грузит "
-                f"CLAUDE.md проекта: бери subagent_type «{LIGHT_TYPE}»")
     return ""
 
 
@@ -464,13 +508,9 @@ def main() -> int:
         payload = json.load(sys.stdin)
     except (ValueError, OSError):
         return 0
-    code, text, warning = decide(payload)
+    code, text = decide(payload)
     if code:
         print(text, file=sys.stderr)
-    elif warning:
-        print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse",
-                                                 "additionalContext": warning}},
-                         ensure_ascii=False))
     return code
 
 

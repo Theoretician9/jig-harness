@@ -1,0 +1,46 @@
+# Политика запуска модели: что сказать модели системным промптом по классу запуска.
+# Формат — спека hr.standards-and-policy §4.2. Модель и инструменты класс не задаёт:
+# их держат models.yaml и helper-roles.yaml. Читает scripts/self-prompt.py.
+наборы:                       # кусок текста = файл-источник + слой + потолок токенов
+  ядро:             {из: harness/self/core.json, слой: 1, потолок: 3000}
+  ядро_кратко:      {из: harness/self/core.json, поля: [сущность, принципы], слой: 1, потолок: 700}
+  копия:            {из: harness/self/instance.yaml, слой: 2, потолок: 900}
+  стандарты:        {из: harness/self/standards.md, слой: 1, потолок: 2500}
+  стандарты_кратко: {из: harness/self/standards.md, раздел: "Инварианты", слой: 1, потолок: 600}
+  роль_оркестратор: {из: harness/self/roles/orchestrator.md, слой: 1}
+  роль_управляющий: {из: harness/self/roles/lead.md, слой: 1}
+  роль_исполнитель: {из: harness/self/roles/worker.md, слой: 1}
+  роль_разведчик:   {из: harness/self/roles/explorer.md, слой: 1}
+классы:
+  оркестратор: [ядро, копия, стандарты, роль_оркестратор]
+  управляющий: [ядро, копия, стандарты, роль_управляющий]
+  исполнитель: [ядро, копия, стандарты, роль_исполнитель]
+  разведчик:   [ядро_кратко, копия, стандарты_кратко, роль_разведчик]
+  демон:       [ядро_кратко, копия, стандарты_кратко]
+  прибор:      [ядро_кратко]
+
+# Карточки помощников: тип → класс и шапка (frontmatter). Тело и отпечаток собирает
+# self-prompt.py --карточки; шапка живёт здесь, а не в самой карточке, иначе сборка в пустой каталог
+# её не нашла бы, а правка шапки руками не краснила бы гейт.
+карточки:
+  harness-worker:
+    класс: исполнитель
+    шапка: |-
+      name: harness-worker
+      description: Executor for harness work (code, tests, probes, data edits, reviews). Does ONE concrete task itself and launches nobody (no Agent tool). Starts WITHOUT the project CLAUDE.md and its @-files and with four tools only (Read, Write, Edit, Bash - no Skill, so no skill list in its context); the rules it needs are below. Name the model explicitly at launch.
+      omitClaudeMd: true
+      tools: Read, Write, Edit, Bash
+  harness-lead:
+    класс: управляющий
+    шапка: |-
+      name: harness-lead
+      description: "Managing helper for harness work - takes one task, walks it through the pipe, launches executors (harness-worker only, model named explicitly), judges their reports and keeps the decision log. Writes no code and no files itself (code enforces it: scripts/hooks/lead_role_guard.py). For one small task use harness-worker directly. Name the model explicitly at launch."
+      omitClaudeMd: true
+      tools: Read, Write, Bash, Agent
+  harness-explorer:
+    класс: разведчик
+    шапка: |-
+      name: harness-explorer
+      description: Read-only scout for the harness - finds and reads files, greps, runs read-only commands and answers the question with paths and short quotes. Writes nothing and launches nobody. Starts WITHOUT the project CLAUDE.md and its @-files and with four tools only (Read, Grep, Glob, Bash). Name the model explicitly at launch.
+      omitClaudeMd: true
+      tools: Read, Grep, Glob, Bash

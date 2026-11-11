@@ -376,7 +376,7 @@ run_scan_inner() {  # $1 = каталог репо, $2 = режим all|staged, 
 # ловушек вызывающего.
 run_scan() {
     (
-        TMPD=$(mktemp -d)
+        TMPD=$(mktemp -d -t check-secrets-scan-XXXXXX)
         trap 'rm -rf "$TMPD"' EXIT
         run_scan_inner "$@"
     )
@@ -395,8 +395,8 @@ run_scan() {
 # 0 или 1. Число случаев печатается из длины списка, а не пишется рукой, и
 # провал любого делает самотест красным.
 if [ "${1:-}" = "--selftest" ]; then
-    T=$(mktemp -d)
-    C=$(mktemp -d)
+    T=$(mktemp -d -t proba-check-secrets-XXXXXX)
+    C=$(mktemp -d -t proba-check-secrets-XXXXXX)
     trap 'rm -rf "$T" "$C"' EXIT
     git -C "$T" init -q
     # Стендовые конфиги источников: без них run_scan читал бы боевой

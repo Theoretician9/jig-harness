@@ -263,7 +263,7 @@ ZADACH_DO=$(grep -c '^\s*- id:' "$DEVMAP" || echo 0)
 
 AGENT_RC=0
 timeout "$STROITEL_TIMEOUT" \
-bash "$PROJECT_DIR/scripts/claude-demon.sh" check-builder -p --model "$(model_dlya тесты)" \
+bash "${CLAUDE_DEMON_SH:-$PROJECT_DIR/scripts/claude-demon.sh}" check-builder -p --model "$(model_dlya тесты)" \
   "Ты строитель проверок для проекта ${PROJECT_NAME:-харнес} ($PROJECT_DIR).
 
 Задача харнеса — не заставлять владельца щупать руками то, что машина может
@@ -332,6 +332,8 @@ $FORMY
 
 if [ "$AGENT_RC" = 77 ]; then
     say "строитель пропущен: лимит подписки (обёртка claude-demon.sh сказала владельцу)"
+elif [ "$AGENT_RC" = 79 ]; then
+    say "пропуск: личность не собрана — строитель не звал модель (сигнал дал носитель)"
 elif [ "$AGENT_RC" != 0 ]; then
     say "агент строителя вернул $AGENT_RC — карту проверяю всё равно"
 fi

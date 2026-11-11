@@ -57,16 +57,34 @@ case_check "образец: отказов 429 с resetsAt в хвосте ≥ 1
 case_check "образец: заметка «continuing automatically» в хвосте ≥ 1 (их $NNOTE)" "да" "$([ "$NNOTE" -ge 1 ] && echo да || echo нет)"
 
 PREFIX="warden-limsil-"
-sweep_panes() {
-    local name
-    while IFS= read -r name; do
-        case "$name" in "$PREFIX"*) tmux kill-session -t "$name" 2>/dev/null ;; esac
-    done < <(tmux ls -F '#{session_name}' 2>/dev/null)
-}
-sweep_panes
 T=$(mktemp -d -t warden-limsil.XXXXXX)
 PANE="${PREFIX}$$"
-trap 'sweep_panes; rm -rf "$T"' EXIT
+# Свой сервер tmux на прогон: панель стенда на боевом сервере ворота выката
+# читали как работу агента (11.11.2026). Обёртка первой в PATH ведёт туда и
+# голый tmux сторожа; TMUX снят, иначе клиент пошёл бы по сокету из неё.
+# Сокет — в каталоге стенда (TMUX_TMPDIR) и уходит вместе с ним.
+REAL_TMUX="$(command -v tmux)"
+SOCK_NAME="$PANE"
+unset TMUX TMUX_PANE
+export TMUX_TMPDIR="$T/tmux"
+mkdir -p "$T/tmux-bin" "$TMUX_TMPDIR"
+printf '#!/bin/sh\nexec "%s" -L "%s" "$@"\n' "$REAL_TMUX" "$SOCK_NAME" > "$T/tmux-bin/tmux"
+chmod +x "$T/tmux-bin/tmux"
+export PATH="$T/tmux-bin:$PATH"
+# Проба личности сторожа (self-prompt-live.sh) со стенда ушла бы фоном к модели
+# через claude-run.sh стенда, а её тревога легла бы в канал стенда посреди
+# чужого случая. Стенду — пустая проба.
+printf '#!/bin/sh\nexit 0\n' > "$T/self-prompt-live.sh"
+export SELF_PROMPT_LIVE_SH="$T/self-prompt-live.sh"
+# Прогон, убитый KILL-ом, ловушку не зовёт: панель сама гасит свой сервер,
+# когда прогона или каталога стенда не стало. Сервер — по pid из $TMUX панели:
+# сокет к тому мигу может уйти вместе с каталогом. Сторож отвязан двойным
+# fork: потомок claude в панели сторож сессий читал бы как работу агента.
+pane_cmd() {  # $1 = команда панели → она же со сторожем жизни стенда
+    printf '( { while kill -0 %s && [ -d %q ]; do sleep 2; done; s=${TMUX#*,}; kill "${s%%%%,*}"; } >/dev/null 2>&1 & ); %s' \
+        "$$" "$T" "$1"
+}
+trap '"$REAL_TMUX" -L "$SOCK_NAME" kill-server 2>/dev/null; rm -rf "$T"' EXIT
 
 # ── перекладка образца на часы стенда ───────────────────────────────────────
 # retime.py <образец> <выход> <виртуальное сейчас> [без-признаков]
@@ -130,13 +148,13 @@ case_check "Ф5 контроль: хвост без машинных призн�
 
 # ── Д. экран: признак лимита и время без выдумки ───────────────────────────
 echo "── Д. экран с фото владельца и строка «None» ──"
-tmux new-session -d -x 200 -y 60 -s "${PANE}-d" "cat '$SCREEN'; exec sleep 600"
+tmux new-session -d -x 200 -y 60 -s "${PANE}-d" "$(pane_cmd "cat '$SCREEN'; exec sleep 600")"
 sleep 0.5
 case_check "Д1: экран с фото — сторож видит лимит (--признак-лимита)" "0" \
     "$(bash "$DAEMON" --признак-лимита "${PANE}-d" >/dev/null 2>&1; echo $?)"
 printf '%s\n' "> Работы не видно 51 минут. СЛЕДУЮЩАЯ РАБОТА: hr.скачай-видео-по-ссылке-https — начата" \
     > "$T/kick-only.txt"
-tmux new-session -d -x 200 -y 60 -s "${PANE}-k" "cat '$T/kick-only.txt'; exec sleep 600"
+tmux new-session -d -x 200 -y 60 -s "${PANE}-k" "$(pane_cmd "cat '$T/kick-only.txt'; exec sleep 600")"
 sleep 0.5
 case_check "Д2 контроль: кириллический пинок без слов лимита — не лимит" "1" \
     "$(bash "$DAEMON" --признак-лимита "${PANE}-k" >/dev/null 2>&1; echo $?)"
@@ -216,7 +234,7 @@ stand() {  # $1 = файл экрана ("" — пустой экран): све
     printf '%s\n' '{"queue": [], "lines": [{"id": "hr", "tasks": [{"id": "hr.b", "status": "wip"}]}]}' \
         > "$T/project/dev-map.yaml"
     tmux kill-session -t "$PANE" 2>/dev/null
-    tmux new-session -d -x 200 -y 60 -s "$PANE" "${1:+cat '$1';} exec $T/claude >> $T/pane.txt"
+    tmux new-session -d -x 200 -y 60 -s "$PANE" -c "$T/project" "$(pane_cmd "${1:+cat '$1';} exec $T/claude >> $T/pane.txt")"
     sleep 0.5
     [ "$(tmux display-message -p -t "$PANE" '#{pane_current_command}')" = claude ] \
         || { echo "ПЛОХО: подставной агент не встал в панель — проверять нечего"; exit 1; }

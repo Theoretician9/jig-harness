@@ -36,15 +36,34 @@ WARDEN="${HARNESS_SESSION_WARDEN:-$HERE/../harness/demons/session-warden.sh}"
 [ -f "$WARDEN" ] || WARDEN="$HERE/../demons/session-warden.sh"
 [ -f "$WARDEN" ] || { echo "ПЛОХО: сторожа нет по пути раскладки — проверять нечего"; exit 1; }
 PREFIX="warden-rothelp-"
-stale=0
-while IFS= read -r s; do
-    [ -n "$s" ] || continue
-    tmux kill-session -t "$s" 2>/dev/null && stale=$((stale + 1))
-done <<<"$(tmux list-sessions -F '#{session_name}' 2>/dev/null | grep "^$PREFIX" || true)"
-[ "$stale" -gt 0 ] && echo "убрано своих хвостовых tmux-сессий: $stale"
 STAND=$(mktemp -d)
 PANE="$PREFIX$$"
-trap 'tmux kill-session -t "$PANE" 2>/dev/null; rm -rf "$STAND"' EXIT
+# Свой сервер tmux на прогон: панель стенда на боевом сервере ворота выката
+# читали как работу агента (11.11.2026). Обёртка первой в PATH ведёт туда и
+# голый tmux сторожа; TMUX снят, иначе клиент пошёл бы по сокету из неё.
+# Сокет — в каталоге стенда (TMUX_TMPDIR) и уходит вместе с ним.
+REAL_TMUX="$(command -v tmux)"
+SOCK_NAME="$PANE"
+unset TMUX TMUX_PANE
+export TMUX_TMPDIR="$STAND/tmux"
+mkdir -p "$STAND/tmux-bin" "$TMUX_TMPDIR"
+printf '#!/bin/sh\nexec "%s" -L "%s" "$@"\n' "$REAL_TMUX" "$SOCK_NAME" > "$STAND/tmux-bin/tmux"
+chmod +x "$STAND/tmux-bin/tmux"
+export PATH="$STAND/tmux-bin:$PATH"
+# Проба личности сторожа (self-prompt-live.sh) со стенда ушла бы фоном к модели
+# через claude-run.sh стенда, а её тревога легла бы в канал стенда посреди
+# чужого случая. Стенду — пустая проба.
+printf '#!/bin/sh\nexit 0\n' > "$STAND/self-prompt-live.sh"
+export SELF_PROMPT_LIVE_SH="$STAND/self-prompt-live.sh"
+# Прогон, убитый KILL-ом, ловушку не зовёт: панель сама гасит свой сервер,
+# когда прогона или каталога стенда не стало. Сервер — по pid из $TMUX панели:
+# сокет к тому мигу может уйти вместе с каталогом. Сторож отвязан двойным
+# fork: потомок claude в панели сторож сессий читал бы как работу агента.
+pane_cmd() {  # $1 = команда панели → она же со сторожем жизни стенда
+    printf '( { while kill -0 %s && [ -d %q ]; do sleep 2; done; s=${TMUX#*,}; kill "${s%%%%,*}"; } >/dev/null 2>&1 & ); %s' \
+        "$$" "$STAND" "$1"
+}
+trap '"$REAL_TMUX" -L "$SOCK_NAME" kill-server 2>/dev/null; rm -rf "$STAND"' EXIT
 
 # Тело функции из живого файла; пусто — функции нет.
 body() { sed -n "/^$1() {/,/^}/p" "$WARDEN"; }
@@ -365,7 +384,7 @@ stand() {  # $1 = сцена помощника
     jq -cn --arg ts "$(date -Is)" --arg s "$SESSION" \
         '{ts:$ts, event:"pre_compact", session:$s, detail:"стенд"}' > "$T/log/rotation.jsonl"
     tmux kill-session -t "$PANE" 2>/dev/null
-    tmux new-session -d -s "$PANE" "exec $T/claude >> $T/pane.txt"
+    tmux new-session -d -s "$PANE" -c "$T/project" "$(pane_cmd "exec $T/claude >> $T/pane.txt")"
     sleep 0.5
     [ "$(tmux display-message -p -t "$PANE" '#{pane_current_command}')" = claude ] \
         || { echo "ПЛОХО СТЕНД: подставной агент не встал в панель — проверять нечего"; exit 1; }

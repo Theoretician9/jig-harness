@@ -155,7 +155,7 @@ fi
 say "пишу тон: прогон $((PROGONOV + 1)) с данными"
 AGENT_RC=0
 timeout "$TON_TIMEOUT" \
-bash "$PROJECT_DIR/scripts/claude-demon.sh" ton-watch -p --model "$(model_dlya замер_речи)" \
+bash "${CLAUDE_DEMON_SH:-$PROJECT_DIR/scripts/claude-demon.sh}" ton-watch -p --model "$(model_dlya замер_речи)" \
   "Ты пишешь рабочий документ «тон общения с владельцем» для проекта ${PROJECT_NAME:-харнес}.
 Его будет читать другой агент ПЕРЕД КАЖДЫМ сообщением в канал — значит документ
 должен быть не эссе о владельце, а инструкцией, по которой можно написать
@@ -231,6 +231,8 @@ N — длина, за которой НАШЕ сообщение уже дли�
 
 if [ "$AGENT_RC" = 77 ]; then
     say "замер тона пропущен: лимит подписки — повтор до сброса вхолостую (владельцу сказано)"
+elif [ "$AGENT_RC" = 79 ]; then
+    say "пропуск: личность не собрана — замер тона без модели (сигнал дал носитель)"
 elif [ "$AGENT_RC" != 0 ]; then
     say "агент тона вернул $AGENT_RC — состояние не двигаю, повторим завтра"
     date -Is > "$HEARTBEAT_DIR/ton-watch"

@@ -33,15 +33,40 @@ export LC_ALL=C.UTF-8 PYTHONDONTWRITEBYTECODE=1
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$HERE/lib/selftest_cases.sh"
 
-STAND=$(mktemp -d)
+STAND=$(mktemp -d -t proba-restart-window-XXXXXX)
 PREFIX="warden-srestart-"
 PANE="$PREFIX$$"
+# Свой сервер tmux на прогон: панель стенда на боевом сервере ворота выката
+# читали как работу агента (11.11.2026). Обёртка первой в PATH ведёт туда и
+# голый tmux сторожа; TMUX снят, иначе клиент пошёл бы по сокету из неё.
+# Сокет — в каталоге стенда (TMUX_TMPDIR) и уходит вместе с ним.
+REAL_TMUX="$(command -v tmux)"
+SOCK_NAME="$PANE"
+unset TMUX TMUX_PANE
+export TMUX_TMPDIR="$STAND/tmux"
+mkdir -p "$STAND/tmux-bin" "$TMUX_TMPDIR"
+printf '#!/bin/sh\nexec "%s" -L "%s" "$@"\n' "$REAL_TMUX" "$SOCK_NAME" > "$STAND/tmux-bin/tmux"
+chmod +x "$STAND/tmux-bin/tmux"
+export PATH="$STAND/tmux-bin:$PATH"
+# Проба личности сторожа (self-prompt-live.sh) со стенда ушла бы фоном к модели
+# через claude-run.sh стенда, а её тревога легла бы в канал стенда посреди
+# чужого случая. Стенду — пустая проба.
+printf '#!/bin/sh\nexit 0\n' > "$STAND/self-prompt-live.sh"
+export SELF_PROMPT_LIVE_SH="$STAND/self-prompt-live.sh"
+# Прогон, убитый KILL-ом, ловушку не зовёт: панель сама гасит свой сервер,
+# когда прогона или каталога стенда не стало. Сервер — по pid из $TMUX панели:
+# сокет к тому мигу может уйти вместе с каталогом. Сторож отвязан двойным
+# fork: потомок claude в панели сторож сессий читал бы как работу агента.
+pane_cmd() {  # $1 = команда панели → она же со сторожем жизни стенда
+    printf '( { while kill -0 %s && [ -d %q ]; do sleep 2; done; s=${TMUX#*,}; kill "${s%%%%,*}"; } >/dev/null 2>&1 & ); %s' \
+        "$$" "$STAND" "$1"
+}
 LOCK_PID=""
 WARDEN_PID=""
 cleanup() {
     [ -n "$WARDEN_PID" ] && kill "$WARDEN_PID" 2>/dev/null
     [ -n "$LOCK_PID" ] && kill "$LOCK_PID" 2>/dev/null
-    tmux kill-session -t "=$PANE" 2>/dev/null
+    "$REAL_TMUX" -L "$SOCK_NAME" kill-server 2>/dev/null
     rm -rf "$STAND"
 }
 trap cleanup EXIT
@@ -535,7 +560,7 @@ case_check "W25 предикат вышел кодом 2 — сторож чит
 # 7-й довод способ_ротации спрашивает паузу сам (B-11): сбой pause.py там тоже «нет».
 echo "── В-1 7-Й ДОВОД «ПЕРЕЗАГРУЗКА ВСТАЛА БЫ»: сбой pause.py ──"
 FIT_FN="$STAND/fit.sh"
-for fn in reboot_would_fit reboot_needed reboot_last_failed reboot_window_verdict работа_на_паузе; do
+for fn in reboot_switch reboot_would_fit reboot_needed reboot_last_failed reboot_window_verdict работа_на_паузе; do
     body "$fn"
 done > "$FIT_FN"
 FW="$STAND/fit"; mkdir -p "$FW/scripts/lib" "$FW/state"
@@ -585,35 +610,6 @@ case_check "каталог метки переживает перезагруз�
 # Условие «нужна ротация» — pre_compact этой сессии при MAX_COMPACTS=1; метки
 # полного перезапуска нет — путь тяжёлый. Судья передачи стенда: «написана».
 echo "── СТЕНД: сторож целым прогоном до «/exit» ──"
-# Мусор — только панели прогонов, чей процесс умер: живая панель соседнего
-# прогона (ночные ворота рядом с пробой мутаций) иначе гибнет посреди сцены.
-sweep_panes() {  # печатает, сколько сессий стенда убрано
-    local name pid count=0
-    while IFS= read -r name; do
-        case "$name" in "$PREFIX"*)
-            pid="${name#"$PREFIX"}"
-            [[ "$pid" =~ ^[0-9]+$ ]] || continue
-            kill -0 "$pid" 2>/dev/null && continue
-            tmux kill-session -t "=$name" 2>/dev/null && count=$((count + 1)) ;;
-        esac
-    done < <(tmux ls -F '#{session_name}' 2>/dev/null)
-    printf '%s\n' "$count"
-}
-echo "мусор прежних прогонов: tmux-сессий стенда убрано $(sweep_panes)"
-# Случай параллелизма своим условием: панель «живого» соседа (владелец — свой
-# sleep) и панель мёртвого прогона. Обе гаснут сами через 120 с, если тест
-# оборвут посреди случая.
-sleep 120 & OWNER_ALIVE=$!
-true & OWNER_DEAD=$!; wait "$OWNER_DEAD"
-tmux new-session -d -s "$PREFIX$OWNER_ALIVE" "sleep 120"
-tmux new-session -d -s "$PREFIX$OWNER_DEAD" "sleep 120"
-sweep_panes > /dev/null
-case_check "уборка: панель живого соседнего прогона цела" "да" \
-    "$(yes_no tmux has-session -t "=$PREFIX$OWNER_ALIVE" 2>/dev/null)"
-case_check "уборка: панель мёртвого прогона убрана" "нет" \
-    "$(yes_no tmux has-session -t "=$PREFIX$OWNER_DEAD" 2>/dev/null)"
-tmux kill-session -t "=$PREFIX$OWNER_ALIVE" 2>/dev/null
-kill "$OWNER_ALIVE" 2>/dev/null; wait "$OWNER_ALIVE" 2>/dev/null
 T="$STAND/a"
 mkdir -p "$T/project/scripts/lib" "$T/projects" "$T/bin"
 cp /bin/cat "$T/claude"
@@ -621,7 +617,8 @@ for f in work-queue.py limit_mark.py limit-in-log.py stall-in-log.py pause.py; d
     cp "$HERE/$f" "$T/project/scripts/" 2>/dev/null
 done
 [ -f "$BOOT_CHECK" ] && cp "$BOOT_CHECK" "$T/project/scripts/boot_check.py"
-cp "$HERE"/lib/*.py "$HERE/lib/config.sh" "$HERE/lib/pane.sh" "$HERE/lib/events.sh" "$T/project/scripts/lib/"
+cp "$HERE"/lib/*.py "$HERE/lib/config.sh" "$HERE/lib/pane.sh" "$HERE/lib/events.sh" "$HERE/lib/agent_pane_log.sh" \
+    "$T/project/scripts/lib/"
 # Сторож вычисляет каталог скриптов от СВОЕГО пути: запущенный с места он судил
 # бы живые pause.py/stack_freshness.py, а не заглушки стенда. Копия — в раскладке
 # стенда, с двери мутаций.
@@ -753,13 +750,11 @@ CONF
     jq -cn --arg ts "$(date -Is)" --arg s "$compact_sid" \
         '{ts:$ts, event:"pre_compact", session:$s, detail:"стенд"}' > "$T/log/rotation.jsonl"
     tmux kill-session -t "=$PANE" 2>/dev/null
-    # Панель живёт на боевом tmux-сервере: брошенный «claude» в ней ворота
-    # выката читают как долгую работу. Панель уходит вместе с тестом, а потолок
-    # 300 с длиннее любой сцены — на случай, если смерть теста не увидена.
-    # Гасится сессия, а не процесс: сторож ставит ей remain-on-exit, и мёртвая
-    # панель иначе остаётся висеть.
-    tmux new-session -d -s "$PANE" \
-        "{ timeout --foreground -k 5 300 tail --pid=$$ -f /dev/null; tmux kill-session -t '=$PANE'; } & exec $T/claude >> $T/pane.txt"
+    # Гасится сервер, а не процесс: сторож ставит панели remain-on-exit, и
+    # мёртвая панель иначе остаётся висеть.
+    # Агент — в каталоге проекта, как у боевого start-agent.sh: чужой каталог
+    # запуска сторож лечит новой сессией и перезагрузку при смене снимает.
+    tmux new-session -d -s "$PANE" -c "$T/project" "$(pane_cmd "exec $T/claude >> $T/pane.txt")"
     sleep 0.5
     [ "$(tmux display-message -p -t "$PANE" '#{pane_current_command}')" = claude ] \
         || { echo "ПЛОХО СТЕНД: подставной агент не встал в панель — проверять нечего"; exit 1; }

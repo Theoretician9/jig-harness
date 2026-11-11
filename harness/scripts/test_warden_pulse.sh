@@ -57,16 +57,34 @@ for f in "$DAEMON" "$WATCHER" "$JUDGE" "$CONF_DIR/harness.conf" "$CONF_DIR/syste
 done
 
 PREFIX="warden-pulse-"
-sweep_panes() {
-    local name
-    while IFS= read -r name; do
-        case "$name" in "$PREFIX"*) tmux kill-session -t "$name" 2>/dev/null ;; esac
-    done < <(tmux ls -F '#{session_name}' 2>/dev/null)
-}
-sweep_panes
 T=$(mktemp -d -t warden-pulse.XXXXXX)
 PANE="${PREFIX}$$"
-trap 'sweep_panes; rm -rf "$T"' EXIT
+# Свой сервер tmux на прогон: панель стенда на боевом сервере ворота выката
+# читали как работу агента (11.11.2026). Обёртка первой в PATH ведёт туда и
+# голый tmux сторожа; TMUX снят, иначе клиент пошёл бы по сокету из неё.
+# Сокет — в каталоге стенда (TMUX_TMPDIR) и уходит вместе с ним.
+REAL_TMUX="$(command -v tmux)"
+SOCK_NAME="$PANE"
+unset TMUX TMUX_PANE
+export TMUX_TMPDIR="$T/tmux"
+mkdir -p "$T/tmux-bin" "$TMUX_TMPDIR"
+printf '#!/bin/sh\nexec "%s" -L "%s" "$@"\n' "$REAL_TMUX" "$SOCK_NAME" > "$T/tmux-bin/tmux"
+chmod +x "$T/tmux-bin/tmux"
+export PATH="$T/tmux-bin:$PATH"
+# Проба личности сторожа (self-prompt-live.sh) со стенда ушла бы фоном к модели
+# через claude-run.sh стенда, а её тревога легла бы в канал стенда посреди
+# чужого случая. Стенду — пустая проба.
+printf '#!/bin/sh\nexit 0\n' > "$T/self-prompt-live.sh"
+export SELF_PROMPT_LIVE_SH="$T/self-prompt-live.sh"
+# Прогон, убитый KILL-ом, ловушку не зовёт: панель сама гасит свой сервер,
+# когда прогона или каталога стенда не стало. Сервер — по pid из $TMUX панели:
+# сокет к тому мигу может уйти вместе с каталогом. Сторож отвязан двойным
+# fork: потомок claude в панели сторож сессий читал бы как работу агента.
+pane_cmd() {  # $1 = команда панели → она же со сторожем жизни стенда
+    printf '( { while kill -0 %s && [ -d %q ]; do sleep 2; done; s=${TMUX#*,}; kill "${s%%%%,*}"; } >/dev/null 2>&1 & ); %s' \
+        "$$" "$T" "$1"
+}
+trap '"$REAL_TMUX" -L "$SOCK_NAME" kill-server 2>/dev/null; rm -rf "$T"' EXIT
 
 SID="7c3e1f20-5b4a-4d8e-9f61-2a0b3c4d5e6f"
 H1="a1511aa2c0ffee001"
@@ -293,7 +311,7 @@ stand() {  # $1 = «работа» | «пусто»: свежий LOG_DIR, ка�
     fi
     printf '# hr.b — журнал\n\n- Замер готов.\n%s\n\n' "$STEP" > "$T/project/.tasks/hr.b/журнал.md"
     tmux kill-session -t "$PANE" 2>/dev/null
-    tmux new-session -d -x 200 -y 60 -s "$PANE" "exec $T/claude >> $T/pane.txt"
+    tmux new-session -d -x 200 -y 60 -s "$PANE" -c "$T/project" "$(pane_cmd "exec $T/claude >> $T/pane.txt")"
     sleep 0.5
     [ "$(tmux display-message -p -t "$PANE" '#{pane_current_command}')" = claude ] \
         || { echo "ПЛОХО: подставной агент не встал в панель — проверять нечего"; exit 1; }

@@ -84,11 +84,41 @@ CASES = [
      "python3 - <<'PY'\nx = 1\nPY\nПУТЬ=/tmp/лог; cat $ПУТЬ"),
     (2, "правка состава MCP", "claude mcp add tg npx server"),
     (2, "правка состава MCP без телеграма в имени — состав всё равно меняется", "claude mcp remove gmail"),
-    (0, "обычный headless-запуск с MCP — разрешён", 'claude -p "сделай X"'),
-    (0, "он же в конвейере", 'echo hi | claude -p "x"'),
+    # Путь 16 спеки hr.standards-and-policy: claude из оболочки модели мимо
+    # носителя приходит без личности — отказ с готовой командой носителя.
+    (2, "headless-запуск мимо носителя — отказ", 'claude -p "сделай X"'),
+    (2, "он же в конвейере", 'echo hi | claude -p "x"'),
     (2, "запуск С ТЕЛЕГРАМ-КАНАЛОМ — отберёт getUpdates", 'claude --channels plugin:telegram@claude-plugins-official'),
     (2, "телеграм в наборе MCP", 'claude -p "x" --mcp-config \'{"mcpServers":{"telegram":{"command":"npx"}}}\' --strict-mcp-config'),
-    (0, "он же в подстановке", 'out=$(claude -p "x")'),
+    (2, "он же в подстановке", 'out=$(claude -p "x")'),
+    (2, "мимо носителя даже со --strict-mcp-config", "claude -p --strict-mcp-config x"),
+    (2, "интерактивный claude из оболочки модели", "claude --dangerously-skip-permissions"),
+    (0, "через носитель с флагом — разрешён", "bash scripts/claude-run.sh --класс прибор -p --strict-mcp-config x"),
+    (0, "носитель абсолютным путём в подстановке",
+     'out=$(bash /opt/proekt/scripts/claude-run.sh --класс прибор -p --strict-mcp-config "x")'),
+    (0, "claude --version — не модель", "claude --version"),
+    (0, "claude --help — не модель", "claude --help"),
+    (0, "claude plugin list — не модель", "claude plugin list"),
+    (0, "claude auth status — не модель", "claude auth status"),
+    # Эталон слоя 1 вне досягаемости модели (спека §5.4).
+    (2, "запись в эталон личности /etc/harness/self", "echo 1 > /etc/harness/self/core.json"),
+    (2, "tee в эталон личности", "tee /etc/harness/self/instance.yaml < /tmp/x"),
+    (2, "подмена печати эталона self-seal", "cp /tmp/x /usr/local/lib/harness/self-seal"),
+    (0, "чтение эталона — не запись", "cat /etc/harness/self/core.json"),
+    # Н2 ревью ЧП#2: печать сверяет выкладку с манифестом, который пишет сам агент, —
+    # вызов печати из команды модели меняет эталон в обход согласия владельца.
+    (2, "Н2: модель зовёт печать эталона sudo -n self-seal",
+     "sudo -n /usr/local/lib/harness/self-seal /var/www/project"),
+    (2, "Н2: печать эталона без sudo", "/usr/local/lib/harness/self-seal /tmp/x"),
+    (2, "Н2: печать после другой команды", "cd /tmp && sudo /usr/local/lib/harness/self-seal /tmp/x"),
+    (2, "Н2: печать под интерпретатором — скрипт проекта", "bash scripts/self-seal.sh /tmp/x"),
+    (2, "Н2: печать по имени self-seal.sh под sudo", "sudo -n /opt/kopiya/scripts/self-seal.sh x"),
+    (0, "Н2: чтение файла печати — не вызов", "cat /usr/local/lib/harness/self-seal"),
+    (0, "Н2: проба печати — не печать", "bash scripts/test_self_seal.sh"),
+    # Н-7 контракта: проба оркестратора живёт в своём tmux-сервере -L.
+    (0, "Н-7: kill-server своего tmux-сервера пробы", "tmux -L sap-proba-1 kill-server"),
+    (0, "Н-7: носитель внутри своего tmux-сервера пробы",
+     'tmux -L sap-proba-1 new-session -d -s proba "bash scripts/claude-run.sh --класс оркестратор --model haiku"'),
     (2, "перезапуск контейнера без пересборки", "docker compose restart backend"),
     # ДЫРА, найденная ревью 10.09.2026: якорь позиции команды не пускал пробелы
     # после начала строки — сторож обходился одним отступом, а внутри if, циклов
@@ -246,7 +276,9 @@ CASES = [
     # наглухо) и слово владельца на запуск.
     (0, "запуск снятия ответов: адреса в команде нет, судит не хук",
      "ERP_TOKEN_FILE=/var/lib/harness/secrets/erp-token.txt node scripts/record-erp-responses.ts"),
-    (0, "запуск с пустым набором MCP", "claude -p \"x\" --mcp-config '{\"mcpServers\":{}}' --strict-mcp-config"),
+    (2, "пустой набор MCP мимо носителя — отказ", "claude -p \"x\" --mcp-config '{\"mcpServers\":{}}' --strict-mcp-config"),
+    (0, "запуск с пустым набором MCP через носитель",
+     "bash scripts/claude-run.sh --класс прибор -p \"x\" --mcp-config '{\"mcpServers\":{}}' --strict-mcp-config"),
     (0, "пересборка", "docker compose up -d --build backend"),
     (0, "обычная команда", "git status --short"),
     (0, "ТЕКСТ про запрет, а не команда", 'echo "никогда не запускай claude mcp add — оборвётся связь"'),
@@ -338,7 +370,8 @@ CASES = [
     # --- В-2: обходы из ревью 09.08.2026 — на каждый пара «обход/безопасный аналог» ---
     (2, "В-2: env-префикс перед rm по данным", "LC_ALL=C rm -rf /opt/app/data"),
     (0, "В-2: env-префикс перед rm по временным", "LC_ALL=C rm -rf /tmp/build-cache"),
-    (0, "В-2: timeout перед обычным claude", "timeout 60 claude -p x"),
+    (2, "В-2: timeout перед claude мимо носителя", "timeout 60 claude -p x"),
+    (0, "В-2: timeout перед носителем", "timeout 60 bash scripts/claude-run.sh --класс прибор -p --strict-mcp-config x"),
     (2, "В-2: timeout перед claude с телеграм-каналом", "timeout 60 claude --channels plugin:telegram@x"),
     (0, "В-2: timeout перед безобидной командой", "timeout 60 curl -s http://127.0.0.1:8010/health"),
     (2, "В-2: nohup перед правкой состава MCP", "nohup claude mcp add x y"),
@@ -1768,6 +1801,36 @@ def проверить_подсказку_pgrep() -> tuple[int, int]:
     return плохо, путей
 
 
+def проверить_подсказку_носителя() -> tuple[int, int]:
+    """Отказ claude мимо носителя обязан дать ГОТОВУЮ команду носителя с флагом.
+
+    K29 контракта hr.standards-and-policy, Н-4: носитель --strict-mcp-config сам
+    не добавляет, и подсказка без флага вела бы к вызову, который отбирает канал
+    у владельца. Готовая команда из подсказки обязана проходить самого сторожа.
+    """
+    плохо, путей = 0, 0
+    for cmd in ("claude -p --strict-mcp-config x", 'claude -p "сделай X"', 'out=$(claude -p "x")'):
+        путей += 1
+        код, текст = run_вывод(cmd)
+        своя_часть = текст.split("Сторож отменяет ВСЮ")[0]
+        беды = []
+        if код != 2:
+            беды.append(f"отказа нет (код {код})")
+        if "claude-run.sh --класс прибор" not in своя_часть:
+            беды.append("в подсказке нет «claude-run.sh --класс прибор»")
+        if "--strict-mcp-config" not in своя_часть:
+            беды.append("в подсказке нет «--strict-mcp-config»")
+        совет = re.search(r"bash \S*claude-run\.sh --класс прибор[^\n«»]*", своя_часть)
+        if совет and run_процессом(совет.group(0).rstrip(" .;,")) != 0:
+            беды.append(f"готовая команда «{совет.group(0)}» сторожем отменена")
+        if беды:
+            print(f"  ПЛОХО  подсказка носителя на «{cmd}» — {'; '.join(беды)}")
+            плохо += 1
+        else:
+            print(f"  ок  подсказка носителя на «{cmd}»: claude-run.sh --класс прибор и --strict-mcp-config")
+    return плохо, путей
+
+
 def проверить_совет_проходит() -> tuple[int, int]:
     """Совет сторожа обязан проходить самого сторожа.
 
@@ -2260,6 +2323,9 @@ def main() -> int:
     _плохо_с, _путей_с = проверить_совет_проходит()
     bad += _плохо_с
     total += _путей_с
+    _плохо_н, _путей_н = проверить_подсказку_носителя()
+    bad += _плохо_н
+    total += _путей_н
     _плохо, _путей = проверить_публикацию_мимо_двери()
     bad += _плохо
     total += _путей

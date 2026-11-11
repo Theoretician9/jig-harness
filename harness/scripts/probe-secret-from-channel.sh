@@ -38,6 +38,12 @@ DISPATCHER="$KOREN/scripts/tg-dispatcher.sh"
 [ "${1:-}" = "--диспетчер" ] && DISPATCHER="$2"
 
 T=$(mktemp -d /tmp/proba-sekret-XXXXXX)
+# Свой сервер tmux на прогон: сессия пробы на боевом сервере висела бы рядом с
+# сессией agent. TMUX снят (иначе клиент пошёл бы по сокету из неё), сокет — в
+# каталоге пробы и уходит вместе с ним; пинок диспетчера идёт туда же.
+unset TMUX TMUX_PANE
+export TMUX_TMPDIR="$T/tmux"
+mkdir -p "$TMUX_TMPDIR"
 TOKEN="000:СТЕНДОВЫЙ"   # не-секрет: подставной Bot API стенда, боевого токена здесь нет
 PIDS=()
 SESSIONS=()

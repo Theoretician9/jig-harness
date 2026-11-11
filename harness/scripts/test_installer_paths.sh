@@ -94,5 +94,36 @@ if [ -f "$upd" ]; then
   v=$(HARNESS_VERSION_FILE="$vf" python3 "$upd" --версия 2>&1)
   grep -q "$head" <<<"$v" && ok "update.py --версия видит записанное" || bad "update.py --версия не видит: $v"
 fi
+# ── Д-14: шаг 7-а пишет версию той копии, что осталась у агента ──
+# Клон /root старше копии агента: положить_пакет копию не трогает (Д-12), и запись
+# версии обязана назвать коммит копии, а не клона. Шаг 7-а идёт как есть до записи
+# версии; /home/user/starter подменён каталогом пробы, root не нужен.
+body7=$(extract шаг_7а)
+[ -n "$body7" ] || { echo "FAIL: функция шаг_7а не найдена в установщике"; exit 1; }
+printf '%s\n' "$body7" > "$tmp/step7.sh"
+rm -rf "$tmp/s" "$tmp/starter"; mkdir -p "$tmp/s" "$tmp/starter" "$tmp/unified" "$tmp/state7/panel-state"
+g "$tmp/s" init -q; echo 1 > "$tmp/s/f"; g "$tmp/s" add -A; g "$tmp/s" commit -qm 1
+cp -a "$tmp/s" "$tmp/starter/STARTER-PACKAGE"; echo 2 > "$tmp/starter/STARTER-PACKAGE/f"
+g "$tmp/starter/STARTER-PACKAGE" commit -qam 2
+copy_head=$(git -C "$tmp/starter/STARTER-PACKAGE" rev-parse HEAD)
+clone_head=$(git -C "$tmp/s" rev-parse HEAD)
+vf7="$tmp/state7/panel-state/версия-харнеса"
+out=$(AS_AGENT= bash -c "
+  . '$tmp/lib.sh'; . '$tmp/step7.sh'
+  заголовок() { :; }; скажи() { :; }; проверка() { :; }
+  делай() {
+    local c=\${1//\/home\/agent\/starter/$tmp/starter}
+    case \$c in *harness.conf*) exit 0 ;; chown*) return 0 ;; esac
+    eval \"\$c\"
+  }
+  AGENT_USER=agent; SCRIPT_DIR='$tmp/s'; STATE_DIR='$tmp/state7'; UNIFIED_SRC='$tmp/unified'
+  шаг_7а" 2>&1)
+[ "$(cat "$tmp/starter/STARTER-PACKAGE/f")" = 2 ] && [ ! -e "$vf7.tmp" ] \
+  && ok "условие Д-14: копия агента новее клона и не тронута" || bad "условие Д-14 не создано: $out"
+got=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1], encoding='utf-8')).get('коммит',''))" "$vf7" 2>/dev/null)
+[ -n "$got" ] && [ "$got" = "$copy_head" ] \
+  && ok "Д-14: записана версия копии агента" \
+  || bad "Д-14: записана не версия копии агента (записано ${got:-—}, копия $copy_head, клон $clone_head)"
+
 [ "$fail" = 0 ] && echo "ИТОГ: зелёный" || echo "ИТОГ: КРАСНЫЙ"
 exit $fail

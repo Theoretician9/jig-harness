@@ -32,6 +32,12 @@ konf_zagruzit
 ITOG_LOG="$LOG_DIR/ворота-итог.jsonl"
 REZHIM="обычный"   # «всё» ставится ниже, у флага --всё
 
+# Голый mktemp в пробах кладёт tmp.XXXX прямо в /tmp, а уборка /tmp такое не опознаёт и держит
+# гигабайты неделями. Все пробы ворот наследуют этот каталог с известным префиксом.
+RUN_TMP=$(mktemp -d -t harness-run-XXXXXX)
+export TMPDIR="$RUN_TMP"
+trap 'rm -rf "$RUN_TMP"' EXIT
+
 # Обёртка проверки и счётчики зелёных/красных/жёлтых — scripts/lib/gates_check.sh.
 # shellcheck disable=SC1091
 . "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/lib/gates_check.sh"
@@ -45,7 +51,7 @@ if [ "${1:-}" = "--selftest" ]; then
     # Журнал секунд самотеста — во временный каталог: боевой журнал не
     # засоряется строками фиктивных проверок.
     GATES_TIMING_DIR=$(mktemp -d)
-    trap 'rm -f "$TRACE"; rm -rf "$GATES_TIMING_DIR"' EXIT
+    trap 'rm -f "$TRACE"; rm -rf "$GATES_TIMING_DIR" "$RUN_TMP"' EXIT
 
     # БОЛЬНОЙ СЛУЧАЙ первым: падающая проверка обязана попасть в красные И
     # показать свой вывод. Ворота, которые глотают падение, хуже отсутствия
@@ -163,6 +169,20 @@ done
 # Только этот самотест судит plan_absent, info/exclude, коммит пакета и связку
 # «дверь ↔ раскладчик»; раскладчик живёт в пакете, а не в проекте.
 проверка "самотест раскладчика" bash -c 'bash "$(python3 -c "import sys; sys.path.insert(0, \"scripts/lib\"); import config; print(config.katalog_paketa())")/harness/razlozhit-harnes.sh" --selftest'
+# Стенд самотеста весит гигабайты: обрыв по timeout обязан его убирать.
+проверка "самотест раскладчика: уборка при обрыве" python3 scripts/test_layout_selftest_cleanup.py
+# Три несущих дефекта выпуска 0.9.3: каждый проходил ворота пакета зелёным и ронял установку с нуля.
+проверка "самотест раскладчика: код выхода" python3 scripts/test_layout_selftest_exit_code.py
+проверка "выгрузка UNIFIED свежа" python3 scripts/test_unified_fresh.py
+проверка "установщик: отказ первого коммита" python3 scripts/test_installer_first_commit.py
+проверка "раскладка печатает эталон личности" python3 scripts/test_layout_self_seal.py
+# Четыре несущих дефекта живой установки R7 (Д-20…Д-23): каждый ронял код установки или эталон.
+проверка "установщик: эталон на обновлении" bash scripts/test_installer_resume_seal.sh
+проверка "установщик: шаг 13 до входа" bash scripts/test_installer_demon_probe.sh
+проверка "первый коммит установщика не мимо карты" bash scripts/test_devmap_selfheal_installer_commit.sh
+проверка "id сессии демона без uuidgen" bash scripts/test_claude_demon_session_id.sh
+# Голый mktemp проб обязан попадать в каталог harness-run-, который уборка /tmp опознаёт.
+проверка "каталог проб ворот" python3 scripts/test_gates_run_temp_dir.py
 проверка "границы задачи" python3 scripts/lib/cards.py --selftest
 # Четыре пробы, которые не звал НИКТО: их нашёл гейт «кто зовёт» 14.09.2026 —
 # ровно тот случай, ради которого он написан (проверка есть, вызова нет).
@@ -184,6 +204,26 @@ done
 проверка "библиотека процессов" python3 scripts/check-process-library.py
 проверка "реестр стека" python3 scripts/check-stack-registry.py
 проверка "реестр стека-самотест" python3 scripts/check-stack-registry.py --selftest
+# Личность и зов модели (hr.standards-and-policy): пробы носителей, стенд
+# каждой подменяет claude, модель не тратится. Живая приёмка — только с
+# ключом --подставной; живьём её гонит смена по слову.
+проверка "личность: сборка"           python3 scripts/test_self_prompt.py
+проверка "личность: носитель claude-run" bash scripts/test_claude_run.sh
+проверка "аккаунт: переключение смены" bash scripts/test_switch_account.sh
+проверка "личность: карточки помощников" python3 scripts/test_agent_cards.py
+проверка "личность: печать эталона"   bash scripts/test_self_seal.sh
+проверка "личность: слой человека"    python3 scripts/test_self_set.py
+проверка "личность: слои памяти, хук" python3 scripts/hooks/test_memory_layer_guard.py
+проверка "личность: прополка памяти"  python3 scripts/test_memory_weeding.py
+проверка "личность: сборка без самоимпорта" bash scripts/test_layout_no_self_import.sh
+проверка "личность: ключ события"     bash scripts/test_live_key.sh
+проверка "личность: смена без личности" bash scripts/test_shift_self_mark.sh
+проверка "личность: носитель сессии"  bash scripts/test_session_carrier.sh
+проверка "личность: живая приёмка (подставной claude)" bash scripts/test_self_prompt_live.sh --подставной
+проверка "зов модели: сторож"         python3 scripts/test_check_model_call.py
+проверка "зов модели: приборы"        python3 scripts/test_instrument_carrier.py
+проверка "зов модели: код 79 у фоновых служб" bash scripts/test_carrier_exit79.sh
+проверка "зов модели: код 79 у входа" python3 scripts/test_login_expiry_exit79.py
 проверка "кто зовёт"      python3 scripts/check-who-calls.py
 # Мера Ф2 ревизии: население — ВСЕ .py/.sh харнеса (193), а не только
 # механизмы реестра. Печатает СПИСОК: инструменты смены, живых только через
@@ -209,6 +249,9 @@ done
 проверка "кто-зовёт-сам"  python3 scripts/check-who-calls.py --selftest
 проверка "очередь канала" python3 scripts/lib/channel_queue.py --selftest
 проверка "указания"       python3 scripts/orders.py
+# Строка приказов не уходит из ORDERS и слов владельца без переноса в архив прополки:
+# в рабочем дереве потерю не видно, видна только против HEAD~.
+проверка "прополка без потерь" python3 scripts/check-memory-weeding.py
 # Задача, сказанная в канал, обязана дойти до карты: 941 сообщение в очереди,
 # 171 с признаком работы, и связи «сообщение → задача» не было ни одной.
 проверка "задачи из канала" python3 scripts/tasks-from-channel.py
@@ -236,6 +279,7 @@ done
 проверка "дверь данных"   python3 scripts/test_data_delete_door.py
 проверка "слово у двери удаления" python3 scripts/test_protected_delete_word.py
 проверка "живая проверка" python3 scripts/build-live-check-list.py --проверить
+проверка "живая проверка в pre-commit" bash scripts/test_precommit_live_check.sh
 # Список файлов сверке подаётся ЯВНО. БОЛЬНОЙ СЛУЧАЙ 12.08.2026: без него
 # скрипт читал stdin ворот, а тот в сессии агента открыт и молчит — ворота
 # висели одиннадцать минут и были сняты вручную, ни одной проверки не показав.
@@ -406,6 +450,7 @@ done
 # Поймано первой живой попыткой публикации 11.09.2026.
 проверка "сборка-публичного" python3 scripts/build-public.py --selftest
 проверка "сборка-в-секунду" python3 scripts/test_build_public_same_second.py
+проверка "манифест-в-сборке" python3 scripts/test_build_public_self_manifest.py
 проверка "чистота-самотест" python3 scripts/check-public-clean.py --selftest
 проверка "quotepath"      python3 scripts/check-quotepath-flag.py
 # Расширения ставит код, а не человек слэш-командой: список жил текстом скила
@@ -414,6 +459,9 @@ done
 # CLAUDE.md пакета собирается из данных: правка руками уедет при следующей
 # сборке, а до неё файл врёт о том, чем держится каждый инвариант.
 проверка "claude.md"      python3 scripts/build-claude-md.py --проверить
+# Карточки помощников собираются из ролей и политики: правка руками или роль без
+# пересборки — красный, иначе помощник стартует с устаревшей личностью (хук его отвергнет).
+проверка "карточки"       python3 scripts/self-prompt.py --карточки --проверить
 # Скил — копия куска главы, а генератор зовут КОМАНДОЙ: поправил главу, забыл
 # перегенерировать — агент работает по устаревшему правилу и уверен, что прав.
 # Вопрос владельца 12.09.2026 про генерацию скилов вскрыл, что сверки не было.

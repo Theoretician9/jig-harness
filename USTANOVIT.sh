@@ -32,8 +32,10 @@ set -Eeuo pipefail
 # Свежий VPS в первые минуты держит замок apt (cloud-init, unattended-upgrades):
 # голый apt-get падал «Could not get lock», и установка вставала на ровном месте.
 # Функция перекрывает имя во всех командах скрипта (в том числе внутри делай/eval),
-# а текст «apt-get install …» в командах остаётся прежним для сверки со стеком.
-export DEBIAN_FRONTEND=noninteractive
+# а гейт стека (check-stack-registry.py) читает пакеты и из apt-get install, и из apt_поставить.
+# needrestart (Ubuntu 24.04) спрашивает про перезапуск служб даже при noninteractive;
+# без терминала в переднем плане такой вопрос останавливает apt навсегда.
+export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a
 APT_LOCK_WAIT=600
 apt-get() { command apt-get -o "DPkg::Lock::Timeout=$APT_LOCK_WAIT" "$@"; }
 
@@ -280,16 +282,47 @@ MANUAL_LIST=()
   exit 1
 }
 
+# Долгая команда шага без единой строки в логе неотличима от зависшей:
+# раз в STEP_PULSE_SEC секунд пока команда жива пишем, что она идёт.
+STEP_PULSE_SEC="${STEP_PULSE_SEC:-60}"
+PULSE_PID=""
+пульс_старт() { # $1 = команда для подписи
+  (
+    local t0=$SECONDS
+    while sleep "$STEP_PULSE_SEC" && kill -0 "$$" 2>/dev/null; do
+      printf '  … %s: идёт «%.60s», %d мин\n' "$CURRENT_STEP" "$1" $(( (SECONDS - t0) / 60 ))
+    done
+  ) </dev/null &
+  PULSE_PID=$!
+}
+пульс_стоп() {
+  [[ -n "$PULSE_PID" ]] || return 0
+  kill "$PULSE_PID" 2>/dev/null || true
+  wait "$PULSE_PID" 2>/dev/null || true
+  PULSE_PID=""
+}
+
+# Единственная дверь всех команд шагов: ввод закрыт, чтобы ни apt, ни чужая
+# обёртка не вставали на чтении терминала, как бы ни был запущен установщик.
+# Пульс останавливает финал, если команда упала и set -e вышел из функции.
 делай() { # печатает команду; в живом режиме исполняет (eval — ради пайпов/редиректов)
   printf '  + %s\n' "$1"
   CURRENT_CMD="$1"   # для trap ERR: печатать саму команду, а не «eval "$1"»
-  if (( ! DRY )); then eval "$1"; fi
+  if (( ! DRY )); then
+    пульс_старт "$1"
+    eval "$1" </dev/null
+    пульс_стоп
+  fi
 }
 
 делай_тихо() { # исполняет без печати команды (для команд с секретами печатаем легенду)
   printf '  + %s\n' "$1"
   CURRENT_CMD="$1 (реальная команда скрыта — секрет)"
-  if (( ! DRY )); then eval "$2"; fi
+  if (( ! DRY )); then
+    пульс_старт "$1"
+    eval "$2" </dev/null
+    пульс_стоп
+  fi
 }
 
 проверка() { # проверка "имя шага" "описание" "команда-проверка" "команда диагностики"
@@ -749,6 +782,24 @@ if (( SELFTEST )); then
       && printf '  ок    расписание из данных пакета проходит сверку шага 9\n' \
       || { printf '  ПЛОХО расписание из данных пакета не проходит сверку шага 9 — установка встанет\n'; ok_flag=0; }
   fi
+  # БОЛЬНОЙ СЛУЧАЙ 10.11.2026: apt под playwright читал терминал и вставал навсегда.
+  # Команда шага, читающая stdin, обязана получить EOF, а не ждать; ввод держит
+  # открытым fifo, поэтому незакрытый ввод виснет и проба убивает его по пределу.
+  st_dir="$(mktemp -d /tmp/ustanovit-selftest-stdin.XXXXXX)"
+  mkfifo "$st_dir/in"; exec 7<>"$st_dir/in"
+  ( делай 'cat >/dev/null' ) >/dev/null <&7 & st_pid=$!
+  for _ in 1 2 3 4 5 6 7 8 9 10; do kill -0 "$st_pid" 2>/dev/null || break; sleep 0.5; done
+  if kill -0 "$st_pid" 2>/dev/null; then
+    kill "$st_pid" 2>/dev/null; printf '  ПЛОХО команда шага читает stdin и виснет (ввод не закрыт)\n'; ok_flag=0
+  else
+    printf '  ок    команда шага не висит на stdin\n'
+  fi
+  exec 7<&-; rm -rf "$st_dir"
+  # пульс: долгая команда обязана подавать голос в лог
+  st_out="$(STEP_PULSE_SEC=1 делай 'sleep 2.5')"
+  [[ "$st_out" == *"идёт"* ]] \
+    && printf '  ок    долгая команда шага пишет пульс\n' \
+    || { printf '  ПЛОХО долгая команда шага молчит без пульса\n'; ok_flag=0; }
   (( ok_flag )) && { echo "SELFTEST: зелёный (17 путей, включая улику живой установки 11.08 и стоп шага 9 13.10)"; exit 0; }
   exit 1
 fi
@@ -773,9 +824,9 @@ fi
 # СПИСОК ОДИН: он же печатается в отказе. Два списка одного и того же
 # расходятся молча, и расходится тот, который реже читают.
 UNIFIED_CANDIDATES=(
-  "$SCRIPT_DIR/../UNIFIED" "$SCRIPT_DIR/UNIFIED" "$SCRIPT_DIR/../../UNIFIED"
-  "$SCRIPT_DIR/sluzhebnoe/UNIFIED" "$SCRIPT_DIR/../sluzhebnoe/UNIFIED"
-  "$SCRIPT_DIR/../../sluzhebnoe/UNIFIED"
+  "$SCRIPT_DIR/UNIFIED" "$SCRIPT_DIR/sluzhebnoe/UNIFIED"
+  "$SCRIPT_DIR/../UNIFIED" "$SCRIPT_DIR/../sluzhebnoe/UNIFIED"
+  "$SCRIPT_DIR/../../UNIFIED" "$SCRIPT_DIR/../../sluzhebnoe/UNIFIED"
 )
 UNIFIED_SRC=""
 for cand in "${UNIFIED_CANDIDATES[@]}"; do
@@ -893,7 +944,7 @@ AGENT_USER="${ENV_AGENT_USER:-$AGENT_USER}"; PRODUCT_PATH="${ENV_PRODUCT_PATH:-$
   TG_CHAT_ID="$(узнать_chat_id "$BOT_TOKEN")" || TG_CHAT_ID=""
   if [[ -z "$TG_CHAT_ID" ]]; then
     while :; do
-      read -r -p "  chat_id владельца числом (узнать: написать боту @userinfobot): " TG_CHAT_ID
+      read -r -p "  chat_id владельца числом; для бота в группе — id группы вида -100… (узнать: @userinfobot или getUpdates, поле chat.id): " TG_CHAT_ID
       [[ "$TG_CHAT_ID" =~ ^-?[0-9]+$ ]] && break
       скажи "      chat_id — это число"
     done
@@ -973,25 +1024,10 @@ EOF
   отметить шаг_0
 }
 
-шаг_1() { # пользователь, права, служебные каталоги (01-SPEC §1)
-  local step="шаг 1 — пользователь и каталоги"; CURRENT_STEP="$step"
-  уже_сделан шаг_1 && { скажи "[$step] пропуск (--resume)"; return 0; }
-  заголовок "$step"
-  делай "id -u $AGENT_USER >/dev/null 2>&1 || adduser --disabled-password --gecos '' $AGENT_USER"
-  # Журнал юнитов агент читает группой. Она выдаётся здесь, ДО первого запуска агента
-  # и перезапуска шага 10: группы процесс берёт при старте.
-  делай "getent group systemd-journal >/dev/null && usermod -aG systemd-journal $AGENT_USER || true"
-  # panel-state — часть каркаса состояния, а не собственность шага 10: задание
-  # build-board пишет в него снимок доски и проверяется ШАГОМ 9, то есть ДО
-  # панели. Без каталога оно падало «No such file or directory» и объявлялось
-  # находкой установки (замер 14.10.2026, проба установки с нуля). Шаг 10
-  # доводит права до 2770 agent:harness-panel своим install -d.
-  # PROJECT_DIR может быть живым репозиторием продукта: рекурсивный chown на каждом
-  # прогоне менял владельца bind-томов compose (postgres, www-data) и ронял базу.
-  # Владелец назначается только самому каталогу и только когда мы его создали.
-  делай "[ -d '$PROJECT_DIR' ] || { mkdir -p '$PROJECT_DIR' && chown $AGENT_USER:$AGENT_USER '$PROJECT_DIR'; }"
-  делай "mkdir -p '$LOG_DIR' '$HEARTBEAT_DIR' '$STATE_DIR/panel-state' /var/backups/harness"
-  делай "chown -R $AGENT_USER:$AGENT_USER '$LOG_DIR' '$HEARTBEAT_DIR' '$STATE_DIR/panel-state' /var/backups/harness"
+шаг_1б() { # sudoers агента и печать эталона: БЕЗ штампа, на каждом прогоне до шага 7-а
+  # Раньше жили в шаге 1 и при `--resume` по штампу не доезжали до машины, обновлённой
+  # с 0.9.2: раскладка не могла напечатать эталон личности через это правило.
+  local step="шаг 1б — sudoers и печать эталона"; CURRENT_STEP="$step"
   # Возврат файлов входа: `sudo claude` рядом делает их root-овыми, и агент
   # теряет вход. Строка обязана совпадать с команда_возврата() в
   # scripts/check-login-expiry.py буква в букву — иначе sudo откажет.
@@ -1000,7 +1036,9 @@ EOF
   # Двери библиотеки (HARNESS_PROCESS_LIBRARY*) доходят до python как есть.
   # Список службы проверок читает python3 (библиотека процессов), а шаг 2 с его
   # установкой ещё впереди: на чистой машине здесь было бы «command not found».
-  делай "apt-get update && apt-get install -y python3 python3-yaml"
+  # Шаг идёт на каждом прогоне: при --resume python3 с yaml уже стоит, и без сети
+  # apt-get update ждал бы замок и ронял шаг.
+  делай "python3 -c 'import yaml' 2>/dev/null || { apt-get update && apt-get install -y python3 python3-yaml; }"
   local checks_ids checks_id checks_action checks_rules="/usr/bin/systemctl daemon-reload"
   checks_ids="$(python3 -I "$HARNESS_SRC/scripts/lib/process_library.py" checks-ids)" \
     || стоп "$step" "не прочитан список службы потока проверок" "python3 -I '$HARNESS_SRC/scripts/lib/process_library.py' checks-ids"
@@ -1019,10 +1057,38 @@ $AGENT_USER ALL=(root) NOPASSWD: /usr/bin/systemctl restart harness-agent, /usr/
 $AGENT_USER ALL=(root) NOPASSWD: /usr/bin/chown -hR $AGENT_USER\:$AGENT_USER /home/$AGENT_USER/.claude /home/$AGENT_USER/.claude.json
 $AGENT_USER ALL=(root) NOPASSWD: $checks_rules
 $AGENT_USER ALL=(root) NOPASSWD: /usr/local/sbin/harness-run-in-checks *
+$AGENT_USER ALL=(root) NOPASSWD: /usr/local/lib/harness/self-seal
 EOF
+  # Печать эталона личности: root-скрипт ставится root-владельцем, чтобы агент не мог
+  # подменить то, что зовёт sudo. Правило sudoers выше — без доводов и без env_keep.
+  делай "install -d -o root -g root -m 0755 /usr/local/lib/harness"
+  делай "install -o root -g root -m 0755 '$HARNESS_SRC/scripts/self-seal.sh' /usr/local/lib/harness/self-seal"
   проверка "$step" "sudoers корректен (visudo -cf)" \
     "visudo -cf /etc/sudoers.d/50-agent" \
     "visudo -cf /etc/sudoers.d/50-agent"
+}
+
+шаг_1() { # пользователь, права, служебные каталоги (01-SPEC §1)
+  local step="шаг 1 — пользователь и каталоги"; CURRENT_STEP="$step"
+  уже_сделан шаг_1 && { скажи "[$step] пропуск (--resume)"; return 0; }
+  заголовок "$step"
+  делай "id -u $AGENT_USER >/dev/null 2>&1 || adduser --disabled-password --gecos '' $AGENT_USER"
+  # Журнал юнитов агент читает группой. Она выдаётся здесь, ДО первого запуска агента
+  # и перезапуска шага 10: группы процесс берёт при старте.
+  делай "getent group systemd-journal >/dev/null && usermod -aG systemd-journal $AGENT_USER || true"
+  # panel-state — часть каркаса состояния, а не собственность шага 10: задание
+  # build-board пишет в него снимок доски и проверяется ШАГОМ 9, то есть ДО
+  # панели. Без каталога оно падало «No such file or directory» и объявлялось
+  # находкой установки (замер 14.10.2026, проба установки с нуля). Шаг 10
+  # доводит права до 2770 agent:harness-panel своим install -d.
+  # PROJECT_DIR может быть живым репозиторием продукта: рекурсивный chown на каждом
+  # прогоне менял владельца bind-томов compose (postgres, www-data) и ронял базу.
+  # Владелец назначается только самому каталогу и только когда мы его создали.
+  делай "[ -d '$PROJECT_DIR' ] || { mkdir -p '$PROJECT_DIR' && chown $AGENT_USER:$AGENT_USER '$PROJECT_DIR'; }"
+  делай "mkdir -p '$LOG_DIR' '$HEARTBEAT_DIR' '$STATE_DIR/panel-state' '$STATE_DIR/account' /var/backups/harness"
+  делай "chown -R $AGENT_USER:$AGENT_USER '$LOG_DIR' '$HEARTBEAT_DIR' '$STATE_DIR/panel-state' '$STATE_DIR/account' /var/backups/harness"
+  # Каталог аккаунтов смены: ключи не здесь, но состояние читает группа панели.
+  делай "chmod 750 '$STATE_DIR/account'"
   проверка "$step" "пользователь агента отвечает" \
     "[ \"\$(sudo -u $AGENT_USER whoami)\" = '$AGENT_USER' ]" \
     "sudo -u $AGENT_USER whoami; id $AGENT_USER"
@@ -1325,7 +1391,7 @@ EOF
   else
     скажи "  + пакет уже лежит в $pkg_dst — копирование пропущено"
   fi
-  делай "записать_версию_пакета '$AGENT_USER' '$SCRIPT_DIR' '$STATE_DIR/panel-state/версия-харнеса'"
+  делай "записать_версию_пакета '$AGENT_USER' '$pkg_dst' '$STATE_DIR/panel-state/версия-харнеса'"
   # harness.conf — раскладчик от agent не имеет прав на /etc; докладываем под root, живой не затираем.
   # Стоит ДО самотеста раскладчика: раскладка поверх живого проекта берёт каталог
   # копий из ключа BACKUP_DIR, и без живого конфига самотест целится в пустоту.
@@ -1344,6 +1410,11 @@ EOF
   # когда .git уже есть, и без этого агенту оставался ручной git init.
   делай "[ -d '$PROJECT_DIR/.git' ] || sudo -u $AGENT_USER git -C '$PROJECT_DIR' init -q"
   делай "mkdir -p '$LOG_DIR' && sudo -u $AGENT_USER bash '$rollout' | tee '$LOG_DIR/install-rollout.log'"
+  # Раскладчик говорит «эталон не напечатан» только в свой журнал; без этой строки
+  # в сводке владелец узнал бы о пропавшем правиле sudo лишь из журнала.
+  if (( ! DRY )) && grep -q 'эталон личности не напечатан' "$LOG_DIR/install-rollout.log" 2>/dev/null; then
+    FAILED_LIST+=("эталон личности не напечатан — добавьте правило sudoers: $AGENT_USER ALL=(root) NOPASSWD: /usr/local/lib/harness/self-seal — и повторите раскладку")
+  fi
   проверка "$step" "вывод раскладки: «UNIFIED доставлен» и «раскладка завершена»" \
     "grep -q 'UNIFIED доставлен' '$LOG_DIR/install-rollout.log' && grep -q 'раскладка завершена' '$LOG_DIR/install-rollout.log'" \
     "cat '$LOG_DIR/install-rollout.log'"
@@ -1642,7 +1713,7 @@ EOF
   # Тяжёлые демоны — только на запускаемость: полный прогон ревизии проекта зовёт
   # модель по всем областям харнеса и держит лок карты десятки минут (установка
   # первая установка 13.10.2026 встала на нём). Полный прогон — по расписанию.
-  local -a LIGHT_RUN=("nightly-gates=NIGHTLY_GATES_CMD=true" "nightly-mutations=NIGHTLY_MUTATIONS_CMD=true" "project-revision=REVIZIA_ENABLED=0")
+  local -a LIGHT_RUN=("nightly-gates=NIGHTLY_GATES_PROBE_ONLY=1" "nightly-mutations=NIGHTLY_MUTATIONS_PROBE_ONLY=1" "project-revision=REVIZIA_ENABLED=0")
   local d rc light pair
   for d in "${demons[@]}"; do
     light=""
@@ -1662,6 +1733,10 @@ EOF
       if (( rc == 0 )); then
         скажи "    exit=0 — $d зелёный"
         CHECKED_LIST+=("$step: $d в env -i, exit=0")
+      elif [[ "$d" = check-login-expiry && $rc -eq 2 && ! -f "/home/$AGENT_USER/.claude/.credentials.json" ]]; then
+        # Код 2 здесь — «входа ещё нет»: до `claude login` владельца он не лечится.
+        скажи "    exit=2 — $d ждёт входа владельца (не отказ)"
+        MANUAL_LIST+=("демон $d: зеленеет после входа владельца в claude (claude login под $AGENT_USER)")
       else
         скажи "    exit=$rc — $d УПАЛ (не прерываемся, свод в конце; лог: $LOG_DIR/install-demon-probe.log)"
         # Причина — в отчёт, а не только в журнал: на стенде журнал остаётся
@@ -2049,6 +2124,7 @@ MANUAL_FILE="$LOG_DIR/ОСТАЛОСЬ-РУКАМИ.txt"
   # кода 13.09.2026, F-10). Запасной код панели жил в этом же блоке.
   (( FINAL_DONE )) && return 0
   FINAL_DONE=1
+  пульс_стоп
   if (( DRY )); then
     осталось_руками
   elif ! осталось_руками | tee "$MANUAL_FILE"; then
@@ -2136,6 +2212,7 @@ trap 'финал' EXIT
 
 шаг_0
 шаг_1
+шаг_1б
 шаг_2
 шаг_2б
 шаг_2в
@@ -2152,4 +2229,7 @@ trap 'финал' EXIT
 шаг_11
 шаг_12
 шаг_13
-exit 0
+# Код выхода — итог, а не «дошли до конца»: упавший шаг не прячется за нулём. Список отказов
+# живёт только в этом прогоне, поэтому при --resume прошлый отказ, который теперь прошёл, в него не попадает.
+(( ${#FAILED_LIST[@]} == 0 )) && exit 0
+exit 1

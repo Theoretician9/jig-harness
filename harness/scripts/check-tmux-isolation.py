@@ -17,13 +17,30 @@ tmux при заданной переменной TMUX берёт сокет и�
 `tmux kill-session -t <имя>` без TMUX_TMPDIR — законная работа с боевым
 сервером (свои именованные сессии проб), её гейт не судит. Обёртки вида
 `stand_tmux "$s" kill-server` не судятся: судится строка, где стоит сам tmux.
+
+Второе правило — X (или
+`new`) в позиции команды (начало строки, после `;`, `&&`, `||`, `|`, `$(`,
+`then`, `do`, `else`) без своего сервера поднимает сессию на БОЕВОМ сервере
+рядом с сессией agent (11.11.2026 так делали восемь проб сторожа). Зелёно, если:
+  - в глобальных доводах назван сервер `-L` или `-S`;
+  - файл на верхнем уровне (без отступа) до этой строки делает
+    `export TMUX_TMPDIR=` и `unset … TMUX`;
+  - файл до этой строки кладёт первой в PATH обёртку tmux, а обёртка пишется
+    с `-L`/`-S`;
+  - над вызовом (или в той же строке) стоит метка `# tmux-боевой: <причина>` —
+    осознанный боевой сервер (сам запуск агента) или долг; метки гейт печатает.
+Комментарии и тела heredoc не судятся, строки с обратной косой в конце склеиваются. `own_tmux`,
+`"$REAL_TMUX"`, `tmux` как довод (`mkproc … tmux new-session`) и массив
+`X=(tmux new-session …)` — не вызов. Правило живёт в этом файле, а не в новом:
+ему нужны те же разбор строк с продолжениями, обход дерева, самотест и ворота.
+
 Файлы .py не судятся: в дереве tmux через subprocess с TMUX_TMPDIR зовёт одна
 проба, и окружение у неё — собранный с нуля словарь.
 
     python3 scripts/check-tmux-isolation.py              # дерево
     python3 scripts/check-tmux-isolation.py <файл…>      # названные файлы
     python3 scripts/check-tmux-isolation.py --selftest
-Код возврата: 0 — чисто, 1 — есть опасная уборка.
+Код возврата: 0 — чисто, 1 — есть опасная уборка или new-session на боевом сервере.
 """
 from __future__ import annotations
 
@@ -50,6 +67,17 @@ LINE_ISOLATED = re.compile(
 TOP_UNSET = re.compile(r"^unset\s+(?:\w+\s+)*?TMUX(?!\w)")
 
 
+HEREDOC = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_]\w*)\1")
+# tmux в позиции команды; `X=(tmux …` и `mkproc … tmux` сюда не попадают
+NEW_CALL = re.compile(r"(?:^|[;&|]|\$\(|\b(?:then|do|else)\b)\s*tmux(?=\s)(?P<rest>[^;&|]*)")
+NEW_ACTIONS = ("new-session", "new")
+GLOBAL_WITH_ARG = ("-L", "-S", "-f", "-c", "-T")
+TOP_EXPORT_TMPDIR = re.compile(r"^export\s+TMUX_TMPDIR=")
+TOP_PATH_FIRST = re.compile(r"^(?:export\s+)?PATH=[\"']?(?!\$\{?PATH\b)\S+?:")
+WRAPPER_WRITE = re.compile(r"exec\b.*\s-[LS]\s.*/tmux\b")
+BATTLE_MARK = "tmux-боевой:"
+
+
 def logical_lines(text: str) -> list[tuple[int, str]]:
     """(номер первой физической строки, команда) с склеенными продолжениями `\\`."""
     out, buf, start = [], "", 0
@@ -63,6 +91,25 @@ def logical_lines(text: str) -> list[tuple[int, str]]:
         buf = ""
     if buf:
         out.append((start, buf))
+    return out
+
+
+def scrubbed_lines(text: str) -> list[str]:
+    """Физические строки без комментариев и тел heredoc (номера строк сохраняются)."""
+    out, end_tag = [], None
+    for line in text.splitlines():
+        if end_tag is not None:
+            if line.strip() == end_tag:
+                end_tag = None
+            out.append("")
+            continue
+        if line.lstrip().startswith("#"):
+            out.append("")
+            continue
+        out.append(line)
+        opened = HEREDOC.search(line)
+        if opened:
+            end_tag = opened.group(2)
     return out
 
 
@@ -88,6 +135,51 @@ def findings(text: str) -> list[int]:
     return bad
 
 
+def tmux_action(rest: str) -> tuple[str, bool]:
+    """(действие, назван ли сервер) по доводам после слова tmux."""
+    named, tokens = False, rest.split()
+    i = 0
+    while i < len(tokens):
+        word = tokens[i]
+        if word in GLOBAL_WITH_ARG:
+            named = named or word in ("-L", "-S")
+            i += 2
+        elif word.startswith("-"):
+            named = named or word[:2] in ("-L", "-S")
+            i += 1
+        else:
+            return word, named
+    return "", named
+
+
+def new_session_verdicts(text: str) -> dict[int, str]:
+    """Номер строки с `tmux new-session` → «bad» (мимо своего сервера) или «marked»."""
+    raw = text.splitlines()
+    lines = logical_lines("\n".join(scrubbed_lines(text)))
+    top_unset = [n for n, line in lines if TOP_UNSET.match(line)]
+    top_export = [n for n, line in lines if TOP_EXPORT_TMPDIR.match(line)]
+    top_path = [n for n, line in lines if TOP_PATH_FIRST.match(line)]
+    wrapper = [n for n, line in lines if WRAPPER_WRITE.search(line)]
+    verdicts = {}
+    for number, line in lines:
+        for call in NEW_CALL.finditer(line):
+            action, named = tmux_action(call.group("rest"))
+            if action not in NEW_ACTIONS or named:
+                continue
+            before = lambda found: any(n < number for n in found)
+            if (before(top_export) and before(top_unset)) or (before(top_path) and before(wrapper)):
+                continue
+            near = raw[number - 2] if number >= 2 else ""
+            marked = BATTLE_MARK in near or BATTLE_MARK in raw[number - 1]
+            verdicts[number] = "marked" if marked else "bad"
+    return verdicts
+
+
+def own_server_findings(text: str) -> list[int]:
+    """Номера строк, где tmux new-session уходит на боевой сервер без метки."""
+    return sorted(n for n, v in new_session_verdicts(text).items() if v == "bad")
+
+
 def tree_files(root: Path) -> list[Path]:
     files = []
     for top in SCAN_DIRS:
@@ -99,19 +191,30 @@ def check(files: list[Path]) -> int:
     if not files:
         print("[изоляция tmux] ОТКАЗ: судить нечего — список файлов пуст")
         return 1
-    bad = []
+    bad, own, marked = [], [], []
     for path in files:
-        for number in findings(path.read_text(encoding="utf-8", errors="replace")):
-            shown = path.relative_to(ROOT) if path.is_relative_to(ROOT) else path
-            bad.append(f"{shown}:{number}")
+        text = path.read_text(encoding="utf-8", errors="replace")
+        shown = path.relative_to(ROOT) if path.is_relative_to(ROOT) else path
+        bad += [f"{shown}:{n}" for n in findings(text)]
+        for number, verdict in new_session_verdicts(text).items():
+            (own if verdict == "bad" else marked).append(f"{shown}:{number}")
     if bad:
         print(f"[изоляция tmux] УБОРКА МИМО СВОЕГО СЕРВЕРА: {len(bad)}")
         for place in bad:
             print(f"  ✗ {place}")
         print("  Починка: `unset TMUX TMUX_PANE` в начале файла или явный сервер — "
               "`env -u TMUX tmux -S <сокет стенда> kill-server`")
+    if own:
+        print(f"[изоляция tmux] new-session НА БОЕВОМ СЕРВЕРЕ: {len(own)}")
+        for place in sorted(own):
+            print(f"  ✗ {place}")
+        print("  Починка: `unset TMUX TMUX_PANE` и `export TMUX_TMPDIR=<каталог стенда>` "
+              "наверху файла, либо `tmux -L <имя> new-session`; осознанный боевой "
+              "сервер — метка `# tmux-боевой: <причина>` над вызовом")
+    if bad or own:
         return 1
-    print(f"[изоляция tmux] чисто: файлов {len(files)}, уборка tmux бьёт только в свой сервер")
+    print(f"[изоляция tmux] чисто: файлов {len(files)}, tmux бьёт только в свой сервер"
+          f" (с меткой «боевой»: {len(marked)})")
     return 0
 
 
@@ -154,6 +257,56 @@ def selftest() -> int:
             findings('export TMUX_TMPDIR="$S"\nown_tmux kill-server\n'))
     c.check("не этот класс: комментарий", [],
             findings('# TMUX_TMPDIR="$d" tmux kill-server\n'))
+    # ── второе правило: tmux new-session мимо своего сервера ──
+    bare = 'tmux new-session -d -s "$PANE" "exec $T/claude >> $T/pane.txt"\n'
+    c.check("БОЛЬНОЙ: голый new-session в начале строки", [1], own_server_findings(bare))
+    c.check("БОЛЬНОЙ: короткое `new` после &&", [2],
+            own_server_findings('cd "$T" &&\ntrue && tmux new -d -s a\n'))
+    c.check("БОЛЬНОЙ: new-session в $(…) и после `;`", [1, 2],
+            own_server_findings('x=$(tmux new-session -d -s a)\ntrue; tmux new-session -d -s b\n'))
+    c.check("БОЛЬНОЙ: строка с продолжением названа по первой строке", [2],
+            own_server_findings('true\ntmux new-session -d \\\n    -s a\n'))
+    c.check("БОЛЬНОЙ: export TMUX_TMPDIR без unset TMUX", [2],
+            own_server_findings('export TMUX_TMPDIR="$T/t"\n' + bare))
+    c.check("БОЛЬНОЙ: unset TMUX без export TMUX_TMPDIR", [2],
+            own_server_findings('unset TMUX\n' + bare))
+    c.check("БОЛЬНОЙ: export и unset ПОСЛЕ вызова", [1],
+            own_server_findings(bare + 'export TMUX_TMPDIR="$T/t"\nunset TMUX\n'))
+    c.check("БОЛЬНОЙ: export и unset с отступом (в функции) не наверху", [4],
+            own_server_findings('f() {\n    export TMUX_TMPDIR="$T/t"; unset TMUX\n}\n' + bare))
+    c.check("БОЛЬНОЙ: PATH с обёрткой, но обёртка без -L/-S", [3],
+            own_server_findings('printf \'#!/bin/sh\\nexec tmux "$@"\\n\' > "$T/b/tmux"\n'
+                                'export PATH="$T/b:$PATH"\n' + bare))
+    c.check("здоровый: -L имя сервера", [],
+            own_server_findings('tmux -L w1t new-session -d -s a\n'))
+    c.check("здоровый: -S сокет", [],
+            own_server_findings('tmux -S "$sock" new -d -s a\n'))
+    c.check("здоровый: export TMUX_TMPDIR и unset TMUX наверху", [],
+            own_server_findings('unset TMUX TMUX_PANE\nexport TMUX_TMPDIR="$T/t"\n' + bare))
+    c.check("здоровый: обёртка с -L первой в PATH", [],
+            own_server_findings('printf \'#!/bin/sh\\nexec "%s" -L "%s" "$@"\\n\' "$R" "$N" > "$T/b/tmux"\n'
+                                'export PATH="$T/b:$PATH"\n' + bare))
+    c.check("здоровый: комментарий", [],
+            own_server_findings('# tmux new-session -d -s a\n    # tmux new-session -d -s a\n'))
+    c.check("здоровый: тело heredoc", [],
+            own_server_findings('cat > "$f" <<SH\ntmux new-session -d -s a\nSH\n'
+                                "cat <<'EOF'\n  tmux new-session -d\nEOF\ntrue\n"))
+    c.check("БОЛЬНОЙ: строка после heredoc судится", [4],
+            own_server_findings('cat <<SH\nx\nSH\ntmux new-session -d -s a\n'))
+    c.check("здоровый: tmux как довод mkproc", [],
+            own_server_findings('mkproc "$T/p" tmux new-session -d -s a\n'))
+    c.check("здоровый: own_tmux и $REAL_TMUX", [],
+            own_server_findings('own_tmux new-session -d -s a\n"$REAL_TMUX" new-session -d\n'))
+    c.check("здоровый: массив TMUX_TOP=(tmux …) не вызов", [],
+            own_server_findings('TMUX_TOP=(tmux new-session -d -s agent)\n'))
+    c.check("здоровый: другое действие (kill-session, has-session)", [],
+            own_server_findings('tmux kill-session -t a\ntmux has-session -t a\n'))
+    c.check("здоровый: `new` как имя сессии, не действие", [],
+            own_server_findings('tmux send-keys -t new Enter\n'))
+    c.check("известный долг: метка tmux-боевой над вызовом", [],
+            own_server_findings('# tmux-боевой: так живёт агент\n' + bare))
+    c.check("БОЛЬНОЙ: метка не над вызовом, а выше через строку", [3],
+            own_server_findings('# tmux-боевой: x\ntrue\n' + bare))
     print(f"[изоляция tmux] самотест: путей {c.paths}, неудач {c.failures}")
     return 0 if c.ok else 1
 

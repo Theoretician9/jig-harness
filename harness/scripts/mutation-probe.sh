@@ -52,6 +52,11 @@ esac
 # shellcheck disable=SC1091
 . "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/lib/config.sh"
 konf_zagruzit
+# Механизм вне дерева проекта (установщик) в данных назван от пакета: `${STARTER_DIR}/USTANOVIT.sh`.
+# Абсолютный путь в данных уезжает в публичную сборку с чужим домашним каталогом и ломает её.
+MECH_STARTER="${MECH_STARTER:-$(python3 -I -c 'import sys; sys.path.insert(0, sys.argv[1]); import config; print(config.katalog_paketa())' \
+    "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/lib" 2>/dev/null || true)}"
+export MECH_STARTER
 # Значения по умолчанию — ПОСЛЕ загрузчика, иначе они глушат файл конфига.
 # Предел одного запуска: зависшая проба иначе съедает всю ночь.
 MUTATION_RUN_TIMEOUT_S="${MUTATION_RUN_TIMEOUT_S:-180}"
@@ -60,7 +65,9 @@ MUTATION_RUN_TIMEOUT_S="${MUTATION_RUN_TIMEOUT_S:-180}"
 # Пусто — без срока (ручной запуск).
 MUTATION_DEADLINE_TS="${MUTATION_DEADLINE_TS:-}"
 MUT_LOG="$LOG_DIR/мутации.log"
-TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
+# Префикс harness-run-: голый mktemp проб внутри наследует TMPDIR, и уборка /tmp его опознаёт.
+TMP=$(mktemp -d -t harness-run-XXXXXX); trap 'rm -rf "$TMP"' EXIT
+export TMPDIR="$TMP"
 # mktemp даёт 0700: проба, зовущая копию от второго пользователя группы, иначе её не откроет.
 chmod 0755 "$TMP"
 OK=0; BAD=0; SKIPPED=0; DROPPED=0
@@ -342,6 +349,12 @@ import yaml
 ИНВАРИАНТЫ = os.environ.get("HARNESS_INVARIANTS") or "harness/config/invariants.yaml"
 ПРОБЫ = os.environ.get("HARNESS_PROBE_MUTATIONS") or "harness/config/probe-mutations.yaml"
 
+МЕХ_ПАКЕТ = os.environ.get("MECH_STARTER", "")
+
+
+def путь_механизма(путь):
+    return путь.replace("${STARTER_DIR}", МЕХ_ПАКЕТ, 1) if isinstance(путь, str) else путь
+
 
 def данные(путь: str, ключ: str):
     """Содержимое носителя. Нечитаемый файл — ОТКАЗ, а не пустота: «не
@@ -374,7 +387,7 @@ def строки():
         случаи = список(з.get("мутация_случай"))
         for н, выражение in enumerate(выражения):
             имя = случаи[н] if н < len(случаи) else "случай не назван"
-            итог.append((з.get("механизм"), выражение, f"{проба}: {имя}"))
+            итог.append((путь_механизма(з.get("механизм")), выражение, f"{проба}: {имя}"))
     return итог
 
 
@@ -705,6 +718,19 @@ source "$d/свежий_сосед.sh"; source "$d/свежий_механизм
         SELF_BAD=1
     fi
 
+    # БОЛЬНОЙ СЛУЧАЙ: механизм вне дерева (установщик пакета) назван в данных от пакета,
+    # без абсолютного пути: в публичной сборке домашний каталог другой.
+    mkdir -p "$STAND/пакет"; cp "$seeing" "$STAND/пакет/установщик.sh"
+    printf 'пробы:\n  scripts/t.sh:\n    механизм: ${STARTER_DIR}/установщик.sh\n    доказательство: bash x\n    мутация: "s/^PRIZNAK=1/ПРИЗНАК=0/"\n    мутация_случай: "от пакета"\n' > "$STAND/от-пакета.yaml"
+    OUT=$(MECH_STARTER="$STAND/пакет" HARNESS_INVARIANTS="$STAND/пустая.yaml" HARNESS_PROBE_MUTATIONS="$STAND/от-пакета.yaml" \
+          bash "${BASH_SOURCE[0]}" --сверить-тексты 2>&1); RC=$?
+    if [ "$RC" = 0 ] && printf '%s' "$OUT" | grep -q "не встало: 0"; then
+        printf '  ок    механизм от ${STARTER_DIR} найден в пакете\n'
+    else
+        printf '  ПЛОХО механизм от ${STARTER_DIR}: код %s, вывод «%s»\n' "$RC" "$OUT"
+        SELF_BAD=1
+    fi
+
     # БОЛЬНОЙ СЛУЧАЙ 27.10.2026: с --механизм в копию попадал один корень
     # механизма, а проверки читают СОСЕДНИЙ (scripts/ → harness/config,
     # harness/demons → scripts/lib). Чистая копия краснела, и каждая мутация
@@ -1012,11 +1038,21 @@ import io, os, sys, yaml
 ИНВАРИАНТЫ = os.environ.get("HARNESS_INVARIANTS") or "harness/config/invariants.yaml"
 ПРОБЫ = os.environ.get("HARNESS_PROBE_MUTATIONS") or "harness/config/probe-mutations.yaml"
 
+МЕХ_ПАКЕТ = os.environ.get("MECH_STARTER", "")
+
+
+def путь_механизма(путь):
+    return путь.replace("${STARTER_DIR}", МЕХ_ПАКЕТ, 1) if isinstance(путь, str) else путь
+
+
 ФИЛЬТР = os.environ.get("MECH_FILTER") or ""
 d = yaml.safe_load(io.open(ИНВАРИАНТЫ, encoding="utf-8"))["инварианты"]
 класс_d = {}
 if os.path.exists(ПРОБЫ):
     класс_d = (yaml.safe_load(io.open(ПРОБЫ, encoding="utf-8")) or {}).get("пробы") or {}
+for з in класс_d.values():
+    if з and з.get("механизм"):
+        з["механизм"] = путь_механизма(з["механизм"])
 # Корни берутся ДО отбора: проверки механизма читают СОСЕДНИЙ корень
 # (scripts/ → harness/config, harness/ → scripts/lib), и копия, собранная по
 # одному отобранному механизму, краснела бы «чистой копией» без вины механизма.

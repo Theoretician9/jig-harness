@@ -24,8 +24,8 @@
 # toolUseResult.status=async_launched, SendMessage, <task-notification> в трёх
 # типах записей, отказ isApiErrorMessage); текст переписки выдуман.
 #
-# tmux-сессии стенда — с префиксом warden-subwork-, чистятся по префиксу до и
-# после. Имена переменных латиницей (память: cyrillic-in-bash-names).
+# tmux стенда — свой сервер на прогон (-L warden-subwork-<pid>), гасится по
+# выходу. Имена переменных латиницей (память: cyrillic-in-bash-names).
 set -uo pipefail
 export LC_ALL=C.UTF-8 PYTHONDONTWRITEBYTECODE=1
 
@@ -41,23 +41,34 @@ for f in "$DAEMON" "$WATCHER"; do
 done
 
 PREFIX="warden-subwork-"
-# Мусор — только панели прогонов, чей процесс умер: соседний прогон (ночные
-# ворота рядом с пробой мутаций) иначе теряет панель посреди проверки.
-sweep_panes() {  # печатает, сколько сессий стенда убрано
-    local name count=0
-    while IFS= read -r name; do
-        case "$name" in "$PREFIX"*)
-            kill -0 "${name#"$PREFIX"}" 2>/dev/null && continue
-            tmux kill-session -t "=$name" 2>/dev/null && count=$((count + 1)) ;;
-        esac
-    done < <(tmux ls -F '#{session_name}' 2>/dev/null)
-    printf '%s\n' "$count"
-}
-echo "мусор прежних прогонов: tmux-сессий стенда убрано $(sweep_panes)"
-
 T=$(mktemp -d -t warden-subwork.XXXXXX)
 PANE="${PREFIX}$$"
-cleanup() { tmux kill-session -t "=$PANE" 2>/dev/null; rm -rf "$T"; }
+# Свой сервер tmux на прогон: панель стенда на боевом сервере ворота выката
+# читали как работу агента (11.11.2026). Обёртка первой в PATH ведёт туда и
+# голый tmux сторожа; TMUX снят, иначе клиент пошёл бы по сокету из неё.
+# Сокет — в каталоге стенда (TMUX_TMPDIR) и уходит вместе с ним.
+REAL_TMUX="$(command -v tmux)"
+SOCK_NAME="$PANE"
+unset TMUX TMUX_PANE
+export TMUX_TMPDIR="$T/tmux"
+mkdir -p "$T/tmux-bin" "$TMUX_TMPDIR"
+printf '#!/bin/sh\nexec "%s" -L "%s" "$@"\n' "$REAL_TMUX" "$SOCK_NAME" > "$T/tmux-bin/tmux"
+chmod +x "$T/tmux-bin/tmux"
+export PATH="$T/tmux-bin:$PATH"
+# Проба личности сторожа (self-prompt-live.sh) со стенда ушла бы фоном к модели
+# через claude-run.sh стенда, а её тревога легла бы в канал стенда посреди
+# чужого случая. Стенду — пустая проба.
+printf '#!/bin/sh\nexit 0\n' > "$T/self-prompt-live.sh"
+export SELF_PROMPT_LIVE_SH="$T/self-prompt-live.sh"
+# Прогон, убитый KILL-ом, ловушку не зовёт: панель сама гасит свой сервер,
+# когда прогона или каталога стенда не стало. Сервер — по pid из $TMUX панели:
+# сокет к тому мигу может уйти вместе с каталогом. Сторож отвязан двойным
+# fork: потомок claude в панели сторож сессий читал бы как работу агента.
+pane_cmd() {  # $1 = команда панели → она же со сторожем жизни стенда
+    printf '( { while kill -0 %s && [ -d %q ]; do sleep 2; done; s=${TMUX#*,}; kill "${s%%%%,*}"; } >/dev/null 2>&1 & ); %s' \
+        "$$" "$T" "$1"
+}
+cleanup() { "$REAL_TMUX" -L "$SOCK_NAME" kill-server 2>/dev/null; rm -rf "$T"; }
 trap cleanup EXIT
 
 SID="5d2a9c1e-7b3f-4e10-9a8d-0c1b2a3f4e5d"
@@ -468,7 +479,9 @@ stand_a() {  # свежий LOG_DIR, карта с работой, новая п
     echo "слово" > "$T/log/inbox/обработано/old.txt"
     touch -d "@$(( $(date +%s) - 7200 ))" "$T/log/inbox/обработано/old.txt"
     tmux kill-session -t "$PANE" 2>/dev/null
-    tmux new-session -d -s "$PANE" "exec $T/claude >> $T/pane.txt"
+    # Агент — в каталоге проекта, как у боевого start-agent.sh: иначе сторож
+    # законно зовёт «запущен не из проекта», и случай судит не ту ветку.
+    tmux new-session -d -s "$PANE" -c "$T/project" "$(pane_cmd "exec $T/claude >> $T/pane.txt")"
     wait_until 5 pane_is_claude \
         || { echo "ПЛОХО: подставной агент не встал в панель за 5 с — проверять нечего"; exit 1; }
 }
@@ -544,6 +557,11 @@ main_answers_scene() {  # главная: ответы в мигах VMAIN, на
 
 echo "── А. Б1: 25.10 01:50 — главная 21 мин у приглашения, помощник работает ──"
 stand_a
+# Панель стенда — на своём сервере -L, а не на боевом: 11.11 две такие панели
+# висели рядом с сессией агента, и ворота выката читали их как работу.
+on_server() { "$@" has-session -t "=$PANE" 2>/dev/null && echo да || echo нет; }
+case_check "стенд: панель на своём сервере tmux (-L), на боевом её нет" "да;нет" \
+    "$(on_server "$REAL_TMUX" -L "$SOCK_NAME");$(on_server env -u TMUX -u TMUX_TMPDIR "$REAL_TMUX")"
 scene "$A_DIR" <<EOF
 main launch 2700 $H0 Код Ф-а
 main launch 2430 $H1 $DESC1

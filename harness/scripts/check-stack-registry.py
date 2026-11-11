@@ -39,6 +39,8 @@ NPM_INSTALL = re.compile(r"npm install -g\s+['\"\\]*((?:@[\w.-]+/)?[\w.-]+)")
 PIP_INSTALL = re.compile(r"pip['\"]?\s+install\s+(?:-\S+\s+)*([\w.-]+)")
 NPX_INSTALL = re.compile(r"npx -y playwright install-deps \w+")
 APT_INSTALL = re.compile(r"apt-get install\s+([^;&|\"})]*)")
+# Установщик ставит через обёртку apt_поставить (замок apt), прямой apt-get — тоже встречается.
+APT_WRAPPER = re.compile(r"apt_поставить\s+([^;&|\"})]*)")
 
 
 def registry_path():
@@ -78,7 +80,7 @@ def installer_items(texts):
         for line in text.split("\n"):
             if MESSAGE_LINE.match(line):
                 continue
-            for match in APT_INSTALL.finditer(line):
+            for match in (*APT_INSTALL.finditer(line), *APT_WRAPPER.finditer(line)):
                 for token in match.group(1).split():
                     if token.startswith("-"):
                         continue
@@ -184,6 +186,14 @@ def selftest():
         if got != expected:
             failed += 1
             print(f"  ПРОВАЛ {title}: расхождений {got}, ждали {expected}")
+    for title, line in (("apt-get install", 'делай "apt-get install -y git tmux"'),
+                        ("обёртка apt_поставить", 'делай "apt_поставить git tmux"'),
+                        ("определение обёртки не пакеты", "apt_поставить() { # git tmux")):
+        got = installer_items([line])[0]
+        want = set() if "()" in line else {"git", "tmux"}
+        if got != want:
+            failed += 1
+            print(f"  ПРОВАЛ {title}: пакеты {sorted(got)}, ждали {sorted(want)}")
     shape = {"имя": "перезагрузка", "чьё": "машина", "критичность": "высокая", "свежая": {"источник": "перезагрузка"},
              "текущая": {"команда": ["uname", "-r"]}, "безопасность": "перезагрузка", "задевает": [], "риск": "r"}
     door = {"дверь": "окно-ротации", "ключ": "AUTO_REBOOT_IN_ROTATION", "причина": "сама при смене сессии"}
@@ -196,7 +206,7 @@ def selftest():
         if got != expected:
             failed += 1
             print(f"  ПРОВАЛ {title}: замечаний {got}, ждали {expected}")
-    print(f"check-stack-registry --selftest: случаев {len(cases) + len(shape_cases)}, неудач {failed}")
+    print(f"check-stack-registry --selftest: случаев {len(cases) + 3 + len(shape_cases)}, неудач {failed}")
     return 1 if failed else 0
 
 

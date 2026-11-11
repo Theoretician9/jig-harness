@@ -197,8 +197,8 @@
     доказательство: python3 scripts/test_live_check_daemon.py
     подмена: HARNESS_LIVE_CHECK_DAEMON_TOOL
     мутация:
-    - s/возраст <= потолок/возраст >= 0/
-    - s/if нужно_содержимое and not файл.read_text(errors="replace").strip():/if False:/
+    - 's@^        if not свеж:$@        if False:@'
+    - 's@bool(файл.read_text(errors="replace").strip())@True@'
     - s/ЗАПАС_ПЕРИОДОВ = 3/ЗАПАС_ПЕРИОДОВ = 100000/
     - s/в расписании его нет и юнита в данных ему/строки не нашлось и юнита в данных ему/
     - 's@    if если_активна != "active":@    if False:@'
@@ -206,9 +206,21 @@
     - 's@    if сказал:@    if False:@'
     - 's@    if стало <= было:@    if False:@'
     - 's@    if not законно:@    if False:@'
+    - 's@^    if подпись:$@    if False:@'
+    - 's@^    if ПИШЕМ_СЛЕДЫ:$@    if True:@'
+    - 's@    if свеж and кончается_трассой(строки):@    if False:@'
+    - 's@ and not СЛОВА_ОБЁРТКИ.match(с)\]@]@'
+    - 's@ and _возраст_мин(метка) <= потолок)@)@'
+    - 's@{_дата_события(годные\[0\], файл)}@@'
+    - 's@СЛЕДЫ if ПИШЕМ_СЛЕДЫ else врем@СЛЕДЫ@'
+    # Поле «как пишет журнал» (ч.6): значение — из данных, не догадка прибора.
+    - 's@("как_пишет_журнал") or {}).get(механизм)$@("как_пишет_журнал") or {}).get(механизм, "каждый-прогон")@'
+    - 's@    if значение not in КАК_ПИШЕТ:@    if False:@'
+    - 's@"молчит-при-успехе": ("кроновый", "свой", "метка", "последняя запись")@"молчит-при-успехе": ("кроновый", "свой", "журнал", "")@'
+    - 's@"по-событию": ("свой", "кроновый", "метка", "последнее событие")@"по-событию": ("свой", "кроновый", "журнал", "")@'
     мутация_случай:
     - журнал старше своего расписания больше не отказ — мёртвый сторож зачтён живым
-    - пустой журнал проходит за доказательство прогона
+    - пустой журнал судится как непустой — отказ «журнал пуст» потерян, свой журнал демона не читается
     - потолок молчания снят — мёртвый сторож и метка-старуха зачтены
     - неприменимость предиката A1 больше не называется своими словами
     - неработающий юнит systemd зачтён за живую службу — класс A2 доказывался бы ничем
@@ -216,6 +228,40 @@
     - молчун, который ЗАГОВОРИЛ, зачтён молчащим — находка о нём стала доказательством
     - молчун, не обновивший метку, зачтён бегавшим: молчание доказывало бы само себя
     - условие молчания в конфиге не судится — ветвь стала отмазкой любому онемевшему демону
+    - демон по событию зачтён «кроновый прогон доказан» — давнее событие выдано за последний прогон (Р1)
+    - сухой прогон без «--записать» пишет живые следы — «увидели» чужих записей перестаёт быть подстрокой следа (Р3)
+    - свежий журнал кончается трассой, а демон зачтён — цитата падения стала доказательством
+    - слова обёртки run-background.sh идут за слова демона — демон, который не запускался, зачтён
+    - метка демона по событию не судится по возрасту — старая метка доказывает прогон
+    - дата последнего события не названа в вердикте «жив»
+    - сухой прогон молчуна пишет живые следы (Р3)
+    - поля «как пишет журнал» нет — прибор угадывает «каждый-прогон» вместо отказа
+    - значение поля вне трёх допустимых не отказ
+    - молчит-при-успехе судится как каждый-прогон — старые ошибки кронового журнала убивают живого демона
+    - по-событию судится как каждый-прогон — давнее событие при свежей метке стало отказом
+  scripts/test_live_check_probe.py:
+    механизм: scripts/live-check-probe.py
+    # Проба сама зовёт прибор мутаций (двор): на глубине 1 без двери стенда — отказ кодом 2.
+    доказательство: env HARNESS_MUTPROBE_SELFTEST_INNER=1 python3 scripts/test_live_check_probe.py
+    подмена: HARNESS_LIVE_CHECK_PROBE_TOOL
+    мутация:
+    # С1: причина «не-проверяемо» — только из закрытого списка.
+    - 's@    return причина if any(причина.startswith(п) for п in допустимые) else ""@    return причина@'
+    # С2: свой LOG_DIR выборки — ночной вердикт в мутации.log не подменяется.
+    - 's@                  "LOG_DIR": str(журнал), "HARNESS_LOG_DIR": str(журнал)})@                  })@'
+    # С3: коды возврата.
+    - 's@    return True, f"{проба}: не-проверяемо — {причина}", поля@    return False, f"{проба}: не-проверяемо — {причина}", поля@'
+    - 's@    return 1 if отказов else 0@    return 0@'
+    # --записать — единственный писатель состояния и следов.
+    - 's@        elif ПИШЕМ:@        else:@'
+    - 's@        if удача and ПИШЕМ:@        if удача:@'
+    мутация_случай:
+    - причина не из закрытого списка причины_непроверяемого проходит как «не-проверяемо» (С1)
+    - выборка пишет журнал мутаций в чужой LOG_DIR — ночной вердикт мутации.log подменён (С2)
+    - «не-проверяемо» отдаёт код 1 (С3)
+    - отказы отдают код 0 — «--всё» с дырой зелёный (С3)
+    - сухой прогон пишет состояние — «--записать» не единственный писатель
+    - сухой прогон кладёт следы в живой каталог
   scripts/test_live_check_sick.py:
     механизм: scripts/live-check-sick.py
     доказательство: python3 scripts/test_live_check_sick.py
@@ -310,10 +356,13 @@
     - s|if python3 "$PROJECT_DIR/scripts/pause.py" --идёт-ли 2>/dev/null; then|if false; then|
     - s|KOD_LIMITA=77|KOD_LIMITA=1|
     - 's|    \[ -f "$OTKAZ_SKAZANO" \] && return      # об этом отказе уже сказано|    return|'
+    # ветки 79 нет: код носителя разобран как обычный отказ (судья, «поток оборван», сообщение владельцу)
+    - 's@^KOD=\${PIPESTATUS\[0\]}$@&\n[ "$KOD" = 79 ] \&\& KOD=1@'
     мутация_случай:
     - на паузе владельца модель всё равно зовётся и владельцу пишут
     - отказ по лимиту отдаётся общим кодом 1 — демон не отличит его от неудачи
     - повторяющийся отказ доступа до владельца не доходит никогда
+    - '79: код отдан как есть, не 77/78/1 (оба вызова)'
   scripts/test_deploy_guard.py:
     механизм: scripts/deploy_guard.py
     доказательство: python3 scripts/test_deploy_guard.py
@@ -326,6 +375,19 @@
     - переиспользованный номер PID снова считается держателем — выкат встал на мёртвом локе
     - живой держатель моложе лока объявлен переиспользованным — ворота пропускают чужой выкат
     - причина протухшего лока не названа словом «держатель мёртв»
+  scripts/test_deploy_guard.py#isolation:
+    # Проба сама ставит помеху (свой «claude» в своём дереве) и отрезает
+    # занятость машины: ничей uid и пустой PROJECT_DIR. Мутация снимает отрез —
+    # случаи о локе обязаны покраснеть от помехи (f63cb51).
+    механизм: scripts/test_deploy_guard.py
+    доказательство: python3 scripts/test_deploy_guard.py
+    подмена: '-'
+    мутация:
+    - 's@HARNESS_OWN_UID=str(ничей_uid()), AGENT_PROC_ROOT@AGENT_PROC_ROOT@'
+    - 's@HARNESS_INSTALL_CONF=str(стендовый_install(двор, пусто))@HARNESS_INSTALL_CONF=str(стендовый_install(двор, КОРЕНЬ))@'
+    мутация_случай:
+    - '«свой» uid — живой: помеха пробы стала занятостью, случаи о локе судят машину'
+    - 'PROJECT_DIR — дерево пробы: помеха под нашим деревом стала занятостью'
   scripts/test_deploy_guard_own_user.py:
     механизм: scripts/deploy_guard.py
     доказательство: python3 scripts/test_deploy_guard_own_user.py
@@ -432,12 +494,8 @@
     - 's@return task if source in ("env", "map") else None@return task@'
     - 's@        fcntl.flock(fh, fcntl.LOCK_EX)@        pass@'
     - 's@agent_skill_guard.решение(payload)@(0, "")@'
-    - 's@elif warning:@elif False:@'
-    - 's@    events.emit(SRC, HEAVY_EVENT, "ok"@    (lambda *a, **k: None)(SRC, HEAVY_EVENT, "ok"@'
-    - 's@HEAVY_TYPES = ("", "general-purpose", "claude")@HEAVY_TYPES = ("", "general-purpose", "claude", "harness-worker")@'
     - 's@    elif task == NO_TASK:@    elif False:@'
     - 's@    if depth > MAX_DEPTH:@    if False:@'
-    - 's@if depth == MAX_DEPTH and agent_type in HEAVY_TYPES:@if False:@'
     - 's@    depth = caller + 1@    depth = caller@'
     - 's@int(json.loads(meta_path(payload, agent).read_text(encoding="utf-8"))\["spawnDepth"\])@0@'
     - 's@counted = by_lead == lead@counted = True@'
@@ -455,6 +513,12 @@
     - 's@^from launch_plan_lib import meta_path, tool_use_id_of    # noqa: E402$@from launch_plan_lib import meta_path; tool_use_id_of = lambda payload, agent: ""  # noqa: E402@'
     - 's@^from launch_plan_lib import meta_path, tool_use_id_of    # noqa: E402$@from launch_plan_lib import tool_use_id_of; meta_path = lambda payload, agent: Path(".нет")  # noqa: E402@'
     - 's@^def agent_model(tool_input: dict) -> str:$@def tool_use_id_of(payload, agent):\n    return ""\n\n\ndef agent_model(tool_input: dict) -> str:@'
+    # хук пускает Explore (тип без собранной карточки)
+    - 's@^def decide(payload: dict) -> tuple\[int, str\]:$@&\n    if (payload.get("tool_input") or {}).get("subagent_type") == "Explore":\n        return 0, ""@'
+    # хук не сверяет отпечаток: свои типы пускаются, какая бы строка ни стояла в карточке
+    - 's@^    if last == FINGERPRINT_PREFIX + label.removeprefix("Метка сборки: "):$@    if True:@'
+    # метка текущей сборки берётся не из эталона смены: правка роли без пересборки не замечается
+    - 's@^        etalon = Path(os.environ.get("SELF_ETALON_DIR") or builder.DEFAULT_ETALON)$@        etalon = Path("/нет/эталона")@'
     мутация_случай:
     - 'счёт не ведётся: запуски не засчитываются, третий запуск мелкой проходит'
     - 'потолок зашит в код, а не читается из pipeline.yaml'
@@ -471,12 +535,8 @@
     - 'трейлер Dev-Map из истории (прежняя задача) берётся задачей'
     - 'счёт без замка: пачка одновременных запусков проскакивает потолок'
     - 'запуск, отменённый сторожем скила, засчитывается'
-    - 'тяжёлый тип помощника не получает предупреждения о harness-worker'
-    - 'предупреждения не считаются: строки agent.heavy-type в журнале нет'
-    - 'лёгкий тип harness-worker получает предупреждение, будто тяжёлый'
     - 'запуск без задачи не считается: потолка при пустой карте нет'
     - 'глубина 3 не отказывается'
-    - 'тяжёлый тип на глубине 2 не отказывается'
     - 'глубина считается без единицы за самого запускаемого'
     - 'глубина всегда 0: meta.json не читается'
     - 'счёт управляющего ведётся по всем запускам: другой управляющий упирается в чужой счёт'
@@ -492,6 +552,9 @@
     - 'импорт tool_use_id_of заглушкой: SendMessage записал agent.resume с вызовом адресата'
     - 'импорт meta_path заглушкой: глубина 2, тип не задан — отказ с подсказкой harness-worker'
     - 'старая копия tool_use_id_of на стыке перекрывает импорт: SendMessage записал agent.resume с вызовом адресата'
+    - 'тип ''Explore'': отказ с подсказкой harness-explorer и harness-worker'
+    - 'harness-worker: чужой хвост метки — отказ «пересобери карточки»'
+    - 'роль исполнителя изменилась — harness-worker: отказ «пересобери карточки»'
   scripts/hooks/./test_agent_budget_guard.py:
     # launch_plan_lib.meta_path и tool_use_id_of: хук бюджета берёт их из библиотеки рядом с собой — проба зовётся из копии (06.11, замок общих конфигов).
     механизм: scripts/lib/launch_plan_lib.py
@@ -1256,7 +1319,7 @@
     - 's/asked_at - previous.ts < window and/True and/'
     - 's/^    if ask:$/    if True:/'
     - 's/^    seeded = \[p for p in removed if p in journal.seed_paths\]$/    seeded = removed/'
-    - 's/^        хвост += _removed_words(forward_archive)$/        pass/'
+    - 's/^        хвост += _removed_words(forward_archive) + версия_беда$/        хвост += версия_беда/'
     - 's@^    if off:$@    if False:@'
     - 's@^        if довезти:$@        if False:@'
     - 's@^            if итог.get("довезти"):$@            if False:@'
@@ -1972,14 +2035,18 @@
     доказательство: bash scripts/test_model_for.sh
     подмена: KONF_LIB_UNDER_TEST
     мутация:
-    - 's@cmd="$first --model $model$rest"@cmd="$cmd"@'
+    - 's@rest=" --model $model$rest"@rest="$rest"@'
     - 's@model=$(MODELS_CONF="$table" bash "$here/model-for.sh" смена)@model=sonnet@'
     - 's@!= \*" --model "\*@!= *" --NO "*@'
     - 's@!= \*" --model="\*@!= *" --NO="*@'
     - 's@if \[ -r "$table" \] && @if @'
     - 's@\[\[ "$first" == \*/claude \]\]@false@'
-    - 's@{ \[ "$first" = "claude" \] || @{ true || @'
+    - 's@if \[ "$first" = "claude" \] || @if true || @'
     - 's@"$here/model-for.sh" смена)@"$here/model-for.sh" смена 2>/dev/null)@'
+    # komanda_agenta не оборачивает (и модель не ставит)
+    - 's@^komanda_agenta() {.*@&\n    printf "env -u %s %s" "$NOSITEL_CHUZHOGO_VHODA" "$1"; return 0@'
+    # оборачивает только без --model (Н-1)
+    - 's@^komanda_agenta() {.*@&\n    case "$1" in *" --model "*) printf "env -u %s %s" "$NOSITEL_CHUZHOGO_VHODA" "$1"; return 0 ;; esac@'
     мутация_случай:
     - 'БОЛЬНОЙ чужой отчёт п.2: подъём без --model — claude получил модель смены из таблицы, носитель входа сорван'
     - 'БОЛЬНОЙ чужой отчёт п.2: подъём без --model — claude получил модель смены из таблицы, носитель входа сорван'
@@ -1989,6 +2056,8 @@
     - 'claude полным путём — модель смены тоже вставлена'
     - 'сосед: команда не claude (стенд сторожа) — без --model'
     - 'сосед: вида «смена» в таблице нет — команда без --model, отказ model-for виден в stderr'
+    - 'K13: «claude --model x …» → env -u CLAUDE_CODE_OAUTH_TOKEN bash <корень>/scripts/as-account.sh bash <корень>/scripts/claude-run.sh --класс оркестратор --model x …'
+    - '--model владельца в команде — через носитель, --model цел, второго нет'
   scripts/test_dispatcher_hang.sh:
     механизм: scripts/lib/pane.sh
     доказательство: bash scripts/test_dispatcher_hang.sh
@@ -2118,6 +2187,16 @@
     - 's@--(?:resolve|key)\\b"@--(?:resolve|key|is-green)\\b"@'
     - 's@        if повтор:@        if False:@'
     - 's@без_вызова = cmd\[:m.start(2)\] + "\\n" + cmd\[m.end(2):\]@без_вызова = cmd@'
+    # подсказка без готовой команды носителя (K29)
+    - 's@claude-run\.sh --класс прибор@claude --класс прибор@g'
+    # эталон слоя 1 снова доступен на запись: путь эталона уводится в сторону
+    - 's@^_ПУТЬ_ЭТАЛОНА = конф.корень_машины() + "/self"$@_ПУТЬ_ЭТАЛОНА = "/нет/self"@'
+    # Н2: вызов печати эталона из команды модели снова пропускается
+    - 's@^    if печать_эталона_в_команде(cmd):$@    if False:@'
+    # Н2: печать под интерпретатором (bash …/self-seal.sh) не распознаётся
+    - 's@^        if argv and _ИНТЕРПРЕТАТОР.fullmatch(os.path.basename(argv\[0\])):$@        if False:@'
+    # Н2: имя скрипта проекта self-seal.sh не считается печатью
+    - 's@^_ПЕЧАТЬ_ЭТАЛОНА = ("self-seal", "self-seal.sh")$@_ПЕЧАТЬ_ЭТАЛОНА = ("self-seal",)@'
     мутация_случай:
     - 'их 3.1: свой стенд <продукт>-ms2 гасится — граница (?![\w-])'
     - 'подчёркивание — часть имени: shopfront_x не продукт'
@@ -2133,6 +2212,11 @@
     - 'ALERT-6: --is-green — чтение, не запрещено'
     - 'БОЛЬНОЙ п.4-литерал: until pgrep -f <имя> …; tail …/<имя>.log'
     - 'сосед: имя только в шаблоне — совет подставляется в ту же команду'
+    - 'подсказка носителя на «claude -p --strict-mcp-config x»'
+    - 'запись в эталон личности /etc/harness/self'
+    - 'Н2: модель зовёт печать эталона sudo -n self-seal'
+    - 'Н2: печать под интерпретатором — скрипт проекта'
+    - 'Н2: печать по имени self-seal.sh под sudo'
   scripts/test_package_leftovers.py:
     механизм: scripts/check-package-leftovers.py
     доказательство: python3 scripts/test_package_leftovers.py
@@ -3437,6 +3521,29 @@
     мутация_случай:
     - 'самотест: окно-ротации с ключом требует argv'
     - 'самотест: окно-ротации без причины принято'
+  scripts/check-tmux-isolation.py:
+    # Второе правило гейта: tmux new-session мимо своего сервера. Самотест гоняет
+    # больные тексты (голый вызов, половина пары export/unset, обёртка без -L) и
+    # здоровые (-L, -S, пара наверху, обёртка с -L, комментарий, heredoc, метка).
+    механизм: scripts/check-tmux-isolation.py
+    доказательство: python3 scripts/check-tmux-isolation.py --selftest
+    подмена: '-'
+    мутация:
+    - 's@            if action not in NEW_ACTIONS or named:@            if action not in NEW_ACTIONS:@'
+    - 's@if (before(top_export) and before(top_unset)) or (before(top_path) and before(wrapper)):@if before(top_export) or (before(top_path) and before(wrapper)):@'
+    - 's@or (before(top_path) and before(wrapper)):@or before(top_path):@'
+    - 's@            end_tag = opened.group(2)@            end_tag = None@'
+    - 's@            if line.strip() == end_tag:@            if False:@'
+    - 's@marked = BATTLE_MARK in near or BATTLE_MARK in raw\[number - 1\]@marked = False@'
+    - 's@^NEW_ACTIONS = ("new-session", "new")@NEW_ACTIONS = ("new-session",)@'
+    мутация_случай:
+    - 'здоровый: -L имя сервера'
+    - 'БОЛЬНОЙ: export TMUX_TMPDIR без unset TMUX'
+    - 'БОЛЬНОЙ: PATH с обёрткой, но обёртка без -L/-S'
+    - 'здоровый: тело heredoc'
+    - 'БОЛЬНОЙ: строка после heredoc судится'
+    - 'известный долг: метка tmux-боевой над вызовом'
+    - 'БОЛЬНОЙ: короткое `new` после &&'
   scripts/test_boot_check.py:
     # Проверка «сервер поднялся» (boot_check.py): виды проверок, метка, «рано», «не состоялась», занятость.
     механизм: scripts/boot_check.py
@@ -4400,9 +4507,11 @@
     доказательство: bash scripts/test_tmux_isolation.sh
     подмена: HARNESS_WAVE3
     мутация:
-    - 's@^        "AGENT_PROC_ROOT=\$s/hb" "STAND_REAL_WRITER@        "STAND_REAL_WRITER@'
+    # Обе защиты сняты разом (TMUX не снят, клиент стенда без env -i): уборка
+    # стенда уходит на сервер из TMUX — частный сервер пробы, не боевой.
+    - 's@^unset TMUX TMUX_PANE$@:@;s@ env -i PATH=/usr/bin:/bin HOME="$1/home" TMUX_TMPDIR@ env PATH=/usr/bin:/bin HOME="$1/home" TMUX_TMPDIR@'
     мутация_случай:
-    - 'волна 3 дала неудач'
+    - 'частная agent МЕРТВА — уборка теста погасила сервер из $TMUX'
 
   # ── hr.watchers-report-must-create-model-task, волна 3: семь сторожей заводят задачу модели ──
   # Мутации по коду 28.10.2026, каждая прогнана на копии; краснеет названный случай.
@@ -4534,7 +4643,7 @@
 # ── Шаг «код» ворот «проба без записи мутаций» (27.10.2026) ──────────────────
   scripts/test_install_voice.sh:
     # Шаг 2в установщика живёт в пакете (вне дерева проекта): одинокая копия, дверь INSTALL_VOICE_INSTALLER.
-    механизм: /home/user/starter/STARTER-PACKAGE/USTANOVIT.sh
+    механизм: ${STARTER_DIR}/USTANOVIT.sh
     доказательство: bash scripts/test_install_voice.sh
     подмена: INSTALL_VOICE_INSTALLER
     мутация:
@@ -7464,7 +7573,7 @@
     - '4 off: запись с признаком идёт, process.start/end, без skip (обёртка читает ключ и для признака)'
   harness/../scripts/test_checks_service.py:
     # Установщик живёт в пакете (вне дерева проекта): одинокая копия, дверь HARNESS_USTANOVIT.
-    механизм: /home/user/starter/STARTER-PACKAGE/USTANOVIT.sh
+    механизм: ${STARTER_DIR}/USTANOVIT.sh
     доказательство: python3 harness/../scripts/test_checks_service.py
     подмена: HARNESS_USTANOVIT
     мутация:
@@ -7623,8 +7732,8 @@
     подмена: HARNESS_CLAUDE_DEMON
     мутация:
     - 's/^jq -nc --arg d "\$DEMON"/true || jq -nc --arg d "$DEMON"/'
-    - 's/^claude "\${DOVODY\[@\]}" 2>"\$OSHIBKI_FAJL"/( tail -n 1 "$RASHOD" >"$RASHOD.st"; head -n -1 "$RASHOD" >"$RASHOD.rest"; mv "$RASHOD.rest" "$RASHOD"; claude "${DOVODY[@]}"; X=$?; cat "$RASHOD.st" >>"$RASHOD"; rm -f "$RASHOD.st"; exit $X ) 2>"$OSHIBKI_FAJL"/'
-    - 's/SESSION_ID="\$(uuidgen)"/SESSION_ID="00000000-0000-4000-8000-000000000000"/'
+    - 's/^bash "\$PROJECT_DIR\/scripts\/claude-run.sh" --класс демон "\${DOVODY\[@\]}" 2>"\$OSHIBKI_FAJL"/( tail -n 1 "$RASHOD" >"$RASHOD.st"; head -n -1 "$RASHOD" >"$RASHOD.rest"; mv "$RASHOD.rest" "$RASHOD"; bash "$PROJECT_DIR\/scripts\/claude-run.sh" --класс демон "${DOVODY[@]}"; X=$?; cat "$RASHOD.st" >>"$RASHOD"; rm -f "$RASHOD.st"; exit $X ) 2>"$OSHIBKI_FAJL"/'
+    - 's@SESSION_ID="\$(cat /proc/sys/kernel/random/uuid)"@SESSION_ID="00000000-0000-4000-8000-000000000000"@'
     мутация_случай:
     - '§В.3 п.2 строки demon.start нет'
     - '§В.3 п.2 demon.start оказывается после вызова claude'
@@ -7885,9 +7994,29 @@
     мутация_случай:
     - 'в итоговом списке нет первый_гейт'
     - 'в итоговом списке нет второй_гейт'
+  scripts/test_precommit_live_check.sh:
+    механизм: scripts/pre-commit-gate.sh
+    доказательство: bash scripts/test_precommit_live_check.sh
+    подмена: PRECOMMIT_UNDER_TEST
+    мутация:
+    - 's@"\${PRECOMMIT_LIVE_CHECK_JUDGE:-\$SNAP_DIR/scripts/build-live-check-list.py}"@"${PRECOMMIT_LIVE_CHECK_JUDGE:-$SCRIPT_DIR/build-live-check-list.py}"@'
+    - 's@build-live-check-list.py}" --данные$@build-live-check-list.py}" --проверить@'
+    - 's@^if printf .%s\\n. "\$CHANGED" | grep -qE .\^harness/config/(live-check.*; then$@if true; then@'
+    - 's@|mechanisms|probe-mutations|invariants)@|mechanisms|invariants)@'
+    - 's@|probe-mutations|invariants)@|probe-mutations)@'
+    - 's@env -u HARNESS_MECHANISMS -u HARNESS_LIVE_CHECK_STATE @env @'
+    - 's@grep -qE .\^harness/config/@grep -qE ''^dev-map\\.yaml$|^harness/config/@'
+    мутация_случай:
+    - 'судья берётся с диска вместо снимка индекса'
+    - 'документ снова сверяется в хуке'
+    - 'судья зовётся и без данных живой проверки в индексе'
+    - 'связь D снята в probe-mutations.yaml'
+    - 'связь D снята в invariants.yaml'
+    - 'окружение на верные данные, индекс битый'
+    - 'на одной карте судья не зван'
   scripts/test_installer_units.sh:
     # Установщик живёт в пакете (вне дерева проекта): одинокая копия, дверь USTANOVIT_UNDER_TEST.
-    механизм: /home/user/starter/STARTER-PACKAGE/USTANOVIT.sh
+    механизм: ${STARTER_DIR}/USTANOVIT.sh
     доказательство: bash scripts/test_installer_units.sh
     подмена: USTANOVIT_UNDER_TEST
     мутация:
@@ -7895,7 +8024,7 @@
     мутация_случай:
     - 'dispatcher: PANEL_SECRETS_DIR в шаблоне'
   scripts/test_installer_paths.sh:
-    механизм: /home/user/starter/STARTER-PACKAGE/USTANOVIT.sh
+    механизм: ${STARTER_DIR}/USTANOVIT.sh
     доказательство: bash scripts/test_installer_paths.sh
     подмена: USTANOVIT_UNDER_TEST
     мутация:
@@ -7942,7 +8071,578 @@
     мутация_случай:
     - 'похожее имя гасится как известный отказ'
     - 'известный отказ не назван вовсе'
+# ── hr.standards-and-policy: пробы носителя личности (Ч2, Ч4, Ч6, Ч9) ──
+  # self-prompt.py: коды 0/3/1, метка, потолки, кэша нет, файл целый при параллельных сборках.
+  scripts/test_self_prompt.py:
+    механизм: scripts/self-prompt.py
+    доказательство: python3 scripts/test_self_prompt.py
+    подмена: из-копии
+    мутация:
+    # сборщик кладёт пустой файл и отвечает 0
+    - 's@^if __name__ == "__main__":$@import sys as _s\nif "--в" in _s.argv:\n    open(_s.argv[_s.argv.index("--в") + 1], "w").close()\n    _s.exit(0)\n&@'
+    # кэш по mtime: свежий файл цели не пересобирается
+    - 's@^if __name__ == "__main__":$@import os as _o, sys as _s, time as _t\n_a = _s.argv\nif "--в" in _a and _o.path.exists(_a[_a.index("--в") + 1]) and _t.time() - _o.path.getmtime(_a[_a.index("--в") + 1]) < 600:\n    _s.exit(0)\n&@'
+    мутация_случай:
+    - 'оркестратор: без эталона — файл с меткой'
+    - 'правка источника меняет метку'
+  # Ч14 hr.standards-and-policy: scripts/test_live_key.sh
+  scripts/test_live_key.sh:
+    механизм: harness/demons/session-warden.sh
+    доказательство: bash scripts/test_live_key.sh
+    подмена: HARNESS_SESSION_WARDEN
+    мутация:
+    - 's@\[ "\${recent:-0}" -lt 4 \] || return 0@true@'
+    - 's@awk -v lim="\$((now - 86400))" ''\$1 + 0 >= lim''@cat@'
+    - 's@"\$PROJECT_DIR/scripts/claude-run.sh" "\$PROJECT_DIR/scripts/self-prompt.py"@"$PROJECT_DIR/scripts/self-prompt.py"@'
+    - 's@\$(sha256sum < "\$f" | cut -c1-64)@$(stat -c %Y "$f")@'
+    - 's@"\${harness:-none}"@none@'
+    - 's@"\${CLAUDE_BIN:-claude}" --version@claude --version@'
+    - 's@printf ''%s %s\\n'' "\$now" "\$key" >> "\$runs" || return 0@true@'
+    - 's@^    ( setsid nohup bash "@    ( setsid nohup bash "${SELF_PROMPT_LIVE_SH:-$HARNESS_SCRIPTS/self-prompt-live.sh}" --ключ "$key" >/dev/null 2>\&1 < /dev/null \& )\n&@'
+    - 's@\[ "\$(cat "\$state" 2>/dev/null || true)" != "\$key" \] || return 0@true@'
+    - 's@2>&1 8>&- <@2>\&1 <@'
+    мутация_случай:
+    - 'потолок снят: проверка числа запусков за сутки выкинута (О8, Г1, С1, Д2 красные)'
+    - 'потолок «навсегда», а не за 24 ч: окно не судится (Д1 красный)'
+    - 'ключ не меняется при правке носителя: claude-run.sh выпал из списка (К5, О6 красные)'
+    - 'ключ по mtime, а не по байтам (К16 красный)'
+    - 'ключ без версии харнеса (К4, О7 красные)'
+    - 'ключ без версии CLI из $CLAUDE_BIN: зовётся голый claude (К3, О4 красные)'
+    - 'запуск без записи в .runs (О9, Г1 красные)'
+    - 'запуск дважды за обход (О1, О4 красные)'
+    - 'запуск при равном ключе: сверка с .state выкинута (О3, О5 красные)'
+    - 'фоновая проба наследует fd 8 — лок сторожа занят, пока она идёт (Л2 красный)'
+  # Ч14 hr.standards-and-policy: scripts/test_session_carrier.sh
+  scripts/test_session_carrier.sh:
+    механизм: scripts/hooks/session_state.sh
+    доказательство: bash scripts/test_session_carrier.sh
+    подмена: HARNESS_SESSION_STATE
+    мутация:
+    - 's@^        cur="\$next"; depth=\$((depth + 1))$@        return 1@'
+    - 's@\[ "\${SHIFT_ARGV\[0\]##\*/}" = claude \]@[[ "${SHIFT_ARGV[*]}" == *claude* ]]@'
+    - 's@\${SHIFT_ARGV\[0\]##\*/}@${SHIFT_ARGV[0]}@'
+    - 's@\[ "\$got" = "\$want" \] || echo "метка файла[^"]*"@true@'
+    - 's@case "\$a" in -p|--print) return 2 ;; esac@true@'
+    - 's@^  echo "смена поднята без личности: \$self_reason"$@  echo "=== отчёт ==="\n&@'
+    - 's@^  echo \"  Поднять смену надо через komanda_agenta.*$@&\n  python3 \"\$HARNESS_ALERT_TASK\" --key session-state:shift-without-self --title x --text \"\$self_reason\" </dev/null >/dev/null 2>\&1 || true@'
+    - 's@^  if \[ -n \"\$self_reason\" \]; then$@  if false; then@'
+    - 's@mv -f \"\$shift_mark_tmp\" \"\$shift_mark_file\"@cat \"\$shift_mark_tmp\" >> \"\$shift_mark_file\" \&\& rm -f \"\$shift_mark_tmp\"@'
+    - 's@mv -f \"\$shift_mark_tmp\" \"\$shift_mark_file\"@cp \"\$shift_mark_tmp\" \"\$shift_mark_file\"@'
+    - 's@^    rm -f \"\$shift_mark_file\"$@    true@'
+    - 's@shift_mark_file=\"\${SHIFT_SELF_MARK:-@shift_mark_file=\"\${SHIFT_SELF_MARK_OFF:-@'
+    - 's@case \"\$a\" in -p|--print) return 2 ;; esac@case \"\$a\" in -p|--print) return 0 ;; esac@'
+    мутация_случай:
+    - '$PPID вместо цепочки: судится только первое звено (Т1 красный)'
+    - 'подстрока «claude» в доводах вместо argv0 (Т8 красный)'
+    - 'argv0 сравнивается целиком, а не по имени файла (Т9 красный)'
+    - 'метка файла не сверяется со сборкой (Т4, Т5 красные)'
+    - 'ближайший claude с -p не пропускается (Т10, Т11 красные)'
+    - 'строка не первой: печать после заголовка (Т2–Т7 красные)'
+    - 'хук снова зовёт alert-task при сбое (Т2–Т7, Т13 красные: писатель сигналов не зван)'
+    - 'хук не пишет отметку (Т2–Т7, Т13 красные)'
+    - 'отметка дописывается, а не переписывается (Т13 красный)'
+    - 'запись не атомарна: временный файл остался рядом (Т2–Т7 красные: хвосты)'
+    - 'в норме прежняя отметка не снимается (Т1, Т8, Т9, Т12 красные)'
+    - 'дверь SHIFT_SELF_MARK не читается (Т14 красный)'
+    - 'claude -p снимает отметку как порядок (Т10, Т11 красные)'
+  # Ч14 hr.standards-and-policy: scripts/test_shift_self_mark.sh
+  scripts/test_shift_self_mark.sh:
+    механизм: harness/demons/session-warden.sh
+    доказательство: bash scripts/test_shift_self_mark.sh
+    подмена: HARNESS_SESSION_WARDEN
+    # «[ -z "$last" ] || return 0» (новая отметка поверх отправленной не шлётся) снята:
+    # прогон 10.11 — проба зелёная. В М6 новая отметка идёт после снятия (М4 чистит
+    # файл отправленного), случая «новая отметка без снятия старой» в пробе нет.
+    мутация:
+    - 's@^    \[ \"\$epoch\" != \"\$last\" \] || return 0$@    true@'
+    - 's@^            alert_task_rc --resolve \"\$key\" || return 0$@            true@'
+    - 's@^        if \[ -n \"\$last\" \]; then$@        if true; then@'
+    - 's@key=session-state:shift-without-self@key=shift-without-self@'
+    - 's@--watcher session-warden$@--watcher session-state@'
+    - 's@--text \"\$reason\"@--text x@'
+    - 's@^    \[\[ \"\$line\" =~ .*|| return 0$@    epoch=\"\${line%% *}\"; reason=\"\${line#* }\"@'
+    - 's@^\(    last=.*\) || true)$@\1)@'
+    - 's@\${SHIFT_SELF_MARK:-\$LOG_DIR/shift-without-self.mark}@\$LOG_DIR/shift-without-self.mark@'
+    - 's@^            alert_task_rc --resolve \"\$key\" || return 0$@            alert_task --resolve \"\$key\"@'
+    - 's@^    python3 \"\$PROJECT_DIR/scripts/alert-task.py\" \"\$\@\" </dev/null >/dev/null 2>&1$@&  || true@'
+    мутация_случай:
+    - 'сигнал на каждом обходе: сверка «уже отправлено» выкинута (М3 красный)'
+    - 'не снимает: --resolve при исчезнувшей отметке выкинут (М4 красный)'
+    - '--resolve на каждом обходе без отметки, не помнит что снял (М5 красный)'
+    - 'ключ без «:» — боевой valid_key отвергает (М2 красный)'
+    - '--watcher session-state вместо session-warden (М2 красный)'
+    - 'причина не передаётся (М2, М6 красные)'
+    - 'битая отметка шлётся как есть: нет разбора (Б2, Б3 красные)'
+    - 'падение под set -e без файла состояния: нет || true у чтения (М1, Б4 красные)'
+    - 'путь отметки зашит, дверь SHIFT_SELF_MARK не читается (Д1 красный)'
+    - 'отказ --resolve не держит память: файл отправленного стёрт, тревога не снята и не повторится'
+    - 'код писателя глушится: alert_task_rc отдаёт 0 при отказе alert-task.py'
+  # Ч14 hr.standards-and-policy: scripts/test_self_prompt_live.sh
+  scripts/test_self_prompt_live.sh:
+    механизм: scripts/self-prompt-live.sh
+    доказательство: bash scripts/test_self_prompt_live.sh --подставной
+    подмена: из-копии
+    мутация:
+    - 's@^if \[ -n "\$failed" \]; then$@printf ''%s\\n'' "$KEY" > "$STATE"\n&@'
+    - 's@python3 "\$ALERT" --key "\$ALERT_KEY"@true "$ALERT" --key "$ALERT_KEY"@'
+    - 's@python3 "\$ALERT" --resolve "\$ALERT_KEY"@true "$ALERT" --resolve "$ALERT_KEY"@'
+    - 's@ || ! grep -qiF -- "\$want" <<< "\$answer"@@'
+    мутация_случай:
+    - 'ключ пишется при не названной метке (Е2 красный)'
+    - 'красный прогон молчит: сигнала нет (Е3 красный)'
+    - 'зелёный прогон не снимает тревогу (Е6 красный)'
+    - 'метка в ответе не сверяется: глухая модель проходит (Е1, Е2, Е3 красные)'
+  # claude-run.sh: 79 без запуска модели на любом сбое сборки, файл в доводах, exec.
+  scripts/test_claude_run.sh:
+    механизм: scripts/claude-run.sh
+    доказательство: bash scripts/test_claude_run.sh
+    подмена: из-копии
+    мутация:
+    # модель запускается без файла личности
+    - 's@^\( *exec .*\) --append-system-prompt-file "[^"]*"@\1@'
+    # первая строка файла не проверяется
+    - 's@grep -q .^Метка сборки: .@true@'
+    # ключ сигнала без «:» — боевой alert-task его отвергает
+    - 's@claude-run:self-prompt-failed@self-prompt-failed@'
+    мутация_случай:
+    - 'след: --append-system-prompt-file <файл> и все доводы как есть'
+    - 'сборщик вернул 0, первая строка не метка: код 79'
+    - 'сборщик вернул 1: сигнал claude-run:self-prompt-failed ровно один, ключ принят боевым valid_key'
+  # as-account.sh: ключ профиля запуска — в окружение claude, одна весть на беду, ключа в выводе нет.
+  scripts/test_switch_account.sh:
+    механизм: scripts/as-account.sh
+    доказательство: bash scripts/test_switch_account.sh
+    подмена: из-копии
+    мутация:
+    # ключ прочитан, но не выставлен в окружение claude
+    - 's@^    export CLAUDE_CODE_OAUTH_TOKEN$@    :@'
+    # весть уходит на каждый подъём, антиповтор снят
+    - 's@^elif \[ "\$(cat "\$MARK" 2>/dev/null)" != "\$trouble" \]; then$@elif true; then@'
+    # удача не снимает метку: антиповтор вечный
+    - 's@^    rm -f "\$MARK" 2>/dev/null$@    :@'
+    # трассировка печатает присваивание ключа в журнал подъёма
+    - 's@^export LC_ALL=C.UTF-8$@&\nset -x@'
+    # края ключа не срезаются: «ключ\r» из CRLF-файла уходит в окружение
+    - 's@^    CLAUDE_CODE_OAUTH_TOKEN="\${CLAUDE_CODE_OAUTH_TOKEN%"\${.*$@    :@'  # не-секрет: образец строки для мутации
+    # весть о беде уходит без ключа карточки: работа модели не заводится
+    - 's@^        --task as-account:not-profile >/dev/null 2>&1$@        >/dev/null 2>\&1@'
+    # удача снимает чужой ключ: карточка беды висит вечно
+    - 's@^        --resolve as-account:not-profile </dev/null >/dev/null 2>&1$@        --resolve as-account:other </dev/null >/dev/null 2>\&1@'
+    мутация_случай:
+    - 'П-1 запуск=alpha: процесс несёт sha ключа alpha'
+    - 'П-10 state.json нет: весть владельцу ровно одна на три подъёма'
+    - 'П-10 беда → удача → беда: вестей две'
+    - 'П-6 ключа нет в argv, выводе, tg, state/profiles, журналах, прокрутке панели'
+    - 'П-1 файл ключа с пробелами и CRLF: в окружении ключ без краёв, как его судила дверь'
+    - 'П-10 каждая весть о беде заводит карточку as-account:not-profile'
+    - 'П-10 удача после беды снимает карточку ровно раз (два удачных подъёма)'
+  # check-login-expiry.py: код 79 носителя — мягкий вердикт, не «ДОСТУП НЕ РАБОТАЕТ».
+  scripts/test_login_expiry_exit79.py:
+    механизм: scripts/check-login-expiry.py
+    доказательство: python3 scripts/test_login_expiry_exit79.py
+    подмена: LOGIN_EXPIRY_UNDER_TEST
+    мутация:
+    # 79 → ДОСТУП НЕ РАБОТАЕТ (ветка 79 стоит раньше, чем ветка Ч5)
+    - 's@^def вердикт_доступа(.*$@&\n    if код == 79:\n        return 1, "ДОСТУП НЕ РАБОТАЕТ (код 79)"@'
+    мутация_случай:
+    - 'БОЛЬНОЙ: 79 → (0, «вход не проверен: личность не собрана…»)'
+  # Шесть разборщиков кода обёртки: 79 — «личность не собрана», без провала и тревоги.
+  scripts/test_carrier_exit79.sh:
+    механизм: harness/demons/devmap-selfheal.sh
+    доказательство: bash scripts/test_carrier_exit79.sh
+    подмена: из-копии
+    мутация:
+    # демон пропустил ветку 79: код обёртки до разбора превращается в обычную неудачу
+    - 's@^tail -20 "\$AGENT_LOG"$@[ "${AGENT_RC:-0}" = 79 ] \&\& AGENT_RC=1\n&@'
+    мутация_случай:
+    - 'devmap-selfheal: в журнале демона «личность не собрана»'
+  # ask-the-model.py и agent-lock-check.py: первый элемент вызова — bash …/claude-run.sh --класс прибор.
+  scripts/test_instrument_carrier.py:
+    механизм: scripts/ask-the-model.py
+    доказательство: python3 scripts/test_instrument_carrier.py
+    подмена: ASK_MODEL_UNDER_TEST
+    мутация:
+    # прибор снова зовёт голый claude (первым вызовом функции)
+    - 's@^def спросить(.*$@&\n    subprocess.run(["claude", "-p", "--strict-mcp-config", "--permission-mode", "manual"], capture_output=True, text=True)@'
+    мутация_случай:
+    - 'ask-the-model.py: голого claude в вызове нет'
+  # check-model-call.py: модель только через носитель; носитель с -p — только со --strict-mcp-config.
+  scripts/test_check_model_call.py:
+    механизм: scripts/check-model-call.py
+    доказательство: python3 scripts/test_check_model_call.py
+    подмена: CHECK_MODEL_CALL_UNDER_TEST
+    мутация:
+    # гейт не обходит дерево (сверить: заголовок обойти() после Ч7)
+    - 's@^def обойти(корень: Path) -> list:$@&\n    return []@'
+    мутация_случай:
+    - 'находит: sh: интерактивный claude без -p'
+  # self-prompt.py --карточки: шапка, тело класса, отпечаток, байты повтора, гейт ручной правки.
+  scripts/test_agent_cards.py:
+    механизм: scripts/self-prompt.py
+    доказательство: python3 scripts/test_agent_cards.py
+    подмена: SELF_PROMPT_PY
+    мутация:
+    # --проверить всегда отвечает 0: ручная правка карточки гейт не краснит
+    - 's@^if __name__ == "__main__":$@import sys as _s\nif "--проверить" in _s.argv:\n    _s.exit(0)\n&@'
+    мутация_случай:
+    - 'harness-lead: тело правлено руками — --проверить код 1 и имя карточки в stderr'
+  # self-seal: сверка всех sha256 до замены эталона, только каталог выкладки, эталон цел при отказе.
+  scripts/test_self_seal.sh:
+    механизм: scripts/self-seal.sh
+    доказательство: bash scripts/test_self_seal.sh
+    подмена: SELF_SEAL_SH
+    мутация:
+    # self-seal без сверки манифеста: скопированное принимается как есть
+    - 's@^    \[ "\${actual%% \*}" = "\${HASHES\[\$i\]}" \] || refuse "sha256 не сошёлся: \$rel"$@    :@'
+    # self-seal принимает любой путь: довод приводится к канону вместо отказа
+    - 's@^\[ "\$(realpath -e -- "\$RELEASE")" = "\$RELEASE" \] || refuse .*$@RELEASE="$(realpath -e -- "$RELEASE")"@'
+    # копирует до сверки всех: первый файл слоя 1 ложится в эталон раньше сверки
+    - 's@^STAGE="\$(mktemp -d "\$PARENT/.self-seal.XXXXXX")"$@&; cp -P -- "\$SELF/\${PATHS[0]}" "\$ETALON/\${PATHS[0]}" 2>/dev/null || true@'
+    # Н1: снова копия ссылки и chmod по пути, который мог стать ссылкой
+    - 's@^    install -m 0644 -T -- "\$SELF/\$rel" "\$STAGE/\$rel"$@    cp -P -- "$SELF/$rel" "$STAGE/$rel"; chmod 0644 -- "$STAGE/$rel"@'
+    мутация_случай:
+    - 'изменённый файл (последний в манифесте) — отказ, частичной копии нет'
+    - 'довод — симлинк на выкладку — отказ'
+    - 'изменённый файл (последний в манифесте) — отказ, частичной копии нет'
+    - 'подмена после сверки: цель ссылки осталась 0600'
+  # Слои памяти (hr.standards-and-policy Ч12): мутации прогнаны на копиях через двери, каждая красна своим случаем.
+  scripts/hooks/test_memory_layer_guard.py:
+    механизм: scripts/hooks/memory_layer_guard.py
+    доказательство: python3 scripts/hooks/test_memory_layer_guard.py
+    подмена: MEMORY_GUARD_UNDER_TEST
+    мутация:
+    - 's@^    if matches(rel, layers.get("неизменяемое")):$@    if False:@'
+    - 's@^    return None$@    return HUMAN_HINT.format(rel=rel)@'
+    - 's@os.path.realpath(absolute)@absolute@'
+    - 's@^    if matches(rel, layers.get("неизменяемое")):$@    if matches(rel, ["harness/self/core.json"]):@'
+    мутация_случай:
+    - 'слой 1: Edit harness/self/core.json — отказ «правка ядра идёт в пакет»'
+    - 'слой 3: Edit память/x.md — пропуск'
+    - 'путь «harness/self/../self/core.json» к core.json — отказ'
+    - 'стенд слоёв без core.json — Edit core.json пропуск (список не зашит)'
+  scripts/test_self_set.py:
+    механизм: scripts/self-set.py
+    доказательство: python3 scripts/test_self_set.py
+    подмена: SELF_SET_PY
+    мутация:
+    - 's@^        opened = owner_word.согласие_кнопкой(KIND, subject, logdir)$@        opened = {}@'
+    - 's@^        if decision and decision\["событие"\] == "нет":$@        if False:@'
+    - 's@^        opened = owner_word.согласие_кнопкой(KIND, subject, logdir)$@        opened = next((o for o in (owner_word.согласие_кнопкой(KIND, c, logdir) for c in {r.get("цель") for r in owner_word._решения_кнопок(logdir / "consent-buttons.jsonl")} if str(c).startswith(field + "=")) if o), None)@'
+    - 's@^    write_atomic(path, new)$@    write_atomic(path, yaml.safe_dump(yaml.safe_load(new), allow_unicode=True))@'
+    - 's@, sha256=digest, поля=field_hashes@, поля=field_hashes@'
+    - 's@^    if hashlib.sha256(path.read_bytes()).hexdigest() == last\["sha256"\]:$@    if True:@'
+    - 's@^    if path.is_file() and not asked_recently(rows):$@    if path.is_file():@'
+    - 's@^            record(gaps\[0\], "", "вопрос", "задан")$@            [record(g, "", "вопрос", "задан") for g in gaps]@'
+    мутация_случай:
+    - 'без «Да»: instance.yaml побайтно цел'
+    - '«Нет», второй вызов: код 4 и без кнопки'
+    - '«Да» на другое значение того же поля: не записано (код 3)'
+    - '«Да»: комментарии пережили запись'
+    - 'журнал: «состояние: да» и sha256 файла после записи'
+    - 'правка мимо двери: «слой 2 изменён мимо согласия: роль»'
+    - 'второй старт в те же сутки: вопрос не повторён'
+    - 'пробелы (цель, проект.описание): ровно один вопрос за старт'
+  scripts/test_self_set.py#session_state:
+    механизм: scripts/hooks/session_state.sh
+    доказательство: python3 scripts/test_self_set.py
+    подмена: SESSION_STATE_SH
+    мутация:
+    - 's@^  timeout 15 python3 "\$project_dir/scripts/self-set.py" --старт 2>/dev/null$@  true@'
+    - 's@scripts/self-set.py" --старт 2>/dev/null$@scripts/self-set.py" --старт >/dev/null 2>\&1@'
+    мутация_случай:
+    - 'правка мимо двери: «слой 2 изменён мимо согласия: роль»'
+    - 'правка мимо двери: «слой 2 изменён мимо согласия: роль»'
+  scripts/test_memory_weeding.py:
+    механизм: scripts/check-memory-weeding.py
+    доказательство: python3 scripts/test_memory_weeding.py
+    подмена: MEMORY_WEEDING_PY
+    мутация:
+    - 's@^            if line.strip() and line.rstrip() not in kept and (name, line.rstrip()) not in lost:$@            if False:@'
+    - 's@archived_lines(str(layers.get("архив_прополки") or "память/archive/"))@archived_lines("память")@'
+    - 's@^BASE = "HEAD~"$@BASE = "HEAD"@'
+    - 's@^    patterns = \[str(p) for p in layers.get("без_потерь") or \[\]\]$@    patterns = ["память/ORDERS.md", "память/owner-orders-*-verbatim.md"]@'
+    мутация_случай:
+    - 'строка ORDERS удалена без переноса (в индексе) — rc 1, строка в выводе'
+    - 'строка перенесена не в архив, а в память/x.md (в индексе) — rc 1, строка в выводе'
+    - 'строка ORDERS удалена без переноса (закоммичено) — rc 1, строка в выводе'
+    - 'файл слоёв без ORDERS.md — удаление строки ORDERS пропускается (в индексе) — rc 0'
+  # hr.alert-disk-cleanup-full-2: пробы ворот получают TMPDIR с префиксом harness-run-, и он убран после прогона.
+  scripts/test_gates_run_temp_dir.py:
+    механизм: scripts/gates.sh
+    доказательство: python3 scripts/test_gates_run_temp_dir.py
+    подмена: GATES_SCRIPT
+    мутация:
+    - 's@^RUN_TMP=\$(mktemp -d -t harness-run-XXXXXX)$@RUN_TMP=$(mktemp -d -t gates-run-XXXXXX)@'
+    - 's@^export TMPDIR="\$RUN_TMP"$@:@'
+    - 's@ "\$GATES_TIMING_DIR" "\$RUN_TMP"'' EXIT$@ "$GATES_TIMING_DIR"'' EXIT@'
+    мутация_случай:
+    - 'TEMP DIR ВОРОТ: каталог ворот без префикса harness-run- — голые mktemp мимо него'
+    - 'TEMP DIR ВОРОТ: TMPDIR пробам не передан — голые mktemp мимо harness-run-'
+    - 'TEMP DIR ВОРОТ: каталог ворот не убран после самотеста — осталось 1'
+  # hr.defekty-harnesa-dlya-stroitelya-obnovlenie Г3: ключи образца доезжают до живого конфига.
+  scripts/test_install_new.py#g3:
+    механизм: scripts/install-new.py
+    доказательство: python3 scripts/test_install_new.py
+    подмена: из-копии
+    мутация:
+    - 's@ if к not in стоят\]$@ if True]@'
+    мутация_случай:
+    - 'Г3: новый ключ дописан с комментарием, значение владельца цело, лишний назван, повтор пуст'
+  # hr.defekty-harnesa-dlya-stroitelya-obnovlenie Г10: панель, выведенная туннелем cloudflared.
+  scripts/test_panel_boundary.py#tunnel:
+    механизм: scripts/check-panel-boundary.py
+    доказательство: python3 scripts/test_panel_boundary.py
+    подмена: из-копии
+    мутация:
+    - 's@^    if _выведена_туннелем(адрес, конф):$@    if False:@'
+    - 's@return выключен != "0" and bool(@return bool(@'
+    - 's@\\\.com\$")$@\\.com")@'
+    мутация_случай:
+    - 'ТУННЕЛЬ без nginx: рубеж не требуется — rc'
+    - 'ТУННЕЛЬ выключен (PANEL_TUNNEL=0): адрес — не туннель, нужен nginx — rc'
+    - 'ТУННЕЛЬ: похожий чужой домен за туннель не засчитан — rc'
+  # hr.defekty-harnesa-dlya-stroitelya-obnovlenie Г1: предел расшифровки от памяти машины.
+  scripts/test_voice_worker.sh#limit:
+    механизм: scripts/voice-worker.sh
+    доказательство: bash scripts/test_voice_worker.sh --случай код
+    подмена: из-копии
+    мутация:
+    - 's@^    \[ "\$limit" -ge "\$VOICE_VM_LIMIT_KB" \] || limit="\$VOICE_VM_LIMIT_KB"$@    :@'
+    - 's@^    \[ "\$limit" -le "\$VOICE_VM_MAX_KB" \] || limit="\$VOICE_VM_MAX_KB"$@    :@'
+    мутация_случай:
+    - 'предел: память 2 ГБ — доля ниже пола, берётся пол 2 500 000'
+    - 'предел: память 32 ГБ — доля выше потолка, берётся потолок 6 000 000'
+  # hr.defekty-harnesa-dlya-stroitelya-obnovlenie: случаи боевого объёма при малых журналах не судятся.
+  # Мутация ставится в саму пробу; пустой источник журналов задаётся её дверью.
+  scripts/test_events_cli.py#volume:
+    механизм: scripts/test_events_cli.py
+    доказательство: env EVENTS_PROBE_LIVE_SRC=/nonexistent python3 scripts/test_events_cli.py
+    подмена: '-'
+    мутация:
+    - 's@^    if mb < MIN_LIVE_MB:$@    if mb > MIN_LIVE_MB:@'
+    мутация_случай:
+    - 'копия не меньше 20 МБ (иначе это не боевой объём) — судится на пустом источнике'
+  # ЧП#3 hr.standards-and-policy (K56): строки, изменённые задачей, без единой мутации.
+  # Таблицы по виду судит виды-10 пробы кнопок: ключи == ВИДЫ_СОГЛАСИЯ во всех трёх файлах.
+  scripts/./././././././././test_consent_buttons.py:
+    механизм: scripts/lib/consent_buttons.py
+    доказательство: python3 scripts/./././././././././test_consent_buttons.py --случай виды-10
+    подмена: из-копии
+    мутация:
+    - 's@"перепись": rewrite_text, "слой-человека": layer_text}@"перепись": rewrite_text}@'
+    мутация_случай:
+    - 'в10б) consent_buttons.py: таблица по виду есть, ключи == ВИДЫ_СОГЛАСИЯ'
+  scripts/././././././././././test_consent_buttons.py:
+    механизм: scripts/lib/owner_word.py
+    доказательство: python3 scripts/././././././././././test_consent_buttons.py --случай виды-10
+    подмена: из-копии
+    мутация:
+    - 's@"перепись": _погашено_предметом, "слой-человека": _погашено_записью_слоя}@"перепись": _погашено_предметом}@'
+    - 's@^                 "слой-человека")$@                 )@'
+    мутация_случай:
+    - 'в10б) owner_word.py: таблица по виду есть, ключи == ВИДЫ_СОГЛАСИЯ'
+    - 'в10а) owner_word.ВИДЫ_СОГЛАСИЯ — восемь видов (спека §5: + «снос-базы», «перепись»; hr.standards-and-policy: + «слой-человека»)'
+  scripts/./././././././././././test_consent_buttons.py:
+    механизм: scripts/ask-consent.py
+    доказательство: python3 scripts/./././././././././././test_consent_buttons.py --случай виды-10
+    подмена: из-копии
+    мутация:
+    - 's@^            "слой-человека": предмет_слоя_человека}$@            }@'
+    мутация_случай:
+    - 'в10б) ask-consent.py: таблица по виду есть, ключи == ВИДЫ_СОГЛАСИЯ'
+  # check-builder.sh: ветка 79 и дверь обёртки (второй разборщик пробы кода 79).
+  scripts/./test_carrier_exit79.sh:
+    механизм: harness/demons/check-builder.sh
+    доказательство: bash scripts/./test_carrier_exit79.sh
+    подмена: из-копии
+    мутация:
+    - 's@^elif \[ "\$AGENT_RC" = 79 \]; then$@elif false; then@'
+    - 's@^bash "\${CLAUDE_DEMON_SH:-\$PROJECT_DIR/scripts/claude-demon.sh}" check-builder -p@bash "$PROJECT_DIR/scripts/claude-demon.sh" check-builder -p@'
+    мутация_случай:
+    - 'check-builder: в журнале демона «личность не собрана»'
+    - 'check-builder: подставная обёртка взята из двери CLAUDE_DEMON_SH и звана'
+  # publish.sh --манифест-слоя1: строка «меняются личность/стандарты» и слой 2 вне манифеста.
+  scripts/./test_self_seal.sh:
+    механизм: scripts/publish.sh
+    доказательство: bash scripts/./test_self_seal.sh
+    подмена: из-копии
+    мутация:
+    - 's@^    \[ -z "\$changed" \] || say "меняются личность/стандарты: \$changed"$@    :@'
+    - 's@ ! -path ./instance.yaml -printf@ -printf@'
+    мутация_случай:
+    - 'прошлого выпуска нет: в строке все файлы слоя 1'
+    - 'прошлого выпуска нет: манифест слоя 1 без instance.yaml и себя'
+  # pre-commit-gate.sh: гейт прополки без потерь подключён строкой «гейт».
+  scripts/./test_memory_weeding.py:
+    механизм: scripts/pre-commit-gate.sh
+    доказательство: python3 scripts/./test_memory_weeding.py
+    подмена: PRECOMMIT_UNDER_TEST
+    мутация:
+    - 's@^гейт "прополка_без_потерь" python3 "\$SCRIPT_DIR/check-memory-weeding.py"$@:@'
+    мутация_случай:
+    - 'pre-commit-gate.sh зовёт check-memory-weeding.py гейтом (строка верхнего уровня)'
+  # check-context-hygiene.py: потолок файла личности из launch-policy.yaml, выборки не судятся.
+  scripts/./test_self_prompt.py:
+    механизм: scripts/check-context-hygiene.py
+    доказательство: python3 scripts/./test_self_prompt.py
+    подмена: CONTEXT_HYGIENE_PY
+    мутация:
+    - 's@^        if size > набор\["потолок"\]:$@        if False:@'
+    - 's@^        if "потолок" not in набор or "поля" in набор or "раздел" in набор:$@        if "потолок" not in набор:@'
+    - 's@^ПОЛИТИКА_ЗАПУСКА = Path("harness") / "config" / "launch-policy.yaml"$@ПОЛИТИКА_ЗАПУСКА = Path("нет") / "launch-policy.yaml"@'
+    мутация_случай:
+    - 'гигиена: файл набора выше потолка — блок «big.md разросся»'
+    - 'гигиена: набор-выборка (поля) гейтом не судится'
+    - 'гигиена: файл набора выше потолка — блок «big.md разросся»'
+  # Стенды сторожа в пробах панели: проба личности по событию уходит в заглушку стенда.
+  # Мутация уводит дверь на несуществующий файл, а не снимает её: снятая дверь звала бы
+  # живую пробу с моделью и настоящим alert-task.
+  scripts/test_pane_door_pause.sh#live-stub:
+    механизм: scripts/test_pane_door_pause.sh
+    доказательство: bash scripts/test_pane_door_pause.sh
+    подмена: '-'
+    мутация:
+    - 's@^            SELF_PROMPT_LIVE_SH="\$T/self-prompt-live-stub.sh" \\$@            SELF_PROMPT_LIVE_SH="$T/нет-заглушки.sh" \\@'
+    мутация_случай:
+    - 'проба личности по событию ушла в заглушку стенда, не в живую'
+  scripts/test_pane_lock_instant.sh#live-stub:
+    механизм: scripts/test_pane_lock_instant.sh
+    доказательство: bash scripts/test_pane_lock_instant.sh
+    подмена: '-'
+    мутация:
+    - 's@^            SELF_PROMPT_LIVE_SH="\$T/self-prompt-live-stub.sh" \\$@            SELF_PROMPT_LIVE_SH="$T/нет-заглушки.sh" \\@'
+    мутация_случай:
+    - 'проба личности по событию ушла в заглушку стенда, не в живую'
+  # Часть 2 живой проверки (hr.zhivaya-proverka-vseh-mehanizmov, 11.11.2026).
+  # Манифест слоя 1 пишет build-public.py по СОБРАННОМУ дереву; дверь BUILD_PUBLIC_UNDER_TEST.
+  scripts/test_build_public_self_manifest.py:
+    механизм: scripts/build-public.py
+    доказательство: python3 scripts/test_build_public_self_manifest.py
+    подмена: BUILD_PUBLIC_UNDER_TEST
+    мутация:
+    - 's@^        записать_манифест_слоя1(дерево)$@        pass@'
+    - 's@п not in ("MANIFEST.sha256", "instance.yaml")@п not in ("MANIFEST.sha256",)@'
+    - 's@hashlib.sha256((корень / п).read_bytes())@hashlib.sha256(b"")@'
+    мутация_случай:
+    - 'БОЛЬНОЙ: в сборке нет harness/self/MANIFEST.sha256'
+    - 'манифест называет instance.yaml (слой 2) — не ровно слой 1'
+    - 'суммы манифеста не сходятся с файлами сборки'
+  # Половина пробы про сборщик CLAUDE.md: источник личности в нём — шаблон. Проба зовётся
+  # из копии дерева: её сборщик (scripts/ копии) находит шаблон в harness/ копии по предкам.
+  # Половина про слияние раскладки мутации не получает: раскладчик лежит в пакете, и его
+  # одинокая копия отказывает раньше случаев (см. без_мутаций у test_layout_selftest_cleanup.py).
+  scripts/test_layout_no_self_import.sh:
+    механизм: harness/шаблоны-задач/CLAUDE-EN.md.in
+    доказательство: bash scripts/test_layout_no_self_import.sh
+    подмена: из-копии
+    мутация:
+    - 's|^@STATE.md$|@harness/self/core.json\n@STATE.md|'
+    - 's|^@STATE.md$|@./STATE-нет.md|'
+    мутация_случай:
+    - 'собранный CLAUDE.md: строк @harness/self/ — 0'
+    - 'собранный CLAUDE.md: @STATE.md остаётся'
+  # Три несущих дефекта 0.9.3. Раскладчик и установщик живут в пакете (вне дерева проекта):
+  # мутируется одинокая копия, и проба кладёт её в свой стенд дверью — блок --selftest
+  # исполняется разбором (Д-16), раскладка — в копии пакета на месте своего раскладчика (Д-18).
+  scripts/test_layout_selftest_exit_code.py:
+    механизм: ${STARTER_DIR}/harness/razlozhit-harnes.sh
+    доказательство: python3 scripts/test_layout_selftest_exit_code.py
+    подмена: LAYOUT_SCRIPT
+    мутация:
+    - 's@2>/dev/null || true; rm -rf "\$T"@2>/dev/null; rm -rf "$T"@'
+    - 's@trap "" TERM INT; chmod -R u+w "\$T" \${OUTSIDE:+"\$OUTSIDE"} 2>/dev/null || true; @trap "" TERM INT; @'
+    мутация_случай:
+    - 'уборка убранного стенда меняет код 0 на 1 — случаи 2) и 3)'
+    - 'стенд с каталогом без записи не убирается — случай 4)'
+  scripts/test_installer_first_commit.py:
+    механизм: ${STARTER_DIR}/USTANOVIT.sh
+    доказательство: python3 scripts/test_installer_first_commit.py
+    подмена: USTANOVIT_UNDER_TEST
+    мутация:
+    - 's@^exit 1$@exit 0@'
+    - 's@отметить шаг_11 || FAILED_LIST+=@отметить шаг_11 || true || FAILED_LIST+=@'
+    мутация_случай:
+    - 'хвост прогона выходит кодом 0 при непустом списке упавшего — случай 1)'
+    - 'отказ первого коммита не попадает в список упавшего — случай 1)'
+  scripts/test_layout_self_seal.py:
+    механизм: ${STARTER_DIR}/harness/razlozhit-harnes.sh
+    доказательство: python3 scripts/test_layout_self_seal.py
+    подмена: LAYOUT_SCRIPT
+    мутация:
+    - 's@self-seal "\$(cd "\$HERE/\.\." && pwd)" >/dev/null@self-seal "$PROJECT_DIR" >/dev/null@'
+    - 's@ pwd)" >/dev/null; then$@ pwd)" >/dev/null || true; then@'
+    - 's@^    echo "ВНИМАНИЕ: эталон личности не напечатан@    exit 1; echo "ВНИМАНИЕ: эталон личности не напечатан@'
+    - 's@^  if ! sudo -n -l /usr/local/lib/harness/self-seal >/dev/null 2>&1; then$@  if ! [ -z "$(sudo -n -l /usr/local/lib/harness/self-seal 2>\&1 >/dev/null)" ]; then@'
+    мутация_случай:
+    - 'довод печати — проект без манифеста, эталон не лёг — случай 1)'
+    - 'отказ self-seal проглочен, код раскладки 0 — случаи 2) и 5)'
+    - 'нет правила sudo — отказ вместо предупреждения — случай 4)'
+    - 'строка sudo в потоке принята за «нет правила», отказ печати проглочен — случай 5)'
+  scripts/test_installer_resume_seal.sh:
+    механизм: ${STARTER_DIR}/USTANOVIT.sh
+    доказательство: bash scripts/test_installer_resume_seal.sh
+    подмена: USTANOVIT_UNDER_TEST
+    мутация:
+    - 's@^шаг_1б$@true@'
+    - 's@^  if (( ! DRY )) && grep -q@  if false \&\& grep -q@'
+    мутация_случай:
+    - 'при --resume со штампами правило sudo и self-seal не ставятся — случай (а) и контроль'
+    - '«эталон не напечатан» не доходит до сводки — случай (б)'
+  scripts/test_installer_demon_probe.sh:
+    механизм: ${STARTER_DIR}/USTANOVIT.sh
+    доказательство: bash scripts/test_installer_demon_probe.sh
+    подмена: USTANOVIT_UNDER_TEST
+    мутация:
+    - 's@nightly-gates=NIGHTLY_GATES_PROBE_ONLY=1@nightly-gates=NIGHTLY_GATES_CMD=true@'
+    - 's@nightly-mutations=NIGHTLY_MUTATIONS_PROBE_ONLY=1@nightly-mutations=NIGHTLY_MUTATIONS_CMD=true@'
+    - 's@ \$rc -eq 2 @ $rc -eq 99 @'
+    мутация_случай:
+    - 'ночные ворота на проверке запускаемости — выход 1 и тревога :broken (Д-20)'
+    - 'ночные мутации на проверке запускаемости — выход 1 и тревога :broken (Д-20)'
+    - 'check-login-expiry до входа — отказ в «УПАЛО» (Д-21)'
+  scripts/test_installer_demon_probe.sh#nightly-gates:
+    механизм: ${STARTER_DIR}/harness/demons/nightly-gates.sh
+    доказательство: bash scripts/test_installer_demon_probe.sh
+    подмена: NIGHTLY_GATES_UNDER_TEST
+    мутация:
+    - 's@"\${NIGHTLY_GATES_PROBE_ONLY:-}" = 1@"${NIGHTLY_GATES_PROBE_ONLY:-}" = 9@'
+    мутация_случай:
+    - 'демон ворот не слышит флаг проверки запускаемости — боевой путь, выход 1 и тревога (Д-20)'
+  scripts/test_installer_demon_probe.sh#nightly-mutations:
+    механизм: ${STARTER_DIR}/harness/demons/nightly-mutations.sh
+    доказательство: bash scripts/test_installer_demon_probe.sh
+    подмена: NIGHTLY_MUTATIONS_UNDER_TEST
+    мутация:
+    - 's@"\${NIGHTLY_MUTATIONS_PROBE_ONLY:-}" = 1@"${NIGHTLY_MUTATIONS_PROBE_ONLY:-}" = 9@'
+    мутация_случай:
+    - 'демон мутаций не слышит флаг проверки запускаемости — боевой путь, выход 1 и тревога (Д-20)'
+  scripts/test_devmap_selfheal_installer_commit.sh:
+    механизм: ${STARTER_DIR}/harness/config/harness.conf
+    доказательство: bash scripts/test_devmap_selfheal_installer_commit.sh
+    подмена: DEVMAP_CONF_UNDER_TEST
+    мутация:
+    - 's@|правка памяти с панели:|Первый коммит каркаса"@|правка памяти с панели:"@'
+    мутация_случай:
+    - 'коммит установщика «мимо карты», модель звана — больной случай R7'
+  scripts/test_devmap_selfheal_installer_commit.sh#installer:
+    механизм: ${STARTER_DIR}/USTANOVIT.sh
+    доказательство: bash scripts/test_devmap_selfheal_installer_commit.sh
+    подмена: USTANOVIT_UNDER_TEST
+    мутация:
+    - 's@Первый коммит каркаса харнеса (установщик)@Каркас харнеса (установщик)@'
+    мутация_случай:
+    - 'тема первого коммита разошлась со служебным префиксом — коммит «мимо карты», модель звана'
+  scripts/test_claude_demon_session_id.sh:
+    механизм: scripts/claude-demon.sh
+    доказательство: bash scripts/test_claude_demon_session_id.sh
+    подмена: CLAUDE_DEMON_UNDER_TEST
+    мутация:
+    - 's@SESSION_ID="\$(cat /proc/sys/kernel/random/uuid)"@SESSION_ID="$(uuidgen)"@'
+    мутация_случай:
+    - 'id сессии от uuidgen: без него --session-id пуст (Д-22)'
 без_мутаций:
+  scripts/test_unified_fresh.py: 'мутация на копии невозможна: дверь UNIFIED_DIR — каталог глав, сборщика и выгрузки, а прибор подставляет в дверь путь одного файла; проба отвечает «нет сборщика» и красна на чистой копии. Красная на поломке доказана живьём: пакет 8da1ae2 — «ОТСТАЛА 323599 против 323861» (c266329, hr.release-0-9-3)'
+  scripts/test_layout_selftest_cleanup.py: 'мутация на копии невозможна (проверено прогоном 10.11): раскладчик пакета лежит вне дерева проекта, одинокая копия без соседних файлов пакета падает раньше обрыва по timeout — проба отвечает «обрыва не было (код 1)», чистая копия красна до мутации (hr.alert-disk-cleanup-full-2)'
   .tasks/: 'пробы задач до шага «код»: переезжают в scripts/ вместе с кодом и там получают запись'
   UNIFIED/templates/: 'шаблон книги для чужого проекта: механизма в этом дереве у него нет'
   scripts/test_environment.sh: 'проба среды продукта, который уехал с машины 15.10.2026; механизма здесь нет'

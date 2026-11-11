@@ -61,6 +61,11 @@ source "$KOREN/scripts/lib/selftest_cases.sh"
 T=$(mktemp -d /tmp/proba-pane-door-XXXXXX)
 echo $$ > "$T/owner"
 STAMP="proba-pane-door-$$"
+# Проба личности по событию (self_prompt_live_check сторожа) зовёт модель и
+# настоящий alert-task; на стенде её место — заглушка, иначе каждый прогон
+# сторожа с пустым состоянием стенда запускал бы живую пробу. Заглушка оставляет
+# отметку: её отсутствие в конце значит, что дверь до сторожа не доехала.
+printf '#!/usr/bin/env bash\ntouch %q\nexit 0\n' "$T/live-stub-called" > "$T/self-prompt-live-stub.sh"
 PATHS_JUDGED=0
 PIDS_KILL=()
 # Процессы стенда находятся по окружению: у каждого есть значение с путём стенда
@@ -409,6 +414,7 @@ CONF
             HARNESS_CONF="$W/harness.conf" HARNESS_INSTALL_CONF="$W/harness.conf" \
             HARNESS_ACTIVE_LINE=hr WARDEN_DETACHED=1 LOG_DIR="$W/log" \
             HARNESS_PANEL_STATE="$PANEL_W" CLAUDE_PROJECTS_DIR="$W/projects" \
+            SELF_PROMPT_LIVE_SH="$T/self-prompt-live-stub.sh" \
             timeout -k 5 120 bash "$WARDEN" > "$W/run.$WRUN" 2>&1 < /dev/null || rc=$?
         cat "$W/run.$WRUN" >> "$W/warden.out"
         if [ "$rc" = 124 ] || [ "$rc" = 137 ]; then
@@ -694,6 +700,13 @@ EOF
     case_check "пауза до сообщения — сообщение во входящих" "есть" "$(d_inbox "$DS")"
 fi
 
+# Какая поломка оставит пробу зелёной, а сторож стенда — зовущим живую пробу личности
+# (модель и настоящий alert-task)? Дверь SELF_PROMPT_LIVE_SH, не доехавшая до сторожа:
+# тогда заглушка не звана ни разу. Сторож гоняет только раздел «сторож».
+if want сторож; then
+    case_check "проба личности по событию ушла в заглушку стенда, не в живую" да \
+        "$([ -e "$T/live-stub-called" ] && echo да || echo нет)"
+fi
 echo "судимых путей толчка: $PATHS_JUDGED"
 [ "$CASES_FAILED" = 0 ] && { echo "ПРОБА ЗЕЛЁНАЯ: путей $PATHS_JUDGED, случаев $CASES_PATHS"; exit 0; }
 echo "ПРОБА КРАСНАЯ: путей $PATHS_JUDGED, неудач $CASES_FAILED из $CASES_PATHS"; exit 1

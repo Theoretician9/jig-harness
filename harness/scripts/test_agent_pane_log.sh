@@ -56,6 +56,16 @@ printf 'systemd\n' > "$STAND/proc/1/comm"
 printf 'Name:\tsystemd\nPid:\t1\nPPid:\t0\nUid:\t0\t0\t0\t0\n' > "$STAND/proc/1/status"
 printf '/sbin/init\0' > "$STAND/proc/1/cmdline"
 ln -s /usr/lib/systemd/systemd "$STAND/proc/1/exe"
+# Смена стенда поднята как надо (claude с файлом личности): иначе сверка
+# носителя в хуке старта печатает «смена поднята без личности» первой строкой,
+# и случай «чужой каталог» судил бы не своё предупреждение.
+mkdir -p "$STAND/sproc/4242"
+printf 'Name:\tclaude\nPid:\t4242\nPPid:\t1\n' > "$STAND/sproc/4242/status"
+printf 'Метка сборки: стенд\n' > "$STAND/self.md"
+printf 'claude\0--append-system-prompt-file\0%s\0' "$STAND/self.md" > "$STAND/sproc/4242/cmdline"
+# Проба личности по событию (self_prompt_live_check сторожа) зовёт модель и
+# настоящий alert-task; на стенде её место — заглушка.
+printf '#!/bin/sh\nexit 0\n' > "$STAND/self-prompt-live-stub.sh"
 
 # Значение «секрета» собирается из частей: целиком в файле его нет.
 SECRET_TAIL="A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6"  # не-секрет: поддельный хвост, проба ждёт его маскировки
@@ -83,7 +93,7 @@ stand_env() {
     PATH="$STAND/bin:$PATH" HARNESS_HOME="$STAND/home" HARNESS_INSTALL_CONF="$STAND/home/install.conf" \
         HARNESS_CONF="$STAND/home/harness.conf" CLAUDE_PROJECTS_DIR="$STAND/projects" \
         HARNESS_PANEL_STATE="$STAND/panel" AGENT_PROC_ROOT="$STAND/proc" AGENT_MAINPID=0 \
-        AGENT_UNIT=apl-no-such-unit "$@"
+        AGENT_UNIT=apl-no-such-unit SELF_PROMPT_LIVE_SH="$STAND/self-prompt-live-stub.sh" "$@"
 }
 run_warden() { stand_env timeout "${1:-60}" bash "$WARDEN" 2>&1 </dev/null; }
 tg() { cat "$STAND/tg.log" 2>/dev/null; }
@@ -201,6 +211,7 @@ own_tmux kill-server 2>/dev/null
 
 # ── 5. хук старта ───────────────────────────────────────────────────────────
 hook_first() { (cd "$1" && HARNESS_INSTALL_CONF="$STAND/home/install.conf" HARNESS_HOME="$STAND/home" \
+    SESSION_PROC_ROOT="$STAND/sproc" SESSION_PROC_START=4242 \
     timeout 30 bash "$HOOK" </dev/null 2>/dev/null | head -1); }
 # Вывод берётся в переменную: pipefail и ранний выход head дали бы ложное «нет».
 OUT_FOREIGN=$(hook_first "$STAND/other")

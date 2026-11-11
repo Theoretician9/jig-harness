@@ -165,9 +165,11 @@ def find_chapters_dir() -> Path:
         candidates.append(Path(env))
     # Вторая раскладка — публичная сборка: главы уехали в служебный подкаталог,
     # чтобы человек не видел исходники правил первым экраном (12.09.2026).
-    candidates += [here.parent.parent / "UNIFIED", here.parent / "UNIFIED",
-                   here.parent.parent / "sluzhebnoe" / "UNIFIED",
-                   here.parent / "sluzhebnoe" / "UNIFIED"]
+    # Порядок от ближнего к дальнему: соседний каталог бывает старым, свой первым.
+    candidates += [here / "UNIFIED", here.parent / "UNIFIED",
+                   here.parent / "sluzhebnoe" / "UNIFIED",
+                   here.parent.parent / "UNIFIED",
+                   here.parent.parent / "sluzhebnoe" / "UNIFIED"]
     for c in candidates:
         if c.is_dir() and list(c.glob("0*-*.md")):
             return c

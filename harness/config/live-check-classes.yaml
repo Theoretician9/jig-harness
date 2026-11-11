@@ -720,6 +720,11 @@
     почему: "прибор живой проверки сторожей — читает журнал их запуска и отвечает, доказан прогон или нет"
   "scripts/test_live_check_daemon.py":
     класс: D
+  "scripts/live-check-probe.py":
+    класс: C2
+    почему: "прибор живой проверки проб — гонит мутации пробы своим журналом и отвечает, доказана проба или нет"
+  "scripts/test_live_check_probe.py":
+    класс: D
   "scripts/live-check-skill.py":
     класс: C2
     почему: "прибор живой проверки правил работы — читает журнал вызовов и отвечает, доказан вызов в этой задаче или нет"
@@ -743,9 +748,9 @@
     класс: D
   "scripts/tmp-sweep.py":
     класс: C3
+    причина: "удаляет файлы из /tmp (И-1): боевой ход только на стенде со своим TMPDIR"
   "scripts/test_resource_report.py":
     класс: D
-    причина: "необратим на производстве"
   "scripts/test_tmp_sweep.py":
     класс: D
   "scripts/docker-sweep.py":
@@ -891,6 +896,8 @@
     класс: D
   "scripts/test_precommit_accumulates.sh":
     класс: D
+  "scripts/test_precommit_live_check.sh":
+    класс: D
   "scripts/test_installer_units.sh":
     класс: D
   "scripts/test_installer_paths.sh":
@@ -905,3 +912,324 @@
     класс: D
   "scripts/lib/agent_pane_log.sh":
     класс: C2
+  "harness/demons/nightly-mutations.sh":
+    класс: A1
+  "scripts/test_gates_run_temp_dir.py":
+    класс: D
+  "scripts/test_layout_selftest_cleanup.py":
+    класс: D
+  "scripts/test_layout_selftest_exit_code.py":
+    класс: D
+  "scripts/test_unified_fresh.py":
+    класс: D
+  "scripts/test_installer_first_commit.py":
+    класс: D
+  "scripts/test_layout_self_seal.py":
+    класс: D
+  "scripts/test_installer_resume_seal.sh":
+    класс: D
+  "scripts/test_installer_demon_probe.sh":
+    класс: D
+  "scripts/test_devmap_selfheal_installer_commit.sh":
+    класс: D
+  "scripts/test_claude_demon_session_id.sh":
+    класс: D
+  "scripts/status-report.py":
+    класс: C2
+  "scripts/test_nightly_mutations.sh":
+    класс: D
+  "scripts/test_nightly_mutations_lock.sh":
+    класс: D
+  "scripts/test_mutation_probe_limits.sh":
+    класс: D
+  "scripts/test_probe_stand_sweep.sh":
+    класс: D
+  "scripts/test_hackathon_switch.py":
+    класс: D
+  "scripts/test_hackathon_menu.sh":
+    класс: D
+  "harness/demons/checks-stream.sh":
+    класс: A1
+  "scripts/check-process-library.py":
+    класс: C1
+  "scripts/test_process_library_gate.py":
+    класс: D
+  "scripts/test_skill_names_its_artifact.py":
+    класс: D
+  "scripts/test_build_public_self_manifest.py":
+    класс: D
+  "scripts/lib/gates_check.sh":
+    класс: C2
+  "scripts/gates-snapshot.sh":
+    класс: C2
+  "scripts/test_gates_snapshot.sh":
+    класс: D
+  "scripts/gates-timing.py":
+    класс: C2
+  "scripts/test_gates_timing.py":
+    класс: D
+  "scripts/commit-msg-gate.sh":
+    класс: C1
+  "scripts/ask-consent.py":
+    класс: C3
+    причина: "шлёт владельцу кнопку согласия: живой вызов тратит его внимание"
+  "scripts/lib/consent_buttons.py":
+    класс: C2
+  "scripts/test_consent_buttons.py":
+    класс: D
+  "scripts/lib/push_subject.py":
+    класс: C2
+  "scripts/lib/door_subjects.py":
+    класс: C2
+  "scripts/test_consent_push.py":
+    класс: D
+  "scripts/test_consent_doors.py":
+    класс: D
+  "scripts/test_consent_button_only.py":
+    класс: D
+  "scripts/test_consent_ask_signs.py":
+    класс: D
+  "scripts/test_protected_delete_word.py":
+    класс: D
+  "scripts/test_host_independence_scope.py":
+    класс: D
+  "scripts/test_map_from_message_not_work.py":
+    класс: D
+  "scripts/test_work_queue_lanes.py":
+    класс: D
+  "scripts/statusline_limits.py":
+    класс: C2
+  "scripts/test_statusline_limits.py":
+    класс: D
+  "scripts/self-prompt.py":
+    класс: C2
+  "scripts/claude-run.sh":
+    класс: C3
+    причина: "зовёт модель: живой вызов поднимает claude и тратит лимит аккаунта"
+  "scripts/self-prompt-live.sh":
+    класс: C3
+    причина: "зовёт модель и при неудаче поднимает сигнал владельцу"
+  "scripts/test_self_prompt.py":
+    класс: D
+  "scripts/test_claude_run.sh":
+    класс: D
+  "scripts/as-account.sh":
+    класс: C2
+  "scripts/account-switch.py":
+    класс: C3
+    причина: "пишет profiles.json и state.json: меняет аккаунт следующей смены"
+  "scripts/lib/accounts.py":
+    класс: C2
+  "scripts/test_switch_account.sh":
+    класс: D
+  "scripts/test_live_key.sh":
+    класс: D
+  "scripts/test_session_carrier.sh":
+    класс: D
+  "scripts/test_shift_self_mark.sh":
+    класс: D
+  "scripts/test_self_prompt_live.sh":
+    класс: D
+  "scripts/test_agent_cards.py":
+    класс: D
+  "scripts/test_check_model_call.py":
+    класс: D
+  "scripts/test_instrument_carrier.py":
+    класс: D
+  "scripts/test_login_expiry_exit79.py":
+    класс: D
+  "scripts/test_carrier_exit79.sh":
+    класс: D
+  "scripts/test_layout_no_self_import.sh":
+    класс: D
+  "scripts/test_self_seal.sh":
+    класс: D
+  "scripts/hooks/test_memory_layer_guard.py":
+    класс: D
+  "scripts/test_self_set.py":
+    класс: D
+  "scripts/test_memory_weeding.py":
+    класс: D
+  "scripts/self-seal.sh":
+    класс: C3
+    причина: "от root заменяет эталон личности в /etc/harness/self"
+  "scripts/test_mutations_before_accept.py":
+    класс: D
+  "scripts/test_mutations_step.py":
+    класс: D
+  "scripts/lib/stand_sweep.sh":
+    класс: C2
+  "scripts/precheck.py":
+    класс: C1
+  "scripts/test_precheck.py":
+    класс: D
+  "scripts/hackathon.py":
+    класс: C2
+  "scripts/test_hackathon.py":
+    класс: D
+  "scripts/test_hackathon_map_gate.sh":
+    класс: D
+  "scripts/test_hackathon_gates.sh":
+    класс: D
+  "scripts/test_hackathon_mark.sh":
+    класс: D
+  "scripts/hooks/lead_role_guard.py":
+    класс: B1
+  "scripts/hooks/test_lead_role_guard.py":
+    класс: D
+  "scripts/hooks/launch_plan_guard.py":
+    класс: B1
+  "scripts/hooks/test_launch_plan_guard.py":
+    класс: D
+  "scripts/hooks/rotation_queue_guard.py":
+    класс: B1
+  "scripts/hooks/test_rotation_queue_guard.py":
+    класс: D
+  "scripts/hooks/test_guard_bash_restart_helpers.py":
+    класс: D
+  "scripts/lib/rotation_flag.py":
+    класс: C2
+  "scripts/launch-plan.py":
+    класс: C2
+  "scripts/test_launch_plan.py":
+    класс: D
+  "scripts/test_nesting_chapter_field.py":
+    класс: D
+  "scripts/hooks/test_agent_budget_part_label.py":
+    класс: D
+  "scripts/lib/launch_plan_lib.py":
+    класс: C2
+  "scripts/test_check_secrets_mask.sh":
+    класс: D
+  "scripts/test_security_secrets_masked.py":
+    класс: D
+  "scripts/test_secret_in_logs_keys.py":
+    класс: D
+  "scripts/lib/agent_processes.py":
+    класс: C2
+  "scripts/one-shift.sh":
+    класс: C3
+    причина: "гасит лишние смены сигналом процессам claude"
+  "scripts/test_agent_processes.py":
+    класс: D
+  "scripts/test_deploy_guard_two_agents.py":
+    класс: D
+  "scripts/test_one_shift.py":
+    класс: D
+  "scripts/test_warden_socket_loss.sh":
+    класс: D
+  "scripts/boot_check.py":
+    класс: A2
+  "scripts/test_server_restart_window.sh":
+    класс: D
+  "scripts/test_warden_rotation_waits_helpers.sh":
+    класс: D
+  "scripts/test_boot_check.py":
+    класс: D
+  "scripts/test_sentinel_after_restart.py":
+    класс: D
+  "scripts/test_tmux_isolation.sh":
+    класс: D
+  "scripts/check-tmux-isolation.py":
+    класс: C1
+  "scripts/hooks/channel_reply_guard.py":
+    класс: B1
+  "scripts/hooks/test_channel_reply_guard.sh":
+    класс: D
+  "scripts/lib/channel_reply.py":
+    класс: C2
+  "scripts/test_check_registry_logs.sh":
+    класс: D
+  "scripts/test_disk_cleanup_selftest.sh":
+    класс: D
+  "scripts/test_dispatcher_pause_accumulate.sh":
+    класс: D
+  "scripts/test_live_check_flock.py":
+    класс: D
+  "scripts/test_map_from_message_chapter.py":
+    класс: D
+  "scripts/test_nightly_gates_broken_resolve.sh":
+    класс: D
+  "scripts/test_pane_kick_confirm.sh":
+    класс: D
+  "scripts/test_pre_commit_snapshot.sh":
+    класс: D
+  "scripts/test_publish_rewrite_door.sh":
+    класс: D
+  "scripts/test_queue_importance.py":
+    класс: D
+  "scripts/test_warden_limit_one_number.sh":
+    класс: D
+  "harness/demons/speed_mode.py":
+    класс: A1
+  "scripts/test_speed_mode.py":
+    класс: D
+  "scripts/test_warden_speed.sh":
+    класс: D
+  "scripts/test_dispatcher_speed.sh":
+    класс: D
+  "scripts/hooks/test_agent_budget_task_card.py":
+    класс: D
+  "scripts/test_work_queue_dependencies.py":
+    класс: D
+  "scripts/run-background.sh":
+    класс: C2
+  "scripts/lib/process_library.py":
+    класс: C2
+  "scripts/build-system-jobs.py":
+    класс: C2
+  "scripts/process-dispatcher.py":
+    класс: A1
+  "scripts/lib/process_load.py":
+    класс: C2
+  "harness/panel/test_processes_page.py":
+    класс: D
+  "scripts/run-in-checks-slice.sh":
+    класс: C2
+  "scripts/checks-slice-wrapper.sh":
+    класс: C2
+  "scripts/test_checks_slice_door.py":
+    класс: D
+  "scripts/test_mutation_speed.py":
+    класс: D
+  "scripts/self-sensors.py":
+    класс: A2
+  "scripts/test_self_sensors.py":
+    класс: D
+  "scripts/lib/spec_review.py":
+    класс: C2
+  "scripts/test_spec_review.py":
+    класс: D
+  "scripts/test_spec_human_block.py":
+    класс: D
+  "scripts/test_build_system_jobs.py":
+    класс: D
+  "scripts/test_process_library.py":
+    класс: D
+  "scripts/test_process_dispatcher.py":
+    класс: D
+  "scripts/test_process_dispatcher_v2.py":
+    класс: D
+  "scripts/test_run_background.sh":
+    класс: D
+  "scripts/test_checks_service.py":
+    класс: D
+  "scripts/test_heartbeat_held_line.py":
+    класс: D
+  "scripts/test_live_check_trace_outside_repo.py":
+    класс: D
+  "scripts/test_map_from_message_three_outcomes.py":
+    класс: D
+  "scripts/test_shift_leftover_port.sh":
+    класс: D
+  "scripts/test_warden_kick.sh":
+    класс: D
+  "scripts/test_warden_pane_flag.sh":
+    класс: D
+  "scripts/hooks/memory_layer_guard.py":
+    класс: B1
+  "scripts/self-set.py":
+    класс: C3
+    причина: "пишет слой человека instance.yaml и просит у владельца кнопку"
+  "scripts/check-memory-weeding.py":
+    класс: C1

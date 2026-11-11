@@ -23,6 +23,15 @@
   harness/demons/sentinel.sh:
     юнит: harness-sentinel.service
     потолок_минут: 15
+  # Таймерные демоны: systemd, не крон. Потолок — три периода таймера
+  # (checks-stream: каждые 20 минут) либо период и сутки запаса (nightly-mutations:
+  # по вторникам 09:00, период 10080).
+  harness/demons/checks-stream.sh:
+    юнит: harness-checks-stream.service
+    потолок_минут: 60
+  harness/demons/nightly-mutations.sh:
+    юнит: harness-nightly-mutations.service
+    потолок_минут: 11520
 
 # Механизмы, которых зовёт не расписание и не systemd, а ДРУГОЙ живой механизм:
 # помощник под обёрткой. Доказательство — ЕГО собственные строки в журнале
@@ -88,3 +97,49 @@
       поднимать туннель cloudflared на этой машине нет, и демон по своему
       описанию только ставит метку
     условие: { ключ: PANEL_URL, не_содержит: trycloudflare.com }
+
+# КАК ДЕМОН ПО РАСПИСАНИЮ ПИШЕТ ЖУРНАЛ — данные для предиката A1. Улика
+# 11.11.2026: прибор угадывал по журналу («кроновый непуст → пишет на каждом
+# прогоне») и отказал живым speed_mode и process-dispatcher — оба молчат при
+# успехе, а журнал непуст от старых ошибок. Значение взято по коду демона и
+# его журналу (замер 11.11.2026: даты записей против метки):
+#   каждый-прогон     — журнал (кроновый, а пуст он — свой <имя>.log) пишется
+#                       каждым прогоном; старше трёх периодов — прогонов не было
+#   по-событию        — свой журнал пишется только по событию; жизнь доказывает
+#                       метка, вердикт называет дату последнего события
+#   молчит-при-успехе — в журнал попадает только неуспех; жизнь доказывает
+#                       метка, вердикт называет дату последней записи
+# Демона нет здесь — прибор отказывает, а не угадывает. Молчуны (выше) и
+# механизмы из «юниты» судятся своим предикатом и здесь не нужны.
+как_пишет_журнал:
+  harness/demons/backup.sh: каждый-прогон
+  harness/demons/devmap-selfheal.sh: каждый-прогон
+  harness/demons/disk-cleanup.sh: каждый-прогон
+  # пишет (say) только тревогу о квитанциях и отказ прибора; в журнале с 06.11
+  # лишь слова обёртки, метка ежеминутная
+  harness/demons/dispatcher-stall-watch.sh: по-событию
+  harness/demons/evolution-collector.sh: каждый-прогон
+  harness/demons/extensions-watch.sh: каждый-прогон
+  harness/demons/heartbeat-watch.sh: каждый-прогон
+  # say → limit-watch.log только на смену лимита и работы; кроновый журнал —
+  # старые ошибки
+  harness/demons/limit-watch.sh: по-событию
+  harness/demons/memory-commit.sh: каждый-прогон
+  harness/demons/memory-revision.sh: каждый-прогон
+  harness/demons/project-revision.sh: каждый-прогон
+  # отчёт раз в сутки (SENT_FILE); прочие прогоны — метка и exit 0 без слов
+  harness/demons/resource-report.sh: по-событию
+  harness/demons/server-hygiene.sh: каждый-прогон
+  harness/demons/session-warden.sh: каждый-прогон
+  # печатает только «проход упал» в stderr; журнал с 06.11 — «Permission
+  # denied» и слова обёртки, метка обновляется каждые 2 минуты
+  harness/demons/speed_mode.py: молчит-при-успехе
+  harness/demons/stack-watch.sh: каждый-прогон
+  harness/demons/task-closer.sh: каждый-прогон
+  harness/demons/tokens-collector.sh: каждый-прогон
+  harness/demons/ton-watch.sh: каждый-прогон
+  harness/demons/update-watch.sh: каждый-прогон
+  scripts/build-board.py: каждый-прогон
+  # --замер печатает только «замок занят», «нет прошлого прохода» и сбой
+  # писателя тревог; журнал — трасса IndexError 07.11 (закрыт 0ceff188)
+  scripts/process-dispatcher.py: молчит-при-успехе

@@ -33,16 +33,34 @@ PAUSE_PY="$HERE/pause.py"
 PREFIX="warden-pauserot-"
 # Хвосты прежних прогонов, убитых SIGKILL мимо ловушки: чистим по префиксу ДО
 # работы и называем число.
-stale=0
-while IFS= read -r s; do
-    [ -n "$s" ] || continue
-    tmux kill-session -t "$s" 2>/dev/null && stale=$((stale + 1))
-done <<<"$(tmux list-sessions -F '#{session_name}' 2>/dev/null | grep "^$PREFIX" || true)"
-[ "$stale" -gt 0 ] && echo "убрано своих хвостовых tmux-сессий: $stale"
-
 T=$(mktemp -d)
 PANE="$PREFIX$$"
-cleanup() { tmux kill-session -t "$PANE" 2>/dev/null || true; rm -rf "$T"; }
+# Свой сервер tmux на прогон: панель стенда на боевом сервере ворота выката
+# читали как работу агента (11.11.2026). Обёртка первой в PATH ведёт туда и
+# голый tmux сторожа; TMUX снят, иначе клиент пошёл бы по сокету из неё.
+# Сокет — в каталоге стенда (TMUX_TMPDIR) и уходит вместе с ним.
+REAL_TMUX="$(command -v tmux)"
+SOCK_NAME="$PANE"
+unset TMUX TMUX_PANE
+export TMUX_TMPDIR="$T/tmux"
+mkdir -p "$T/tmux-bin" "$TMUX_TMPDIR"
+printf '#!/bin/sh\nexec "%s" -L "%s" "$@"\n' "$REAL_TMUX" "$SOCK_NAME" > "$T/tmux-bin/tmux"
+chmod +x "$T/tmux-bin/tmux"
+export PATH="$T/tmux-bin:$PATH"
+# Проба личности сторожа (self-prompt-live.sh) со стенда ушла бы фоном к модели
+# через claude-run.sh стенда, а её тревога легла бы в канал стенда посреди
+# чужого случая. Стенду — пустая проба.
+printf '#!/bin/sh\nexit 0\n' > "$T/self-prompt-live.sh"
+export SELF_PROMPT_LIVE_SH="$T/self-prompt-live.sh"
+# Прогон, убитый KILL-ом, ловушку не зовёт: панель сама гасит свой сервер,
+# когда прогона или каталога стенда не стало. Сервер — по pid из $TMUX панели:
+# сокет к тому мигу может уйти вместе с каталогом. Сторож отвязан двойным
+# fork: потомок claude в панели сторож сессий читал бы как работу агента.
+pane_cmd() {  # $1 = команда панели → она же со сторожем жизни стенда
+    printf '( { while kill -0 %s && [ -d %q ]; do sleep 2; done; s=${TMUX#*,}; kill "${s%%%%,*}"; } >/dev/null 2>&1 & ); %s' \
+        "$$" "$T" "$1"
+}
+cleanup() { "$REAL_TMUX" -L "$SOCK_NAME" kill-server 2>/dev/null || true; rm -rf "$T"; }
 trap cleanup EXIT
 
 cp /bin/sleep "$T/claude"
@@ -106,7 +124,7 @@ TG_CHAT_ID=""
 TG_TOKEN_FILE="/nonexistent"
 CONF
 
-tmux new-session -d -s "$PANE" "$T/claude 3600"
+tmux new-session -d -s "$PANE" -c "$T/project" "$(pane_cmd "exec $T/claude 3600")"
 sleep 1
 [ "$(tmux display-message -p -t "$PANE" '#{pane_current_command}')" = claude ] \
     || { echo "ПЛОХО: подставной агент не встал в панель — проверять нечего"; exit 1; }
@@ -245,7 +263,7 @@ GOT="$T/agent-got.txt"
 stand; pause_on
 rm -f "$GOT"
 tmux kill-session -t "$PANE" 2>/dev/null
-tmux new-session -d -s "$PANE" "$T/py/claude -I -u $T/agent.py $GOT"
+tmux new-session -d -s "$PANE" -c "$T/project" "$(pane_cmd "exec $T/py/claude -I -u $T/agent.py $GOT")"
 sleep 1
 [ "$(tmux display-message -p -t "$PANE" '#{pane_current_command}' 2>/dev/null)" = claude ] \
     || { echo "ПЛОХО СТЕНД: агент-python не встал в панель — проверять нечего"; exit 1; }
@@ -266,7 +284,7 @@ check 1 "$(event rotate_command)" "команда ротации записан�
 check 0 "$(pause_py --идёт-ли; echo $?)" "пауза владельца стоит после смены (сторож её не снял)"
 # Панель стенда — обратно sleep-«claude» для случая 5.
 tmux kill-session -t "$PANE" 2>/dev/null
-tmux new-session -d -s "$PANE" "$T/claude 3600"
+tmux new-session -d -s "$PANE" -c "$T/project" "$(pane_cmd "exec $T/claude 3600")"
 sleep 1
 
 # ── 5. Новая пауза после снятия — снова одна строка ─────────────────────────

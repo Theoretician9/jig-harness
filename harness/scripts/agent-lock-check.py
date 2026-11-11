@@ -94,7 +94,10 @@ def проба() -> int:
                    f"Ответь одним словом.")
         for имя, доводы in (("без замка", []), ("с замком", ЗАМОК.split())):
             метка.unlink(missing_ok=True)
-            subprocess.run(["claude", "-p", "--model", "haiku", задание, *доводы,
+            # Через носитель личности, класс «прибор»: замок мерится на том
+            # же запуске, каким модель идёт в бою.
+            subprocess.run(["bash", str(Path(__file__).resolve().with_name("claude-run.sh")),
+                            "--класс", "прибор", "-p", "--model", "haiku", задание, *доводы,
                             "--allowedTools", "Read,Edit,Write,Grep,Glob",
                             "--mcp-config", '{"mcpServers":{}}', "--strict-mcp-config",
                             "--output-format", "text"],

@@ -166,7 +166,9 @@ def спросить(вопрос: str, схема: dict, вид: str, тайм�
             # вместо данных. Аналитический вопрос несёт данные В СЕБЕ; ходить
             # по машине незачем. Замок держит --permission-mode manual
             # (--allowedTools его не заменяет, память: флаг-инструментов-не-замок).
-                ["claude", "-p", "--model", модель, "--strict-mcp-config",
+                # Модель зовётся через носитель личности, класс «прибор».
+                ["bash", str(Path(__file__).resolve().with_name("claude-run.sh")),
+                 "--класс", "прибор", "-p", "--model", модель, "--strict-mcp-config",
                  "--permission-mode", "manual",
                  "--output-format", "json", подсказка],
                 capture_output=True, text=True, timeout=таймаут, cwd=пусто)

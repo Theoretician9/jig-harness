@@ -475,6 +475,29 @@ def самотест() -> int:
         проба("БОЛЬНОЙ: не сказано «не требуется»", 1,
               нет_слов(вывод, (СЛОВА_ОТКАЗА["не_требуется"],)))
 
+    # ── 14. Панель выведена туннелем cloudflared, а не nginx ─────────────
+    # panel-tunnel.sh пишет в PANEL_URL адрес https://<слова>.trycloudflare.com;
+    # nginx при этом не нужен, и требовать его — ложная красная на машине без root.
+    with tempfile.TemporaryDirectory() as tmp:
+        с = Стенд(tmp, panel_url="https://alpha-one.trycloudflare.com")
+        rc, вывод = прогон(гейт, с)
+        проба("ТУННЕЛЬ без nginx: рубеж не требуется — rc", 0, rc)
+        проба("ТУННЕЛЬ: названо, что панель выведена туннелем", 1, есть(вывод, "туннел"))
+    with tempfile.TemporaryDirectory() as tmp:
+        с = Стенд(tmp, panel_url="https://alpha-one.trycloudflare.com")
+        с.конф.write_text('PANEL_URL="https://alpha-one.trycloudflare.com"\n'
+                          'PANEL_TUNNEL="0"\n', encoding="utf-8")
+        rc, _ = прогон(гейт, с)
+        проба("ТУННЕЛЬ выключен (PANEL_TUNNEL=0): адрес — не туннель, нужен nginx — rc", 1, rc)
+    with tempfile.TemporaryDirectory() as tmp:
+        с = Стенд(tmp, panel_url="https://alpha-one.trycloudflare.com.evil.example")
+        rc, _ = прогон(гейт, с)
+        проба("ТУННЕЛЬ: похожий чужой домен за туннель не засчитан — rc", 1, rc)
+    with tempfile.TemporaryDirectory() as tmp:
+        с = Стенд(tmp)
+        rc, вывод = прогон(гейт, с)
+        проба("СВОЙ ДОМЕН без nginx-рубежа остаётся красным — rc", 1, rc)
+
     итог = (f"SELFTEST: зелёный ({путей} путей; первым — живой больной случай "
             "13.09.2026: панель отвечала на чужой Host)"
             if ok else f"SELFTEST: КРАСНЫЙ (путей {путей})")

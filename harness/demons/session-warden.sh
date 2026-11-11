@@ -1250,6 +1250,7 @@ start_agent() {
             # С оболочкой, а не командой: сессия, созданная командой, умирает
             # вместе с агентом и выбрасывает приаттаченного владельца из tmux
             # (улика 13.08.2026 — та же, что в scripts/start-agent.sh).
+            # tmux-боевой: запуск агента: сессия смены на боевом сервере и есть цель
             tmux new-session -d -s "$TMUX_SESSION" -c "$PROJECT_DIR" 8>&- || return 1
             pane_log_attach "$TMUX_SESSION" "$LOG_DIR"
             pane_command keys "$zapusk" Enter || return 1
@@ -1571,6 +1572,7 @@ if [ "${1:-}" = "--selftest" ]; then
     # Больной случай ПЕРВЫМ: не воспроизведётся — проверять нечего.
     стенд_oboloch() {  # $1 = имя сессии; своё имя и отказ, если занято
         tmux has-session -t "$1" 2>/dev/null && return 1
+        # tmux-боевой: долг: самотест на боевом сервере (имя с $$), перевести на свой
         tmux new-session -d -s "$1" -c /tmp 2>/dev/null || return 1
         sleep 0.5
         tmux send-keys -t "$1" Escape
@@ -2868,8 +2870,94 @@ tg_send() {
 # Зелёное («агент на месте») гасит задачу модели. Писателя может не быть
 # (раскладка неполна) — сторож от этого не падает.
 alert_task() {  # $@ = доводы писателя: --resolve <ключ>
+    alert_task_rc "$@" || true
+}
+# С кодом писателя: отказ resolve не должен стирать память об отправленном.
+alert_task_rc() {
     [ -f "$PROJECT_DIR/scripts/alert-task.py" ] || return 0
-    python3 "$PROJECT_DIR/scripts/alert-task.py" "$@" </dev/null >/dev/null 2>&1 || true
+    python3 "$PROJECT_DIR/scripts/alert-task.py" "$@" </dev/null >/dev/null 2>&1
+}
+
+# ── Ключ события живой пробы личности (спека §6.2, K49) ─────────────────────
+# Проба «назови метку» тратит вызовы модели, поэтому идёт не по расписанию, а
+# когда изменилось то, от чего зависит личность: версия Claude Code, версия
+# харнеса или байты носителей (по байтам, не по времени: touch ничего не меняет).
+self_prompt_live_key() {
+    local cli harness files f
+    cli=$("${CLAUDE_BIN:-claude}" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
+    harness=$(PYTHONPATH="$HARNESS_SCRIPTS/lib" python3 -c 'import config; print(open(config.version_file(), encoding="utf-8").read().strip())' 2>/dev/null | tr -d ' \n' || true)
+    files=$(
+        for f in "$PROJECT_DIR/scripts/claude-run.sh" "$PROJECT_DIR/scripts/self-prompt.py" \
+                 "$PROJECT_DIR/scripts/lib/config.sh" "$PROJECT_DIR/scripts/claude-demon.sh" \
+                 "$PROJECT_DIR/harness/config/launch-policy.yaml"; do
+            [ -f "$f" ] && echo "$f"
+        done
+        find "$PROJECT_DIR/.claude/agents" -maxdepth 1 -name '*.md' -type f 2>/dev/null
+        find "$PROJECT_DIR/harness/self" -type f 2>/dev/null
+        # Эталон — там же, где его ищет сборщик (по умолчанию /etc/harness/self).
+        find "${SELF_ETALON_DIR:-$(konf_koren)/self}" -type f 2>/dev/null
+        true
+    )
+    # Порядок файлов не должен менять ключ, а путь — входить в него: перенос
+    # содержимого из одного носителя в другой тоже событие.
+    printf '%s+%s+%s\n' "${cli:-none}" "${harness:-none}" \
+        "$(printf '%s\n' "$files" | LC_ALL=C sort | while IFS= read -r f; do
+               [ -n "$f" ] && printf '%s %s\n' "${f#"$PROJECT_DIR"/}" "$(sha256sum < "$f" | cut -c1-64)"
+           done | sha256sum | cut -c1-16)"
+}
+
+# Ключ другой, чем в состоянии, и за сутки запусков меньше 4 → один запуск
+# пробы фоном. Потолок нужен при скачущем ключе (версия мигает, носитель правят
+# в цикле); состояние пишет сама проба, когда метки названы, поэтому красная
+# проба повторяется на следующем обходе — до потолка. Сторожа не роняет ничто.
+self_prompt_live_check() {
+    local key state runs now recent
+    key=$(self_prompt_live_key 2>/dev/null || true)
+    [ -n "$key" ] || return 0
+    state="${SELF_PROMPT_LIVE_STATE:-$LOG_DIR/self-prompt-live.state}"
+    runs="$LOG_DIR/self-prompt-live.runs"
+    [ "$(cat "$state" 2>/dev/null || true)" != "$key" ] || return 0
+    now=$(date +%s)
+    recent=$(awk -v lim="$((now - 86400))" '$1 + 0 >= lim' "$runs" 2>/dev/null | wc -l || true)
+    [ "${recent:-0}" -lt 4 ] || return 0
+    printf '%s %s\n' "$now" "$key" >> "$runs" || return 0
+    say "проба личности: ключ события сменился ($key) — запуск"
+    # 8>&- — фоновая проба живёт минуты и не должна держать лок сторожа:
+    # иначе следующие обходы видят «лок занят» и выходят без действий.
+    ( setsid nohup bash "${SELF_PROMPT_LIVE_SH:-$HARNESS_SCRIPTS/self-prompt-live.sh}" --ключ "$key" \
+        >/dev/null 2>&1 8>&- < /dev/null & ) || true
+    return 0
+}
+
+# ── Сигнал «смена поднята без личности» по отметке хука (спека §6.2, Н-5) ────
+# Хук SessionStart идёт под claude, а alert-task.py отказывает зовам из-под
+# claude, поэтому хук кладёт отметку «<epoch> <причина>», а сигнал шлёт сторож —
+# он демон, не под claude. Что уже отправлено, помнит сам (epoch отправленной
+# отметки в файле под $LOG_DIR): потолок шума держим здесь, а не на дедупликации
+# писателя. Битая отметка сигнала не даёт — мусор не должен стать задачей модели.
+shift_self_mark_file() { printf '%s' "${SHIFT_SELF_MARK:-$LOG_DIR/shift-without-self.mark}"; }
+
+shift_self_mark_state() { printf '%s' "${SHIFT_SELF_MARK_SENT:-$LOG_DIR/shift-without-self.sent}"; }
+
+shift_self_mark_check() {
+    local mark sent line epoch reason last key=session-state:shift-without-self
+    mark=$(shift_self_mark_file); sent=$(shift_self_mark_state)
+    last=$(head -n1 "$sent" 2>/dev/null | tr -d '\0' || true)
+    if [ ! -e "$mark" ]; then
+        if [ -n "$last" ]; then
+            alert_task_rc --resolve "$key" || return 0
+            : > "$sent" 2>/dev/null || true
+        fi
+        return 0
+    fi
+    line=$(head -n1 "$mark" 2>/dev/null | tr -d '\0' || true)
+    [[ "$line" =~ ^([0-9]+)\ (.+)$ ]] || return 0
+    epoch="${BASH_REMATCH[1]}"; reason="${BASH_REMATCH[2]}"
+    [ "$epoch" != "$last" ] || return 0
+    say "смена поднята без личности: $reason — сигнал"
+    alert_task --key "$key" --title "Смена поднята без личности" --text "$reason" --watcher session-warden
+    printf '%s\n' "$epoch" > "$sent" 2>/dev/null || true
+    return 0
 }
 
 # Пересозданный лок — не мелочь механики: до этой минуты сторож не работал, а
@@ -3297,7 +3385,7 @@ if [ "$LATE_WATCH" = 1 ]; then
             exit 0
         fi
         jlog "restart_failed" "$gone_session" "дозор позднего выхода: агент не поднялся"
-        tg_send "Сессия закрылась после ротации, но преемник не поднялся: в tmux '$TMUX_SESSION' команда «$AGENT_START_CMD» не дала claude. Нужен запуск руками." \
+        tg_send "Сессия закрылась после ротации, но преемник не поднялся: в tmux '$TMUX_SESSION' команда «$AGENT_START_CMD» не дала claude. Нужны ваши руки: sudo -u $AGENT_USER -H systemctl restart harness-agent" \
             || say "и сигнал не ушёл"
         exit 1
     done
@@ -3357,7 +3445,7 @@ panel_watch() {
                     [ "$AGE_MIN" -lt "$AGENT_DEAD_COOLDOWN_MIN" ] && TELL=0
                 fi
                 if [ "$TELL" = 1 ]; then
-                    tg_send "Агента нет ${MIN_OUT} мин: в tmux-панели '$PANE_NOW'. Сам не поднимаю — в панели кто-то работает (последняя активность ${PANE_IDLE_MIN} мин назад), команда испортила бы ваш ввод. Запустить: «$AGENT_START_CMD»." \
+                    tg_send "Агента нет ${MIN_OUT} мин: в tmux-панели '$PANE_NOW'. Сам не поднимаю — в панели кто-то работает (последняя активность ${PANE_IDLE_MIN} мин назад), команда испортила бы ваш ввод. Поднять: sudo -u $AGENT_USER -H systemctl restart harness-agent" \
                         && date +%s > "$DEAD_STAMP" \
                         || say "сигнал о простое агента не ушёл"
                 fi
@@ -4093,7 +4181,7 @@ rotate_full() {
     if ! start_agent; then
         jlog "restart_failed" "$SESSION_ID" "агент не поднялся за ${AGENT_START_TIMEOUT_SEC}с после ротации"
         say "снимок панели: $(сохранить_снимок "агент-не-поднялся")"
-        tg_send "Агент остановлен после ротации, нужен запуск: в tmux '$TMUX_SESSION' команда «$AGENT_START_CMD» не подняла claude за ${AGENT_START_TIMEOUT_SEC}с." --несмотря-на-лимит || say "и сигнал не ушёл"
+        tg_send "Агент остановлен после ротации и не поднялся за ${AGENT_START_TIMEOUT_SEC}с (tmux '$TMUX_SESSION'). Нужны ваши руки: sudo -u $AGENT_USER -H systemctl restart harness-agent" --несмотря-на-лимит || say "и сигнал не ушёл"
         return 1
     fi
     # Та же уборка, что и у быстрого пути: удачная смена снимает метки
@@ -4117,10 +4205,16 @@ rotate_full() {
     # а следующий замер уже зелёный по построению.
     # Модель — дешёвая (DEMON_MODEL): чтение трёх файлов не стоит opus-цены,
     # а переключатель модели агента на headless-вызовы не действует.
-    answer=$(cd "$PROJECT_DIR" && timeout 300 bash "$PROJECT_DIR/scripts/claude-demon.sh" session-warden -p --model "$(model_dlya дежурный)" \
+    answer=$(cd "$PROJECT_DIR" && timeout 300 bash "${CLAUDE_DEMON_SH:-$PROJECT_DIR/scripts/claude-demon.sh}" session-warden -p --model "$(model_dlya дежурный)" \
         "прочитай CLAUDE.md, STATE.md и последний docs/handover/*; назови текущую задачу и следующий шаг. НИЧЕГО НЕ МЕНЯЙ: это проверка приёма, а не работа — файлы не правь, коммитов не делай" \
         --mcp-config '{"mcpServers":{}}' --strict-mcp-config --output-format text 2>&1) || rc=$?
     jlog "rotation_check" "$SESSION_ID" "rc=$rc: $(printf '%s' "$answer" | head -c 2000)"
+    if [ "$rc" -eq 79 ]; then
+        # Модель не запускалась: приём не проверен, но и не провален. Сигнал о
+        # сборке личности дал носитель, второй тревоги владельцу не шлём.
+        say "пропуск: личность не собрана — проверка приёма не выполнена (сигнал дал носитель)"
+        return 0
+    fi
     if [ "$rc" -ne 0 ] || [ -z "$(printf '%s' "$answer" | tr -d '[:space:]')" ]; then
         say "проверка приёма ПРОВАЛЕНА (rc=$rc, ответ пуст или ошибка) — сигнал владельцу"
         tg_send "Ротация выполнена, агент поднят, но проверка приёма провалена (rc=$rc): headless-сессия не назвала задачу и шаг. Передача, вероятно, битая." || say "и сигнал не ушёл"
@@ -4229,6 +4323,14 @@ if [ "$WORK_PAUSED" = 1 ]; then
 fi
 
 limit_active
+
+# Проба личности по событию: на каждом обходе, но модель зовёт только при смене
+# ключа и не чаще 4 раз в сутки. На паузе владельца модель не зовём.
+[ "$WORK_PAUSED" = 1 ] || self_prompt_live_check
+
+# Отметка хука «смена без личности» → сигнал; снятая отметка → снятие сигнала.
+# Дешёвое чтение файла, поэтому и на паузе владельца.
+shift_self_mark_check
 
 # ── 6. Silence-watchdog: очередь непуста, а агент молчит ────────────────────
 DEVMAP="$PROJECT_DIR/dev-map.yaml"

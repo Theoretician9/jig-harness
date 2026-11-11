@@ -181,6 +181,17 @@ cat > "$T/bin/claude" <<'SH'
 printf 'args=%s|token=%s\n' "$*" "${CLAUDE_CODE_OAUTH_TOKEN:-нет}"
 SH
 chmod +x "$T/bin/claude"
+# Подставной носитель на месте настоящего (hr.standards-and-policy §4.4, пути
+# 1 и 2): смена обязана подниматься через claude-run.sh, иначе встаёт без
+# личности. Голый claude в PATH остаётся — по нему видно, что обёртки не было.
+cat > "$SM/scripts/claude-run.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'носитель: %s|token=%s\n' "$*" "${CLAUDE_CODE_OAUTH_TOKEN:-нет}"
+SH
+# Обёртка аккаунта стоит перед носителем (hr.switch-account): подставная только передаёт управление.
+printf '#!/usr/bin/env bash\nexec "$@"\n' > "$SM/scripts/as-account.sh"
+CARRIER_CMD="bash $SM/scripts/claude-run.sh --класс оркестратор"
+WRAPPED_CMD="bash $SM/scripts/as-account.sh $CARRIER_CMD"
 
 start_cmd() {  # $1 = AGENT_START_CMD, $2 = путь таблицы → текст komanda_agenta в $T/out, stderr в $T/err
     (cd "$T" && HARNESS_INSTALL_CONF="$T/нет-install.conf" HARNESS_CONF="$T/нет-harness.conf" \
@@ -188,45 +199,64 @@ start_cmd() {  # $1 = AGENT_START_CMD, $2 = путь таблицы → текс
         timeout 30 bash -c 'source "$1"; komanda_agenta "$2"' _ "$SM/scripts/lib/config.sh" "$1" \
         > "$T/out" 2> "$T/err") || true
 }
-run_start() {  # $1 = AGENT_START_CMD → что увидел подставной claude
+run_start() {  # $1 = AGENT_START_CMD → что увидел подставной носитель (или голый claude)
     start_cmd "$1" "$SM/harness/config/models.yaml"
     (cd "$T" && PATH="$T/bin:$PATH" CLAUDE_CODE_OAUTH_TOKEN=чужой-ключ timeout 30 bash -c "$(cat "$T/out")") 2>&1
 }
 
 seen=$(run_start "claude --dangerously-skip-permissions")
-verdict "$([ "$seen" = "args=--model claude-stend-9 --dangerously-skip-permissions|token=нет" ] && echo 1 || echo 0)" \
-    "БОЛЬНОЙ чужой отчёт п.2: подъём без --model — claude получил модель смены из таблицы, носитель входа сорван" \
-    "команда «$(cat "$T/out")», claude увидел «$seen»"
+verdict "$([ "$seen" = "носитель: --класс оркестратор --model claude-stend-9 --dangerously-skip-permissions|token=нет" ] && echo 1 || echo 0)" \
+    "БОЛЬНОЙ чужой отчёт п.2: подъём без --model — носитель класса «оркестратор» получил модель смены из таблицы, носитель входа сорван" \
+    "команда «$(cat "$T/out")», увидел «$seen»"
 
 seen=$(run_start "$T/bin/claude --dangerously-skip-permissions")
-verdict "$([ "$seen" = "args=--model claude-stend-9 --dangerously-skip-permissions|token=нет" ] && echo 1 || echo 0)" \
-    "claude полным путём — модель смены тоже вставлена" \
-    "команда «$(cat "$T/out")», claude увидел «$seen»"
+verdict "$([ "$seen" = "носитель: --класс оркестратор --model claude-stend-9 --dangerously-skip-permissions|token=нет" ] && echo 1 || echo 0)" \
+    "claude полным путём — тоже через носитель, модель смены вставлена" \
+    "команда «$(cat "$T/out")», увидел «$seen»"
 
+# Н-1 контракта: обёртка не зависит от --model — команда с --model владельца
+# тоже идёт через носитель.
 seen=$(run_start "claude --model opus --dangerously-skip-permissions")
-verdict "$([ "$seen" = "args=--model opus --dangerously-skip-permissions|token=нет" ] && echo 1 || echo 0)" \
-    "сосед: --model владельца в команде — цел, второго --model нет" \
-    "команда «$(cat "$T/out")», claude увидел «$seen»"
+verdict "$([ "$seen" = "носитель: --класс оркестратор --model opus --dangerously-skip-permissions|token=нет" ] && echo 1 || echo 0)" \
+    "--model владельца в команде — через носитель, --model цел, второго нет" \
+    "команда «$(cat "$T/out")», увидел «$seen»"
 
 seen=$(run_start "claude --dangerously-skip-permissions --model=opus")
-verdict "$([ "$seen" = "args=--dangerously-skip-permissions --model=opus|token=нет" ] && echo 1 || echo 0)" \
-    "сосед: --model=opus (через знак равенства) — цел" \
-    "команда «$(cat "$T/out")», claude увидел «$seen»"
+verdict "$([ "$seen" = "носитель: --класс оркестратор --dangerously-skip-permissions --model=opus|token=нет" ] && echo 1 || echo 0)" \
+    "--model=opus (через знак равенства) — через носитель, цел" \
+    "команда «$(cat "$T/out")», увидел «$seen»"
+
+# K13: текст команды целиком — префикс срыва входа остаётся, носитель за ним.
+start_cmd "claude --model x --dangerously-skip-permissions" "$SM/harness/config/models.yaml"
+verdict "$([ "$(cat "$T/out")" = "env -u CLAUDE_CODE_OAUTH_TOKEN $WRAPPED_CMD --model x --dangerously-skip-permissions" ] && echo 1 || echo 0)" \
+    "K13: «claude --model x …» → env -u CLAUDE_CODE_OAUTH_TOKEN bash <корень>/scripts/as-account.sh bash <корень>/scripts/claude-run.sh --класс оркестратор --model x …" \
+    "команда «$(cat "$T/out")»"
+
+# K15: уже обёрнутая команда не заворачивается второй раз и модель не получает.
+start_cmd "$CARRIER_CMD --model x" "$SM/harness/config/models.yaml"
+verdict "$([ "$(cat "$T/out")" = "env -u CLAUDE_CODE_OAUTH_TOKEN $CARRIER_CMD --model x" ] && [ "$(grep -o 'claude-run\.sh' "$T/out" | wc -l)" = 1 ] && echo 1 || echo 0)" \
+    "K15: команда уже через claude-run.sh — носитель ровно один раз, команда не тронута" \
+    "команда «$(cat "$T/out")»"
 
 start_cmd "echo VSTAL" "$SM/harness/config/models.yaml"
 verdict "$([ "$(cat "$T/out")" = "env -u CLAUDE_CODE_OAUTH_TOKEN echo VSTAL" ] && echo 1 || echo 0)" \
-    "сосед: команда не claude (стенд сторожа) — без --model" \
+    "сосед: команда не claude (стенд сторожа) — без носителя и без --model" \
+    "команда «$(cat "$T/out")»"
+
+start_cmd "echo hi" "$SM/harness/config/models.yaml"
+verdict "$([ "$(cat "$T/out")" = "env -u CLAUDE_CODE_OAUTH_TOKEN echo hi" ] && echo 1 || echo 0)" \
+    "K16: «echo hi» → ровно env -u CLAUDE_CODE_OAUTH_TOKEN echo hi" \
     "команда «$(cat "$T/out")»"
 
 printf 'модели:\n  код: sonnet\nумолчание: haiku\n' > "$T/без-смены.yaml"
 start_cmd "claude --dangerously-skip-permissions" "$T/без-смены.yaml"
-verdict "$([ "$(cat "$T/out")" = "env -u CLAUDE_CODE_OAUTH_TOKEN claude --dangerously-skip-permissions" ] && grep -q 'смена' "$T/err" && echo 1 || echo 0)" \
-    "сосед: вида «смена» в таблице нет — команда без --model, отказ model-for виден в stderr" \
+verdict "$([ "$(cat "$T/out")" = "env -u CLAUDE_CODE_OAUTH_TOKEN $WRAPPED_CMD --dangerously-skip-permissions" ] && grep -q 'смена' "$T/err" && echo 1 || echo 0)" \
+    "сосед: вида «смена» в таблице нет — через носитель без --model, отказ model-for виден в stderr" \
     "команда «$(cat "$T/out")», stderr «$(cat "$T/err")»"
 
 start_cmd "claude --dangerously-skip-permissions" "$T/нет-таблицы.yaml"
-verdict "$([ "$(cat "$T/out")" = "env -u CLAUDE_CODE_OAUTH_TOKEN claude --dangerously-skip-permissions" ] && echo 1 || echo 0)" \
-    "сосед: таблицы нет — команда без --model, а не смена на умолчании haiku" \
+verdict "$([ "$(cat "$T/out")" = "env -u CLAUDE_CODE_OAUTH_TOKEN $WRAPPED_CMD --dangerously-skip-permissions" ] && echo 1 || echo 0)" \
+    "сосед: таблицы нет — через носитель без --model, а не смена на умолчании haiku" \
     "команда «$(cat "$T/out")»"
 
 # ── каждый вид, который зовут вызывающие, есть в БОЕВОЙ таблице ───────────

@@ -132,6 +132,25 @@ def кандидаты(текст: str) -> list[str]:
     return собрано
 
 
+# Кандидаты по порядку появления с числом подъёмов вверх от места файла:
+# `"$HERE/../UNIFIED"` — один, `here.parent.parent / "UNIFIED"` — два.
+ПУТЬ_СТРОКОЙ = re.compile(r'["\']([^"\'\n]*?/UNIFIED)["\']')
+ПУТЬ_СБОРКОЙ = re.compile(r'([\w.]+)\s*/\s*(?:["\']sluzhebnoe["\']\s*/\s*)?["\']UNIFIED["\']')
+
+
+def подъёмы(текст: str) -> list[int]:
+    ряд = []
+    for строка in текст.splitlines():
+        if строка.strip().startswith(("#", "//")):
+            continue
+        найдено = [(м.start(), len(re.findall(r"(?:^|/)\.\.(?=/)", м.group(1))))
+                   for м in ПУТЬ_СТРОКОЙ.finditer(строка)
+                   if any(якорь in м.group(1) for якорь in ЯКОРЯ)]
+        найдено += [(м.start(), м.group(1).count(".parent")) for м in ПУТЬ_СБОРКОЙ.finditer(строка)]
+        ряд += [вверх for _, вверх in sorted(найдено)]
+    return ряд
+
+
 def искатели(корень: Path) -> list[Path]:
     """Файлы кода, которые ищут главы от своего местоположения."""
     найдено = []
@@ -182,7 +201,31 @@ def судить(путь: Path) -> list[str]:
             "sluzhebnoe/UNIFIED — в публичной сборке главы лежат ТАМ, и этот "
             f"файл их не найдёт (строки: {' | '.join(свои)})"
         )
+    # Свой каталог глав раньше соседнего: сосед на машине бывает старым, и
+    # тогда установка молча берёт чужие главы. Ближе к файлу — раньше.
+    ряд = подъёмы(текст)
+    if ряд != sorted(ряд):
+        беды.append(
+            f"{путь}: кандидаты глав идут не от ближнего к дальнему (подъёмов вверх: {ряд}) — "
+            "сосед окажется раньше своего каталога"
+        )
     return беды
+
+
+def больной_порядок(двор: Path) -> int:
+    неудач = 0
+    for имя, текст, ждём in (
+        ("sosed.sh", 'for c in "$HERE/../UNIFIED" "$HERE/../sluzhebnoe/UNIFIED" "$HERE/UNIFIED"; do :; done\n', 1),
+        ("sosed.py", 'к = [here.parent.parent / "UNIFIED", here.parent / "sluzhebnoe" / "UNIFIED"]\n', 1),
+        ("svoj.sh", 'for c in "$HERE/UNIFIED" "$HERE/../UNIFIED" "$HERE/../sluzhebnoe/UNIFIED" "$HERE/../../UNIFIED"; do :; done\n', 0),
+    ):
+        файл = двор / имя
+        файл.write_text(текст, encoding="utf-8")
+        нашли = sum("не от ближнего" in б for б in судить(файл))
+        ок = нашли == ждём
+        print(("  ок    " if ок else "  ПЛОХО ") + f"порядок кандидатов {имя}: находок {нашли}, ждали {ждём}")
+        неудач += 0 if ок else 1
+    return неудач
 
 
 def больной_случай() -> int:
@@ -192,7 +235,7 @@ def больной_случай() -> int:
         двор = Path(врем)
         слепой = двор / "slepoj.sh"
         слепой.write_text(
-            'for cand in "$HERE/../UNIFIED" "$HERE/UNIFIED"; do :; done\n',
+            'for cand in "$HERE/UNIFIED" "$HERE/../UNIFIED"; do :; done\n',
             encoding="utf-8",
         )
         зрячий = двор / "zryachij.sh"
@@ -246,7 +289,7 @@ def больной_случай() -> int:
         # на генераторе скилов, то есть на одном из двух способов написать путь.
         сборный = двор / "sbornyj.py"
         сборный.write_text(
-            'главы = [here.parent / "sluzhebnoe" / "UNIFIED", here / "UNIFIED"]\n',
+            'главы = [here / "UNIFIED", here.parent / "sluzhebnoe" / "UNIFIED"]\n',
             encoding="utf-8",
         )
         ок = сборный in искатели(двор) and судить(сборный) == []
@@ -285,7 +328,9 @@ def больной_случай() -> int:
         print(("  ок    " if ок else "  ПЛОХО ") + "закрытый файл — находка, а не тишина")
         неудач += 0 if ок else 1
 
-    print(f"ИСКАТЕЛИ ГЛАВ (самотест): путей 9, неудач {неудач}")
+        неудач += больной_порядок(двор)
+
+    print(f"ИСКАТЕЛИ ГЛАВ (самотест): путей 12, неудач {неудач}")
     return 0 if неудач == 0 else 1
 
 

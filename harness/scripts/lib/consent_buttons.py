@@ -41,6 +41,7 @@ DECISIONS = {"y": "да", "n": "нет"}
 GIT_TIMEOUT_SEC = 5
 LIST_LIMIT = 5
 SUBJECT_LIMIT = 60
+VALUE_LIMIT = 240
 TEXT_LIMIT = 700
 
 
@@ -279,10 +280,17 @@ def spec_text(request: dict, secrets_dir: str, ttl: int) -> str:
             f"Кнопка действует {ttl_phrase(ttl)}.")
 
 
+def layer_text(request: dict, secrets_dir: str, ttl: int) -> str:
+    field, _, value = str(request["цель"]).partition("=")
+    why = str(request.get("почему") or "")[:WHY_LIMIT]
+    return (f"Записать в личность этой копии: {field} = «{value[:VALUE_LIMIT]}»?\n"
+            f"Почему: {why}\nКнопка действует {ttl_phrase(ttl)}.")
+
+
 # Текст по виду: ключи — ВИДЫ_СОГЛАСИЯ.
 TEXT = {"удаление": delete_text, "пуш": push_text, "выкат": deploy_text,
         "публикация": publish_text, "спека": spec_text, "снос-базы": drop_text,
-        "перепись": rewrite_text}
+        "перепись": rewrite_text, "слой-человека": layer_text}
 
 
 def message_text(request: dict, secrets_dir: str, ttl: int) -> str:

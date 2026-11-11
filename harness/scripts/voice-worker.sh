@@ -3,7 +3,10 @@
 # voice-worker.sh — обработчик голосовых владельца: скачивание и расшифровка
 # вне цикла приёма диспетчера, чтобы минуты работы не держали канал. Один на
 # машину (flock): занят — работает другой. Предел памяти расшифровки —
-# VOICE_VM_LIMIT_KB; замер 28.10: пол между 1 200 000 и 1 500 000 КБ, ключ 2 500 000.
+# от памяти машины: доля MemTotal (VOICE_VM_MEM_PERCENT), не ниже пола
+# VOICE_VM_LIMIT_KB и не выше потолка VOICE_VM_MAX_KB. Замер 28.10: пол на машине
+# с 4 ядрами между 1 200 000 и 1 500 000 КБ; MKL берёт память по числу ядер, поэтому
+# одно число на все машины не годится.
 #
 # Очередь — $LOG_DIR/inbox/вложения/<message_id>.json; итог — <message_id>.done.
 # В inbox/, inbox.jsonl, панель и канал обработчик не пишет: итог подбирает
@@ -20,7 +23,24 @@ HARNESS_CONF="${HARNESS_CONF:-$(konf_koren)/harness.conf}"
 konf_zagruzit
 # Значения по умолчанию — ПОСЛЕ загрузчика: стоящие выше затёрли бы ключи конфига.
 VOICE_VM_LIMIT_KB="${VOICE_VM_LIMIT_KB:-2500000}"
+VOICE_VM_MEM_PERCENT="${VOICE_VM_MEM_PERCENT:-40}"
+VOICE_VM_MAX_KB="${VOICE_VM_MAX_KB:-8000000}"
 SERVICE_LOCKS_SUBDIR="${SERVICE_LOCKS_SUBDIR:-services}"
+
+# Предел расшифровки, КБ, для памяти машины $1 (КБ). Память не прочиталась — пол.
+voice_vm_limit_kb() {
+    local mem="${1:-0}" limit
+    limit=$(( mem * VOICE_VM_MEM_PERCENT / 100 ))
+    [ "$limit" -ge "$VOICE_VM_LIMIT_KB" ] || limit="$VOICE_VM_LIMIT_KB"
+    [ "$limit" -le "$VOICE_VM_MAX_KB" ] || limit="$VOICE_VM_MAX_KB"
+    echo "$limit"
+}
+# Вычисление судит самотест на стендовых значениях MemTotal.
+if [ "${1:-}" = "--limit-for" ]; then
+    voice_vm_limit_kb "${2:-0}"
+    exit 0
+fi
+VOICE_VM_EFFECTIVE_KB="$(voice_vm_limit_kb "$(awk '/^MemTotal:/{print $2}' /proc/meminfo 2>/dev/null)")"
 
 QUEUE="$LOG_DIR/inbox/вложения"
 LOCK_FILE="$LOG_DIR/locks/$SERVICE_LOCKS_SUBDIR/voice-worker.lock"
@@ -56,10 +76,10 @@ process() {  # $1 = путь <id>.json
         return 0
     fi
     rc=0
-    text=$(bash -c 'ulimit -v "$1"; exec python3 "$2" "$3"' _ "$VOICE_VM_LIMIT_KB" \
+    text=$(bash -c 'ulimit -v "$1"; exec python3 "$2" "$3"' _ "$VOICE_VM_EFFECTIVE_KB" \
                "${HARNESS_TRANSCRIBE_PY:-$HERE/transcribe_voice.py}" "$audio" 2>&1) || rc=$?
     if [ "$rc" != 0 ] || [ -z "$text" ]; then
-        log "$id: расшифровка не удалась (rc=$rc): ${text:0:200}"
+        log "$id: расшифровка не удалась (rc=$rc): ${text: -200}"
         write_done "$id" false "расшифровка" "" "$text" "$audio"
         return 0
     fi

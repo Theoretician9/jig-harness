@@ -235,6 +235,7 @@ SAMPLES = [
     ("log", 'artifact-seals.jsonl', {"ts": "2026-11-06T20:56:38Z", "file": ".tasks/hr.sample/безопасность.yaml", "agent": "a-sample", "model": "sample", "источник": "хук"}, '2026-11-06T20:56:38+00:00'),
     ("log", 'checks-slice.jsonl', {"v": 1, "ts": "2026-11-06T18:04:13+05:00", "src": "scripts/run-in-checks-slice.sh", "event": "checks.slice.queue-busy", "outcome": "refused", "task": "-", "task_from": "env", "session": "s-sample"}, '2026-11-06T13:04:13+00:00'),
     ("log", 'self-sensors.jsonl', {"v": 1, "ts": "2026-11-07T03:05:21+05:00", "src": "scripts/self-sensors.py", "event": "sensors.daily", "outcome": "ok", "task": "hr.sample", "task_from": "map", "session": None}, '2026-11-06T22:05:21+00:00'),
+    ("log", 'self-set.jsonl', {"v": 1, "ts": "2026-11-10T20:46:37+05:00", "src": "scripts/self-set.py", "event": "self-set.state", "outcome": "ok", "task": "hr.sample", "task_from": "map", "session": "s-sample", "data": {"поле": "проект.описание", "значение": "", "источник": "вопрос", "состояние": "задан"}}, '2026-11-10T15:46:37+00:00'),
     ("log", 'tokens-2026-08.jsonl', {"ts": "2026-08-31T11:23:10.490Z", "session": "s-sample"}, '2026-08-31T11:23:10+00:00'),
     ("log", 'tokens-2026-09.jsonl', {"ts": "2026-09-30T18:09:42.075Z", "session": "s-sample"}, '2026-09-30T18:09:42+00:00'),
     ("log", 'tokens-2026-10.jsonl', {"ts": "2026-10-27T09:09:34.617Z", "session": "s-sample"}, '2026-10-27T09:09:34+00:00'),

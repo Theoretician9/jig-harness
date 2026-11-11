@@ -53,6 +53,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 CLI = os.environ.get("HARNESS_EVENTS_CLI") or str(ROOT / "scripts" / "events.py")
 LIVE_EVENTS = Path("/var/log/harness/.events")
+# Откуда берутся боевые журналы для копий. Подмена нужна пробе самой пробы:
+# малый объём на машине с большими журналами иначе не воспроизвести.
+LIVE_SRC = Path(os.environ.get("EVENTS_PROBE_LIVE_SRC", "/var/log/harness"))
+MIN_LIVE_MB = 20
 TASK = "hr.harness-detailed-logging"
 ACK_REASON = "разобрано пробой"
 BUDGET = {"status": 150, "task": 400, "journals": 300, "lost": 200}
@@ -76,6 +80,24 @@ def skip(name: str, why: str) -> None:
     global not_judged
     not_judged += 1
     print(f"НЕ СУДИТСЯ · {name}: {why}")
+
+
+def live_volume_mb() -> float:
+    """Объём боевых журналов, которые копируются в стенд (те же файлы, что берёт
+    copy_live_stand). Малый объём — свойство машины, а не поломка CLI: случаи,
+    что судят боевой объём, при нём не судятся, а не краснеют."""
+    files = list(LIVE_SRC.glob("*.jsonl")) + list(LIVE_SRC.glob("evo/*.jsonl"))
+    return sum(p.stat().st_size for p in files
+               if not p.is_symlink() and os.access(p, os.R_OK)) / 1e6
+
+
+def check_volume(name: str, expected, actual) -> None:
+    """check для случая, который судится только при боевом объёме."""
+    mb = live_volume_mb()
+    if mb < MIN_LIVE_MB:
+        skip(name, f"объём {mb:.1f} МБ < {MIN_LIVE_MB} МБ")
+    else:
+        check(name, expected, actual)
 
 
 def events_group() -> tuple[str, int]:
@@ -192,7 +214,7 @@ def copy_live_stand(root: Path) -> dict:
     """Копия боевых журналов (только чтение боевых; CLI потом видит ТОЛЬКО
     копию) плюс две подложенные строки потерь — факт, который знает лишь стенд.
     Симлинк tokens.jsonl не копируется: он второй раз тот же месяц."""
-    src = Path("/var/log/harness")
+    src = LIVE_SRC
     log = root / "log"
     state = log / ".events"
     state.mkdir(parents=True)
@@ -247,14 +269,16 @@ def first_line(text: str) -> str:
     return lines[0] if lines else ""
 
 
-def answer_shape(name: str, cmd: str, rc: int, out: str, err: str) -> None:
+def answer_shape(name: str, cmd: str, rc: int, out: str, err: str,
+                 next_needs_volume: bool = False) -> None:
     """Общее для каждого непустого ответа: rc 0, бюджет, «дальше:» последней строкой."""
     check(f"{name}: rc 0", 0, rc)
     if rc != 0:
         print(f"     stderr: {err.strip()[:300]}")
     n = tokens(out)
     check(f"{name}: в бюджете {BUDGET[cmd]} токенов (вышло {n})", True, 0 < n <= BUDGET[cmd])
-    check(f"{name}: последняя строка — «дальше:»", True, last_line(out).startswith("дальше:"))
+    judge = check_volume if next_needs_volume else check
+    judge(f"{name}: последняя строка — «дальше:»", True, last_line(out).startswith("дальше:"))
 
 
 def line_with(text: str, *needles: str) -> str:
@@ -283,9 +307,22 @@ def live_modes() -> dict:
     return out
 
 
-def devmap_cyrillic_ids() -> list[str]:
-    """Id задач с кириллицей — РАЗБОРОМ настоящей карты, не списком в пробе:
-    список, переписанный сюда, перестал бы видеть новые карточки."""
+# Карточки стенда с кириллицей разных форм: карта машины может не держать ни
+# одной, и тогда судить было бы нечего.
+STAND_CYRILLIC_IDS = ("hr.проба-ёжика-2", "pr.карточка_стенда", "задача-без-префикса")
+
+
+def add_stand_cards(devmap: Path) -> None:
+    import yaml
+    tree = yaml.safe_load(devmap.read_text(encoding="utf-8"))
+    tree.setdefault("lines", []).append({"id": "line-stand", "tasks": [
+        {"id": tid, "status": "plan"} for tid in STAND_CYRILLIC_IDS]})
+    devmap.write_text(yaml.safe_dump(tree, allow_unicode=True), encoding="utf-8")
+
+
+def devmap_cyrillic_ids(devmap: Path) -> list[str]:
+    """Id задач с кириллицей — РАЗБОРОМ карты стенда, не списком в пробе:
+    в ней и карточки машины, и свои карточки стенда."""
     import yaml
     found: list[str] = []
 
@@ -299,7 +336,7 @@ def devmap_cyrillic_ids() -> list[str]:
             for child in node:
                 walk(child)
 
-    walk(yaml.safe_load((ROOT / "dev-map.yaml").read_text(encoding="utf-8")))
+    walk(yaml.safe_load(devmap.read_text(encoding="utf-8")))
     return found
 
 
@@ -310,15 +347,17 @@ def hint_commands(out: str) -> list[str]:
 
 def case_cyrillic_task(base: Path) -> None:
     print("── БОЛЬНОЙ (ревью п.4): task принимает кириллические id карты; подсказка refusals --by task исполнима ──")
-    ids = devmap_cyrillic_ids()
-    print(f"     кириллических id в dev-map.yaml: {len(ids)}")
-    check("проба: кириллических id в карте больше нуля (пустой набор — суда нет)", True, len(ids) > 0)
-    if not ids:
-        return
     root = base / "cyr"
     log, state = root / "log", root / "log" / ".events"
     state.mkdir(parents=True)
     make_devmap(root / "dev-map.yaml")
+    add_stand_cards(root / "dev-map.yaml")
+    ids = devmap_cyrillic_ids(root / "dev-map.yaml")
+    print(f"     кириллических id в карте стенда: {len(ids)}")
+    check("проба: свои кириллические id стенда найдены разбором карты", True,
+          set(STAND_CYRILLIC_IDS) <= set(ids))
+    if not ids:
+        return
     task_id = ids[0]
     write_jsonl(log / "guard.jsonl", [
         v1(1, SRC_GUARD, "guard.refused", "refused", task_id, "arg", {"verdict": "deny", "rule": "x"}),
@@ -488,7 +527,7 @@ def case_install(base: Path) -> None:
     (log / "evo").mkdir(parents=True)
     # Копии боевых журналов с их НАСТОЯЩИМИ правами: по одному на каждый режим,
     # что встречается на машине (сегодня 644, 664, 600) — шаг судится на том, что есть.
-    src = Path("/var/log/harness")
+    src = LIVE_SRC
     picked: dict[int, Path] = {}
     for p in sorted(src.glob("*.jsonl")):
         if p.is_symlink() or not os.access(p, os.R_OK) or p.stat().st_size > 2_000_000:
@@ -503,8 +542,8 @@ def case_install(base: Path) -> None:
     (log / ".events").mkdir()
     os.chmod(log / ".events", 0o755)  # каталог есть, но не тот: без setgid, группа своя, index/runs нет
     print(f"     копий журналов: {len(picked)}, режимы {sorted(oct(m) for m in picked)}")
-    check("проба: копий журналов больше нуля и среди них не только 0640", True,
-          bool(picked) and any(m != 0o640 for m in picked))
+    check_volume("проба: копий журналов больше нуля и среди них не только 0640", True,
+                 bool(picked) and any(m != 0o640 for m in picked))
     stand = {"log": log, "state": log / ".events", "devmap": root / "dev-map.yaml"}
     make_devmap(stand["devmap"])
     extra = {"EVENTS_GROUP": gname}
@@ -638,11 +677,11 @@ def main() -> int:
         copy = copy_live_stand(base / "copy")
         mb = sum(p.stat().st_size for p in copy["log"].rglob("*.jsonl")) / 1e6
         print(f"     копия: {mb:.1f} МБ")
-        check("копия не меньше 20 МБ (иначе это не боевой объём)", True, mb >= 20)
+        check_volume("копия не меньше 20 МБ (иначе это не боевой объём)", True, mb >= MIN_LIVE_MB)
         spent = 0
         for cmd in ("status", "journals", "lost"):
             rc, out, err = run(copy, cmd)
-            answer_shape(f"копия {cmd}", cmd, rc, out, err)
+            answer_shape(f"копия {cmd}", cmd, rc, out, err, next_needs_volume=(cmd == "journals"))
             spent += tokens(out)
             if cmd == "status":
                 check("копия status: строка потерь с числом 2 (подложено стендом)", True,

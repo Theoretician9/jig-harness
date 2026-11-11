@@ -132,13 +132,18 @@ komanda_agenta() {  # $1 = AGENT_START_CMD; печатает её же, без �
     local cmd="$1" first rest here table model
     first="${cmd%% *}"
     rest="${cmd#"$first"}"
-    if { [ "$first" = "claude" ] || [[ "$first" == */claude ]]; } \
-        && [[ "$cmd" != *" --model "* && "$cmd" != *" --model="* ]]; then
+    # Подстановка модели и обёртка личностью — два независимых шага: команда с
+    # --model владельца обязана идти через носитель так же, как без него.
+    # Команда, уже начатая с bash …/claude-run.sh, не claude и второй раз не оборачивается.
+    if [ "$first" = "claude" ] || [[ "$first" == */claude ]]; then
         here="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.."
-        table="${MODELS_CONF:-${PROJECT_DIR:-$here/..}/harness/config/models.yaml}"
-        if [ -r "$table" ] && model=$(MODELS_CONF="$table" bash "$here/model-for.sh" смена) && [ -n "$model" ]; then
-            cmd="$first --model $model$rest"
+        if [[ "$cmd" != *" --model "* && "$cmd" != *" --model="* ]]; then
+            table="${MODELS_CONF:-${PROJECT_DIR:-$here/..}/harness/config/models.yaml}"
+            if [ -r "$table" ] && model=$(MODELS_CONF="$table" bash "$here/model-for.sh" смена) && [ -n "$model" ]; then
+                rest=" --model $model$rest"
+            fi
         fi
+        cmd="bash ${PROJECT_DIR:-$here/..}/scripts/as-account.sh bash ${PROJECT_DIR:-$here/..}/scripts/claude-run.sh --класс оркестратор$rest"
     fi
     printf 'env -u %s %s' "$NOSITEL_CHUZHOGO_VHODA" "$cmd"
 }
@@ -253,8 +258,8 @@ konf_selftest() {
     # Обратный случай: без срыва носитель виден. Иначе проба зелена сама по себе.
     case_check "без срыва носитель виден — проба мерит, а не совпадает" "чужой-ключ" \
           "$(CLAUDE_CODE_OAUTH_TOKEN=чужой-ключ printenv CLAUDE_CODE_OAUTH_TOKEN)"
-    case_check "команда запуска доезжает целиком, с ключами модели" "env -u CLAUDE_CODE_OAUTH_TOKEN claude --model claude-opus-5 --dangerously-skip-permissions" \
-          "$(bash -c 'source "$1"; komanda_agenta "claude --model claude-opus-5 --dangerously-skip-permissions"' _ "$lib")"
+    case_check "команда запуска доезжает целиком, с ключами модели" "env -u CLAUDE_CODE_OAUTH_TOKEN bash /selftest/scripts/as-account.sh bash /selftest/scripts/claude-run.sh --класс оркестратор --model claude-opus-5 --dangerously-skip-permissions" \
+          "$(PROJECT_DIR=/selftest bash -c 'source "$1"; komanda_agenta "claude --model claude-opus-5 --dangerously-skip-permissions"' _ "$lib")"
 
     [ "$CASES_FAILED" = 0 ] && { echo "САМОТЕСТ ПРОЙДЕН: $CASES_PATHS путей, первым — больной случай"; return 0; }
     echo "САМОТЕСТ ПРОВАЛЕН"; return 1

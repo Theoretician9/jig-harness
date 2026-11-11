@@ -131,6 +131,8 @@ model_task:
     - {kind: owner-only, why: "ответ на нажатие владельца в панели — код подтверждения и исход переключения"}
   harness/panel/server.py:
     - {kind: owner-only, why: "вход запасным кодом и промахи входа — ответ на его действие"}
+  scripts/as-account.sh:
+    - {kind: card, key: "as-account:not-profile", why: "смена поднята на входе /login, а не на профиле аккаунта (нет state.json, профиля, файла ключа) — причину чинит модель; карточку снимает первый подъём на профиле"}
   scripts/claude-demon.sh:
     - {kind: owner-only, why: "«демоны не получают ответ модели» — лимит, лечится сам при снятии лимита, ждать нечего"}
   scripts/emergency-send.sh:

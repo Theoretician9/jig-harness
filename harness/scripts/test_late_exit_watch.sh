@@ -10,7 +10,7 @@
 #
 # Проверка создаёт своё условие: поднимает свою tmux-сессию с подставным
 # «агентом», ставит дозор, УБИВАЕТ сессию — и смотрит, поднял ли дозор
-# преемника сам. В боевую сессию агента не пишет ни байта: своё имя панели,
+# преемника сам. В боевую сессию агента не пишет ни байта: свой сервер tmux,
 # свой LOG_DIR, свой PROJECT_DIR, канал заведомо не настроен.
 #
 # Запуск: bash harness/demons/test_late_exit_watch.sh
@@ -22,6 +22,26 @@ set -euo pipefail
 DAEMON="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/harness/demons/session-warden.sh"
 T=$(mktemp -d); ok=1
 PANE="warden-latewatch-$$"
+# Свой сервер tmux на прогон: панель стенда на боевом сервере ворота выката
+# читали как работу агента (11.11.2026). Обёртка первой в PATH ведёт туда и
+# голый tmux сторожа; TMUX снят, иначе клиент пошёл бы по сокету из неё.
+# Сокет — в каталоге стенда (TMUX_TMPDIR) и уходит вместе с ним.
+REAL_TMUX="$(command -v tmux)"
+SOCK_NAME="$PANE"
+unset TMUX TMUX_PANE
+export TMUX_TMPDIR="$T/tmux"
+mkdir -p "$T/tmux-bin" "$TMUX_TMPDIR"
+printf '#!/bin/sh\nexec "%s" -L "%s" "$@"\n' "$REAL_TMUX" "$SOCK_NAME" > "$T/tmux-bin/tmux"
+chmod +x "$T/tmux-bin/tmux"
+export PATH="$T/tmux-bin:$PATH"
+# Прогон, убитый KILL-ом, ловушку не зовёт: панель сама гасит свой сервер,
+# когда прогона или каталога стенда не стало. Сервер — по pid из $TMUX панели:
+# сокет к тому мигу может уйти вместе с каталогом. Сторож отвязан двойным
+# fork: потомок claude в панели сторож сессий читал бы как работу агента.
+pane_cmd() {  # $1 = команда панели → она же со сторожем жизни стенда
+    printf '( { while kill -0 %s && [ -d %q ]; do sleep 2; done; s=${TMUX#*,}; kill "${s%%%%,*}"; } >/dev/null 2>&1 & ); %s' \
+        "$$" "$T" "$1"
+}
 # Уборка снимает дозор ГРУППОЙ и только потом сносит каталог: setsid уводит
 # демона в свою сессию, и каталог, вынутый из-под живого процесса, оставляет
 # его писать в никуда до конца прогона ворот (ревью 10.09.2026, ops-18).
@@ -29,7 +49,7 @@ PANE="warden-latewatch-$$"
     local sid; sid=$(cat "$T/дозор.pid" 2>/dev/null || true)
     [[ "$sid" =~ ^[0-9]+$ ]] && kill -- "-$sid" 2>/dev/null || true
 }
-trap 'снять_дозор; tmux kill-session -t "$PANE" 2>/dev/null || true; rm -rf "$T"' EXIT
+trap 'снять_дозор; "$REAL_TMUX" -L "$SOCK_NAME" kill-server 2>/dev/null || true; rm -rf "$T"' EXIT
 
 # Подставной «агент»: имя файла и есть pane_current_command, поэтому просто
 # копия sleep под именем claude — start_agent ждёт в панели именно claude|node.
@@ -51,11 +71,17 @@ TG_CHAT_ID=""
 TG_TOKEN_FILE="/nonexistent"
 CONF
 mkdir -p "$T/log" "$T/project"
+# Подъём оборачивает claude носителем входа и личности (komanda_agenta):
+# bash scripts/as-account.sh bash scripts/claude-run.sh --класс оркестратор …
+# Стенду — их сквозные подмены, иначе преемник падает на «нет файла».
+mkdir -p "$T/project/scripts"
+printf '#!/bin/sh\nexec "$@"\n' > "$T/project/scripts/as-account.sh"
+printf '#!/bin/sh\nshift 2\nexec "%s" "$@"\n' "$T/claude" > "$T/project/scripts/claude-run.sh"
 
 итог() { if [ "$1" = ок ]; then printf '  ок    %s\n' "$2"; else printf '  ПЛОХО %s\n' "$2"; ok=0; fi; }
 
 # ── условие: живая панель с «агентом», которая сейчас закроется ─────────────
-tmux new-session -d -s "$PANE" "$T/claude 600"
+tmux new-session -d -s "$PANE" "$(pane_cmd "exec $T/claude 600")"
 sleep 1
 [ "$(tmux display-message -p -t "$PANE" '#{pane_current_command}')" = claude ] \
     || { echo "ПЛОХО: подставной агент не встал в панель — проверять нечего"; exit 1; }

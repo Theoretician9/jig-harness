@@ -3,8 +3,6 @@
 Project name and code directory are config data: `PROJECT_NAME` / `PROJECT_DIR`
 in `/etc/harness/install.conf`.
 
-@harness/self/core.json
-@harness/self/instance.yaml
 @STATE.md
 @./память/ORDERS.md
 @./память/MEMORY.md
@@ -196,7 +194,7 @@ Bans are enforced by `scripts/hooks/guard_bash.py`, not by your memory.
 ## What is watching (built from the registry)
 
 <!-- AUTO:mechanisms -->
-508 mechanisms are registered in `harness/config/mechanisms.yaml` (gates — 427, daemons — 39, skills — 19, hooks — 23). Each one names what it does, when it runs, what breaks without it and the command that proves it works. The registry is data: `python3 scripts/check-registry.py` fails when the code and the registry disagree.
+533 mechanisms are registered in `harness/config/mechanisms.yaml` (gates — 451, daemons — 39, skills — 19, hooks — 24). Each one names what it does, when it runs, what breaks without it and the command that proves it works. The registry is data: `python3 scripts/check-registry.py` fails when the code and the registry disagree.
 <!-- /AUTO -->
 
 ---

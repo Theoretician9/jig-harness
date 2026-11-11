@@ -157,7 +157,7 @@ def read(n, d=""):
 time.sleep(float(read("tr-sleep", "0") or 0))
 put(f"end {time.time():.3f} {os.getpid()} {name}")
 if os.path.exists(os.path.join(stand, "tr-fail")):
-    print("расшифровка упала: проба")
+    print("расшифровка упала: " + "х" * 350 + " RuntimeError: проба")
     sys.exit(2)
 print(read("tr-text") or f"расшифровка {name}")
 PYEOF
@@ -301,7 +301,7 @@ AGENT_USER="$(id -un)"
 PANEL_STATE_DIR="$S/panel"
 EOF
         # Предел памяти стенда отличен от умолчания пакета: заглушка видит, чей он.
-        printf 'TMUX_SESSION="%s"\nSERVICE_LOCKS_SUBDIR="services"\nPANE_TMUX_TIMEOUT="5"\nPANE_ENTER_DELAY="0.1"\nPANE_SEND_NOW="0"\nVOICE_VM_LIMIT_KB="2400000"\n' \
+        printf 'TMUX_SESSION="%s"\nSERVICE_LOCKS_SUBDIR="services"\nPANE_TMUX_TIMEOUT="5"\nPANE_ENTER_DELAY="0.1"\nPANE_SEND_NOW="0"\nVOICE_VM_LIMIT_KB="2400000"\nVOICE_VM_MAX_KB="2400000"\n' \
             "$STAMP-$name" > "$S/harness.conf"
         mkdir -p "$S/log/locks/services"
         [ -e "$S/pause" ] && {
@@ -466,6 +466,8 @@ except ValueError: print(f"нет метки (толчок {sys.argv[1]}, при
         case "$stage" in
             расшифровка)
                 case_check "(ж) владельцу — «расшифровать не смог»" "1" "$(cnt 'расшифровать не смог' "$S/acks")"
+                case_check "БОЛЬНОЙ (ж) причина длиннее предела: сама ошибка в ответе владельцу и в толчке" "да да" \
+                    "$(grep -qF 'RuntimeError' "$S/acks" && echo да || echo нет) $(grep -qF 'RuntimeError' "$S/tmux-calls" && echo да || echo нет)"
                 case_check "(ж) толчок «расшифровать не удалось»" "да" "$(grep -qF 'расшифровать не удалось' "$S/tmux-calls" && echo да || echo нет)" ;;
             скачивание)
                 case_check "(ж) владельцу — «Файл до меня НЕ дошёл»" "1" "$(cnt 'Файл до меня НЕ дошёл' "$S/acks")"
@@ -547,6 +549,22 @@ if want код; then
     echo "═══ путь 3: ключ предела памяти"
     case_check "harness.conf пакета: VOICE_VM_LIMIT_KB — число не меньше 1 500 000 (пол замера 28.10)" "да" \
         "$(v=$(sed -n 's/^VOICE_VM_LIMIT_KB="\{0,1\}\([0-9]*\)"\{0,1\}.*/\1/p' "$CONF_SEED" | head -1); [ -n "$v" ] && [ "$v" -ge 1500000 ] && echo да || echo "нет (${v:-ключа нет})")"
+    # Предел — от памяти машины: доля MemTotal, не ниже пола и не выше потолка.
+    # Одно число на все машины убило расшифровку на чужой (MKL берёт память по числу
+    # ядер); вычисление судится на стендовых значениях MemTotal, а не на этой машине.
+    VL="$T/vmlimit"; mkdir -p "$VL/log"
+    printf 'PROJECT_DIR="%s"\nLOG_DIR="%s/log"\n' "$VL" "$VL" > "$VL/install.conf"
+    printf 'VOICE_VM_LIMIT_KB="2500000"\nVOICE_VM_MEM_PERCENT="40"\nVOICE_VM_MAX_KB="6000000"\n' > "$VL/harness.conf"
+    limit_for() {  # $1 = MemTotal стенда, КБ
+        env -u VOICE_VM_LIMIT_KB HARNESS_INSTALL_CONF="$VL/install.conf" HARNESS_CONF="$VL/harness.conf" \
+            timeout 20 bash "$KOREN/scripts/voice-worker.sh" --limit-for "$1" 2>&1 | tail -1
+    }
+    case_check "предел: память 2 ГБ — доля ниже пола, берётся пол 2 500 000" "2500000" "$(limit_for 2000000)"
+    case_check "предел: память 8 ГБ — доля 40% = 3 200 000" "3200000" "$(limit_for 8000000)"
+    case_check "предел: память 32 ГБ — доля выше потолка, берётся потолок 6 000 000" "6000000" "$(limit_for 32000000)"
+    case_check "предел: память не прочиталась (0) — пол, а не ноль" "2500000" "$(limit_for 0)"
+    case_check "harness.conf пакета: есть ключи доли и потолка предела расшифровки" "да" \
+        "$(grep -q '^VOICE_VM_MEM_PERCENT=' "$CONF_SEED" && grep -q '^VOICE_VM_MAX_KB=' "$CONF_SEED" && echo да || echo нет)"
 fi
 
 echo "судимых путей: $PATHS_JUDGED"

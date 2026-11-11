@@ -39,15 +39,50 @@ def стендовый_конфиг(двор: pathlib.Path) -> pathlib.Path:
     живой = pathlib.Path(конф.путь_harness_conf())
     текст = живой.read_text(encoding="utf-8") if живой.is_file() else ""
     свой = двор / "harness.conf"
-    свой.write_text(текст + "\nPUSH_NEEDS_OWNER=0\n", encoding="utf-8")
+    свой.write_text(текст + '\nPUSH_NEEDS_OWNER=0\nPRODUCT_PATH=""\nPRODUCT_DIR=""\n', encoding="utf-8")
     return свой
+
+
+def стендовый_install(двор: pathlib.Path, проект: pathlib.Path) -> pathlib.Path:
+    """Живой install.conf, но PROJECT_DIR — пустой каталог двора: иначе долгий
+    прогон в живом дереве проекта ворота звали бы занятостью стенда."""
+    import config as конф
+    живой = pathlib.Path(конф.путь_install_conf())
+    текст = живой.read_text(encoding="utf-8") if живой.is_file() else ""
+    свой = двор / "install.conf"
+    свой.write_text(текст + f'\nPROJECT_DIR="{проект}"\n', encoding="utf-8")
+    return свой
+
+
+def ничей_uid() -> int:
+    """uid, которому не принадлежит ни один процесс машины."""
+    занятые = set()
+    for p in pathlib.Path("/proc").iterdir():
+        try:
+            if p.name.isdigit():
+                занятые.add(p.stat().st_uid)
+        except OSError:
+            continue
+    uid = 60000
+    while uid in занятые:
+        uid += 1
+    return uid
 
 
 def ворота(двор: pathlib.Path) -> tuple[int, str]:
     """(код, ответ) ворот. Код судится вместе со словом: незнакомый ключ
     отвечает rc 2, и проба, судившая одно слово, принимала отказ разбора за
     «не блокирует»."""
-    среда = dict(os.environ, HARNESS_LOG_DIR=str(двор), HARNESS_CONF=str(стендовый_конфиг(двор)))
+    # Случаи судят ЛОК, поэтому занятость процессами машины отрезана: «свой» uid —
+    # ничей, дерево проекта — пустой каталог двора, /proc для подсчёта смен —
+    # пустой. DEPLOY_BUSY_MIN_SEC=0: помеха ниже, созданная самой пробой, видна
+    # сразу — без отреза она и краснит случаи о локе.
+    пусто = двор / "пусто"
+    пусто.mkdir(exist_ok=True)
+    среда = dict(os.environ, HARNESS_LOG_DIR=str(двор), HARNESS_CONF=str(стендовый_конфиг(двор)),
+                 HARNESS_INSTALL_CONF=str(стендовый_install(двор, пусто)),
+                 HARNESS_OWN_UID=str(ничей_uid()), AGENT_PROC_ROOT=str(пусто),
+                 DEPLOY_BUSY_MIN_SEC="0")
     готово = subprocess.run([sys.executable, str(ПРИБОР), "--действие", "push"],
                             capture_output=True, text=True, env=среда, check=False)
     return готово.returncode, готово.stdout + готово.stderr
@@ -66,6 +101,15 @@ with tempfile.TemporaryDirectory() as врем:
                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     time.sleep(0.3)
     живой = отвязанный.pid
+
+    # Помеха машины, созданная здесь: свой «claude» вне tmux агента, в дереве
+    # проекта (как долгий прогон ночных ворот). Улика
+    # 11.11.2026: забытая заглушка claude пробы переключения смены жила 4 часа,
+    # и ворота стенда отвечали «занято: процесс …» — случаи о локе краснели
+    # от машины, а не от своего правила.
+    помеха = subprocess.Popen(["setsid", "bash", "-c", "exec -a claude sleep 60"], cwd=str(КОРЕНЬ),
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    time.sleep(0.3)
 
     # БОЛЬНОЙ СЛУЧАЙ: лок СТАРШЕ старта этого процесса (номер переиспользован).
     старый = локи / "deploy.lock"
@@ -124,6 +168,7 @@ with tempfile.TemporaryDirectory() as врем:
            any(с.startswith(f"процесс {работа.pid}:") for с in долгие), True)
 
     отвязанный.terminate()
+    помеха.terminate()
 
 print(f"ИТОГ: плохих {плохо}")
 sys.exit(1 if плохо else 0)

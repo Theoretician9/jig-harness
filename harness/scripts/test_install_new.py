@@ -605,7 +605,7 @@ with tempfile.TemporaryDirectory() as врем:
 
 # main(): договор вывода и --показать на уровне скрипта. Расписание, конфиг и
 # метки подменены своими — проба не трогает машину.
-def прогон_main(пакет: Path, проект: Path, доводы: list) -> tuple:
+def прогон_main(пакет: Path, проект: Path, доводы: list, конфиг: str = "") -> tuple:
     import contextlib
     import io
 
@@ -619,7 +619,7 @@ def прогон_main(пакет: Path, проект: Path, доводы: list) 
     было_расписание = доустановка._расписание_сейчас
     было_окружение = {к: os.environ.get(к) for к in ("HARNESS_STARTER", "PROJECT_DIR")}
     пустой_конф = проект.parent / "harness.conf"
-    пустой_конф.write_text("", encoding="utf-8")
+    пустой_конф.write_text(конфиг, encoding="utf-8")
     (проект.parent / "heartbeat").mkdir(exist_ok=True)
 
     def run_без_машины(команда, *доводы_, **ключи_):
@@ -1817,6 +1817,41 @@ def show_does_not_count_service():
 
 
 случай("--показать: строки службы не считаются «заданий не хватает»", show_does_not_count_service)
+
+
+print("── Г3: ключи образца доезжают до живого конфига ──")
+# Живой /etc/harness/harness.conf обновление не обновляло: список `ключи` в
+# system-jobs.yaml правят руками, и забытый ключ (HACKATHON_UNTIL) на чужой
+# установке не появлялся, а гейт переключателей краснел. Стенд — свой каталог.
+ОБРАЗЕЦ_Г3 = ('# Прежний ключ: умолчание пакета.\nOLD_KEY="default"\n\n'
+              '# Новый ключ: комментарий должен приехать вместе с ним.\nNEW_KEY="fresh"\n')
+ЖИВОЙ_Г3 = 'OLD_KEY="owner-value"\nEXTRA_KEY="mine"\n'
+
+
+def ключи_образца_доезжают():
+    двор = Path(tempfile.mkdtemp(prefix="proba-g3-"))
+    try:
+        проект = двор / "proj"
+        (проект / "harness" / "config").mkdir(parents=True)
+        (проект / "harness" / "config" / "harness.conf").write_text(ОБРАЗЕЦ_Г3, encoding="utf-8")
+        (двор / "pkg" / "harness" / "память").mkdir(parents=True)   # пустая память: отказ «пакет не прочитан» не нужен
+        код, вывод = прогон_main(двор / "pkg", проект, [], ЖИВОЙ_Г3)
+        итог = (двор / "harness.conf").read_text(encoding="utf-8")
+        значения = доустановка.конф_модуль.из_текста(итог)
+        повтор = прогон_main(двор / "pkg", проект, [], итог)[1]
+        return (код == 0 and значения.get("NEW_KEY") == "fresh"
+                and значения.get("OLD_KEY") == "owner-value"
+                and значения.get("EXTRA_KEY") == "mine"
+                and "# Новый ключ: комментарий" in итог
+                and "NEW_KEY" in вывод and "EXTRA_KEY" in вывод
+                and "ключи образца" not in повтор,
+                f"код {код}, значения {значения}, вывод {вывод!r}")
+    finally:
+        shutil.rmtree(двор, ignore_errors=True)
+
+
+случай("Г3: новый ключ дописан с комментарием, значение владельца цело, лишний назван, повтор пуст",
+       ключи_образца_доезжают)
 
 
 print(f"ДОУСТАНОВКА: путей {путей}, неудач {неудач}")

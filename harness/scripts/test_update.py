@@ -804,7 +804,7 @@ try:
     timers = [f"harness-{i}.timer" for i in timer_ids] + ["harness-sentinel.timer"]
 
     def root_stand(rights=True, agent_rules=True, logrotate=True) -> Path:
-        etc = Path(tempfile.mkdtemp(prefix="корень-"))
+        etc = Path(tempfile.mkdtemp(prefix="proba-update-root-"))
         (etc / "harness").mkdir()
         (etc / "logrotate.d").mkdir()
         if rights:
@@ -839,7 +839,7 @@ try:
     root_case("R1 root-часть: всё на месте — тишина; каждый пробел (права, копия прав, logrotate, таймер) назван", case_root_gaps)
 
     def case_timer_enabled():
-        bin_dir = Path(tempfile.mkdtemp(prefix="systemctl-"))
+        bin_dir = Path(tempfile.mkdtemp(prefix="proba-update-systemctl-"))
         (bin_dir / "systemctl").write_text(
             '#!/bin/sh\n[ "$1 $2 $3" = "is-enabled --quiet harness-on.timer" ]\n', encoding="utf-8")
         (bin_dir / "systemctl").chmod(0o755)

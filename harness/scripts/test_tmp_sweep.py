@@ -1142,18 +1142,30 @@ CREATOR_DIRS = ((HERE,), (HERE / "hooks", HERE.parent / "hooks"),
                 (HERE.parent / "harness" / "panel", HERE.parent / "panel"))
 
 
+def layout_script() -> Path:
+    # Раскладчик в проект не кладётся, а его самотест сорит в /tmp из ворот проекта.
+    local = HERE.parent / "razlozhit-harnes.sh"
+    if local.is_file():
+        return local
+    sys.path.insert(0, str(HERE / "lib"))
+    import config
+    return config.katalog_paketa() / "harness" / "razlozhit-harnes.sh"
+
+
 def tree_creators() -> dict[str, list[str]]:
     dirs = [next((d for d in pair if d.is_dir()), None) for pair in CREATOR_DIRS]
     missing = [str(pair[0]) for pair, d in zip(CREATOR_DIRS, dirs) if d is None]
     assert not missing, f"каталоги создателей не найдены: {missing}"
+    layout = layout_script()
+    assert layout.is_file(), f"раскладчик не найден: {layout}"
     creators: dict[str, list[str]] = {}
-    for folder in dirs:
-        for source in sorted([*folder.glob("*.py"), *folder.glob("*.sh")]):
-            text = source.read_text(encoding="utf-8", errors="replace")
-            for pattern in CREATOR_PATTERNS:
-                for found in pattern.finditer(text):
-                    line = text.count("\n", 0, found.start()) + 1
-                    creators.setdefault(found[1], []).append(f"{source.relative_to(HERE.parent)}:{line}")
+    sources = [s for folder in dirs for s in sorted([*folder.glob("*.py"), *folder.glob("*.sh")])]
+    for source in [*sources, layout]:
+        text = source.read_text(encoding="utf-8", errors="replace")
+        for pattern in CREATOR_PATTERNS:
+            for found in pattern.finditer(text):
+                line = text.count("\n", 0, found.start()) + 1
+                creators.setdefault(found[1], []).append(f"{source}:{line}")
     return creators
 
 

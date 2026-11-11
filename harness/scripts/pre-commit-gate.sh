@@ -563,6 +563,21 @@ if printf '%s\n' "$CHANGED" | grep -qE '^(harness/config/(system-jobs|process-li
     гейт "сборка_system-jobs" python3 "$SNAP_DIR/scripts/build-system-jobs.py" --check
 fi
 
+# ── 2е. Живая проверка: записи доказаны следом ──────────────────────────────
+# Судья идёт около 10 с, поэтому зовётся только когда в индексе есть её данные. Берётся из
+# снимка индекса (К-4), а не с диска; документ не сверяет — его свежесть судят ворота.
+# Код судьи кроме 0 и 1 (упал) гейт тоже краснит: тихий пропуск был бы «зелёным» без суда.
+# Судья зовётся и при probe-mutations.yaml и invariants.yaml: их записи он читает. dev-map.yaml
+# не включён: карта меняется почти в каждом коммите, а судья идёт ~10 с. Переменные путей
+# снимаются, чтобы судья судил снимок индекса, а не окружение того, кто коммитит.
+# HARNESS_LOG_DIR не снимается: по нему судья находит слова владельца для класса B2.
+if printf '%s\n' "$CHANGED" | grep -qE '^harness/config/(live-check-[^/]*|mechanisms|probe-mutations|invariants)\.yaml$'; then
+    гейт "живая_проверка" env -u HARNESS_MECHANISMS -u HARNESS_LIVE_CHECK_STATE \
+        -u HARNESS_LIVE_CHECK_CLASSES -u HARNESS_LIVE_CHECK_DOC -u HARNESS_LIVE_CHECK_UNITS \
+        -u HARNESS_DEVMAP -u HARNESS_PROBE_MUTATIONS -u HARNESS_INVARIANTS \
+        python3 "${PRECOMMIT_LIVE_CHECK_JUDGE:-$SNAP_DIR/scripts/build-live-check-list.py}" --данные
+fi
+
 # ── 3. Синтаксис staged-скриптов — по содержимому индекса (К-4) ─────────────
 while IFS= read -r f; do
     [ -z "$f" ] && continue
@@ -612,6 +627,10 @@ ADDED=$(git -c core.quotepath=false diff --cached --name-only --diff-filter=AR)
 # Второй пункт владельца 11.09. Пока жёлтый: правило новое, база ненулевая
 # (75 коммитов истории), а краснящий с первого дня гейт отключают.
 гейт "тесты_до_кода" python3 "$SCRIPT_DIR/check-tests-first.py"
+
+# ── 3д2. Прополка без потерь: строка приказов уходит только в архив ────────
+# Спека hr.standards-and-policy §5.3: файлы «без_потерь» сверяются с HEAD~.
+гейт "прополка_без_потерь" python3 "$SCRIPT_DIR/check-memory-weeding.py"
 
 # ── 3е. Импорт ведёт в существующий модуль ─────────────────────────────────
 # Перевод имён файлов на латиницу оставил 171 импорт продукта указывать на

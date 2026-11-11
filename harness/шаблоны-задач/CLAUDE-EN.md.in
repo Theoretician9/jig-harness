@@ -3,8 +3,6 @@
 Project name and code directory are config data: `PROJECT_NAME` / `PROJECT_DIR`
 in `/etc/harness/install.conf`.
 
-@harness/self/core.json
-@harness/self/instance.yaml
 @STATE.md
 @./память/ORDERS.md
 @./память/MEMORY.md

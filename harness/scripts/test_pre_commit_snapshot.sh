@@ -36,7 +36,7 @@ if [ ! -f "$SRC/scripts/pre-commit-gate.sh" ]; then
 fi
 [ -f "$SRC/scripts/pre-commit-gate.sh" ] || { echo "ПЛОХО: нет дерева проекта для клона ($SRC)"; echo "ИТОГ: путей 1, неудач 1"; exit 1; }
 
-T="$(mktemp -d)"
+T="$(mktemp -d -t proba-precommit-snapshot-XXXXXX)"
 trap 'rm -rf "$T"' EXIT
 S="$T/repo"
 

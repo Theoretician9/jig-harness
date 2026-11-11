@@ -56,7 +56,7 @@ SRC="$(cd "${HACKATHON_PROBE_SRC:-$HERE/..}" && pwd)"
 # shellcheck disable=SC1091
 source "$HERE/lib/selftest_cases.sh"
 
-STAND=$(mktemp -d)
+STAND=$(mktemp -d -t proba-hackathon-gates-XXXXXX)
 trap 'rm -rf "$STAND"' EXIT
 TODAY=$(date +%F)
 

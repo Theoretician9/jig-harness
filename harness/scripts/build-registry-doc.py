@@ -231,7 +231,9 @@ def main() -> int:
         return 0
     ДОКУМЕНТ.parent.mkdir(parents=True, exist_ok=True)
     было = ДОКУМЕНТ.read_text(encoding="utf-8") if ДОКУМЕНТ.exists() else None
-    ДОКУМЕНТ.write_text(текст, encoding="utf-8")
+    # Не тронутый документ не переписывается: повтор раскладки той же версии не должен менять mtime.
+    if было != текст:
+        ДОКУМЕНТ.write_text(текст, encoding="utf-8")
     состояние = "без изменений" if было == текст else "обновлён"
     print(f"{ДОКУМЕНТ.relative_to(КОРЕНЬ)}: {состояние}, механизмов {len(записи)}")
     return 0

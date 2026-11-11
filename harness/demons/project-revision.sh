@@ -157,7 +157,7 @@ zapusk_agenta() {  # $1 = область, $2 = вопрос, $3 = список, 
     # --allowedTools перекрывается настройками проекта (живая проба 11.09.2026).
     # --strict-mcp-config обязателен: без него рвётся канал с владельцем.
     # 9>&- — агент не наследует дескриптор лока карты.
-    timeout "$6" bash "$PROJECT_DIR/scripts/claude-demon.sh" project-revision -p --model "$REVIZIA_MODEL" "$promt" \
+    timeout "$6" bash "${CLAUDE_DEMON_SH:-$PROJECT_DIR/scripts/claude-demon.sh}" project-revision -p --model "$REVIZIA_MODEL" "$promt" \
         --permission-mode manual \
         --allowedTools "Read,Edit,Write,Grep,Glob" \
         --mcp-config '{"mcpServers":{}}' --strict-mcp-config \
@@ -231,6 +231,10 @@ TG
     ISTOK="$(cd "$HERE/../.." && pwd)"
     cp "$ISTOK/scripts/claude-demon.sh" "$ISTOK/scripts/limit-in-log.py" "$T/proekt/scripts/"
     cp "$ISTOK/scripts/lib/config.sh" "$T/proekt/scripts/lib/"
+    # Обёртка зовёт модель через носитель личности; сборка личности самотесту
+    # не предмет (её судит test_claude_run.sh), поэтому носитель — прокладка,
+    # отдающая вызов подставному claude.
+    printf '#!/usr/bin/env bash\nshift 2\nexec claude "$@"\n' > "$T/proekt/scripts/claude-run.sh"
     git -C "$T/proekt" init -q -b master
     git -C "$T/proekt" add -A
     git -C "$T/proekt" -c user.name=t -c user.email=t@t commit -qm "проба"
@@ -549,6 +553,9 @@ PY
         porcii "$OBLAST" --продвинуть "$POSLEDNIJ" >/dev/null
         OBLASTEJ=$(( OBLASTEJ + 1 ))
         ISHOD["$OBLAST"]="прочитано"
+    elif [ "$AGENT_RC" = 79 ]; then
+        say "пропуск: личность не собрана — область $OBLAST без модели, курсор не двигаю (сигнал дал носитель)"
+        ISHOD["$OBLAST"]="не читалась (личность не собрана)"
     else
         say "область $OBLAST: агент вернул $AGENT_RC — курсор не двигаю"
         ISHOD["$OBLAST"]="не читалась (агент вернул $AGENT_RC)"

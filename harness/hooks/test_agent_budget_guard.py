@@ -19,7 +19,7 @@
   * пачка одновременных запусков не проскакивает потолок (замок, три пачки);
   * нет wip / две wip / только трейлер в истории — запуски считаются по СЕССИИ
     под потолком «без-задачи» (раньше — проход со следом «задача не определена»);
-    на настоящем журнале вызовы-агентов.jsonl: сессия, чьи запуски легли
+    на журнале стенда с историей прежнего хука: сессия, чьи запуски легли
     skipped, упирается в потолок;
   * глубина: помощник глубины 2 зовёт третьего — отказ; глубина 2 тяжёлого типа —
     отказ с подсказкой harness-worker; глубина берётся из meta.json помощника
@@ -30,23 +30,31 @@
     (живые = дети с недавно писавшимся транскриптом); два управляющих не мешают
     друг другу, и смена с её потолком «без-задачи» тоже;
   * чужой инструмент хук не трогает;
-  * тяжёлый тип помощника (без типа, general-purpose, claude — грузят CLAUDE.md
-    проекта, 71 тыс. токенов на старт) получает ПРЕДУПРЕЖДЕНИЕ в additionalContext
-    с именем harness-worker, а не отказ, и строку agent.heavy-type в журнале;
-    лёгкие типы (harness-worker, Explore, Plan, claude-code-guide) — без
-    предупреждения и без строки; запуск, отменённый сторожем скила, не считается;
+  * тип без собранной карточки (без типа, пусто, general-purpose, claude, Explore,
+    Plan, claude-code-guide, plugin:x) — ОТКАЗ (код 2 или permissionDecision deny)
+    с подсказкой harness-explorer и harness-worker: их системный промпт не правится,
+    личности в них нет (спека hr.standards-and-policy §4.4); отказ потолок не ест;
+    свои собранные карточки (harness-worker, harness-lead, harness-explorer) с
+    отпечатком, равным текущей сборке класса, — проход без предупреждения;
+    карточка с чужим отпечатком, без отпечатка или устаревшая после правки роли —
+    отказ «пересобери карточки»; запуск, отменённый сторожем скила, не считается;
   * продолжение помощника (SendMessage) никогда не отказывается: потолок
     «без-задачи» исчерпан, новый запуск — отказ (код 2), а SendMessage — код 0 и
     строка agent.resume {вызов: toolUseId адресата из его meta.json}; адресат без
     meta.json — код 0, строки нет (ревью hr.status-human-readable, G2-01).
 
 Механизм берётся рядом с пробой либо из HARNESS_AGENT_BUDGET_GUARD (дверь для
-мутаций: копия с поломкой). Прогон: python3 scripts/hooks/test_agent_budget_guard.py
+мутаций: копия с поломкой). Карточки стенда — свой каталог SELF_CARDS_DIR, собранный
+из своей копии эталона SELF_ETALON_DIR сборщиком scripts/self-prompt.py (--класс);
+хук судит только последнюю строку «отпечаток: <метка>» против текущей сборки класса.
+Прогон: python3 scripts/hooks/test_agent_budget_guard.py
 """
 from __future__ import annotations
 
 import json
 import os
+import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -62,15 +70,21 @@ PIPELINE = ROOT / "harness" / "config" / "pipeline.yaml"
 JOURNAL_NAME = "вызовы-агентов.jsonl"
 SRC = "scripts/hooks/agent_budget_guard.py"
 LAUNCH_EVENT = "agent.launch"
-HEAVY_EVENT = "agent.heavy-type"
 RESUME_EVENT = "agent.resume"
 LIGHT_TYPE = "harness-worker"
+EXPLORER_TYPE = "harness-explorer"
+BUILDER = ROOT / "scripts" / "self-prompt.py"
+CARD_CLASS = {LIGHT_TYPE: "исполнитель", "harness-lead": "управляющий", EXPLORER_TYPE: "разведчик"}
+UNBUILT_TYPES = (None, "", "general-purpose", "claude", "Explore", "Plan", "claude-code-guide",
+                 "plugin:x")
+REBUILD = "пересобери карточки"
+SELF_DOORS = ("SELF_ETALON_DIR", "SELF_CARDS_DIR", "SELF_TREE_DIR", "LAUNCH_POLICY")
+# Собранные карточки стенда: эталон и каталог заводит main() до первого стенда.
+STAND_SELF: dict = {}
 NO_TASK = "без-задачи"
 LEAD_LEVEL = "управляющий"
 LEAD_PARALLEL = 3
 LEAD_TOTAL = 4
-REAL_JOURNAL = Path(os.environ.get("HARNESS_REAL_AGENT_JOURNAL")
-                    or "/var/log/harness") / JOURNAL_NAME
 
 checked = failed = 0
 
@@ -93,8 +107,11 @@ def levels_from_data(path: Path) -> dict:
 class Stand:
     """Свой каталог журналов, своя карта и своя копия pipeline.yaml."""
 
-    def __init__(self, base: Path, ceilings: dict):
+    def __init__(self, base: Path, ceilings: dict, cards: Path | None = None,
+                 etalon: Path | None = None):
         self.base = base
+        self.cards = cards or STAND_SELF["cards"]
+        self.etalon = etalon or STAND_SELF["etalon"]
         self.logs = base / "logs"
         self.logs.mkdir(parents=True, exist_ok=True)
         self.devmap = base / "dev-map.yaml"
@@ -114,7 +131,10 @@ class Stand:
         self.devmap.write_text(yaml.safe_dump(tree, allow_unicode=True), encoding="utf-8")
 
     def env(self) -> dict:
-        env = {k: v for k, v in os.environ.items() if k != "HARNESS_TASK"}
+        env = {k: v for k, v in os.environ.items()
+               if k != "HARNESS_TASK" and k not in SELF_DOORS}
+        env.update(SELF_ETALON_DIR=str(self.etalon), SELF_CARDS_DIR=str(self.cards),
+                   SELF_TREE_DIR=str(ROOT))
         env.update(HARNESS_LOG_DIR=str(self.logs), LOG_DIR=str(self.logs),
                    HARNESS_DEVMAP=str(self.devmap),
                    HARNESS_EVENTS_STATE=str(self.base / "state"),
@@ -124,10 +144,27 @@ class Stand:
         return env
 
     def launch(self, description: str = "помощник: код", tool: str = "Agent",
-               session: str = "проба", subagent_type: str | None = None,
+               session: str = "проба", subagent_type: str | None = LIGHT_TYPE,
                caller_depth: int | None = None, lead: str | None = None):
-        """caller_depth — spawnDepth зовущего помощника (None — зовёт смена);
-        lead — agent_id управляющего-зовущего (глубина 1, agent_type harness-lead)."""
+        """(код, stderr). subagent_type None — тип не задан; caller_depth — spawnDepth
+        зовущего помощника (None — зовёт смена); lead — agent_id управляющего-зовущего
+        (глубина 1, agent_type harness-lead)."""
+        proc = self.launch_proc(description, tool, session, subagent_type, caller_depth, lead)
+        return proc.returncode, proc.stderr
+
+    def verdict(self, subagent_type: str | None = LIGHT_TYPE, caller_depth: int | None = None):
+        """(отказ ли, текст отказа): отказ — код 2 (текст в stderr) или permissionDecision deny."""
+        proc = self.launch_proc("помощник: код", "Agent", "проба", subagent_type, caller_depth, None)
+        if proc.returncode == 2:
+            return True, proc.stderr
+        try:
+            out = (json.loads(proc.stdout) if proc.stdout.strip() else {}).get("hookSpecificOutput") or {}
+        except (ValueError, AttributeError):
+            out = {}
+        return out.get("permissionDecision") == "deny", str(out.get("permissionDecisionReason") or "")
+
+    def launch_proc(self, description: str, tool: str, session: str, subagent_type: str | None,
+                    caller_depth: int | None, lead: str | None):
         tool_input = {"description": description, "prompt": "работа"}
         if subagent_type is not None:
             tool_input["subagent_type"] = subagent_type
@@ -141,9 +178,8 @@ class Stand:
             payload.update(agent_id=lead, agent_type="harness-lead",
                            transcript_path=str(self.base / "s.jsonl"))
             self.write_meta(session, lead, {"spawnDepth": 1})
-        proc = subprocess.run([sys.executable, str(GUARD)], input=json.dumps(payload),
+        return subprocess.run([sys.executable, str(GUARD)], input=json.dumps(payload),
                               capture_output=True, text=True, env=self.env(), timeout=60)
-        return proc.returncode, proc.stderr
 
     def write_meta(self, session: str, agent: str, meta: dict) -> Path:
         path = self.base / session / "subagents" / f"agent-{agent}.meta.json"
@@ -173,10 +209,6 @@ class Stand:
             out = {}
         context = ((out.get("hookSpecificOutput") or {}).get("additionalContext") or "")
         return proc.returncode, context
-
-    def heavy_rows(self) -> list:
-        return [r for r in self.rows()
-                if r.get("src") == SRC and r.get("event") == HEAVY_EVENT]
 
     def send(self, target: str, session: str = "проба"):
         """(код, stderr) SendMessage смены помощнику target."""
@@ -303,7 +335,8 @@ def judge_race(tmp: Path) -> None:
         stand = Stand(tmp / f"гонка-{round_no}", {"мелкая": {"всего": 2, "ревью": 0}})
         stand.set_map([("задача-г", "wip", "мелкая")])
         payload = json.dumps({"tool_name": "Agent", "session_id": "проба",
-                              "tool_input": {"description": "помощник: код"}})
+                              "tool_input": {"description": "помощник: код",
+                                             "subagent_type": LIGHT_TYPE}})
         procs = [subprocess.Popen([sys.executable, str(GUARD)], stdin=subprocess.PIPE,
                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                   text=True, env=stand.env()) for _ in range(6)]
@@ -351,30 +384,43 @@ def judge_fail_open(tmp: Path) -> None:
     check("чужой инструмент следа не оставляет", before, len(stand.rows()))
 
 
-def judge_real_journal(tmp: Path) -> None:
-    """Настоящий журнал: сессия, чьи запуски легли skipped «задача не определена»,
-    не должна уходить от потолка. Список сессий берётся ПАРСИНГОМ журнала."""
-    path = REAL_JOURNAL
+def history_rows(session: str, skipped: int) -> list:
+    """Строки прежнего хука: запуски сессии без задачи легли skipped. Рядом —
+    чужие строки, которые счёт обязан пропустить."""
+    row = {"v": 1, "ts": "2026-10-29T10:00:00+03:00", "src": SRC, "event": LAUNCH_EVENT,
+           "outcome": "skipped", "task": "-", "session": session,
+           "data": {"почему": "задача не определена"}}
+    return [row] * skipped + [dict(row, session="соседняя", outcome="ok", task=NO_TASK),
+                              dict(row, src="scripts/agent-level.py")]
+
+
+def judge_history_journal(tmp: Path) -> None:
+    """Журнал с историей: сессия, чьи запуски легли skipped «задача не определена»,
+    не должна уходить от потолка. Историю пишет стенд — на живой машине её может
+    не быть; список сессий берётся ПАРСИНГОМ журнала стенда."""
+    stand = Stand(tmp / "история", {NO_TASK: {"всего": 3, "ревью": 0}})
+    stand.set_map([("одна", "plan", "мелкая")])
+    path = stand.logs / JOURNAL_NAME
+    path.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n"
+                            for r in history_rows("3f1c9a2e-7b4d-4e8a-9c0f-2d6b5a1e7f70", 4)),
+                    encoding="utf-8")
     skipped: dict = {}
-    if path.exists():
-        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
-            try:
-                row = json.loads(line)
-            except ValueError:
-                continue
-            if (row.get("src") == SRC and row.get("event") == LAUNCH_EVENT
-                    and row.get("outcome") == "skipped" and row.get("task") == "-"
-                    and (row.get("data") or {}).get("почему") == "задача не определена"):
-                skipped[row.get("session") or ""] = skipped.get(row.get("session") or "", 0) + 1
-    check("в настоящем журнале есть запуски без задачи (иначе проба слепа)", True,
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if (row.get("src") == SRC and row.get("event") == LAUNCH_EVENT
+                and row.get("outcome") == "skipped" and row.get("task") == "-"
+                and (row.get("data") or {}).get("почему") == "задача не определена"):
+            skipped[row.get("session") or ""] = skipped.get(row.get("session") or "", 0) + 1
+    check("в журнале стенда есть запуски без задачи (иначе проба слепа)", True,
           bool(skipped))
     if not skipped:
         return
     session, count = max(skipped.items(), key=lambda kv: kv[1])
-    stand = Stand(tmp / "настоящий", {NO_TASK: {"всего": 3, "ревью": 0}})
-    stand.set_map([("одна", "plan", "мелкая")])
     codes = [stand.launch(session=session)[0] for _ in range(count + 3)]
-    check(f"сессия настоящего журнала ({count} запусков без задачи) упирается в потолок 3",
+    check(f"сессия из истории ({count} запусков без задачи) упирается в потолок 3",
           [0, 0, 0] + [2] * count, codes)
 
 
@@ -382,27 +428,27 @@ def judge_depth(tmp: Path) -> None:
     """Глубина нового помощника = spawnDepth зовущего + 1 (смена — 0)."""
     stand = Stand(tmp / "глубина", {"мелкая": {"всего": 0, "ревью": 0}})
     stand.set_map([("задача-г", "wip", "мелкая")])
-    check("смена зовёт общего помощника (глубина 1) — проход", 0,
-          stand.launch(subagent_type="general-purpose")[0])
+    check(f"смена зовёт {LIGHT_TYPE} (глубина 1) — проход", 0,
+          stand.launch(subagent_type=LIGHT_TYPE)[0])
     check("помощник глубины 1 зовёт harness-worker (глубина 2) — проход", 0,
           stand.launch(subagent_type=LIGHT_TYPE, caller_depth=1)[0])
     for heavy in (None, "general-purpose", "claude"):
-        code, text = stand.launch(subagent_type=heavy, caller_depth=1)
+        refused, text = stand.verdict(subagent_type=heavy, caller_depth=1)
         check(f"глубина 2, тип {heavy or 'не задан'} — отказ с подсказкой {LIGHT_TYPE}",
-              (2, True), (code, LIGHT_TYPE in text))
-    for light in (LIGHT_TYPE, "Explore"):
+              (True, True), (refused, LIGHT_TYPE in text))
+    for light in (LIGHT_TYPE, EXPLORER_TYPE):
         code, text = stand.launch(subagent_type=light, caller_depth=2)
         check(f"глубина 3, тип {light} — отказ (потолок глубины 2)", (2, True),
               (code, "глубин" in text))
     check("отказ по глубине записан исходом refused", "refused",
           (stand.launch_rows() or [{}])[-1].get("outcome"))
     ok_before = sum(1 for r in stand.launch_rows() if r.get("outcome") == "ok")
-    stand.launch(subagent_type="general-purpose", caller_depth=1)
+    stand.launch(subagent_type=LIGHT_TYPE, caller_depth=2)
     check("отказ по глубине счёт задачи не увеличил", ok_before,
           sum(1 for r in stand.launch_rows() if r.get("outcome") == "ok"))
     payload = {"tool_name": "Agent", "session_id": "проба", "agent_id": "нет-файла",
                "transcript_path": str(stand.base / "s.jsonl"),
-               "tool_input": {"description": "помощник", "subagent_type": "general-purpose"}}
+               "tool_input": {"description": "помощник", "subagent_type": LIGHT_TYPE}}
     proc = subprocess.run([sys.executable, str(GUARD)], input=json.dumps(payload),
                           capture_output=True, text=True, env=stand.env(), timeout=60)
     check("meta.json нет — глубина неизвестна, правило молчит", 0, proc.returncode)
@@ -447,33 +493,111 @@ def judge_lead(tmp: Path) -> None:
           stand.launch(lead="Л1", subagent_type=LIGHT_TYPE)[0])
 
 
-def judge_type_hint(tmp: Path) -> None:
-    """Тяжёлый тип помощника — предупреждение и счёт, не отказ."""
+def judge_types(tmp: Path) -> None:
+    """Тип без собранной карточки — отказ: личности в его системном промпте нет."""
     stand = Stand(tmp / "тип", {"мелкая": {"всего": 0, "ревью": 0}})
     stand.set_map([("задача-т", "wip", "мелкая")])
-    for heavy in (None, "general-purpose", "claude"):
-        code, context = stand.launch_typed(heavy)
-        check(f"тип {heavy or 'не задан'}: запуск не отказан", 0, code)
-        check(f"тип {heavy or 'не задан'}: предупреждение называет {LIGHT_TYPE} и 71 тыс.",
-              True, LIGHT_TYPE in context and "71" in context)
-    rows = stand.heavy_rows()
-    check("три тяжёлых запуска — три строки agent.heavy-type с задачей",
-          [("задача-т", "ok")] * 3, [(r.get("task"), r.get("outcome")) for r in rows])
-    check("в строке записан тип помощника", ["-", "general-purpose", "claude"],
-          [(r.get("data") or {}).get("тип") for r in rows])
-    for light in (LIGHT_TYPE, "Explore", "Plan", "claude-code-guide"):
-        code, context = stand.launch_typed(light)
-        check(f"тип {light}: без предупреждения", (0, ""), (code, context))
-    check("лёгкие типы строк agent.heavy-type не добавили", 3, len(stand.heavy_rows()))
-    check("строки agent.heavy-type потолок не едят: 7 запусков — 7 строк agent.launch",
-          7, sum(1 for r in stand.launch_rows() if r.get("outcome") == "ok"))
+    for unbuilt in UNBUILT_TYPES:
+        refused, text = stand.verdict(unbuilt)
+        name = "не задан" if unbuilt is None else repr(unbuilt)
+        check(f"тип {name}: отказ с подсказкой {EXPLORER_TYPE} и {LIGHT_TYPE}", (True, True),
+              (refused, EXPLORER_TYPE in text and LIGHT_TYPE in text))
+    check("отказ по типу потолок не ест: строк agent.launch ok нет", 0,
+          sum(1 for r in stand.launch_rows() if r.get("outcome") == "ok"))
+    for built in CARD_CLASS:
+        code, context = stand.launch_typed(built)
+        check(f"тип {built} (собранная карточка): проход без предупреждения", (0, ""), (code, context))
+    check("три собранных типа — три строки agent.launch ok", 3,
+          sum(1 for r in stand.launch_rows() if r.get("outcome") == "ok"))
 
     stand = Stand(tmp / "тип-сосед", {"мелкая": {"всего": 0, "ревью": 0}})
     stand.set_map([("задача-т", "wip", "мелкая")])
     (stand.logs / "skills.jsonl").write_text("", encoding="utf-8")
-    code, context = stand.launch_typed("general-purpose")
-    check("запуск, отменённый сторожем скила: ни предупреждения, ни строки",
-          ("", 0), (context, len(stand.heavy_rows())))
+    code, context = stand.launch_typed(LIGHT_TYPE)
+    check("запуск, отменённый сторожем скила: ни слова, ни строки запуска",
+          (0, "", 0), (code, context, len(stand.launch_rows())))
+
+
+def spoil_cards(base: Path, name: str, last_line: str | None) -> Path:
+    """Копия карточек стенда, где у карточки `name` последняя строка заменена
+    (None — строки отпечатка нет вовсе)."""
+    shutil.copytree(STAND_SELF["cards"], base)
+    path = base / f"{name}.md"
+    lines = path.read_text(encoding="utf-8").rstrip("\n").split("\n")[:-1]
+    path.write_text("\n".join(lines + ([last_line] if last_line else [])) + "\n", encoding="utf-8")
+    return base
+
+
+def judge_fingerprint(tmp: Path) -> None:
+    """Отпечаток карточки сверяется с ТЕКУЩЕЙ сборкой класса."""
+    stand = Stand(tmp / "отпечаток", {"мелкая": {"всего": 0, "ревью": 0}})
+    stand.set_map([("задача-о", "wip", "мелкая")])
+    for built in CARD_CLASS:
+        check(f"своя карточка {built} с верным отпечатком — проход", (False, 0),
+              (stand.verdict(built)[0], stand.launch(subagent_type=built)[0]))
+
+    labels = STAND_SELF["labels"]
+    worker_tail = labels[LIGHT_TYPE].rsplit("-", 1)[1]
+    shifted = f"{CARD_CLASS[LIGHT_TYPE]}-{(int(worker_tail, 16) + 1) % 0x1000000:06x}"
+    spoiled = (("чужой хвост метки", f"отпечаток: {shifted}"),
+               ("отпечаток разведчика в карточке исполнителя", f"отпечаток: {labels[EXPLORER_TYPE]}"),
+               ("строки отпечатка нет", None))
+    for number, (what, line) in enumerate(spoiled):
+        cards = spoil_cards(tmp / f"отпечаток-{number}", LIGHT_TYPE, line)
+        bench = Stand(tmp / f"отпечаток-стенд-{number}", {"мелкая": {"всего": 0, "ревью": 0}},
+                      cards=cards)
+        bench.set_map([("задача-о", "wip", "мелкая")])
+        refused, text = bench.verdict(LIGHT_TYPE)
+        check(f"{LIGHT_TYPE}: {what} — отказ «{REBUILD}»", (True, True), (refused, REBUILD in text))
+
+    # Роль исполнителя изменилась, карточки не пересобраны: старый отпечаток чужой.
+    etalon = tmp / "эталон-правлен"
+    shutil.copytree(STAND_SELF["etalon"], etalon)
+    role = etalon / "roles" / "worker.md"
+    role.write_text(role.read_text(encoding="utf-8") + "\nновое правило роли\n", encoding="utf-8")
+    bench = Stand(tmp / "отпечаток-устарел", {"мелкая": {"всего": 0, "ревью": 0}}, etalon=etalon)
+    bench.set_map([("задача-о", "wip", "мелкая")])
+    refused, text = bench.verdict(LIGHT_TYPE)
+    check(f"роль исполнителя изменилась — {LIGHT_TYPE}: отказ «{REBUILD}»", (True, True),
+          (refused, REBUILD in text))
+    check(f"роль исполнителя изменилась — {EXPLORER_TYPE} (роль не тронута): проход", False,
+          bench.verdict(EXPLORER_TYPE)[0])
+
+
+def card_head(name: str) -> str:
+    """Шапка живой карточки; у разведчика живой может не быть — шапка по спеке §4.4."""
+    live = ROOT / ".claude" / "agents" / f"{name}.md"
+    text = live.read_text(encoding="utf-8") if live.exists() else ""
+    found = re.match(r"---\n(.*?)\n---\n", text, re.S)
+    if found:
+        return found[1]
+    return (f"name: {name}\ndescription: Read-only scout for the harness.\n"
+            "omitClaudeMd: true\ntools: Read, Grep, Glob, Bash")
+
+
+def make_stand_cards(base: Path) -> None:
+    """Эталон стенда и собранные из него карточки: тело — классовая сборка,
+    последняя строка — «отпечаток: <метка сборки класса>»."""
+    etalon = base / "эталон"
+    shutil.copytree(ROOT / "harness" / "self", etalon)
+    cards = base / "карточки"
+    cards.mkdir(parents=True)
+    env = {k: v for k, v in os.environ.items() if k not in SELF_DOORS}
+    env.update(SELF_ETALON_DIR=str(etalon), SELF_TREE_DIR=str(ROOT), PYTHONDONTWRITEBYTECODE="1")
+    labels = {}
+    for name, cls in CARD_CLASS.items():
+        built = base / "класс" / f"{cls}.md"
+        built.parent.mkdir(parents=True, exist_ok=True)
+        rc = subprocess.run([sys.executable, str(BUILDER), "--класс", cls, "--в", str(built)],
+                            env=env, capture_output=True, text=True, timeout=60).returncode
+        first, _, body = built.read_text(encoding="utf-8").partition("\n") if rc == 0 else ("", "", "")
+        check(f"стенд: классовая сборка {cls} — код 0 и метка", True,
+              first.startswith("Метка сборки: "))
+        labels[name] = first.removeprefix("Метка сборки: ")
+        (cards / f"{name}.md").write_text(
+            f"---\n{card_head(name)}\n---\n\n{body.strip()}\n\nотпечаток: {labels[name]}\n",
+            encoding="utf-8")
+    STAND_SELF.update(etalon=etalon, cards=cards, labels=labels)
 
 
 def judge_resume(tmp: Path) -> None:
@@ -507,6 +631,7 @@ def main() -> int:
     check("в pipeline.yaml есть уровни ключа «помощники»", True, bool(levels))
     with tempfile.TemporaryDirectory() as raw:
         tmp = Path(raw)
+        make_stand_cards(tmp / "личность")
         for level, ceiling in levels.items():
             judge_level(tmp, str(level), int(ceiling.get("всего") or 0),
                         int(ceiling.get("ревью") or 0))
@@ -514,10 +639,11 @@ def main() -> int:
         judge_neighbour_refusal(tmp)
         judge_race(tmp)
         judge_fail_open(tmp)
-        judge_real_journal(tmp)
+        judge_history_journal(tmp)
         judge_depth(tmp)
         judge_lead(tmp)
-        judge_type_hint(tmp)
+        judge_types(tmp)
+        judge_fingerprint(tmp)
         judge_resume(tmp)
     print(f"SELFTEST: {'зелёный' if not failed else 'КРАСНЫЙ'} ({checked} случаев, "
           f"уровней из данных {len(levels)}, неудач {failed})")

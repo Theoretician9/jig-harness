@@ -993,6 +993,19 @@ def _launch_layout(archive=None, rollback_of=None, timeout=LAYOUT_TIMEOUT_SEC):
     return True
 
 
+def _напечатать_эталон() -> None:
+    """Просит у root печать эталона личности по только что разложенному пакету.
+
+    Права может не быть (установка старее этой строки) — это не беда обновления:
+    молча идём дальше: эталон останется прежним до права или следующей печати.
+    Вывод sudo не показываем: владельцу он ничего не даёт."""
+    try:
+        subprocess.run(["sudo", "-n", "/usr/local/lib/harness/self-seal", str(пакет())],
+                       capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
 def _разложить_пакет(archive=None, rollback_of=None) -> tuple:
     """Раскладка пакета в проект И пересборка производных → (раскладка_ок, упавшие).
 
@@ -1004,6 +1017,8 @@ def _разложить_пакет(archive=None, rollback_of=None) -> tuple:
     launched = _launch_layout(archive, rollback_of)
     if not launched and not _rollback_finished(launched, archive, rollback_of):
         return launched, []
+    if launched:   # откат с кодом 1 не печатает: эталон ставит только удавшаяся раскладка
+        _напечатать_эталон()
     упавшие = пересобрать_производные()
     # Новый демон без строки cron и без периода метки мёртв и незаметен
     # (находка C7): доустановка добавляет недостающее и ничего не удаляет.
@@ -1113,7 +1128,7 @@ def _перезапустить_службы() -> bool:
     """Носители обновлённого кода. Диспетчер ПОСЛЕДНИМ: он держит канал с
     владельцем, и его перезапуск обрывает разговор (находка C4)."""
     ок = True
-    for служба in ("harness-panel", "harness-sentinel.timer", "harness-dispatcher"):
+    for служба in ("harness-panel.service", "harness-sentinel.timer", "harness-dispatcher.service"):
         готово = subprocess.run(["sudo", "-n", "systemctl", "restart", служба],
                                 capture_output=True, timeout=120)
         ок = ок and готово.returncode == 0
@@ -1160,6 +1175,12 @@ def main(argv: list) -> int:
             return 0
         print(f"[обновление] не поставлено: {итог.get('беда')}", file=sys.stderr)
         return 1
+    if "--пересобрать-производные" in argv:
+        # Дверь для раскладчика: одна и та же пересборка, что зовёт обновление.
+        не_собрано = пересобрать_производные()
+        for файл, хвост in не_собрано:
+            print(f"{файл} — {хвост or 'без текста'}", file=sys.stderr)
+        return 1 if не_собрано else 0
     if "--затравка" in argv or "--затравка-спросить" in argv:
         return _seed_command("--затравка-спросить" in argv)
     if "--версия" in argv:

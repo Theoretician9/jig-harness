@@ -411,7 +411,7 @@ done <<< "$TAKEN"
 AGENT_RC=0
 (
 cd "$AGENT_DIR" && timeout -k 30 "${TIMEOUT_MIN}m" \
-bash "$PROJECT_DIR/scripts/claude-demon.sh" checks-stream -p --model "$(model_dlya код)" \
+bash "${CLAUDE_DEMON_SH:-$PROJECT_DIR/scripts/claude-demon.sh}" checks-stream -p --model "$(model_dlya код)" \
   "Ты исполнитель тревог проверок проекта ${PROJECT_NAME:-харнес} ($PROJECT_DIR).
 
 Тревога проверки — это красный итог мутаций, ночных ворот или ревизии: проба
@@ -472,7 +472,7 @@ done <<< "$TAKEN"
 
 # Отдых начинается с взятия. Агент, остановленный лимитом, работы не сделал —
 # его ключи на отдых не уходят; зелёные из файла уходят.
-if [ "$AGENT_RC" != 77 ]; then
+if [ "$AGENT_RC" != 77 ] && [ "$AGENT_RC" != 79 ]; then
     NOW=$(date +%s)
     while read -r _ key; do
         [ -n "$key" ] || continue
@@ -493,6 +493,8 @@ done
 
 if [ "$AGENT_RC" = 77 ]; then
     tell_owner_once "Поток проверок не шёл: лимит подписки. Тревог проверок открыто $COUNT, повторю на следующем проходе."
+elif [ "$AGENT_RC" = 79 ]; then
+    say "пропуск: личность не собрана — поток без модели, ключи на отдых не ушли (сигнал дал носитель)"
 elif [ "$AGENT_RC" != 0 ]; then
     tell_owner_once "Поток проверок упал (код $AGENT_RC). Тревог проверок открыто $COUNT, журнал checks-stream.log."
 elif [ "${#STILL[@]}" -gt 0 ]; then
