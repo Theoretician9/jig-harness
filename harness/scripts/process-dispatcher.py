@@ -38,7 +38,9 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE / "lib"))
 import config      # noqa: E402
 import events      # noqa: E402
+import process_library  # noqa: E402
 import process_load  # noqa: E402
+import process_state  # noqa: E402
 
 SRC = "scripts/process-dispatcher.py"
 STARTED = time.monotonic()
@@ -83,7 +85,6 @@ def load_json(path: Path, default):
 def read_library(args) -> dict:
     """Библиотека для чтения: файл пакета плюс слой установки. Писать надо в файл пакета
     (to_library), поэтому слитый вид туда не идёт."""
-    import process_library       # noqa: PLC0415
     return process_library.with_local_layer(load_json(Path(args.library), {}))
 
 
@@ -201,7 +202,6 @@ def switch_state():
     value = conf.get("BACKGROUND_PROCESSES", "on") if conf else None
     if value in (None, "on"):
         return value, 0
-    import process_library       # noqa: PLC0415
     return value, len((process_library.load().get("выключатель") or {}).get("исключения") or [])
 
 
@@ -295,27 +295,51 @@ def show_now(args) -> int:
     return 0
 
 
+def exempt_ids() -> set:
+    return {r["id"] for r in (process_library.load().get("выключатель") or {}).get("исключения") or []}
+
+
+def live_states(args, library: dict, idents: set, now: float) -> dict:
+    """Состояния процессов живьём: у CLI есть docker, поэтому и медленные факты он собирает сам."""
+    records = library.get("процессы", [])
+    schedule = process_library.load().get("процессы") or {}
+    slow = process_state.state_facts(records, schedule, process_load.read_lines(args.logs, "process-runs"), now, args.proc)
+    outside = sorted(idents - {r["id"] for r in records})
+    facts = process_state.gather(records, schedule, args.logs, slow, now, switch_state()[0], exempt_ids(), outside,
+                                 args.proc)
+    return process_state.resolve(records, facts, now)
+
+
+def state_cell(found) -> str:
+    if not found:
+        return "-"
+    word = process_state.LABELS[found["value"]]
+    return f"{word} ({found['why']})" if found["value"] in ("failed", "skipped", "unknown") else word
+
+
 def show_window(args, label: str) -> int:
     hours, now = HOURS[label], time.time()
     agg = process_load.aggregate(process_load.read_lines(args.logs), now, hours)
-    shares = process_load.window_shares(args.logs, args.transcripts, args.proc, agg,
-                                        read_library(args), now, hours)
+    library = read_library(args)
+    shares = process_load.window_shares(args.logs, args.transcripts, args.proc, agg, library, now, hours)
     tokens = shares["tokens"]
+    idents = set(agg["ids"]) | set(shares["runs"]) | set(tokens["ids"])
+    states = live_states(args, library, idents, now)
     print(switch_line())
     print(f"данных {round(agg['hours'])} ч из {hours}; отброшено строк со сбоем замера: {agg['dropped']}")
-    print("процесс | ядро-ч | % ёмкости | память пик/ср МБ | запусков | в работе | доля запусков | токены | доля токенов")
-    idents = set(agg["ids"]) | set(shares["runs"]) | set(tokens["ids"])
+    print("процесс | состояние | ядро-ч | % ёмкости | память пик/ср МБ | запусков | в работе | доля запусков | токены | доля токенов")
     cpu = lambda i: agg["ids"].get(i, {}).get("cpu_с", 0.0)  # noqa: E731
     for ident in sorted(idents, key=lambda i: (-cpu(i), -tokens["ids"].get(i, {}).get("all", 0), i)):
         v = agg["ids"].get(ident)
         server = [f"{v['cpu_с'] / 3600:.2f}", f"{pct(v['cpu_с'], agg['capacity_с']):.1f}",
                   f"{v['rss_пик']:.0f}/{v['rss_ср']:.0f}"] if v else ["-", "-", "-"]
-        print(" | ".join([ident] + server + run_cells(ident, shares) + token_cells(ident, tokens)))
+        print(" | ".join([ident, state_cell(states.get(ident))] + server + run_cells(ident, shares)
+                         + token_cells(ident, tokens)))
         parts = shares["runs"].get(ident, {}).get("parts", {})
         for part in sorted(set(parts) | set(tokens["ids"].get(ident, {}).get("parts", {}))):
             run = parts.get(part)
             part_tokens = tokens["ids"][ident]["parts"].get(part) if ident in tokens["ids"] else None
-            print(f"└ {part} | - | - | - | " + " | ".join([
+            print(f"└ {part} | - | - | - | - | " + " | ".join([
                 str(run["n"]) if run else "-", spent_text(run["sec"]) if run else "-", "-",
                 grouped(part_tokens) if part_tokens else "-", f"{pct(part_tokens or 0, tokens['total']):.1f} %"]))
     for ident, runs in sorted(shares["runs"].items()):
@@ -420,11 +444,14 @@ def build_view(args) -> dict:
     _, agg, shares = windows["24ч"]
     gap = process_load.reconcile(shares["events"], shares["daily"])["расхождение"] if shares["daily"] else None
     key, exempt = switch_state()
+    facts = process_state.state_facts(library.get("процессы", []), process_library.load().get("процессы") or {},
+                                      process_load.read_lines(args.logs, "process-runs"), now, args.proc)
     return {"снято": dt.datetime.fromtimestamp(now).astimezone().isoformat(timespec="seconds"),
             "выключатель": {"ключ": key, "исключений": exempt},
             "окна": {name: found[0] for name, found in windows.items()},
             "сверка": {"расхождение_токенов": gap, "без_метки_проц": number(process_load.unlabelled_pct(shares["tokens"]), 1)},
-            "неразмечено": windows["24ч"][0]["неразмечено"]}
+            "неразмечено": windows["24ч"][0]["неразмечено"],
+            "state_facts": facts}
 
 
 def write_view(args) -> None:

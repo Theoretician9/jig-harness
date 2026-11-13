@@ -27,7 +27,8 @@
     # владельцу. Запись без флагов пускает любые.
     скрипты: ["scripts/who-writes.py", "scripts/gates-snapshot.sh", "scripts/model-for.sh",
              "scripts/launch-plan.py --json --строка --нужен-план --проверить-план --метрики --сутки --карта --планы",
-             "scripts/spec_approval.py --состояние"]
+             "scripts/spec_approval.py --состояние",
+             "scripts/merge-queue.py", "scripts/commit-friction.py"]
     git: [status, log, diff, show, branch, rev-parse, ls-files]
 
 # Вывод роли и потолка исполнителей кодом (launch-plan.py). Первая подошедшая

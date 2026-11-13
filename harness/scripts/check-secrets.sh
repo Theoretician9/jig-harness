@@ -400,7 +400,7 @@ if [ "${1:-}" = "--selftest" ]; then
     trap 'rm -rf "$T" "$C"' EXIT
     git -C "$T" init -q
     # Стендовые конфиги источников: без них run_scan читал бы боевой
-    # /srv/sample-18/.env, и исход самотеста зависел бы от машины.
+    # /srv/sample-17/.env, и исход самотеста зависел бы от машины.
     KONF_PUSTOJ="$C/pustoj.yaml"; printf '# источников нет\n' > "$KONF_PUSTOJ"
     KONF_KATALOG="$C/katalog.yaml"; printf -- '- вид: каталог\n  путь: SECRETS_DIR\n' > "$KONF_KATALOG"
 

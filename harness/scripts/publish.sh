@@ -30,8 +30,12 @@ set -uo pipefail
 
 # shellcheck disable=SC1091
 source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/lib/config.sh"
-konf_zagruzit
+# PUBLIC_PASPORT — путь паспорта для сборщика: только от паспорта двери (ниже), не из окружения;
+# самотест называет свой двор присваиванием уже ПОСЛЕ загрузки.
+konf_zagruzit_dveri STARTER_DIR PUBLIC_BRANCH PUBLIC_REMOTE PUBLIC_BUILD_DIR PUBLIC_COMMIT_EMAIL PUBLIC_PASPORT PAKET_SHA PREDMET_ZAMKA
 
+# Судья слова владельца — рядом с этим скриптом, а не по окружению: путь от реального файла.
+SCRIPTS_REAL="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
 PROJECT_DIR="${PROJECT_DIR:?пуст PROJECT_DIR — не прочитан паспорт установки}"
 # Имя агента — из паспорта: вшитое сюда, оно след НАШЕЙ установки.
 PACKAGE_DIR="${STARTER_DIR:-/home/$(konf_iz_fajla AGENT_USER)/starter/STARTER-PACKAGE}"
@@ -86,7 +90,7 @@ fi
 # Коды: 0 — дверь открыта (цитата в stdout), 3 — записи нет, 1 — запись негодна.
 PRAVO_NA_PROPUSK_MAX=21600
 proverit_zapis_propuska() { # $1=каталог журнала
-    python3 - "$1/publish-gates-waiver.json" "$PRAVO_NA_PROPUSK_MAX" <<'PY'
+    python3 -I - "$1/publish-gates-waiver.json" "$PRAVO_NA_PROPUSK_MAX" <<'PY'
 import json, sys, time
 from pathlib import Path
 путь, потолок = Path(sys.argv[1]), int(sys.argv[2])
@@ -119,14 +123,14 @@ propustit_statusy_po_slovu() {
     say "замок 3 · статусы пропущены по слову владельца «$slovo»; уезжает непроверенное — $(printf '%s\n' "$spisok" | grep -c .) задач(и):"
     printf '%s\n' "$spisok" | sed 's/^/  • /'
     [ "$CHECK_ONLY" = 1 ] && return 0
-    bash "$PROJECT_DIR/scripts/tg_send.sh" "Публикую по твоему слову «$slovo». В публичную ветку уезжает непроверенное тобой: $(printf '%s\n' "$spisok" | sed 's/ (статус.*//' | paste -sd, | sed 's/,/, /g')" >/dev/null 2>&1 || true
+    bash "$SCRIPTS_REAL/tg_send.sh" "Публикую по твоему слову «$slovo». В публичную ветку уезжает непроверенное тобой: $(printf '%s\n' "$spisok" | sed 's/ (статус.*//' | paste -sd, | sed 's/,/, /g')" >/dev/null 2>&1 || true
 }
 
-zamok_vorot() { # $1=каталог журнала → 0 пустить, 1 отказ
-    local katalog="$1" slovo rc
+zamok_vorot() { # $1=каталог журнала [$2=каталог скриптов ворот] → 0 пустить, 1 отказ
+    local katalog="$1" skripty="${2:-$SCRIPTS_REAL}" slovo rc
     slovo=$(proverit_zapis_propuska "$katalog" 2>/tmp/публикация-пропуск.err); rc=$?
     if [ "$rc" = 3 ]; then
-        bash "$PROJECT_DIR/scripts/gates.sh" > /tmp/публикация-ворота.log 2>&1 || {
+        bash "$skripty/gates.sh" > /tmp/публикация-ворота.log 2>&1 || {
             say "ОТКАЗ: ворота красные — публиковать нельзя. Хвост:"
             tail -5 /tmp/публикация-ворота.log; return 1; }
         say "замок 1 · ворота зелёные"; return 0
@@ -134,9 +138,9 @@ zamok_vorot() { # $1=каталог журнала → 0 пустить, 1 от�
     if [ "$rc" != 0 ]; then
         say "ОТКАЗ: $(cat /tmp/публикация-пропуск.err)"; return 1
     fi
-    if ! { bash "$PROJECT_DIR/scripts/gates.sh" --хакатон \
-           && bash "$PROJECT_DIR/scripts/check-secrets.sh" "$PROJECT_DIR" \
-           && python3 "$PROJECT_DIR/scripts/build-public.py" --selftest; } \
+    if ! { bash "$skripty/gates.sh" --хакатон \
+           && bash "$skripty/check-secrets.sh" "$PROJECT_DIR" \
+           && python3 -I "$skripty/build-public.py" --selftest; } \
            > /tmp/публикация-ворота.log 2>&1; then
         say "ОТКАЗ: быстрые ворота красные — публиковать нельзя. Хвост:"
         tail -5 /tmp/публикация-ворота.log; return 1
@@ -183,7 +187,7 @@ ids_iz_istorii() { # $1=момент ISO (пусто — вся история) 
     # самотесте. Копия внутри оболочки досталась бы только замку.
     DEVMAP="$PROJECT_DIR/dev-map.yaml" \
     DEVMAP_ARCHIVE="$PROJECT_DIR/docs/dev-map-archive.yaml" \
-    IDS="$ids" python3 "$PROJECT_DIR/scripts/vitrina_status.py"
+    IDS="$ids" python3 -I "$SCRIPTS_REAL/vitrina_status.py"
 }
 
 # ── Замки 4-6 и публикация собранного дерева ────────────────────────────────
@@ -205,12 +209,12 @@ ids_iz_istorii() { # $1=момент ISO (пусто — вся история) 
     # /etc/harness/install.conf, и самотест судил машину, а не код — «здоровая»
     # проба зеленела лишь потому, что настоящие имена не встретились в
     # подставном дереве (ревью кода 12.09.2026, №10).
-    local pasport="${PUBLIC_PASPORT:-$(konf_koren)/install.conf}"
-    itog=$(python3 "$PROJECT_DIR/scripts/build-public.py" \
+    local pasport="${PUBLIC_PASPORT:-$KONF_DVERI_KOREN/install.conf}"
+    itog=$(python3 -I "$SCRIPTS_REAL/build-public.py" \
                    --пакет "$paket" --куда "$sborka" --паспорт "$pasport" \
                    --коммит "$paket_sha" 2>&1) || {
         say "ОТКАЗ: сборка не прошла — $itog"; return 1; }
-    hesh=$(printf '%s' "$itog" | python3 -c 'import json,sys; print(json.load(sys.stdin)["пакет"])' 2>/dev/null)
+    hesh=$(printf '%s' "$itog" | python3 -I -c 'import json,sys; print(json.load(sys.stdin)["пакет"])' 2>/dev/null)
     # Пустой хэш означает, что вывод сборщика не разобран: дальше он ушёл бы в
     # сообщение коммита строкой «пакет » — и публичная история перестала бы
     # отвечать, из какого состояния пакета собрана (ревью кода 12.09.2026, №12).
@@ -245,7 +249,7 @@ ids_iz_istorii() { # $1=момент ISO (пусто — вся история) 
     # Замок 5 (И-3): у нового репозитория своих хуков нет, и сторож секретов
     # его не сторожит — зовём явно, по временному индексу.
     local vyvod
-    if ! vyvod=$(bash "$PROJECT_DIR/scripts/check-secrets.sh" "$sborka" 2>&1); then
+    if ! vyvod=$(bash "$SCRIPTS_REAL/check-secrets.sh" "$sborka" 2>&1); then
         say "ОТКАЗ: в сборке похожее на секрет — публикация отменена"
         printf '%s\n' "$vyvod" | sed 's/^/  /'
         return 1
@@ -253,7 +257,7 @@ ids_iz_istorii() { # $1=момент ISO (пусто — вся история) 
     say "замок 5 · секретов в сборке нет"
 
     # Замок 6: следы установки. Образцы берутся не из данных сборщика.
-    if ! vyvod=$(python3 "$PROJECT_DIR/scripts/check-public-clean.py" "$sborka" \
+    if ! vyvod=$(python3 -I "$SCRIPTS_REAL/check-public-clean.py" "$sborka" \
                          --пакет "$paket" --проект "$PROJECT_DIR" \
                          --паспорт "$pasport" 2>&1); then
         say "ОТКАЗ: в сборке следы этой установки — публикация отменена"
@@ -267,7 +271,7 @@ ids_iz_istorii() { # $1=момент ISO (пусто — вся история) 
     # Судится только когда есть что выпускать: пустой индекс — это повтор упавшей
     # отправки или «публиковать нечего», и запись тогда уже вышла по праву.
     if ! git -C "$sborka" diff --cached --quiet; then
-        if ! vyvod=$(python3 "$PROJECT_DIR/scripts/check-release-notes.py" "$sborka" 2>&1); then
+        if ! vyvod=$(python3 -I "$SCRIPTS_REAL/check-release-notes.py" "$sborka" 2>&1); then
             say "ОТКАЗ: релиз без записи простым языком — публикация отменена"
             printf '%s\n' "$vyvod" | sed 's/^/  /'
             return 1
@@ -314,12 +318,12 @@ ids_iz_istorii() { # $1=момент ISO (пусто — вся история) 
         # которые реально опубликованы. По локальным тегам счёт после упавшей
         # отправки тега пропускал бы номер, оставляя вышедший релиз без метки
         # навсегда (ревью кода 12.09.2026, R-2).
-        otvet_versii=$(python3 "$PROJECT_DIR/scripts/version.py" --оформить \
+        otvet_versii=$(python3 -I "$SCRIPTS_REAL/version.py" --оформить \
                        --пакет "$paket" --сборка "$sborka" \
                        --удалённый "$PUBLIC_REMOTE" 2>&1) || {
             say "ОТКАЗ: версия релиза не посчитана — $otvet_versii"; return 1; }
         nomer_versii=$(printf '%s' "$otvet_versii" \
-            | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["следующая"]); sys.stderr.write(d["почему"])' 2>/dev/null)
+            | python3 -I -c 'import json,sys; d=json.load(sys.stdin); print(d["следующая"]); sys.stderr.write(d["почему"])' 2>/dev/null)
         [ -n "$nomer_versii" ] || {
             say "ОТКАЗ: ответ version.py не разобран: ${otvet_versii:0:120}"; return 1; }
         say "версия релиза: v$nomer_versii"
@@ -328,7 +332,7 @@ ids_iz_istorii() { # $1=момент ISO (пусто — вся история) 
         # коде. CHANGELOG появляется ПОСЛЕ замка 6, поэтому судья чистоты
         # зовётся второй раз: уже по дереву с заметками (замер 13.10.2026 — в
         # заметки попадало 40 заголовков из 532).
-        if ! vyvod=$(python3 "$PROJECT_DIR/scripts/check-public-clean.py" "$sborka" \
+        if ! vyvod=$(python3 -I "$SCRIPTS_REAL/check-public-clean.py" "$sborka" \
                              --пакет "$paket" --проект "$PROJECT_DIR" \
                              --паспорт "$pasport" 2>&1); then
             say "ОТКАЗ: следы установки в заметках релиза — публикация отменена"
@@ -350,7 +354,7 @@ ids_iz_istorii() { # $1=момент ISO (пусто — вся история) 
     if [ "$(git -C "$paket" rev-parse HEAD 2>/dev/null)" != "$paket_sha" ]; then
         say "ОТКАЗ: пакет сдвинулся после согласия — не отправлено"; return 1
     fi
-    if [ -n "${PREDMET_ZAMKA:-}" ] && ! vyvod=$(python3 "$PROJECT_DIR/scripts/lib/door_subjects.py" \
+    if [ -n "${PREDMET_ZAMKA:-}" ] && ! vyvod=$(python3 -I "$SCRIPTS_REAL/lib/door_subjects.py" \
             сверить-публикацию "$PREDMET_ZAMKA" "$paket" "$sborka" "$PUBLIC_REMOTE" "$PUBLIC_BRANCH" 2>&1); then
         say "ОТКАЗ: предмет публикации изменился после согласия — не отправлено: $vyvod"; return 1
     fi
@@ -461,7 +465,7 @@ sverit_imena_ssylok() { # $1=«sha ref» удалённого $2=«sha ref» к�
 # сборки, а метка называет пакет, из которого оно собрано; пересобрать нельзя.
 proverit_chistotu_kopii() { # $1=копия $2=паспорт
     local vyvod rc=0
-    vyvod=$(python3 "$PROJECT_DIR/scripts/check-public-clean.py" "$1" \
+    vyvod=$(python3 -I "$SCRIPTS_REAL/check-public-clean.py" "$1" \
                 --пакет "$PACKAGE_DIR" --проект "$PROJECT_DIR" --паспорт "$2" \
                 --свежесть-не-судить 2>&1) || rc=$?
     if [ "$rc" != 0 ] || grep -q '⚠ история' <<< "$vyvod"; then
@@ -482,7 +486,7 @@ zavershit_dver() {
 PREDMET_PEREPISI=""
 vzyat_soglasie_dveri() { # $1=копия
     local otvet
-    otvet=$(HARNESS_LOG_DIR="$LOG_DIR" python3 "$PROJECT_DIR/scripts/deploy_guard.py" --действие перепись \
+    otvet=$(HARNESS_LOG_DIR="$LOG_DIR" python3 -I "$SCRIPTS_REAL/deploy_guard.py" --действие перепись \
                 --только-согласие --просить --перепись "$1" 2>&1) || {
         say "ОТКАЗ: $otvet"
         return 1; }
@@ -534,7 +538,7 @@ perepisat_istoriyu() { # $1=каталог копии $2=файл бэкапа
         = "$(git -C "$PUBLIC_BUILD_DIR" rev-parse "refs/heads/$PUBLIC_BRANCH^{tree}" 2>/dev/null)" ] \
         || { say "ОТКАЗ: дерево ветки в копии не равно дереву локальной сборки — перепись меняет историю, не содержимое"; return 1; }
     # Паспорт передаётся явно, как в замке 6: иначе гейт читает боевой.
-    pasport="${PUBLIC_PASPORT:-$(konf_koren)/install.conf}"
+    pasport="${PUBLIC_PASPORT:-$KONF_DVERI_KOREN/install.conf}"
     proverit_chistotu_kopii "$kopiya" "$pasport" || return 1
     say "проверки пройдены: ссылки сверены, бэкап покрывает удалённый, дерево равно сборке, следов в истории нет"
 
@@ -547,7 +551,7 @@ perepisat_istoriyu() { # $1=каталог копии $2=файл бэкапа
         spisok+=("$ref:$ref")
     done <<< "$u_nas"
     # Между «Да» и отправкой удалённый и копия обязаны остаться теми же, что на кнопке.
-    soobshchenie=$(python3 "$PROJECT_DIR/scripts/lib/door_subjects.py" сверить-перепись "$PREDMET_PEREPISI" \
+    soobshchenie=$(python3 -I "$SCRIPTS_REAL/lib/door_subjects.py" сверить-перепись "$PREDMET_PEREPISI" \
                        "$kopiya" "$PACKAGE_DIR" "$PUBLIC_REMOTE" "$PUBLIC_BRANCH" 2>&1) \
         || { say "ОТКАЗ: $soobshchenie"; return 1; }
     if ! git -C "$kopiya" push --atomic "${arendy[@]}" "$adres" "${spisok[@]}" 2>&1; then
@@ -576,10 +580,14 @@ if [ "${1:-}" = "--selftest" ]; then
     # Паспорт задан, а ветки пусты: условие пробы — ИМЕННО незаданные ветки.
     # Прежде проба подавала пустой конфиг целиком, и после снятия умолчания
     # пути скрипт честно отказывал раньше — про PROJECT_DIR (12.09.2026).
-    PUSTOJ_KONFIG=$(mktemp)
+    # Дверь берёт паспорт рядом с СОБОЙ, а не из окружения: стенд кладёт КОПИЮ двери в
+    # свой каталог, и паспорт стенда ей даёт HARNESS_DOOR_STAND_HOME (как у drop-database.sh).
+    STEND=$(mktemp -d); mkdir -p "$STEND/scripts"
+    cp "$SCRIPTS_REAL/publish.sh" "$STEND/scripts/publish.sh"
+    ln -s "$SCRIPTS_REAL/lib" "$STEND/scripts/lib"
+    PUSTOJ_KONFIG="$STEND/install.conf"
     printf 'PROJECT_DIR="%s"\nPUBLIC_BRANCH=""\n' "$(mktemp -d)" > "$PUSTOJ_KONFIG"
-    OUT=$(HARNESS_CONF="$PUSTOJ_KONFIG" HARNESS_INSTALL_CONF="$PUSTOJ_KONFIG" \
-          bash "$0" --проверка 2>&1); RC=$?
+    OUT=$(HARNESS_DOOR_STAND_HOME="$STEND" bash "$STEND/scripts/publish.sh" --проверка 2>&1); RC=$?
     if [ "$RC" = 2 ] && printf '%s' "$OUT" | grep -q "PUBLIC_BRANCH"; then
         echo "  ок    БОЛЬНОЙ СЛУЧАЙ: ветки не заданы — отказ с внятной причиной"
     else
@@ -588,9 +596,8 @@ if [ "${1:-}" = "--selftest" ]; then
     # БОЛЬНОЙ СЛУЧАЙ: паспорта нет вовсе. Прежде здесь стоял наш путь
     # умолчанием — скрипт брался публиковать ЧУЖУЮ установку как свою.
     : > "$PUSTOJ_KONFIG"
-    OUT=$(HARNESS_CONF="$PUSTOJ_KONFIG" HARNESS_INSTALL_CONF="$PUSTOJ_KONFIG" \
-          bash "$0" --проверка 2>&1); RC=$?
-    rm -f "$PUSTOJ_KONFIG"
+    OUT=$(HARNESS_DOOR_STAND_HOME="$STEND" bash "$STEND/scripts/publish.sh" --проверка 2>&1); RC=$?
+    rm -rf "$STEND"
     if [ "$RC" != 0 ] && printf '%s' "$OUT" | grep -q "PROJECT_DIR"; then
         echo "  ок    БОЛЬНОЙ СЛУЧАЙ: без паспорта отказ вслух, а не чужой каталог"
     else
@@ -646,7 +653,7 @@ if [ "${1:-}" = "--selftest" ]; then
     rm -rf "$ISTORIYA_DVOR"
     # БОЛЬНОЙ СЛУЧАЙ 3: разбор статусов витрины судится своим самотестом —
     # тем же файлом, который зовёт замок, а не его копией здесь.
-    if python3 "$PROJECT_DIR/scripts/vitrina_status.py" --selftest | tail -1 \
+    if python3 -I "$SCRIPTS_REAL/vitrina_status.py" --selftest | tail -1 \
        | grep -q "САМОТЕСТ ПРОЙДЕН"; then
         echo "  ок    разбор статусов витрины: «принято» не держит, «test» держит"
     else
@@ -716,7 +723,7 @@ if [ "${1:-}" = "--selftest" ]; then
         printf '#!/bin/sh\necho "secrets" >> "%s/звали"\n' "$d" > "$d/проект/scripts/check-secrets.sh"
         printf 'open("%s/звали","a").write("build\\n")\n' "$d" > "$d/проект/scripts/build-public.py"
         [ -n "$2" ] && printf '%s' "$2" > "$d/лог/publish-gates-waiver.json"
-        ( PROJECT_DIR="$d/проект" zamok_vorot "$d/лог" 2>&1 ); echo "rc=$?"
+        ( PROJECT_DIR="$d/проект" zamok_vorot "$d/лог" "$d/проект/scripts" 2>&1 ); echo "rc=$?"
     }
     zapis_propuska() { # $1=выдана-смещение $2=до-смещение (сек от сейчас)
         local n; n=$(date +%s)
@@ -750,7 +757,7 @@ if [ "${1:-}" = "--selftest" ]; then
         mkdir -p "$d/проект/scripts" "$d/лог"
         printf '#!/bin/sh\necho "$1" >> "%s/ушло"\n' "$d" > "$d/проект/scripts/tg_send.sh"
         [ -n "$2" ] && printf '%s' "$2" > "$d/лог/publish-gates-waiver.json"
-        ( PROJECT_DIR="$d/проект" CHECK_ONLY=0 propustit_statusy_po_slovu "$d/лог" $'задача-а (статус test)\nзадача-б (статус test)' 2>&1 ); echo "rc=$?"
+        ( PROJECT_DIR="$d/проект" SCRIPTS_REAL="$d/проект/scripts" CHECK_ONLY=0 propustit_statusy_po_slovu "$d/лог" $'задача-а (статус test)\nзадача-б (статус test)' 2>&1 ); echo "rc=$?"
     }
     OUT=$(proba_statusy "$T/с1" ""); if printf '%s' "$OUT" | grep -q 'rc=1' && [ ! -e "$T/с1/ушло" ]; then
         echo "  ок    БОЛЬНОЙ СЛУЧАЙ: статусы без записи о пропуске — замок 3 не снят"
@@ -1006,7 +1013,7 @@ POPYTKA_NACHATA=$(date +%s)
 # Нет кнопки — ворота просят её сами (--просить), но не в проверке: --проверка сеть и владельца не трогает.
 PREFLIGHT_ASK=""
 [ "$CHECK_ONLY" = 1 ] || PREFLIGHT_ASK="--просить"
-PREFLIGHT_REFUSAL=$(HARNESS_LOG_DIR="$LOG_DIR" python3 "$PROJECT_DIR/scripts/deploy_guard.py" --действие публикация --только-согласие \
+PREFLIGHT_REFUSAL=$(HARNESS_LOG_DIR="$LOG_DIR" python3 -I "$SCRIPTS_REAL/deploy_guard.py" --действие публикация --только-согласие \
         --публикация "$PACKAGE_DIR" $PREFLIGHT_ASK 2>&1) || {
     say "ОТКАЗ: $PREFLIGHT_REFUSAL"
     exit 1
@@ -1018,7 +1025,7 @@ zamok_vorot "${LOG_DIR:?пуст LOG_DIR — не прочитан паспор�
 # Суд по тексту ответа пропускал всякий отказ, сказанный другими словами.
 PAKET_SHA=$(git -C "$PACKAGE_DIR" rev-parse HEAD 2>/dev/null) \
     || { say "ОТКАЗ: HEAD пакета $PACKAGE_DIR не прочитан — публиковать нечего"; exit 1; }
-if ! REFUSAL=$(HARNESS_LOG_DIR="$LOG_DIR" python3 "$PROJECT_DIR/scripts/deploy_guard.py" --действие публикация --только-согласие \
+if ! REFUSAL=$(HARNESS_LOG_DIR="$LOG_DIR" python3 -I "$SCRIPTS_REAL/deploy_guard.py" --действие публикация --только-согласие \
         --публикация "$PACKAGE_DIR" --свежесть-на "$POPYTKA_NACHATA" 2>&1); then
     say "ОТКАЗ: $REFUSAL"
     exit 1
@@ -1078,7 +1085,7 @@ if [ -n "$PENDING" ] && [ "$PO_SLOVU" = 1 ]; then
     say "ПО СЛОВУ ВЛАДЕЛЬЦА: уезжает непроверенное им — $(printf '%s\n' "$PENDING" | grep -c .) задач(и):"
     printf '%s\n' "$PENDING" | sed 's/^/  • /'
     SPISOK=$(printf '%s\n' "$PENDING" | sed 's/ (статус.*//' | paste -sd', ')
-    bash "$PROJECT_DIR/scripts/tg_send.sh" "Публикую по твоему слову. В публичную ветку уезжает непроверенное тобой: $SPISOK" >/dev/null 2>&1 || true
+    bash "$SCRIPTS_REAL/tg_send.sh" "Публикую по твоему слову. В публичную ветку уезжает непроверенное тобой: $SPISOK" >/dev/null 2>&1 || true
     PENDING=""
 fi
 if [ -n "$PENDING" ]; then

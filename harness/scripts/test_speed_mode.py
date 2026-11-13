@@ -89,6 +89,11 @@ MIN = 60
 HOUR = 3600
 CPUS = 4
 BASE = int(time.time()) // MIN * MIN
+# Пороги мощности по доле CPU за интервал замера (hr.speed-uses-whole-server): ключи harness.conf
+# стенда. Кража — по-прежнему «мощность.кража_выше_pct» данных (15).
+CPU_BUSY_MAX = 90
+CPU_BUSY_QUIET = 75
+CPU_IOWAIT_MAX = 20
 
 # Копия блока спеки 4.3: пробы судят поведение на известных числах, а не на живых данных,
 # которые калибруются. Живые данные сверяет со структурой этого блока случай data_live.
@@ -114,7 +119,7 @@ STAND_DATA = {
                   "говорить": "нет"},
         "ротация": {"потолок": "заморозка", "держится_мин": 0, "отпускает_мин": 0,
                     "говорить": "нет"},
-        "мощность": {"потолок": "ступень_вниз", "нагрузка_на_ядро_ниже": 1.25,
+        "мощность": {"потолок": "ступень_вниз",
                      "кража_выше_pct": 15, "держится_мин": 10, "отпускает_мин": 20,
                      "говорить": "да"},
         "авария": {"потолок": 1, "нагрузка_на_ядро_выше": 4.0, "диска_выше_pct": 90,
@@ -245,15 +250,21 @@ class Stand:
             else:
                 node[last] = value
         self.conf = {"SPEED_MODE": mode, "LOAD_MAX_PER_CPU": "2.0", "MEM_MIN_FREE_PCT": "10",
+                     "CPU_BUSY_MAX_PCT": str(CPU_BUSY_MAX), "CPU_BUSY_QUIET_PCT": str(CPU_BUSY_QUIET),
+                     "CPU_IOWAIT_MAX_PCT": str(CPU_IOWAIT_MAX),
                      "SWAP_MAX_PCT": "85", "AUTOMATION_LEVEL": "partial",
                      "HELPER_HUNG_MIN": "120", "ACTIVE_LINE": LINE}
         self.cards = [dict(c) for c in cards]
         self.load = 0.5
         self.steal_pct = 0.0
+        self.affinity = CPUS  # ядер, доступных процессам судьи (cgroup cpuset); по умолчанию — все
         self.mem_free_pct = 50.0
         self.swap_pct = 0.0
-        self.cpu_total = 0
-        self.cpu_steal = 0
+        # Доли процессорного времени за проход (тик): занято (вместе с кражей), ожидание диска;
+        # остальное — простой. Счётчики /proc/stat — их накопленная сумма.
+        self.busy_pct = 30.0
+        self.iowait_pct = 0.0
+        self.cpu = {"user": 0, "idle": 0, "iowait": 0, "steal": 0}
         (self.proc / "locks").write_text("", encoding="utf-8")
         self.write_all()
 
@@ -307,21 +318,32 @@ class Stand:
 
     def write_stat(self) -> None:
         def row(name: str, share: int) -> str:
-            steal = self.cpu_steal // share
-            busy = self.cpu_total // share - steal
-            return f"{name} {busy} 0 0 0 0 0 0 {steal} 0 0\n"
+            c = {k: v // share for k, v in self.cpu.items()}
+            # user nice system idle iowait irq softirq steal guest guest_nice
+            return f"{name} {c['user']} 0 0 {c['idle']} {c['iowait']} 0 0 {c['steal']} 0 0\n"
         text = row("cpu", 1) + "".join(row(f"cpu{i}", CPUS) for i in range(CPUS))
         (self.proc / "stat").write_text(text + "intr 0\nctxt 0\nbtime 0\n", encoding="utf-8")
 
     def tick(self) -> None:
-        """Каждый проход видит новые счётчики /proc/stat: кража — их разница."""
-        self.cpu_total += 10_000
-        self.cpu_steal += int(10_000 * self.steal_pct / 100)
+        """Каждый проход видит новые счётчики /proc/stat: доли за интервал — их разница."""
+        part = 10_000
+        steal = int(part * self.steal_pct / 100)
+        user = max(0, int(part * self.busy_pct / 100) - steal)
+        iowait = int(part * self.iowait_pct / 100)
+        self.cpu["steal"] += steal
+        self.cpu["user"] += user
+        self.cpu["iowait"] += iowait
+        self.cpu["idle"] += part - steal - user - iowait
         self.write_stat()
 
     def set_load(self, per_cpu: float) -> None:
         self.load = per_cpu
         self.write_proc()
+
+    def warm_up(self, at: float) -> None:
+        """Проход за минуту до отсчёта: судье нужен прошлый снимок /proc/stat, иначе доли CPU
+        неизвестны и признак мощности не ставится — первый «настоящий» замер был бы в at+2 мин."""
+        self.measure(at - MIN)
 
     def env(self) -> dict:
         env = {k: v for k, v in os.environ.items() if k not in STRIP_ENV}
@@ -335,7 +357,7 @@ class Stand:
             "HARNESS_EVENTS_STATE": str(self.log / ".events"),
             "HARNESS_DEVMAP": str(self.root / "dev-map.yaml"), "HARNESS_ACTIVE_LINE": LINE,
             "CLAUDE_PROJECTS_DIR": str(self.projects), "PROJECT_DIR": str(self.project),
-            "SPEED_PROC_DIR": str(self.proc), "SPEED_DISK_PATH": str(self.root),
+            "SPEED_PROC_DIR": str(self.proc), "SPEED_AFFINITY": str(self.affinity), "SPEED_DISK_PATH": str(self.root),
             "SPEED_MODE_DATA": str(self.root / "speed-modes.yaml"),
             "SPEED_MODE_BIN": str(JUDGE), "PYTHONDONTWRITEBYTECODE": "1",
         })
@@ -545,7 +567,8 @@ def ladder_steps():
     """10.3.2: признак 9 мин — 0 шагов; 30 мин при ultra и 10 в работе — ровно 3 шага; подъём по 20 мин."""
     with Stand("ultra", cards("w", 10, "wip") + cards("p", 2)) as s:
         t0 = BASE
-        s.set_load(2.5)
+        s.busy_pct = 97
+        s.warm_up(t0)
         st = s.measure(t0)
         check("до признака эффективный 10", st.get("эффективный") == 10, st.get("эффективный"))
         st = s.measure(t0 + 9 * MIN)
@@ -565,7 +588,7 @@ def ladder_steps():
               "нет blocker.on")
 
         t1 = t0 + 34 * MIN
-        s.set_load(0.5)
+        s.busy_pct = 30
         s.measure(t1)
         for minute, ceiling in ((19, 1), (20, 3), (22, 3), (39, 3), (40, 5)):
             st = s.measure(t1 + minute * MIN)
@@ -585,7 +608,8 @@ def ladder_steps():
 def ladder_from_in_work():
     """4.2: шаг вниз — от len(в_работе), а не от эффективного; П выше выбранного допустим."""
     with Stand("medium", cards("w", 10, "wip")) as s:
-        s.set_load(2.5)
+        s.busy_pct = 97
+        s.warm_up(BASE)
         s.measure(BASE)
         st = s.measure(BASE + 10 * MIN)
         check("medium и 10 в работе: первый шаг П = 5 (ниже 10, а не ниже 3)",
@@ -611,6 +635,191 @@ def steal_sign():
               isinstance(steal, (int, float)) and abs(steal - 20) < 1, steal)
         st = s.measure(BASE + 12 * MIN)
         check("кража 10 мин — шаг вниз П = 5", power_ceiling(st) == 5, power_ceiling(st))
+
+
+# ── мощность по доле CPU, а не по loadavg (hr.speed-uses-whole-server) ─────────
+# Слово владельца 12.11: «использовать сервер целиком». Замер: loadavg 17,6 на 8 ядрах при CPU
+# занят 58 % — очередь коротких процессов, не загрузка. Мощность судится долей занятого CPU
+# (всё, кроме idle и iowait) за интервал между двумя чтениями /proc/stat, плюс iowait и steal
+# за тот же интервал. Замер пишет «занято_pct» и «ожидание_диска_pct» рядом с «кража_pct».
+
+def cpu_stand(busy: float, load: float = 0.5, iowait: float = 0.0, steal: float = 0.0,
+              mode: str = "ultra", wip: int = 10, plans: int = 2) -> Stand:
+    s = Stand(mode, cards("w", wip, "wip") + cards("p", plans))
+    s.busy_pct, s.iowait_pct, s.steal_pct = busy, iowait, steal
+    s.set_load(load)
+    return s
+
+
+def gauge(st: dict, key: str):
+    return (st.get("замер") or {}).get(key)
+
+
+def near(got, want: float, slack: float = 1.0) -> bool:
+    return isinstance(got, (int, float)) and not isinstance(got, bool) and abs(got - want) < slack
+
+
+def power_candidate(st: dict) -> bool:
+    return "мощность" in (st.get("кандидаты") or {})
+
+
+def forget_interval(s: Stand) -> None:
+    """Состояние без прошлого снимка /proc/stat — как первый проход судьи."""
+    path = s.panel / "скорость.json"
+    if path.is_file():
+        st = json.loads(path.read_text(encoding="utf-8"))
+        st.pop("cpu_прошлый", None)
+        path.write_text(json.dumps(st, ensure_ascii=False), encoding="utf-8")
+
+
+@case
+def power_busy_not_load():
+    """12.11: loadavg 2,2/ядро (17,6 на 8), CPU занят 58 % — мощность не режет, ультра держит 10."""
+    with cpu_stand(busy=58, load=2.2) as s:
+        s.measure(BASE)
+        st = s.measure(BASE + 2 * MIN)
+        check("занято_pct за интервал ≈ 58", near(gauge(st, "занято_pct"), 58), gauge(st, "занято_pct"))
+        check("ожидание_диска_pct ≈ 0", near(gauge(st, "ожидание_диска_pct"), 0),
+              gauge(st, "ожидание_диска_pct"))
+        check("58 % — кандидата мощности нет", not power_candidate(st), st.get("кандидаты"))
+        held = [power_ceiling(s.measure(BASE + minute * MIN)) for minute in (12, 14, 24)]
+        check("24 мин при 2,2/ядро и 58 % — потолка мощности нет", held == [None] * 3, held)
+        st = s.state()
+        check("эффективный 10 (ультра)", st.get("эффективный") == 10, st.get("эффективный"))
+
+
+@case
+def power_busy_cuts():
+    """Занято 97 % при loadavg 0,5/ядро — признак мощности, через 10 мин П 5; 85 % — не режет."""
+    with cpu_stand(busy=97, load=0.5) as s:
+        s.measure(BASE)
+        st = s.measure(BASE + 2 * MIN)
+        check("занято_pct за интервал ≈ 97", near(gauge(st, "занято_pct"), 97), gauge(st, "занято_pct"))
+        check(f"97 % (порог {CPU_BUSY_MAX}) — кандидат мощности", power_candidate(st),
+              st.get("кандидаты"))
+        st = s.measure(BASE + 12 * MIN)
+        check("признак 10 мин — П 5", power_ceiling(st) == 5, power_ceiling(st))
+        check("признак 10 мин — эффективный 5", st.get("эффективный") == 5, st.get("эффективный"))
+    with cpu_stand(busy=85, load=0.5) as s:
+        held = [power_ceiling(s.measure(BASE + minute * MIN)) for minute in (0, 2, 12, 14)]
+        check(f"85 % (ниже порога {CPU_BUSY_MAX}) — не режет", held == [None] * 4, held)
+
+
+@case
+def power_iowait_cuts():
+    """iowait 30 % за интервал (порог 20) — признак мощности при занятости 40 %; 15 % — не режет."""
+    with cpu_stand(busy=40, iowait=30, load=0.5) as s:
+        s.measure(BASE)
+        st = s.measure(BASE + 2 * MIN)
+        check("ожидание_диска_pct ≈ 30", near(gauge(st, "ожидание_диска_pct"), 30),
+              gauge(st, "ожидание_диска_pct"))
+        check("занято_pct ≈ 40 (iowait не занятость)", near(gauge(st, "занято_pct"), 40),
+              gauge(st, "занято_pct"))
+        check(f"iowait 30 % (порог {CPU_IOWAIT_MAX}) — кандидат мощности", power_candidate(st),
+              st.get("кандидаты"))
+        st = s.measure(BASE + 12 * MIN)
+        check("iowait 10 мин — П 5", power_ceiling(st) == 5, power_ceiling(st))
+    with cpu_stand(busy=40, iowait=15, load=0.5) as s:
+        held = [power_ceiling(s.measure(BASE + minute * MIN)) for minute in (0, 2, 12, 14)]
+        check(f"iowait 15 % (ниже {CPU_IOWAIT_MAX}) — не режет", held == [None] * 4, held)
+
+
+@case
+def power_steal_cuts():
+    """steal 20 % за интервал (порог 15 в данных) при занятости 40 % и низком loadavg — П 5."""
+    with cpu_stand(busy=40, steal=20, load=0.5) as s:
+        s.measure(BASE)
+        st = s.measure(BASE + 2 * MIN)
+        check("кража_pct ≈ 20", near(gauge(st, "кража_pct"), 20), gauge(st, "кража_pct"))
+        st = s.measure(BASE + 12 * MIN)
+        check("кража 10 мин — П 5", power_ceiling(st) == 5, power_ceiling(st))
+
+
+@case
+def power_busy_releases():
+    """После среза по 97 % занятость 58 % при loadavg 2,2/ядро — «тихо», через 20 мин потолок снят."""
+    with cpu_stand(busy=97, load=0.5) as s:
+        s.measure(BASE)
+        s.measure(BASE + 2 * MIN)
+        st = s.measure(BASE + 12 * MIN)
+        check("срез по занятости — П 5", power_ceiling(st) == 5, power_ceiling(st))
+        t1 = BASE + 14 * MIN
+        s.busy_pct = 58
+        s.set_load(2.2)
+        s.measure(t1)
+        st = s.measure(t1 + 19 * MIN)
+        check("58 % 19 мин — П ещё 5, не ниже", power_ceiling(st) == 5, power_ceiling(st))
+        st = s.measure(t1 + 20 * MIN)
+        check(f"58 % (ниже {CPU_BUSY_QUIET}) 20 мин — блокер снят, эффективный 10",
+              "мощность" not in blockers(st) and st.get("эффективный") == 10,
+              (power_ceiling(st), st.get("эффективный")))
+
+
+@case
+def power_no_interval():
+    """Без прошлого снимка /proc/stat занятость неизвестна: не режет и не отпускает — потолок как был."""
+    # 1) Высокий loadavg и накопленные с загрузки 97 % — без интервала это не замер.
+    with cpu_stand(busy=97, load=2.5) as s:
+        seen = []
+        for minute in (0, 2, 12, 14):
+            forget_interval(s)
+            st = s.measure(BASE + minute * MIN)
+            seen.append((power_candidate(st), power_ceiling(st)))
+        check("без интервала — ни кандидата, ни потолка мощности", seen == [(False, None)] * 4, seen)
+        check("без интервала занято_pct — None (неизвестно), не число с загрузки",
+              gauge(st, "занято_pct") is None, gauge(st, "занято_pct"))
+        check("эффективный 10", st.get("эффективный") == 10, st.get("эффективный"))
+    # 2) Потолок 5 уже стоит; дальше проходы без интервала при низком loadavg — П держится 5.
+    with cpu_stand(busy=97, load=0.5) as s:
+        s.measure(BASE)
+        s.measure(BASE + 2 * MIN)
+        st = s.measure(BASE + 12 * MIN)
+        check("срез по занятости — П 5", power_ceiling(st) == 5, power_ceiling(st))
+        s.busy_pct = 10
+        held = []
+        for minute in (14, 24, 34, 44, 54):
+            forget_interval(s)
+            held.append(power_ceiling(s.measure(BASE + minute * MIN)))
+        check("40 мин без интервала — П 5: не отпущен и не срезан ниже", held == [5] * 5, held)
+
+
+@case
+def power_busy_fill_quota():
+    """Добор сторожа — по занятости: 58 % при 2,2/ядро — добрать весь недобор; 97 % при 0,5 — ноль."""
+    with cpu_stand(busy=58, load=2.2, wip=2, plans=5) as s:
+        s.measure(BASE)
+        st = s.measure(BASE + 2 * MIN)
+        check("58 %: добор 5 (весь недобор до 7)", st.get("добор") == 5,
+              (st.get("добор"), st.get("добор_почему")))
+    with cpu_stand(busy=97, load=0.5, wip=2, plans=5) as s:
+        s.measure(BASE)
+        st = s.measure(BASE + 2 * MIN)
+        check("97 %: добор 0", st.get("добор") == 0, (st.get("добор"), st.get("добор_почему")))
+
+
+@case
+def power_affinity_seen():
+    """Привязка процессов к части ядер (cpuset) видна в замере и в --показать; блокером не служит."""
+    with cpu_stand(busy=40, load=0.5) as s:
+        s.affinity = 2
+        s.measure(BASE)
+        st = s.measure(BASE + 2 * MIN)
+        check("ядер_доступно = 2", gauge(st, "ядер_доступно") == 2, gauge(st, "ядер_доступно"))
+        check("ядер в замере — все", gauge(st, "ядер") == CPUS, gauge(st, "ядер"))
+        _, text = s.show(BASE + 2 * MIN)
+        check(f"--показать: «привязка к 2 из {CPUS} ядер»", f"привязка к 2 из {CPUS} ядер" in text,
+              text[-300:])
+        check("привязка не блокер: кандидата нет, эффективный 10",
+              not power_candidate(st) and st.get("эффективный") == 10,
+              (st.get("кандидаты"), st.get("эффективный")))
+    with cpu_stand(busy=40, load=0.5) as s:
+        s.measure(BASE)
+        st = s.measure(BASE + 2 * MIN)
+        check("все ядра доступны — поля нет", "ядер_доступно" not in (st.get("замер") or {}),
+              st.get("замер"))
+        _, text = s.show(BASE + 2 * MIN)
+        check("все ядра доступны — в --показать про привязку молчит", "привязка" not in text,
+              text[-300:])
 
 
 @case
@@ -701,6 +910,37 @@ def files_blocker():
         st = s.measure(BASE)
         check("файлы в блокерах", "файлы" in blockers(st), blockers(st))
         check("эффективный 5", st.get("эффективный") == 5, st.get("эффективный"))
+
+
+def claim_rows(s: Stand, event: str, minutes) -> None:
+    for i, minute in enumerate(minutes):
+        s.append("заявки-на-файлы.jsonl", {
+            "v": 1, "ts": iso(BASE - minute * MIN), "src": "scripts/hooks/file_claim_guard.py",
+            "event": event, "outcome": "ok", "task": "w1", "task_from": "arg", "session": "s1",
+            "data": {"путь": f"/x/{event}-{i}.py", "агент": f"a{i}", "общий": False,
+                     "занявшие": ["b"], "номер": 1}})
+
+
+@case
+def files_counts_only_warn():
+    """Хук пишет file.claim.warn только на настоящее пересечение; повтор (repeat) и напоминание
+    об общем файле (remind) — не предупреждения и в счёт блокера «файлы» не идут."""
+    with Stand("ultra", cards("w", 10, "wip")) as s:
+        claim_rows(s, "file.claim.warn", (5, 12, 29))
+        claim_rows(s, "file.claim.warn", (31,))
+        claim_rows(s, "file.claim.repeat", (3, 6, 9, 14, 20))
+        claim_rows(s, "file.claim.remind", (4, 8))
+        got, err = attempt(s, "file_warnings", BASE)
+        check("за 30 мин 3 warn, 5 repeat, 2 remind (+1 warn 31 мин назад) — file_warnings 3",
+              got == 3, err or got)
+    with Stand("ultra", cards("w", 10, "wip")) as s:
+        claim_rows(s, "file.claim.warn", (5, 12))
+        claim_rows(s, "file.claim.repeat", (3, 6, 9, 14, 20))
+        claim_rows(s, "file.claim.remind", (4, 8))
+        st = s.measure(BASE)
+        check("2 warn + 5 repeat + 2 remind — блокера «файлы» нет, эффективный 10",
+              "файлы" not in blockers(st) and st.get("эффективный") == 10,
+              (blockers(st), st.get("эффективный")))
 
 
 @case
@@ -955,26 +1195,28 @@ def kick_ids(out: str) -> tuple[str, int | None, list]:
 
 @case
 def kick_by_load():
-    """10.3.8а: нагрузка 1,0 — весь недобор; 1,6 — по одной; 2,3 — молчу (кандидат мощности)."""
+    """10.3.8а: занято 58 % — весь недобор; 80 % (между тишиной и максимумом) — по одной;
+    97 % — молчу (кандидат мощности)."""
     plans = {f"p{i}" for i in range(1, 6)}
     with kick_stand() as s:
-        s.set_load(1.0)
+        s.busy_pct = 58
+        s.warm_up(BASE)
         s.measure(BASE)
         kind, size, ids = kick_ids(s.warden(0, BASE))
-        check("1,0/ядро — недобор 2", (kind, size) == ("недобор", 2), (kind, size))
-        check("1,0/ядро — 2 id из готовых", len(ids) == 2 and set(ids) <= plans, ids)
-        s.set_load(1.6)
+        check("58 % — недобор 2", (kind, size) == ("недобор", 2), (kind, size))
+        check("58 % — 2 id из готовых", len(ids) == 2 and set(ids) <= plans, ids)
+        s.busy_pct = 80
         st = s.measure(BASE + 2 * MIN)
         kind, size, ids = kick_ids(s.warden(0, BASE + 2 * MIN))
-        check("1,6/ядро — недобор 1", (kind, size) == ("недобор", 1), (kind, size))
-        check("1,6/ядро — 1 id", len(ids) == 1 and set(ids) <= plans, ids)
-        check("1,6/ядро — добор в состоянии 1", st.get("добор") == 1, st.get("добор"))
+        check("80 % — недобор 1", (kind, size) == ("недобор", 1), (kind, size))
+        check("80 % — 1 id", len(ids) == 1 and set(ids) <= plans, ids)
+        check("80 % — добор в состоянии 1", st.get("добор") == 1, st.get("добор"))
         _, text = s.show(BASE + 2 * MIN)
         check("--показать: «добираю по одной»", "по одной" in text, text[-300:])
-        s.set_load(2.3)
+        s.busy_pct = 97
         s.measure(BASE + 4 * MIN)
         out = s.warden(0, BASE + 4 * MIN)
-        check("2,3/ядро — молчу: кандидат мощности",
+        check("97 % — молчу: кандидат мощности",
               out.startswith("молчу\t") and "кандидат мощности" in out, out)
         _, text = s.show(BASE + 4 * MIN)
         check("--показать говорит то же", "кандидат мощности" in text, text[-300:])
@@ -982,16 +1224,22 @@ def kick_by_load():
 
 @case
 def kick_load_edges():
-    """10.3.8а: ровно на порогах — 1,25 ещё весь недобор, 2,0 ещё не кандидат (по одной)."""
+    """10.3.8а: края порогов. «Тихо» — строго ниже CPU_BUSY_QUIET_PCT (отпускает только ниже):
+    74,5 % — весь недобор, ровно 75 — уже по одной. Кандидат — строго выше CPU_BUSY_MAX_PCT:
+    ровно 90 — ещё по одной, 90,5 — молчу."""
+    edges = ((CPU_BUSY_QUIET - 0.5, "недобор", 2, "ниже порога тишины — весь недобор 2"),
+             (CPU_BUSY_QUIET, "недобор", 1, "ровно порог тишины — по одной"),
+             (CPU_BUSY_MAX, "недобор", 1, "ровно максимум — по одной, не кандидат"),
+             (CPU_BUSY_MAX + 0.5, "молчу", None, "выше максимума — молчу (кандидат)"))
     with kick_stand() as s:
-        s.set_load(1.25)
-        s.measure(BASE)
-        kind, size, _ = kick_ids(s.warden(0, BASE))
-        check("1,25/ядро (порог «ниже») — весь недобор 2", (kind, size) == ("недобор", 2), (kind, size))
-        s.set_load(2.0)
-        s.measure(BASE + 2 * MIN)
-        kind, size, _ = kick_ids(s.warden(0, BASE + 2 * MIN))
-        check("2,0/ядро (LOAD_MAX) — по одной, не кандидат", (kind, size) == ("недобор", 1), (kind, size))
+        s.warm_up(BASE)
+        for i, (busy, want_kind, want_size, label) in enumerate(edges):
+            at = BASE + 2 * i * MIN
+            s.busy_pct = busy
+            st = s.measure(at)
+            kind, size, _ = kick_ids(s.warden(0, at))
+            check(f"{busy} % ({label})", kind == want_kind and size == want_size,
+                  (kind, size, gauge(st, "занято_pct")))
 
 
 @case
@@ -1030,12 +1278,13 @@ def kick_after_power_rise():
     """10.3.8а: шаг вверх мощности 15 мин назад — молчу; 21 мин — недобор."""
     with kick_stand() as s:
         t0 = BASE
-        s.set_load(2.5)
+        s.busy_pct = 97
+        s.warm_up(t0)
         s.measure(t0)
         st = s.measure(t0 + 10 * MIN)
         check("признак 10 мин при 1 в работе — П 1", power_ceiling(st) == 1, power_ceiling(st))
         t1 = t0 + 12 * MIN
-        s.set_load(0.5)
+        s.busy_pct = 30
         s.measure(t1)
         st = s.measure(t1 + 20 * MIN)
         check("подъём 1→3 = выбранный — блокер снят", "мощность" not in blockers(st),
@@ -1436,23 +1685,25 @@ def cli_verdict(done: subprocess.CompletedProcess) -> str:
 
 @case
 def power_quiet_zone():
-    """4.2, 4.4: 1,9/ядро — не «тихо», П не растёт; 1,0/ядро — подъём через 20 мин своего отсчёта."""
+    """4.2, 4.4: занято 80 % — не «тихо», П не растёт; 58 % — подъём через 20 мин своего отсчёта."""
     with Stand("ultra", cards("w", 10, "wip") + cards("p", 2)) as s:
         t0 = BASE
-        s.set_load(2.5)
+        s.busy_pct = 97
+        s.warm_up(t0)
         s.measure(t0)
         st = s.measure(t0 + 10 * MIN)
         check("признак 10 мин — П 5", power_ceiling(st) == 5, power_ceiling(st))
-        s.set_load(1.9)
+        s.busy_pct = 80
         held = [power_ceiling(s.measure(t0 + minute * MIN)) for minute in (12, 22, 32, 42)]
-        check("1,9/ядро 30 мин (выше нагрузка_на_ядро_ниже) — П держится 5", held == [5] * 4, held)
+        check(f"80 % 30 мин (не ниже порога тишины {CPU_BUSY_QUIET}) — П держится 5",
+              held == [5] * 4, held)
         t1 = t0 + 44 * MIN
-        s.set_load(1.0)
+        s.busy_pct = 58
         s.measure(t1)
         st = s.measure(t1 + 19 * MIN)
-        check("1,0/ядро 19 мин — П ещё 5", power_ceiling(st) == 5, power_ceiling(st))
+        check("58 % 19 мин — П ещё 5", power_ceiling(st) == 5, power_ceiling(st))
         st = s.measure(t1 + 20 * MIN)
-        check("1,0/ядро 20 мин — подъём: блокер снят, эффективный 10",
+        check("58 % 20 мин — подъём: блокер снят, эффективный 10",
               "мощность" not in blockers(st) and st.get("эффективный") == 10,
               (power_ceiling(st), st.get("эффективный")))
 

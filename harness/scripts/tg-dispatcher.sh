@@ -574,12 +574,16 @@ if [ "${1:-}" = "--selftest" ]; then
     итог "1" "$(grep -c '"message_id":"551"' "$INBOX_LOG" || true)" \
          "диспетчер пишет входящее строкой JSON с message_id телеграма"
     LIB_PROBY="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/lib"
-    CHITAET=$(HARNESS_OWNER_WORD_STEND=1 python3 - "$LIB_PROBY" "$T" <<'PY' || echo "отказ"
+    CHITAET=$(python3 -I - "$LIB_PROBY" "$T" <<'PY' || echo "отказ"
 import sys
 from pathlib import Path
 sys.path.insert(0, sys.argv[1])
 import owner_word
-print("да" if owner_word.разрешение(60, Path(sys.argv[2])) else "нет")
+папка = Path(sys.argv[2])
+# Носитель стенда — аргумент судье в своём процессе: окружение судью не касается.
+стенд = owner_word.Носитель(папка=папка, uid=None, паспорт={}, граница=папка, окно_мин=60,
+                            срок_кнопки_мин=None, ручки={})
+print("да" if owner_word.разрешение(носитель=стенд) else "нет")
 PY
 )
     итог "да" "$CHITAET" \
@@ -1000,11 +1004,14 @@ consent_send_pending() {
 # цикл после): сбой между ними даёт повтор нажатия, а не потерянное решение.
 # Любой сбой вызовов — в лог; возврат всегда 0, иначе set -e уронит канал.
 handle_callback() {  # $1 = update
-    local cb cb_id verdict edit_text chat message_id resp
+    local cb cb_id verdict edit_text chat message_id resp kick target
     cb=$(printf '%s' "$1" | jq -c '.callback_query')
     cb_id=$(printf '%s' "$cb" | jq -r '.id // empty')
-    verdict=$(printf '%s' "$cb" | python3 "$HERE/lib/consent_buttons.py" judge "$LOG_DIR" "$TG_CHAT_ID" 2>>"$DISPATCH_LOG") \
-        || verdict='{"answer":"Сбой, нажми ещё раз","log":"судья нажатий упал"}'
+    # Префикс a: — выбор аккаунта (свой судья и свой журнал), остальное — согласие.
+    case "$(printf '%s' "$cb" | jq -r '.data // empty')" in
+        a:*) verdict=$(printf '%s' "$cb" | python3 "$HERE/lib/account_buttons.py" judge "$LOG_DIR" "$TG_CHAT_ID" 2>>"$DISPATCH_LOG") ;;
+        *)   verdict=$(printf '%s' "$cb" | python3 "$HERE/lib/consent_buttons.py" judge "$LOG_DIR" "$TG_CHAT_ID" "${SECRETS_DIR:-}" 2>>"$DISPATCH_LOG") ;;
+    esac || verdict='{"answer":"Сбой, нажми ещё раз","log":"судья нажатий упал"}'
     printf '%s' "$verdict" | jq -e . >/dev/null 2>&1 || verdict='{"answer":"Сбой, нажми ещё раз","log":"судья нажатий ответил не JSON"}'
     say "кнопка: $(printf '%s' "$verdict" | jq -r '.log // "без пояснения"')"
     if [ -n "$cb_id" ]; then
@@ -1012,12 +1019,25 @@ handle_callback() {  # $1 = update
                    "text=$(printf '%s' "$verdict" | jq -r '.answer')") || resp=""
         printf '%s' "$resp" | jq -e '.ok == true' >/dev/null 2>&1 || say "answerCallbackQuery не прошёл: ${resp:0:120}"
     fi
+    # Нажатие владельца будит смену так же, как его сообщение: иначе решение лежит
+    # в журнале, а смена о нём не знает.
+    kick=$(printf '%s' "$verdict" | jq -r '.kick // empty') || kick=""
+    [ -z "$kick" ] || agent_kick "$kick" || say "пинок о нажатии не прошёл"
     edit_text=$(printf '%s' "$verdict" | jq -r '.edit // empty')
-    [ -n "$edit_text" ] || return 0
-    chat=$(printf '%s' "$cb" | jq -r '.message.chat.id // empty')
-    message_id=$(printf '%s' "$cb" | jq -r '.message.message_id // empty')
-    resp=$(bot_call editMessageText "chat_id=$chat" "message_id=$message_id" "text=$edit_text") || resp=""
-    printf '%s' "$resp" | jq -e '.ok == true' >/dev/null 2>&1 || say "editMessageText не прошёл: ${resp:0:120}"
+    if [ -n "$edit_text" ]; then
+        chat=$(printf '%s' "$cb" | jq -r '.message.chat.id // empty')
+        message_id=$(printf '%s' "$cb" | jq -r '.message.message_id // empty')
+        resp=$(bot_call editMessageText "chat_id=$chat" "message_id=$message_id" "text=$edit_text") || resp=""
+        printf '%s' "$resp" | jq -e '.ok == true' >/dev/null 2>&1 || say "editMessageText не прошёл: ${resp:0:120}"
+    fi
+    # Выбор аккаунта уже записан судьёй; переключает дверь фоном и ждать её нельзя:
+    # она ждёт, пока помощники закончат. Без дескрипторов 3 и 9 потомок не держит лок диспетчера.
+    target=$(printf '%s' "$verdict" | jq -r '.target // empty')
+    if [ -n "$target" ]; then
+        ( exec 3<&- 9>&-; setsid nohup python3 "$PROJECT_DIR/scripts/account-switch.py" --хочу "$target" \
+            >> "$LOG_DIR/account-switch.log" 2>&1 < /dev/null & )
+        say "выбран аккаунт $target — дверь переключения позвана"
+    fi
     return 0
 }
 
@@ -1461,6 +1481,24 @@ while true; do
                     "$PROJECT_DIR/dev-map.yaml" --владельцу 2>/dev/null) || STATUS_TEXT=""
                 ack "$CHAT" "${STATUS_TEXT:-Очередь пуста: работы в карте нет.}"
                 say "владельцу отдан статус по команде"
+                persist_offset "$UPDATE_ID"
+                continue ;;
+            "account")
+                # Меню аккаунтов: что слать и что записать решает модуль, здесь
+                # только Bot API. Меню записывается по ответу sendMessage
+                # (message_id), иначе судья не узнает своё сообщение.
+                ACC_MENU=$(python3 "$HERE/lib/account_buttons.py" menu "$LOG_DIR" 2>>"$DISPATCH_LOG") || ACC_MENU=""
+                ACC_MARKUP=$(jq -r '.reply_markup // empty' <<<"$ACC_MENU" 2>/dev/null)
+                ACC_TEXT=$(jq -r '.text // empty' <<<"$ACC_MENU" 2>/dev/null)
+                if [ -z "$ACC_MARKUP" ]; then
+                    ack "$CHAT" "${ACC_TEXT:-Меню аккаунтов собрать не удалось.}"
+                else
+                    ACC_RESP=$(bot_call sendMessage "chat_id=$CHAT" "text=$ACC_TEXT" "reply_markup=$ACC_MARKUP") || ACC_RESP=""
+                    printf '%s' "$ACC_RESP" | python3 "$HERE/lib/account_buttons.py" sent "$LOG_DIR" \
+                        "$(jq -r '.nonce' <<<"$ACC_MENU")" "$(jq -r '.names' <<<"$ACC_MENU")" >/dev/null \
+                        || say "меню аккаунтов не отправлено или не записано"
+                fi
+                say "владельцу отдано меню аккаунтов"
                 persist_offset "$UPDATE_ID"
                 continue ;;
             # Хакатон: ответ владельца словом — это и есть его действие, второго

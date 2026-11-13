@@ -372,6 +372,10 @@ pane_delivery_mark() {  # текст звонящего, код двери
     else
         list=$(pane_unsent_ts | paste -sd, -)
     fi
+    # Неотданных нет, а текст называет файл: пинок устарел (файл уже перенесён) —
+    # исход «stale» пишется тем же путём, что sent/refused.
+    [ -n "$list" ] || list=$(printf '%s' "$text" | grep -oE "$LOG_DIR/inbox/[0-9]+\.[0-9]+\.txt" \
+        | sed -E 's#.*/([0-9.]+)\.txt#\1#' | paste -sd, -)
     [ -n "$list" ] || return 0
     at="${PANE_KICK_AT:-$(date +%s.%N)}"
     if [ "$rc" != 0 ]; then
@@ -384,6 +388,9 @@ pane_delivery_mark() {  # текст звонящего, код двери
     elif [ -n "$PANE_PRESS" ]; then
         HARNESS_LOG_DIR="$LOG_DIR" harness_event доставка scripts/lib/pane.sh delivery.kick_sent ok \
             "ts_список=$list" "когда=$at"
+    else
+        HARNESS_LOG_DIR="$LOG_DIR" harness_event доставка scripts/lib/pane.sh delivery.kick_stale held \
+            "ts_список=$list" "почему=пинок устарел: файл уже прочитан" "когда=$at"
     fi
     [ -z "$PANE_SEND_NOW_RESULT" ] || \
         HARNESS_LOG_DIR="$LOG_DIR" harness_event доставка scripts/lib/pane.sh delivery.send_now ok \

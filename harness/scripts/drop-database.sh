@@ -34,8 +34,7 @@ set -euo pipefail
 export LC_ALL=C.UTF-8
 
 source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/lib/config.sh"
-INSTALL_CONF="${HARNESS_INSTALL_CONF:-${INSTALL_CONF:-$(konf_koren)/install.conf}}"
-HARNESS_CONF="${HARNESS_CONF:-$(konf_koren)/harness.conf}"
+konf_dveri_puti "${BASH_SOURCE[0]}"
 [ -r "$INSTALL_CONF" ] || { echo "убрать-базу: нет $INSTALL_CONF — установка не завершена"; exit 1; }
 # Конфиги грузятся так, чтобы ОКРУЖЕНИЕ было старше файла: иначе проба с
 # подставным путём судит БОЕВУЮ установку (улика 12.09.2026 — команда смены
@@ -44,10 +43,9 @@ HARNESS_CONF="${HARNESS_CONF:-$(konf_koren)/harness.conf}"
 # Путь берётся по РЕАЛЬНОМУ файлу (readlink -f): pre-commit подключён в
 # .git/hooks симлинком, и dirname дал бы .git/hooks, где библиотеки нет.
 # Поймано первым же коммитом после правки, 12.09.2026.
-konf_zagruzit PROJECT_DIR LOG_DIR TMUX_SESSION SECRETS_DIR AGENT_START_CMD
+konf_zagruzit_dveri PROJECT_DIR LOG_DIR TMUX_SESSION SECRETS_DIR AGENT_START_CMD BACKUP_DIR DROPPABLE_DB_PREFIX DB_ADMIN_EXEC DB_ADMIN_USER
 
 BACKUP_DIR="${BACKUP_DIR:-/var/backups/harness}"
-CONFIRM_MAX_AGE_MIN="${CONFIRM_MAX_AGE_MIN:-60}"
 DROPPABLE_DB_PREFIX="${DROPPABLE_DB_PREFIX:-}"
 DB_ADMIN_EXEC="${DB_ADMIN_EXEC:-}"
 DB_ADMIN_USER="${DB_ADMIN_USER:-postgres}"
@@ -60,12 +58,13 @@ say() { printf '%s  %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"; }
 # Комментарий о единственности, не подкреплённый вызовом, — это просьба помнить, а не
 # механизм. --просить: нет кнопки — ворота просят её сами; каталог журналов — явно.
 consent() { # $1=база
-    local scripts="${PROJECT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}/scripts"
+    local scripts
+    scripts="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
     if [ ! -r "$scripts/deploy_guard.py" ]; then
         say "ворот согласия нет на месте ($scripts/deploy_guard.py) — удаление без них не делаю"
         return 1
     fi
-    HARNESS_LOG_DIR="$LOG_DIR" python3 "$scripts/deploy_guard.py" --действие dropdb --база "$1" --только-согласие --просить
+    HARNESS_LOG_DIR="$LOG_DIR" python3 -I "$scripts/deploy_guard.py" --действие dropdb --база "$1" --только-согласие --просить
 }
 
 drop_db() {
@@ -132,10 +131,69 @@ if [ "${1:-}" = "--selftest" ]; then
     [ -n "$DB_ADMIN_EXEC" ] || { echo "САМОТЕСТ ПРОПУЩЕН: DB_ADMIN_EXEC не задан — СУБД в этой установке не описана"; exit 0; }
     T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
     PROBE="${DROPPABLE_DB_PREFIX}самотест_$$"
+    # Копия двери читает паспорт СТЕНДА: окружение дверь не слушает, а живой паспорт машины
+    # писал бы в живые журналы и бэкапы. Ключи СУБД — те, что прочитала настоящая дверь.
+    mkdir -p "$T/паспорт"
+    printf 'LOG_DIR="%s"\nBACKUP_DIR="%s"\nDB_ADMIN_EXEC="%s"\nDB_ADMIN_USER="%s"\nDROPPABLE_DB_PREFIX="%s"\n' \
+        "$T" "$T/backup" "$DB_ADMIN_EXEC" "$DB_ADMIN_USER" "$DROPPABLE_DB_PREFIX" > "$T/паспорт/harness.conf"
+    : > "$T/паспорт/install.conf"
     LOG_DIR="$T"; BACKUP_DIR="$T/backup"
-    # Журнал кнопок — свой каталог $T: подмена каталога разрешена только ключом стенда.
-    export HARNESS_OWNER_WORD_STEND=1
     : > "$T/inbox.jsonl"
+    # Судья не слушает окружение: журнал кнопок стенда ему даёт НОСИТЕЛЬ. Дверь берёт ворота
+    # рядом с собой (readlink -f), поэтому стенд кладёт КОПИЮ двери в $T/scripts вместе с
+    # обёрткой ворот; обёртки в СВОЁМ процессе подставляют носитель стенда (папка $T) и зовут
+    # настоящие deploy_guard.py и ask-consent.py.
+    REAL_SCRIPTS="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
+    mkdir -p "$T/scripts"
+    cp "$REAL_SCRIPTS/drop-database.sh" "$T/scripts/drop-database.sh"
+    ln -s "$REAL_SCRIPTS/lib" "$T/scripts/lib"
+    drop_db() { HARNESS_DOOR_STAND_HOME="$T/паспорт" bash "$T/scripts/drop-database.sh" "$1"; }
+    printf '{"папка":"%s","lib":"%s/lib","scripts":"%s","префикс":"%s","владелец":"777000","ask":"%s/ask-consent-stand.py"}\n' \
+        "$T" "$REAL_SCRIPTS" "$REAL_SCRIPTS" "$DROPPABLE_DB_PREFIX" "$T" > "$T/stand-carrier.json"
+    cat > "$T/stand_carrier.py" <<'STAND_PY'
+import json
+import sys
+from pathlib import Path
+
+ДАНО = json.loads((Path(__file__).parent / "stand-carrier.json").read_text(encoding="utf-8"))
+
+
+def поставить() -> None:
+    sys.path.insert(0, ДАНО["lib"])
+    sys.path.insert(0, ДАНО["scripts"])
+    import owner_word
+    папка = Path(ДАНО["папка"])
+    стенд = owner_word.Носитель(папка=папка, uid=None, паспорт={"TG_CHAT_ID": ДАНО["владелец"]},
+                                граница=папка, окно_мин=60, срок_кнопки_мин=15,
+                                ручки={"DROPPABLE_DB_PREFIX": ДАНО["префикс"]})
+    owner_word.носитель = lambda: стенд
+    owner_word.ЗАПРОС_КНОПКИ = Path(ДАНО["ask"])
+STAND_PY
+    cat > "$T/scripts/deploy_guard.py" <<'STAND_PY'
+import runpy
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import stand_carrier
+
+stand_carrier.поставить()
+real = str(Path(stand_carrier.ДАНО["scripts"]) / "deploy_guard.py")
+sys.argv[0] = real
+runpy.run_path(real, run_name="__main__")
+STAND_PY
+    cat > "$T/ask-consent-stand.py" <<'STAND_PY'
+import runpy
+import sys
+from pathlib import Path
+
+import stand_carrier
+
+stand_carrier.поставить()
+real = str(Path(stand_carrier.ДАНО["scripts"]) / "ask-consent.py")
+sys.argv[0] = real
+runpy.run_path(real, run_name="__main__")
+STAND_PY
 
     # «Да» кнопкой, как его пишет диспетчер: «отправлено» и решение с одним nonce.
     button_press() { # $1=consent.yes|consent.no $2=база

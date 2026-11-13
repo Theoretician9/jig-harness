@@ -40,11 +40,11 @@ instance.yaml мимо двери видна сверкой sha256 при ста
   SELF_SET_PY          — путь self-set.py (мутационная проба подставляет копию);
   SESSION_STATE_SH     — путь session_state.sh (то же);
   SELF_INSTANCE        — instance.yaml, который пишет дверь и сверяет старт смены;
-  SELF_SET_ASK_CONSENT — программа просьбы кнопки вместо scripts/ask-consent.py
-                         (те же доводы, тот же код в выводе);
   MEMORY_LAYERS        — файл слоёв (обязательные_поля_человека);
-  HARNESS_OWNER_WORD_STEND=1, HARNESS_INSTALL_CONF, HARNESS_CONF, HARNESS_LOG_DIR,
-  LOG_DIR — стенд судьи кнопок (как у test_deploy_guard_consent.py).
+  HARNESS_INSTALL_CONF, HARNESS_CONF, HARNESS_LOG_DIR, LOG_DIR — свои каталоги и
+  паспорт ДВЕРИ. Судье кнопок стенд приходит носителем: дверь зовёт раннер пробы,
+  который подменяет owner_word.носитель и owner_word.ЗАПРОС_КНОПКИ (подставной ask-consent
+  с теми же доводами и тем же кодом в выводе) в процессе двери (окружение судья не слушает).
 
 Прогон: python3 scripts/test_self_set.py
 """
@@ -134,6 +134,21 @@ print("[согласие кнопкой] запрос записан; диспе
 print(code)
 '''
 
+# Раннер двери: судья получает носитель стенда подменой owner_word.носитель в процессе двери.
+CARRIER_RUNNER = r"""
+import json, pathlib, runpy, sys
+spec = json.loads(sys.argv[1])
+sys.path.insert(0, spec["lib"])
+import owner_word
+carrier = owner_word.Носитель(папка=pathlib.Path(spec["папка"]), uid=None, паспорт=spec["паспорт"],
+                              граница=pathlib.Path(spec["граница"]), окно_мин=spec["окно_мин"],
+                              срок_кнопки_мин=spec["срок_кнопки_мин"], ручки=spec["ручки"])
+owner_word.носитель = lambda: carrier
+owner_word.ЗАПРОС_КНОПКИ = pathlib.Path(spec["ask"])
+sys.argv = spec["argv"]
+runpy.run_path(spec["argv"][0], run_name="__main__")
+"""
+
 cases = 0
 failures = 0
 
@@ -189,19 +204,27 @@ class Stand:
             (self.log / name).write_text("", encoding="utf-8")
 
     def env(self) -> dict:
-        env = dict(os.environ, HARNESS_OWNER_WORD_STEND="1",
+        env = dict(os.environ,
                    HARNESS_INSTALL_CONF=str(self.base / "install.conf"),
                    HARNESS_CONF=str(self.base / "harness.conf"),
                    HARNESS_LOG_DIR=str(self.log), LOG_DIR=str(self.log),
                    PROJECT_DIR=str(self.project), SELF_INSTANCE=str(self.instance),
-                   SELF_SET_ASK_CONSENT=str(self.fake_ask), MEMORY_LAYERS=str(self.layers),
-                   CONSENT_BUTTON_TTL_MIN="15", HARNESS_TASK="-")
+                   MEMORY_LAYERS=str(self.layers),
+                   HARNESS_TASK="-")
         for door in ("SELF_SET_PY", "SESSION_STATE_SH", "HEARTBEAT_DIR", "STATE_DIR"):
             env.pop(door, None)
         return env
 
+    def carrier(self, argv: list[str]) -> str:
+        return json.dumps({"lib": str(SELF_SET.resolve().parent.parent / "scripts" / "lib"),
+                           "папка": str(self.log), "граница": str(self.base), "окно_мин": 60,
+                           "срок_кнопки_мин": 15, "argv": argv, "ask": str(self.fake_ask),
+                           "паспорт": config.из_файла(str(self.base / "install.conf")),
+                           "ручки": config.из_файла(str(self.base / "harness.conf"))}, ensure_ascii=False)
+
     def self_set(self, field: str, value: str) -> tuple[int, str]:
-        done = subprocess.run([sys.executable, str(SELF_SET), field, value], capture_output=True,
+        runner = [sys.executable, "-c", CARRIER_RUNNER, self.carrier([str(SELF_SET), field, value])]
+        done = subprocess.run(runner, capture_output=True,
                               text=True, timeout=60, cwd=str(self.project), env=self.env(),
                               stdin=subprocess.DEVNULL)
         return done.returncode, done.stdout + done.stderr

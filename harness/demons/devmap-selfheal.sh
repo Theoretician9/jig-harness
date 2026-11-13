@@ -484,8 +484,10 @@ if [ -n "$(git -C "$PROJECT_DIR" status --porcelain -- dev-map.yaml)" ]; then
         alive
         exit 1
     fi
-    git -C "$PROJECT_DIR" add -- "${COMMIT_PATHS[@]}"
-    if soobshchenie_kommita "$FOREIGN_EDIT" \
+    # add — часть коммита: занятый чужим git index.lock даёт код 128, и под
+    # set -e демон вышел бы без метки жизни и без строки в журнал.
+    if git -C "$PROJECT_DIR" add -- "${COMMIT_PATHS[@]}" \
+        && soobshchenie_kommita "$FOREIGN_EDIT" \
         | git -C "$PROJECT_DIR" commit -q -F - -- "${COMMIT_PATHS[@]}"; then
         say "карта закоммичена${FOREIGN_EDIT:+ (вместе с чужой правкой, сказано в сообщении)}"
     else

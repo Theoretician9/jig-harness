@@ -1287,9 +1287,10 @@ PY
   chmod u+w "$ex_k" 2>/dev/null || true
   case_result "фб-к)" "info/exclude не записать: код 0, «info/exclude не тронут», раскладка завершена" ${bad[@]+"${bad[@]}"}
 
-  # фб-к2) хук commit-msg (n-6 хакатона): без него суд хакатона по трейлеру
-  #   Dev-Map в проекте не действует. Ловит: строка ln пропала, цель не та,
-  #   цель неисполняема, хук роняет обычный коммит. pre-commit-гейт стенда не
+  # фб-к2) хуки commit-msg (n-6 хакатона) и post-commit: без первого суд
+  #   хакатона по трейлеру Dev-Map в проекте не действует, без второго общий
+  #   индекс отстаёт после коммита личным индексом. Ловит: строка ln пропала,
+  #   цель не та, цель неисполняема, хук роняет обычный коммит. pre-commit-гейт стенда не
   #   предмет и снимается со стенда перед коммитом.
   C=$(fb_stand fb-k2); P="$C/proj"; bad=()
   stand_git init -q "$P" >/dev/null 2>&1 || bad+=("стенд: репозиторий не собран")
@@ -1298,13 +1299,16 @@ PY
   link=$(readlink "$P/.git/hooks/commit-msg" 2>/dev/null || echo нет)
   [[ "$link" == ../../scripts/commit-msg-gate.sh ]] || bad+=(".git/hooks/commit-msg → «$link», ждали ../../scripts/commit-msg-gate.sh")
   [[ -x "$P/.git/hooks/commit-msg" && -f "$(readlink -f "$P/.git/hooks/commit-msg")" ]] || bad+=("цель commit-msg нет или неисполняема")
+  link_pc=$(readlink "$P/.git/hooks/post-commit" 2>/dev/null || echo нет)
+  [[ "$link_pc" == ../../scripts/post-commit-heal-index.sh ]] || bad+=(".git/hooks/post-commit → «$link_pc», ждали ../../scripts/post-commit-heal-index.sh")
+  [[ -x "$P/.git/hooks/post-commit" && -f "$(readlink -f "$P/.git/hooks/post-commit")" ]] || bad+=("цель post-commit нет или неисполняема")
   rm -f "$P/.git/hooks/pre-commit"
   printf 'обычная правка\n' > "$P/hook-probe.md"
   stand_git -C "$P" add hook-probe.md >/dev/null 2>&1
   rc=0; out=$(HARNESS_INSTALL_CONF="$C/install.conf" HARNESS_CONF="$C/harness.conf" \
     stand_git -C "$P" commit -q -m "обычный коммит" 2>&1) || rc=$?
   [[ $rc -eq 0 && "$link" != нет ]] || bad+=("обычный коммит через хук commit-msg: код $rc $(tail -2 <<<"$out" | tr '\n' ' ')")
-  case_result "фб-к2)" "хук commit-msg — симлинк на scripts/commit-msg-gate.sh, цель исполняема, обычный коммит проходит" ${bad[@]+"${bad[@]}"}
+  case_result "фб-к2)" "хуки commit-msg и post-commit — симлинки на свои скрипты, цели исполняемы, обычный коммит проходит" ${bad[@]+"${bad[@]}"}
 
   # фб-л) пакет без panel/, vozmozhnosti/, README-ПЛАГИН.md и .claude-plugin/
   #   (ревью кода Ф-б R1-04): строки четырёх групп «источник не найден», в теле,
@@ -3202,6 +3206,9 @@ if [[ -d "$PROJECT_DIR/.git" ]]; then
   # commit-msg: суд хакатона по трейлеру Dev-Map (сообщения на стадии pre-commit ещё нет)
   ln -sf ../../scripts/commit-msg-gate.sh "$PROJECT_DIR/.git/hooks/commit-msg"
   echo "commit-msg подключён симлинком"
+  # post-commit: общий индекс догоняет HEAD после коммита личным индексом
+  ln -sf ../../scripts/post-commit-heal-index.sh "$PROJECT_DIR/.git/hooks/post-commit"
+  echo "post-commit подключён симлинком"
 else
   echo "репозитория ещё нет — после git init повторить раскладку (подключит pre-commit)"
 fi

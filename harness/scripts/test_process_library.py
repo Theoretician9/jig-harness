@@ -408,6 +408,56 @@ with tempfile.TemporaryDirectory(prefix="pl-layer-") as layer_dir:
         else:
             os.environ["HARNESS_PROCESS_LIBRARY_LOCAL"] = saved_door
 
+print("── 13. судья поля «состояние_из» (hr.zapuskov-none-net-informacii-znachit §3.5) ──")
+# Поле говорит разрешителю состояния, откуда брать живость записи вне соглашения harness-<id>.*;
+# кривое или мёртвое поле дало бы вечное «неизвестно» без единой красной строки в воротах.
+JUDGE = HERE / "check-process-library.py"
+
+
+def judged(records_list: list, unit_lines: list) -> tuple:
+    with tempfile.TemporaryDirectory(prefix="pl-judge-") as stand:
+        cfg = Path(stand) / "harness" / "config"
+        cfg.mkdir(parents=True)
+        (cfg / "process-library.json").write_text(json.dumps({"процессы": records_list}, ensure_ascii=False),
+                                                  encoding="utf-8")
+        (cfg / "process-library.yaml").write_text("процессы: {}\n", encoding="utf-8")
+        (Path(stand) / "crontab.txt").write_text("", encoding="utf-8")
+        (Path(stand) / "units.txt").write_text("".join(u + " enabled enabled\n" for u in unit_lines), encoding="utf-8")
+        import subprocess
+        done = subprocess.run([sys.executable, str(JUDGE), "--root", stand, "--crontab", str(Path(stand) / "crontab.txt"),
+                               "--units", str(Path(stand) / "units.txt"), "--project-dir", stand],
+                              capture_output=True, text=True, timeout=60)
+        return done.returncode, done.stdout + done.stderr
+
+
+def judged_record(ident: str, launch: str, source) -> dict:
+    return {"id": ident, "название": ident, "класс": "сторонний", "запуск": launch, "статус": "работает", "файлы": [],
+            "доля_нагрузки": {"приписка": {"способ": "cgroup", "признак": "-"}, "замер": "не измерено"},
+            "состояние_из": source}
+
+
+field_records = [judged_record("rot", "таймер", {"systemd": ["logrotate.timer", "logrotate.service"]}),
+                 judged_record("bent-empty", "контейнер", {}),
+                 judged_record("bent-two", "контейнер", {"docker": "a", "cgroup": "b"}),
+                 judged_record("bent-blank", "контейнер", {"systemd": []}),
+                 judged_record("fine", "контейнер", {"docker": "game-server"})]
+rc, said = judged(field_records, ["logrotate.service"])
+lines = said.splitlines()
+report(rc == 1 and any(l.startswith("НАРУШЕНИЕ мёртвая запись: rot :: logrotate.timer") for l in lines),
+       "--units без logrotate.timer → «мёртвая запись: rot :: logrotate.timer» (полный список юнитов, не только harness-*)",
+       [f"rc={rc}"] + lines[-4:])
+report(not any(":: logrotate.service" in l for l in lines),
+       "logrotate.service есть в списке юнитов → нарушения по нему нет, «без записи» по-прежнему только harness-*",
+       [l for l in lines if "logrotate.service" in l])
+crooked = [i for i in ("bent-empty", "bent-two", "bent-blank")
+           if not any(l.startswith(f"НАРУШЕНИЕ кривая запись: {i} :: состояние_из") for l in lines)]
+report(rc == 1 and not crooked,
+       "состояние_из: {} / два ключа / пустое значение → «кривая запись: <id> :: состояние_из»", crooked + lines[-3:])
+report(not any(": fine ::" in l for l in lines), "состояние_из: {docker: …} ровно с одним ключом — нарушений нет",
+       [l for l in lines if ": fine ::" in l])
+rc, said = judged(field_records[:1], ["logrotate.timer", "logrotate.service"])
+report(rc == 0, "оба юнита состояние_из.systemd в списке → чисто", [f"rc={rc}"] + said.splitlines()[-3:])
+
 print(f"БИБЛИОТЕКА ПРОЦЕССОВ: путей {paths}, неудач {failures}")
 if failures:
     sys.exit(1)

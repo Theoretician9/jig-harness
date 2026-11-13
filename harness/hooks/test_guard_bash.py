@@ -10,6 +10,7 @@
 Запускается без /etc/harness/install.conf — это тоже проверка: сторож обязан
 работать с дефолтами на свежей машине без конфига: необратимое (push, выкат) без ответа ворот — ОТКАЗ, остальное — fail-open.
 """
+import dataclasses
 import datetime
 import json
 import os
@@ -19,6 +20,79 @@ import subprocess
 import sys
 import tempfile
 import time
+
+# ── носитель стенда: «Да» стенда судья видит только аргументом в процессе пробы ──
+# После карточки А (спека §3.2) судья не слушает окружение ни при каком ключе: каталог
+# слова, паспорт и окно даёт ему носитель. Стенд подменяет owner_word.носитель в
+# процессе, где идёт суд, — в своём (run) или в дочернем процессе-обёртке, который
+# импортирует дверь и зовёт её main() (run_вывод, ворота). Свой ключ в окружении
+# пробе не нужен: что подменять, обёртке называют доводами.
+ОБЁРТКА = "--обёртка-двери"
+# Код обёртки, у которой судья без Носитель: ни 0, ни 2 — случай краснеет, а не
+# проходит отказом, который дала бы любая поломка.
+КОД_ОБЁРТКИ = 3
+
+
+def _число(значение, умолчание):
+    текст = str(значение or "").strip()
+    return int(текст) if текст.isdigit() else умолчание
+
+
+def носитель_стенда(слово_вл, конф, паспорт: str, ручки: str | None):
+    """Носитель стенда для судьи `слово_вл`: папка — LOG_DIR паспорта стенда, ручки — его harness.conf.
+
+    Окно и срок кнопки — из ручек стенда, как их читала бы машина из своих. LookupError — у судьи
+    нет dataclass Носитель (до А3) или есть обязательное поле, которого проба не знает.
+    """
+    cls = getattr(слово_вл, "Носитель", None)
+    if cls is None or not dataclasses.is_dataclass(cls):
+        raise LookupError("в судье нет dataclass Носитель")
+    значения = конф.из_файла(паспорт)
+    ключи = конф.из_файла(ручки) if ручки else {}
+    папка = pathlib.Path(значения.get("LOG_DIR") or паспорт)
+    известные = {"папка": папка, "uid": None, "паспорт": значения, "граница": папка,
+                 "окно_мин": _число(ключи.get("CONFIRM_MAX_AGE_MIN"), 60),
+                 "срок_кнопки_мин": _число(ключи.get("CONSENT_BUTTON_TTL_MIN"), None), "ручки": ключи}
+    поля = dataclasses.fields(cls)
+    чужие = [п.name for п in поля if п.name not in известные
+             and п.default is dataclasses.MISSING and п.default_factory is dataclasses.MISSING]
+    if чужие:
+        raise LookupError(f"у Носитель обязательные поля, которых проба не знает: {чужие}")
+    return cls(**{п.name: известные[п.name] for п in поля if п.name in известные})
+
+
+def обёртка_двери(доводы: list[str]) -> int:
+    """Дочерний процесс: <файл двери> <паспорт стенда> <ручки стенда|-> [доводы двери…].
+
+    Дверь (сторож или ворота) грузится из того же файла, что судит проба (дверь мутаций
+    GUARD_UNDER_TEST), её судье подменяется носитель, и зовётся её main() — тем же входом,
+    что у харнеса: stdin, доводы, код выхода.
+    """
+    import importlib.util
+    файл, паспорт, ручки, *свои = доводы
+    sys.argv = [файл, *свои]
+    spec = importlib.util.spec_from_file_location("дверь_под_пробой", файл)
+    дверь = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(дверь)
+    try:
+        носитель = носитель_стенда(дверь.слово_вл, дверь.конф, паспорт, None if ручки == "-" else ручки)
+    except LookupError as беда:
+        print(f"ОБЁРТКА ПРОБЫ: {беда}", file=sys.stderr)
+        return КОД_ОБЁРТКИ
+    дверь.слово_вл.носитель = lambda: носитель
+    return дверь.main()
+
+
+def зов_обёртки(файл_двери, env: dict, *доводы: str) -> list[str]:
+    """Командная строка обёртки для стенда, чей паспорт и ручки названы в env."""
+    return ["python3", str(pathlib.Path(__file__).resolve()), ОБЁРТКА, str(файл_двери),
+            env["HARNESS_INSTALL_CONF"], env.get("HARNESS_CONF") or "-", *доводы]
+
+
+# Обёртка — до побочных действий модуля ниже (свой двор учёта, загрузка сторожа):
+# у дочернего процесса их нет, окружение он получил от пробы.
+if __name__ == "__main__" and sys.argv[1:2] == [ОБЁРТКА]:
+    sys.exit(обёртка_двери(sys.argv[2:]))
 
 # Путь относительно самого теста: набор переносится целиком, тест работает из любого каталога.
 # Путь к сторожу подменяем переменной окружения — так мутационная проба
@@ -647,7 +721,8 @@ def проверить_дверь_dannyh() -> tuple[int, int]:
         команда = (f"HARNESS_DATA_DELETE_WHY='его слово 15.10' rm -rf {цель}")
 
         def стенд(имя: str, нажатия=(), слова=()) -> dict:
-            """Своё окружение: LOG_DIR с журналом входящих и журналом кнопок; ключ стенда включён."""
+            """Своё окружение: LOG_DIR с журналом входящих и журналом кнопок. Судье его подаёт
+            носитель стенда (run/run_вывод с стенд=True); паспорт в окружении — для следа сторожа."""
             логи = pathlib.Path(двор, имя)
             логи.mkdir(parents=True)
             (логи / "inbox.jsonl").write_text("".join(слова), encoding="utf-8")
@@ -658,7 +733,6 @@ def проверить_дверь_dannyh() -> tuple[int, int]:
             конф.write_text(f'LOG_DIR="{логи}"\n' + ПАСПОРТ_ВЛАДЕЛЬЦА, encoding="utf-8")
             окружение = dict(os.environ)
             окружение["HARNESS_INSTALL_CONF"] = str(конф)
-            окружение["HARNESS_OWNER_WORD_STEND"] = "1"
             return окружение
 
         def нажатие(событие: str, минут_назад: float, предмет: str = os.path.realpath(цель)) -> str:
@@ -672,7 +746,7 @@ def проверить_дверь_dannyh() -> tuple[int, int]:
         # БОЛЬНОЙ СЛУЧАЙ ПЕРВЫМ: причину написал сам агент, кнопки нет вовсе.
         env_пусто = стенд("log-pusto")
         путей += 1
-        if run(команда, env=env_пусто) != 2:
+        if run(команда, env=env_пусто, стенд=True) != 2:
             print("  ПЛОХО причина без кнопки владельца открыла дверь данных")
             bad += 1
         else:
@@ -680,7 +754,7 @@ def проверить_дверь_dannyh() -> tuple[int, int]:
 
         env = стенд("log-da", нажатия=[нажатие("consent.yes", 1)])
         путей += 1
-        if run(команда, env=env) != 0:
+        if run(команда, env=env, стенд=True) != 0:
             print("  ПЛОХО «Да» кнопкой на цель + причина в команде — дверь данных не открылась")
             bad += 1
         else:
@@ -691,7 +765,7 @@ def проверить_дверь_dannyh() -> tuple[int, int]:
                             f"Удали секреты и копии базы из {цель}", "message_id": "552"},
                            ensure_ascii=False) + "\n"
         путей += 1
-        вывод = run_вывод(команда, env=стенд("log-text", слова=[слово]))
+        вывод = run_вывод(команда, env=стенд("log-text", слова=[слово]), стенд=True)
         if вывод[0] != 2:
             print("  ПЛОХО текст владельца с названным путём открыл дверь данных")
             bad += 1
@@ -710,7 +784,7 @@ def проверить_дверь_dannyh() -> tuple[int, int]:
                  [json.dumps({"ts": datetime.datetime.now().astimezone().isoformat(), "text":
                               "стоп, не удаляй секреты", "message_id": "553"}, ensure_ascii=False) + "\n"])):
             путей += 1
-            if run(команда, env=стенд(f"log-{путей}", нажатия=нажатия, слова=слова)) != 2:
+            if run(команда, env=стенд(f"log-{путей}", нажатия=нажатия, слова=слова), стенд=True) != 2:
                 print(f"  ПЛОХО {имя} не закрыло дверь данных")
                 bad += 1
             else:
@@ -718,32 +792,40 @@ def проверить_дверь_dannyh() -> tuple[int, int]:
 
         # Битый журнал кнопок — «прочитать не смогли»: дверь закрыта, причина названа.
         путей += 1
-        вывод = run_вывод(команда, env=стенд("log-bitaja", нажатия=["{битая строка\n"]))
+        вывод = run_вывод(команда, env=стенд("log-bitaja", нажатия=["{битая строка\n"]), стенд=True)
         if вывод[0] != 2 or "не прочитан" not in вывод[1]:
             print(f"  ПЛОХО битый журнал кнопок: код {вывод[0]}, причина не названа: {вывод[1][:160]}")
             bad += 1
         else:
             print("  ок    БОЛЬНОЙ СЛУЧАЙ: журнал кнопок битый — дверь закрыта, причина названа")
 
-        # Тот же стенд БЕЗ ключа стенда: подмена каталога журнала — отказ с причиной.
-        env_без_ключа = dict(env)
-        env_без_ключа.pop("HARNESS_OWNER_WORD_STEND", None)
+        # Тот же стенд со свежим «Да» БЕЗ носителя стенда: паспорт стенда в окружении (путь M
+        # замера) судье не хозяин — он судит носитель машины, где этой кнопки нет. Рядом контроль:
+        # с носителем стенда то же «Да» открыло дверь выше.
         путей += 1
-        вывод = run_вывод(команда, env=env_без_ключа)
-        if вывод[0] != 2 or "HARNESS_OWNER_WORD_STEND" not in вывод[1]:
-            print(f"  ПЛОХО без ключа стенда: код {вывод[0]}, ключ не назван: {вывод[1][:160]}")
+        вывод = run_вывод(команда, env=env)
+        if вывод[0] != 2:
+            print(f"  ПЛОХО паспорт стенда в окружении открыл дверь данных мимо носителя: код {вывод[0]}")
             bad += 1
         else:
-            print("  ок    БОЛЬНОЙ СЛУЧАЙ: подмена каталога без ключа стенда — отказ с причиной")
+            print("  ок    БОЛЬНОЙ СЛУЧАЙ: подмена паспорта окружением — судья берёт носитель машины, отказ")
+        # И ключ прежнего стенда в окружении больше ничего не открывает (спека §3.2).
+        путей += 1
+        вывод = run_вывод(команда, env=dict(env, HARNESS_OWNER_WORD_STEND="1"))
+        if вывод[0] != 2:
+            print(f"  ПЛОХО ключ стенда в окружении открыл дверь данных: код {вывод[0]}")
+            bad += 1
+        else:
+            print("  ок    БОЛЬНОЙ СЛУЧАЙ: ключ стенда в окружении + паспорт стенда — отказ")
 
     return bad, путей
 
 
-def _judge_cases(cases: list, env: dict, prefix: str) -> tuple[int, int]:
-    """Вердикт каждого случая против ожидания; (неудач, путей)."""
+def _judge_cases(cases: list, env: dict, prefix: str, стенд: bool = False) -> tuple[int, int]:
+    """Вердикт каждого случая против ожидания; (неудач, путей). `стенд` — как у run."""
     bad = 0
     for want, name, cmd in cases:
-        got = run(cmd, env=env)
+        got = run(cmd, env=env, стенд=стенд)
         if got != want:
             bad += 1
         print(f"  {'ок ' if got == want else 'ПЛОХО'} ждали={want} получили={got}  {prefix}: {name}")
@@ -815,7 +897,7 @@ def check_protected_paths() -> tuple[int, int]:
         harness = pathlib.Path(yard, "harness.conf")
         harness.write_text(f'PROTECTED_PATHS="{project}"\n', encoding="utf-8")
         env = dict(os.environ, HARNESS_INSTALL_CONF=str(install),
-                   HARNESS_CONF=str(harness), HARNESS_OWNER_WORD_STEND="1")
+                   HARNESS_CONF=str(harness))
         why = "HARNESS_DATA_DELETE_WHY='его слово 03.11'"
         cases = [
             (2, "rm -rf PROTECTED_PATHS", f"rm -rf {project}"),
@@ -878,7 +960,7 @@ def check_protected_paths() -> tuple[int, int]:
             (0, "mv готового S/*.tmp в несуществующую цель того же каталога",
              f"mv {keys}/gotov.tmp {keys}/novyj"),
         ]
-        bad, paths = _judge_cases(cases, env, "защищённый путь")
+        bad, paths = _judge_cases(cases, env, "защищённый путь", стенд=True)
         # И-3: имя файла в каталоге секретов само бывает ключом доступа —
         # отказ называет корень защищённого, а не путь к файлу.
         secret_name = "sekret-klyuch-777"  # не-секрет: выдуманное имя для пробы утечки
@@ -886,7 +968,7 @@ def check_protected_paths() -> tuple[int, int]:
         for verb, cmd in (("truncate -s0", f"truncate -s0 {keys}/{secret_name}"),
                           (": >", f": > {keys}/{secret_name}"),
                           ("shred", f"shred {keys}/{secret_name}")):
-            got, said = run_вывод(cmd, env=env)
+            got, said = run_вывод(cmd, env=env, стенд=True)
             ok = got == 2 and secret_name not in said
             if not ok:
                 bad += 1
@@ -900,7 +982,7 @@ def check_protected_paths() -> tuple[int, int]:
             "текст": f"Удали копии и секреты из {project} и {keys}"},
             ensure_ascii=False) + "\n", encoding="utf-8")
         b_text, p_text = _judge_cases([(2, "дверь: причина + ТЕКСТ с путём без кнопки — закрыта",
-                                        f"{why} rm -rf {project}")], env, "защищённый путь")
+                                        f"{why} rm -rf {project}")], env, "защищённый путь", стенд=True)
         (logs / "inbox.jsonl").write_text("", encoding="utf-8")
         _button(logs, project)
         _button(logs, keys)
@@ -910,7 +992,7 @@ def check_protected_paths() -> tuple[int, int]:
             (0, "дверь: та же дверь и для другого глагола — mv SECRETS_DIR",
              f"{why} mv {keys} /tmp/x"),
         ]
-        bad_d, paths_d = _judge_cases(door, env, "защищённый путь")
+        bad_d, paths_d = _judge_cases(door, env, "защищённый путь", стенд=True)
     return bad + bad_d + b_text, paths + paths_d + p_text
 
 
@@ -973,7 +1055,7 @@ def check_delete_door_targets() -> tuple[int, int]:
         harness.write_text(f'PROTECTED_PATHS="~/.ssh {arch} {arch_ru} {foreign}"\n',
                            encoding="utf-8")
         env = dict(os.environ, HOME=str(home), HARNESS_INSTALL_CONF=str(install),
-                   HARNESS_CONF=str(harness), HARNESS_OWNER_WORD_STEND="1")
+                   HARNESS_CONF=str(harness))
         why = "HARNESS_DATA_DELETE_WHY='его слово 04.11'"
         cases = [
             (2, "rm -f ~/.ssh/github_x", "rm -f ~/.ssh/github_x"),
@@ -1000,7 +1082,7 @@ def check_delete_door_targets() -> tuple[int, int]:
             (0, "ssh-keyscan >> НОВОГО файла в ~/.ssh",
              "ssh-keyscan github.com >> ~/.ssh/known_hosts_novyj"),
         ]
-        b, p = _judge_cases(cases, env, "цели двери")
+        b, p = _judge_cases(cases, env, "цели двери", стенд=True)
         bad, paths = bad + b, paths + p
 
         # Список — данные: тот же снос без ключа проходит, мутация данных меняет вердикт.
@@ -1008,7 +1090,7 @@ def check_delete_door_targets() -> tuple[int, int]:
         empty.write_text('PROTECTED_PATHS=""\n', encoding="utf-8")
         b, p = _judge_cases([(0, "PROTECTED_PATHS=\"\" — rm -rf чужого проекта проходит",
                               f"rm -rf {foreign}")],
-                            dict(env, HARNESS_CONF=str(empty)), "цели двери, данные")
+                            dict(env, HARNESS_CONF=str(empty)), "цели двери, данные", стенд=True)
         bad, paths = bad + b, paths + p
 
         # Дверь: причина + «Да» кнопкой на realpath цели; проход оставляет след.
@@ -1016,7 +1098,7 @@ def check_delete_door_targets() -> tuple[int, int]:
                             (f"{why} rm -rf {arch_ru}", arch_ru)):
             _button(logs, target)
             b, p = _judge_cases([(0, f"дверь: «Да» кнопкой на {target.name} + причина", cmd)], env,
-                                "цели двери")
+                                "цели двери", стенд=True)
             bad, paths = bad + b, paths + p
             bad += _judge_trace(
                 logs, lambda r, t=str(target): r.get("reason") == "дверь: удаление данных"
@@ -1041,7 +1123,7 @@ def check_delete_door_targets() -> tuple[int, int]:
              "HARNESS_PREVIOUS_DELETE_WHY='его слово 04.11' docker rmi app-api:previous"),
         ]
         for want, name, cmd in holes:
-            b, p = _judge_cases([(want, name, cmd)], env, "дыры двери")
+            b, p = _judge_cases([(want, name, cmd)], env, "дыры двери", стенд=True)
             bad, paths = bad + b, paths + p
 
         # find -delete по каталогу из имён данных: дверь та же, что у rm.
@@ -1052,12 +1134,12 @@ def check_delete_door_targets() -> tuple[int, int]:
         b, p = _judge_cases([
             (2, "find data -delete без причины", f"find {named} -delete"),
             (2, "БОЛЬНОЙ СЛУЧАЙ: find data -delete, причина без слова",
-             f"{why} find {named} -delete")], env, "find-дверь")
+             f"{why} find {named} -delete")], env, "find-дверь", стенд=True)
         bad, paths = bad + b, paths + p
         inbox.write_text("", encoding="utf-8")
         _button(logs, named)
         b, p = _judge_cases([(0, "find data -delete: причина + «Да» кнопкой на цель",
-                              f"{why} find {named} -delete")], env, "find-дверь")
+                              f"{why} find {named} -delete")], env, "find-дверь", стенд=True)
         bad, paths = bad + b, paths + p
         bad += _judge_trace(
             logs, lambda r: r.get("reason") == "дверь: удаление данных"
@@ -1086,7 +1168,7 @@ def _check_door_all_targets() -> tuple[int, int]:
         harness = yard / "harness.conf"
         harness.write_text("", encoding="utf-8")
         env = dict(os.environ, HOME=str(yard / "home"), HARNESS_INSTALL_CONF=str(install),
-                   HARNESS_CONF=str(harness), HARNESS_OWNER_WORD_STEND="1")
+                   HARNESS_CONF=str(harness))
         why = "HARNESS_DATA_DELETE_WHY='его слово 04.11'"
         inbox.write_text("", encoding="utf-8")
         _button(logs, a)
@@ -1114,13 +1196,13 @@ def _check_door_all_targets() -> tuple[int, int]:
             (2, "причина в соседнем звене: true && rm", f"{why} true && rm -rf {a}"),
             (2, "причина в соседнем звене: true; find", f"{why} true; find {a} -delete"),
         ]
-        bad, paths = _judge_cases(cases, env, "дверь, все цели")
+        bad, paths = _judge_cases(cases, env, "дверь, все цели", стенд=True)
         # Кнопка на КАЖДУЮ цель: законная дверь на несколько целей; на родителя одной кнопки мало.
         _button(logs, b_)
         b, p = _judge_cases([
             (0, "кнопки на обе цели: rm -rf A B", f"{why} rm -rf {a} {b_}"),
             (0, "кнопки на обе цели: find A B -delete", f"{why} find {a} {b_} -delete")],
-            env, "дверь, общий родитель")
+            env, "дверь, общий родитель", стенд=True)
         bad, paths = bad + b, paths + p
         bad += _judge_trace(
             logs, lambda r: r.get("reason") == "дверь: удаление данных"
@@ -1132,7 +1214,7 @@ def _check_door_all_targets() -> tuple[int, int]:
         (logs / "consent-buttons.jsonl").write_text("", encoding="utf-8")
         _button(logs, yard)
         b, p = _judge_cases([(2, "кнопка на родителя не открывает детей", f"{why} rm -rf {a} {b_}")],
-                            env, "дверь, выбор слова")
+                            env, "дверь, выбор слова", стенд=True)
         bad, paths = bad + b, paths + p
     return bad, paths
 
@@ -1161,7 +1243,7 @@ def _check_blockade_roots() -> tuple[int, int]:
         harness = yard / "harness.conf"
         harness.write_text(f'PROTECTED_PATHS="{base} ~ /tmp {foreign}"\n', encoding="utf-8")
         env = dict(os.environ, HOME=str(home), HARNESS_INSTALL_CONF=str(install),
-                   HARNESS_CONF=str(harness), HARNESS_OWNER_WORD_STEND="1")
+                   HARNESS_CONF=str(harness))
         bad, paths = _judge_cases([
             (0, "> $LOG_DIR/x.log при предке LOG_DIR в списке", f"echo x > {logs}/x.log"),
             (0, "sed -i в PROJECT_DIR при предке проекта в списке",
@@ -1169,7 +1251,7 @@ def _check_blockade_roots() -> tuple[int, int]:
             (0, ">> ~/.bashrc при ~ в списке", "echo x >> ~/.bashrc"),
             (0, "rm -rf /tmp/x при /tmp в списке", "rm -rf /tmp/x"),
             (2, "соседний нормальный корень в том же ключе держит", f"rm -rf {foreign}"),
-        ], env, "блокада")
+        ], env, "блокада", стенд=True)
         # Корень судится целым словом: «/tmp» — префикс любого пути стенда.
         for root in (base, home, pathlib.Path("/tmp")):
             bad += _judge_trace(
@@ -1193,7 +1275,7 @@ def _check_blockade_roots() -> tuple[int, int]:
         only_root = yard / "harness-koren.conf"
         only_root.write_text('PROTECTED_PATHS="/"\n', encoding="utf-8")
         b, p = _judge_cases([(0, "«/» по-прежнему отсекается", "rm -rf /tmp/x")],
-                            dict(env, HARNESS_CONF=str(only_root)), "блокада")
+                            dict(env, HARNESS_CONF=str(only_root)), "блокада", стенд=True)
         bad, paths = bad + b, paths + p
         # Рабочее место берётся только абсолютным: пустой и «.» не гасят корень,
         # внутри которого стоит cwd хука.
@@ -1208,7 +1290,7 @@ def _check_blockade_roots() -> tuple[int, int]:
                 inst.write_text(f'{line}LOG_DIR="{logs}"\nAUTONOMY="semi"\n', encoding="utf-8")
                 b, p = _judge_cases([(2, f"cwd в корне, {name}: корень держит", f"rm -rf {foreign}")],
                                     dict(env, HARNESS_CONF=str(keep), HARNESS_INSTALL_CONF=str(inst)),
-                                    "блокада")
+                                    "блокада", стенд=True)
                 bad, paths = bad + b, paths + p
         finally:
             os.chdir(прежний_cwd)
@@ -1355,8 +1437,8 @@ def проверить_дверь_previous() -> tuple[int, int]:
             print(f"  ок    {имя}")
     # Стенд создаёт своё условие: свой LOG_DIR с МАШИННЫМ журналом диспетчера, боевые
     # входящие не читаются (их читают двери чтения учёта ниже).
-    # Каталог журнала подменяется ТОЛЬКО ключом стенда (ревью кода 28.09.2026,
-    # C-2): без ключа подмена — отказ, и это отдельный путь ниже.
+    # Каталог журнала судье подаёт ТОЛЬКО носитель стенда в процессе пробы (спека §3.2):
+    # окружение его не подменяет.
     команда = ("HARNESS_PREVIOUS_DELETE_WHY='его слово 28.09' "
                "docker rmi app-api:previous")
 
@@ -1379,7 +1461,6 @@ def проверить_дверь_previous() -> tuple[int, int]:
         конф.write_text(f'LOG_DIR="{логи}"\n', encoding="utf-8")
         env = dict(os.environ)
         env["HARNESS_INSTALL_CONF"] = str(конф)
-        env["HARNESS_OWNER_WORD_STEND"] = "1"
         # Сначала — БОЛЬНОЙ СЛУЧАЙ: входящих нет вовсе, причину написал сам
         # агент. Судится на СВОЁМ дворе: на боевых входящих свежее слово
         # владельца сделало бы этот путь зелёным по чужой причине.
@@ -1392,7 +1473,7 @@ def проверить_дверь_previous() -> tuple[int, int]:
         env_пусто["HARNESS_INSTALL_CONF"] = str(конф_пусто)
         путей += 1
         if run("HARNESS_PREVIOUS_DELETE_WHY='агент сам себе написал причину' "
-               "docker rmi app-api:previous", env=env_пусто) != 2:
+               "docker rmi app-api:previous", env=env_пусто, стенд=True) != 2:
             print("  ПЛОХО причина без слова владельца открыла дверь")
             bad += 1
         else:
@@ -1401,7 +1482,7 @@ def проверить_дверь_previous() -> tuple[int, int]:
         # привязать, а текст владельца необратимое не открывает. Свежее слово с названным
         # предметом и причиной в команде — отказ, и отказ говорит об этом.
         путей += 1
-        вывод = run_вывод(команда, env=env)
+        вывод = run_вывод(команда, env=env, стенд=True)
         if вывод[0] != 2:
             print("  ПЛОХО со свежим словом владельца дверь :previous открылась")
             bad += 1
@@ -1412,7 +1493,7 @@ def проверить_дверь_previous() -> tuple[int, int]:
             print("  ок    БОЛЬНОЙ СЛУЧАЙ: свежее слово + причина — дверь :previous закрыта наглухо")
         журнал.unlink()
         путей += 1
-        if run(команда, env=env) != 2:
+        if run(команда, env=env, стенд=True) != 2:
             print("  ПЛОХО без журнала входящих дверь :previous открылась")
             bad += 1
         else:
@@ -1426,34 +1507,34 @@ def проверить_дверь_previous() -> tuple[int, int]:
                   "curl -s https://api.erp-obrazec.test/api/remap/1.2/entity/store")
         журнал.write_text(строка_журнала("2"), encoding="utf-8")
         путей += 1
-        if run(чтение, env=env) != 2:
+        if run(чтение, env=env, стенд=True) != 2:
             print("  ПЛОХО цифра «2» открыла дверь чтения учёта")
             bad += 1
         else:
             print("  ок    БОЛЬНОЙ СЛУЧАЙ: ответ цифрой дверь чтения не открывает")
         журнал.write_text(строка_журнала("удали токен"), encoding="utf-8")
         путей += 1
-        if run(чтение, env=env) != 2:
+        if run(чтение, env=env, стенд=True) != 2:
             print("  ПЛОХО слово об УДАЛЕНИИ открыло дверь ЧТЕНИЯ")
             bad += 1
         else:
             print("  ок    БОЛЬНОЙ СЛУЧАЙ: слово удаления дверь чтения не открывает")
         журнал.write_text(строка_журнала("читай статусы и типы цен"), encoding="utf-8")
         путей += 1
-        if run(чтение, env=env) != 0:
+        if run(чтение, env=env, стенд=True) != 0:
             print("  ПЛОХО «читай статусы и типы цен» + причина — дверь чтения не открылась")
             bad += 1
         else:
             print("  ок    свежее «читай …» + причина в команде — дверь чтения открыта")
         путей += 1
-        if run("curl -s https://api.erp-obrazec.test/api/remap/1.2/entity/store", env=env) != 2:
+        if run("curl -s https://api.erp-obrazec.test/api/remap/1.2/entity/store", env=env, стенд=True) != 2:
             print("  ПЛОХО чтение БЕЗ причины в команде открылось по одному его слову")
             bad += 1
         else:
             print("  ок    БОЛЬНОЙ СЛУЧАЙ: его слово есть, причины в команде нет — закрыто")
         журнал.write_text(строка_журнала("не читай статусы пока"), encoding="utf-8")
         путей += 1
-        if run(чтение, env=env) != 2:
+        if run(чтение, env=env, стенд=True) != 2:
             print("  ПЛОХО отказ «не читай» открыл дверь чтения")
             bad += 1
         else:
@@ -1462,7 +1543,7 @@ def проверить_дверь_previous() -> tuple[int, int]:
         # нарочно, и один класс действий не берёт слово другого.
         журнал.write_text(строка_журнала("читай статусы и типы цен"), encoding="utf-8")
         путей += 1
-        if run(команда, env=env) != 2:
+        if run(команда, env=env, стенд=True) != 2:
             print("  ПЛОХО слово о ЧТЕНИИ открыло дверь УДАЛЕНИЯ образа")
             bad += 1
         else:
@@ -1527,6 +1608,112 @@ def проверить_публикацию_мимо_двери() -> tuple[int, 
             bad += 1
         else:
             print("  ок    без ключей публикации правило молчит")
+    return bad, путей
+
+
+def проверить_сеть_мимо_двери() -> tuple[int, int]:
+    """G1–G8: push в общий репозиторий сети — только дверью evolution-net.py --отправить.
+
+    Ручной push в клон HarnessEvolution проходил сторож целиком (факт 9 плана фазы 1):
+    коммит уходил ко всем серверам без суда подписи и без закреплённого адреса.
+    Клон и адрес — ДАННЫЕ harness.conf, поэтому стенд подсовывает свой конфиг; ворота
+    выката — заглушка «можно», чтобы отказ шёл от правила, а не от молчания ворот.
+    """
+    bad = 0
+    путей = 0
+    sha = "0123456789abcdef" * 2 + "01234567"
+    with tempfile.TemporaryDirectory() as tmp:
+        клон = pathlib.Path(tmp, "клон-сети")
+        (клон / ".git").mkdir(parents=True)
+        ссылка = pathlib.Path(tmp, "ссылка-на-клон")
+        ссылка.symlink_to(клон)
+        # без «.git»: соседний «…HarnessEvoStand-other.git» содержит его подстрокой (G3d)
+        адрес = "git@github.com:Example/HarnessEvoStand"
+        конф = pathlib.Path(tmp, "harness.conf")
+        конф.write_text(f'EVOLUTION_DIR="{клон}"\nEVOLUTION_REMOTE_URL="{адрес}"\n', encoding="utf-8")
+        проект = pathlib.Path(tmp, "проект")
+        (проект / "scripts").mkdir(parents=True)
+        (проект / "scripts" / "deploy_guard.py").write_text("import sys\nsys.exit(0)\n", encoding="utf-8")
+        пасп = pathlib.Path(tmp, "install.conf")
+        пасп.write_text(f'PROJECT_DIR="{проект}"\n', encoding="utf-8")
+        env = dict(os.environ)
+        env["HARNESS_CONF"] = str(конф)
+        env["HARNESS_INSTALL_CONF"] = str(пасп)
+        случаи = [
+            # G1 — краснеет, если разбор звена `git -C` снят (push=None): путь клона в тексте
+            # НЕ назван, его видит только разбор звена (относительный -C после cd в родителя)
+            (2, "G1 push из клона сети через относительный -C отменён",
+             f"cd {tmp} && git -C {клон.name} push origin {sha}:refs/heads/main"),
+            # G1s — краснеет, если каталог сравнивается без realpath (E-15): симлинк обходит правило
+            (2, "G1s push через симлинк на клон отменён",
+             f"git -C {ссылка} push origin {sha}:refs/heads/main"),
+            # G2 — краснеет, если снят разбор cd в звеньях: каталог клона относительный
+            (2, "G2 cd в клон по относительному пути и push отменён",
+             f"cd {tmp} && cd {клон.name} && git push"),
+            # G3 — краснеет, если снят поиск адреса EVOLUTION_REMOTE_URL в команде
+            (2, "G3 push по адресу общего репозитория из другого каталога отменён",
+             f"git push {адрес} {sha}:refs/heads/main"),
+            # G3b/G3c/G3f — краснеет, если адрес сравнивается как строка, а не как репозиторий
+            (2, "G3f тот же репозиторий с «.git» отменён",
+             f"git push git@github.com:Example/HarnessEvoStand.git {sha}:refs/heads/main"),
+            (2, "G3b тот же репозиторий по ssh:// отменён",
+             f"git push ssh://git@github.com/Example/HarnessEvoStand.git {sha}:refs/heads/main"),
+            (2, "G3c тот же репозиторий по https:// без .git отменён",
+             f"git push https://github.com/Example/HarnessEvoStand {sha}:refs/heads/main"),
+            # G3d — краснеет, если соседний репозиторий судится как этот (подстрока адреса без .git)
+            (0, "G3d соседний репозиторий …HarnessEvoStand-other.git не задет",
+             f"git push git@github.com:Example/HarnessEvoStand-other.git {sha}:refs/heads/main"),
+            (0, "G3e соседний каталог …/клон-сети-other не задет",
+             f"cd {клон}-other && git push origin master"),
+            # G4 — краснеет, если снят разбор GIT_DIR= звена: путь относительный
+            (2, "G4 относительный GIT_DIR клона и push отменён",
+             f"cd {tmp} && GIT_DIR={клон.name}/.git git push"),
+            # G9 — краснеет, если send-pack не считается отправкой
+            (2, "G9 git send-pack из клона отменён",
+             f"cd {tmp} && git -C {клон.name} send-pack origin {sha}:refs/heads/main"),
+            (2, "G9b git send-pack по адресу отменён",
+             f"git send-pack {адрес} {sha}:refs/heads/main"),
+            # G10 — краснеет, если `-c alias.X=push` не считается отправкой
+            (2, "G10 алиас push через -c в клоне отменён",
+             f"cd {tmp} && git -C {клон.name} -c alias.p=push p origin {sha}:refs/heads/main"),
+            # G5 — краснеет, если правило шире нужного: push проекта судят ворота выката, не оно
+            (0, "G5 push проекта не задет",
+             f"cd {проект} && git push origin master"),
+            # G6 — краснеет, если правило перекрыло саму дверь
+            (0, "G6 дверь сети разрешена",
+             f"python3 scripts/evolution-net.py --отправить {sha}"),
+            # G8 — краснеет, если правило режет любой git в клоне, а не только push
+            (0, "G8 fetch клона сети не задет",
+             f"git -C {клон} fetch origin"),
+        ]
+        for ждём, имя, cmd in случаи:
+            путей += 1
+            код = run(cmd, env=env)
+            if код != ждём:
+                print(f"  ПЛОХО {имя}: ждали {ждём}, вышло {код}")
+                bad += 1
+            else:
+                print(f"  ок    {имя}")
+        # G1t — краснеет, если отказ молчит о единственном пути (AC-17): человек не узнает, как надо
+        путей += 1
+        код, текст = run_вывод(f"git -C {клон} push origin {sha}:refs/heads/main", env=env)
+        if код != 2 or "evolution-net.py --отправить" not in текст:
+            print(f"  ПЛОХО G1t отказ называет дверь evolution-net.py --отправить: код {код}")
+            bad += 1
+        else:
+            print("  ок    G1t отказ называет дверь evolution-net.py --отправить")
+        # G7 — краснеет, если правило без ключей EVOLUTION_* запрещает push вообще
+        пустой = pathlib.Path(tmp, "пустой.conf")
+        пустой.write_text("# без ключей сети серверов\n", encoding="utf-8")
+        env_пустой = dict(env)
+        env_пустой["HARNESS_CONF"] = str(пустой)
+        путей += 1
+        код = run(f"git -C {клон} push origin {sha}:refs/heads/main", env=env_пустой)
+        if код != 0:
+            print(f"  ПЛОХО G7 без ключей EVOLUTION_* правило обязано молчать: {код}")
+            bad += 1
+        else:
+            print("  ок    G7 без ключей EVOLUTION_* правило молчит")
     return bad, путей
 
 
@@ -1894,21 +2081,26 @@ def run_процессом(cmd: str, tool: str = "Bash", env: dict | None = None
     return p.returncode
 
 
-def run_вывод(cmd: str, tool: str = "Bash", env: dict | None = None) -> tuple[int, str]:
+def run_вывод(cmd: str, tool: str = "Bash", env: dict | None = None,
+              стенд: bool = False) -> tuple[int, str]:
     """Код И ТЕКСТ отказа: дверь, молчащая о причине, неотличима от сломанной.
 
     Отдельно от `run`: тот судит только вердикт и ради скорости зовёт сторожа
     внутри процесса, а текст отказа сторож печатает в свой stderr.
+    `стенд` — судье носитель стенда из паспорта env (обёртка), а не машины.
     """
     p = subprocess.run(
-        GUARD,
+        зов_обёртки(GUARD[1], env) if стенд else GUARD,
         input=json.dumps({"tool_name": tool, "tool_input": {"command": cmd}}),
         capture_output=True, text=True, env=env,
     )
     return p.returncode, (p.stderr or "") + (p.stdout or "")
 
 
-def run(cmd: str, tool: str = "Bash", env: dict | None = None) -> int:
+_СКАЗАНО: set[str] = set()
+
+
+def run(cmd: str, tool: str = "Bash", env: dict | None = None, стенд: bool = False) -> int:
     """Тот же вердикт, но без запуска процесса.
 
     221 путь × 107 мс отдельного python = 24 с из 41 с всех ворот (замер
@@ -1916,15 +2108,28 @@ def run(cmd: str, tool: str = "Bash", env: dict | None = None) -> int:
     подмена os.environ здесь равносильна env= у subprocess (проверено тем, что
     пути про ворота выката и ротацию остались зелёными).
     Не-Bash вызовы отсекает main(), а не check(), — их гоняем процессом.
+    `стенд` — судье на время вызова носитель стенда из паспорта env, как в обёртке.
     """
     if tool != "Bash":
         return run_процессом(cmd, tool, env)
+    судья = ГВАРД.слово_вл
+    прежний_носитель = судья.__dict__.get("носитель")
+    if стенд:
+        try:
+            носитель = носитель_стенда(судья, ГВАРД.конф, env["HARNESS_INSTALL_CONF"], env.get("HARNESS_CONF"))
+        except LookupError as беда:
+            if str(беда) not in _СКАЗАНО:
+                _СКАЗАНО.add(str(беда))
+                print(f"  ПЛОХО обёртка пробы: {беда} — случаи стенда судить нечем, их код {КОД_ОБЁРТКИ}")
+            return КОД_ОБЁРТКИ
     прежнее = dict(os.environ)
     прежняя_сессия = getattr(ГВАРД, "СЕССИЯ", "")
     try:
         if env is not None:
             os.environ.clear()
             os.environ.update(env)
+        if стенд:
+            судья.носитель = lambda: носитель
         ГВАРД.СЕССИЯ = ""
         try:
             return ГВАРД.check(cmd)
@@ -1939,6 +2144,10 @@ def run(cmd: str, tool: str = "Bash", env: dict | None = None) -> int:
         os.environ.clear()
         os.environ.update(прежнее)
         ГВАРД.СЕССИЯ = прежняя_сессия
+        if прежний_носитель is None:
+            судья.__dict__.pop("носитель", None)
+        else:
+            судья.носитель = прежний_носитель
 
 
 def gate_env(tmp: str, busy: bool) -> dict:
@@ -2329,6 +2538,9 @@ def main() -> int:
     _плохо, _путей = проверить_публикацию_мимо_двери()
     bad += _плохо
     total += _путей
+    _плохо_сеть, _путей_сеть = проверить_сеть_мимо_двери()
+    bad += _плохо_сеть
+    total += _путей_сеть
     _плохо_г, _путей_г = проверить_гашение_по_выборке()
     bad += _плохо_г
     total += _путей_г
@@ -2365,8 +2577,8 @@ def dg_scenario(tmp: str, autonomy: str = "full", кнопка_минут_наз
 
     Дерево выката — свой чистый git-репозиторий (PROJECT_DIR): предмет кнопки считается по нему.
     `кнопка_минут_назад` кладёт «Да» кнопкой на предмет этого дерева, `слово` — текст владельца
-    во входящие: он дверь не открывает. Ключи ворота читают у машины; на стенде — из файлов
-    окружения, поэтому ключ стенда включён.
+    во входящие: он дверь не открывает. Каталог слова и ключи согласия судья берёт у носителя:
+    ворота стенда идут обёрткой (run_dg), носитель — из этих же install.conf и harness.conf.
     """
     log = pathlib.Path(tmp, "log")
     (log / "locks" / "services").mkdir(parents=True, exist_ok=True)
@@ -2402,12 +2614,12 @@ def dg_scenario(tmp: str, autonomy: str = "full", кнопка_минут_наз
     env.pop("HARNESS_LOG_DIR", None)      # дверь запускающего перебила бы LOG_DIR стенда
     env["HARNESS_INSTALL_CONF"] = str(pathlib.Path(tmp, "install.conf"))
     env["HARNESS_CONF"] = str(pathlib.Path(tmp, "harness.conf"))
-    env["HARNESS_OWNER_WORD_STEND"] = "1"
     return env, log
 
 
 def run_dg(env: dict, *args: str) -> tuple[int, str]:
-    p = subprocess.run(["python3", str(DEPLOY_GUARD), *args],
+    """Настоящие ворота main() в обёртке: судье — носитель стенда dg_scenario."""
+    p = subprocess.run(зов_обёртки(DEPLOY_GUARD, env, *args),
                        capture_output=True, text=True, env=env)
     return p.returncode, p.stdout + p.stderr
 
@@ -2424,7 +2636,8 @@ def живая_занятость() -> str:
     with tempfile.TemporaryDirectory() as t:
         своё, _ = dg_scenario(t)                  # чистое окружение: локов нет
         rc, out = run_dg(своё)
-    if rc == 0:
+    # Обёртка без Носитель — не занятость машины: пути обязаны краснеть, а не пропускаться.
+    if rc in (0, КОД_ОБЁРТКИ):
         return ""
     мешает = [с for с in out.splitlines() if с.startswith(("занято:", "процесс "))]
     return "; ".join(мешает)[:120] or out.strip()[:120]

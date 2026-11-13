@@ -18,6 +18,7 @@
 """
 import ast
 import datetime as dt
+import functools
 import importlib.util
 import json
 import os
@@ -70,11 +71,19 @@ def is_hackathon(card):
     return isinstance(depth, dict) and depth.get("уровень") == LEVEL
 
 
+_PIPELINES = {}
+
+
 def _pipeline():
-    spec = importlib.util.spec_from_file_location("pipeline_hackathon", HERE / "pipeline.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    """pipeline.py грузится раз на процесс; правка файла (mtime) — новая загрузка."""
+    path = HERE / "pipeline.py"
+    key = (str(path), path.stat().st_mtime_ns)
+    if key not in _PIPELINES:
+        spec = importlib.util.spec_from_file_location("pipeline_hackathon", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _PIPELINES[key] = module
+    return _PIPELINES[key]
 
 
 FORBIDDEN_IN_INDEX = "harness/config/hackathon-forbidden.yaml"
@@ -113,35 +122,74 @@ def forbidden_masks(path=None):
     return masks
 
 
-def _in_scripts(root, name):
-    for folder in ("scripts", "scripts/lib"):
-        if (root / folder / name).is_file():
-            return f"{folder}/{name}"
-    return None
-
-
-def _python_edges(root, path):
-    found = set()
-    for node in ast.walk(ast.parse((root / path).read_text(encoding="utf-8"))):
-        names = []
+def _python_names(text):
+    """Сырые имена-кандидаты рёбер файла: что он импортирует, делит путём или склеивает."""
+    names = []
+    for node in ast.walk(ast.parse(text)):
         if isinstance(node, ast.Import):
-            names = [alias.name.split(".")[0] + ".py" for alias in node.names]
+            names += [alias.name.split(".")[0] + ".py" for alias in node.names]
         elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
-            names = [node.module.split(".")[0] + ".py"]
+            names += [node.module.split(".")[0] + ".py"]
         elif isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
-            names = [node.right.value] if isinstance(node.right, ast.Constant) else []
+            names += [node.right.value] if isinstance(node.right, ast.Constant) else []
         elif (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
               and node.func.attr == "join" and node.args and isinstance(node.args[-1], ast.Constant)):
-            names = [node.args[-1].value]
-        found |= {hit for name in names if isinstance(name, str) and BARE_NAME.match(name)
-                  for hit in [_in_scripts(root, name)] if hit}
-    return found
+            names += [node.args[-1].value]
+    return [[f"scripts/{name}", f"scripts/lib/{name}"]
+            for name in names if isinstance(name, str) and BARE_NAME.match(name)]
 
 
-def _shell_edges(root, path):
-    lines = (root / path).read_text(encoding="utf-8").splitlines()
-    return {f"scripts/{rel}" for line in lines if not line.lstrip().startswith("#")
-            for rel in SHELL_CALL.findall(line) if (root / "scripts" / rel).is_file()}
+def _shell_names(text):
+    return [[f"scripts/{rel}"] for line in text.splitlines() if not line.lstrip().startswith("#")
+            for rel in SHELL_CALL.findall(line)]
+
+
+# Разбор файлов суда по (путь, mtime_ns, размер): правка файла меняет ключ, и читается только он.
+_PARSED = None
+
+
+def _cache_file():
+    folder = os.environ.get("HARNESS_JUDGE_CACHE")
+    return Path(folder) / "judge-parse.json" if folder else None
+
+
+def _parsed_store():
+    global _PARSED
+    if _PARSED is None:
+        path = _cache_file()
+        _PARSED = json.loads(path.read_text(encoding="utf-8")) if path and path.is_file() else {}
+    return _PARSED
+
+
+def _save_parsed(parsed):
+    out = _cache_file()
+    if out:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        tmp = out.with_suffix(f".{os.getpid()}")
+        tmp.write_text(json.dumps(parsed), encoding="utf-8")
+        os.replace(tmp, out)
+
+
+def _candidates(root, path):
+    full = root / path
+    stat = full.stat()
+    key = f"{full}|{stat.st_mtime_ns}|{stat.st_size}"
+    parsed = _parsed_store()
+    if key not in parsed:
+        names = _python_names if path.endswith(".py") else _shell_names
+        parsed[key] = names(full.read_text(encoding="utf-8"))
+        _save_parsed(parsed)
+    return parsed[key]
+
+
+def _edges(root, path, is_file):
+    """Рёбра файла: первый существующий из каждой группы кандидатов.
+
+    Наличие проверяется при каждом вызове judge_dependencies; is_file — память ОДНОГО вызова,
+    чтобы одно и то же имя не стояло в файловой системе по числу ссылок на него.
+    """
+    return {hit for group in _candidates(root, path)
+            for hit in [next((c for c in group if is_file(c)), None)] if hit}
 
 
 def judge_dependencies(root=None):
@@ -149,16 +197,16 @@ def judge_dependencies(root=None):
 
     Пустой итог и нечитаемый файл — исключение: суд без списка не судит.
     """
-    root = Path(root) if root else HERE.parent
-    seen, todo = set(), [r for r in JUDGE_ROOTS if (root / r).is_file()]
+    root = Path(root).resolve() if root else HERE.parent
+    is_file = functools.cache(lambda candidate: (root / candidate).is_file())
+    seen, todo = set(), [r for r in JUDGE_ROOTS if is_file(r)]
     try:
         while todo:
             path = todo.pop()
             if path in seen:
                 continue
             seen.add(path)
-            edges = _python_edges if path.endswith(".py") else _shell_edges
-            todo.extend(edges(root, path) - seen)
+            todo.extend(_edges(root, path, is_file) - seen)
     except (OSError, ValueError, SyntaxError) as error:
         raise RuntimeError(f"зависимости суда хакатона не выведены ({path}): {error}")
     if not seen:

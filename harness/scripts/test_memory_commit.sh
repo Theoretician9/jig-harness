@@ -409,5 +409,41 @@ case_check "каталог целиком неотслеженный: ложно
 case_check "каталог целиком неотслеженный: запись в коммите" \
     "да" "$(git -C "$PROJECT" -c core.quotepath=false show --name-only --format= HEAD | grep -q 'новый-сервер.md' && echo да || echo нет)"
 
+echo "── БОЛЬНОЙ СЛУЧАЙ 11.11: гонка за HEAD — не красный гейт ──"
+# Пока демон ~80 с гоняет гейты, другой процесс коммитит, и git отказывает
+# «cannot lock ref 'HEAD'». Гейты при этом прошли: это занятость, как
+# index.lock, а не отказ гейта. Гонку не воспроизвести по времени, поэтому
+# `git commit` подменяет обёртка в PATH стенда: она печатает точный текст git.
+# Остальные команды git идут в настоящий git.
+NASTOYASHCHIJ_GIT="$(command -v git)"
+mkdir -p "$STAND/bin"
+cat > "$STAND/bin/git" <<OBERTKA
+#!/usr/bin/env bash
+if [ "\${1:-}" = commit ]; then
+    echo "fatal: cannot lock ref 'HEAD': is at aaa but expected bbb" >&2
+    exit 128
+fi
+exec "$NASTOYASHCHIJ_GIT" "\$@"
+OBERTKA
+chmod +x "$STAND/bin/git"
+zelenyj_gejt
+printf 'гонка за HEAD\n' > "$PROJECT/память/запись.md"
+SK=$(skazano)
+rm -f "$STAND/zhurnal/heartbeat/memory-commit"
+PATH="$STAND/bin:$PATH" progon "$STAND/head-race.out"
+case_check "H1 вывод коммита — отказ блокировки HEAD (стенд сработал)" \
+    "да" "$(grep -q "cannot lock ref 'HEAD'" "$STAND/zhurnal/memory-commit.вывод" && echo да || echo нет)"
+case_check "H1 гонка за HEAD счёт неудач не двигает" "0" "$(schet)"
+case_check "H1 о гонке за HEAD владельцу не пишем" "$SK" "$(skazano)"
+case_check "H1 гонка за HEAD идёт в счёт занятого git" "1" "$(schet_zamkov)"
+case_check "H1 гонка за HEAD гейтом не названа в журнале" \
+    "0" "$(grep -c 'коммит НЕ прошёл (гейты)' "$STAND/head-race.out" || true)"
+case_check "H1 в журнале сказано о повторе на следующем обходе" \
+    "да" "$(grep -q 'повторю на следующем обходе' "$STAND/head-race.out" && echo да || echo нет)"
+case_check "H1 метка пульса стоит" "да" "$(puls)"
+progon
+case_check "H1 без гонки правка закоммичена" \
+    "да" "$(git -C "$PROJECT" -c core.quotepath=false show --name-only --format= HEAD | grep -q 'запись.md' && echo да || echo нет)"
+
 printf '\nПАМЯТЬ-В-ГИТ: путей %d, неудач %d\n' "$CASES_PATHS" "$CASES_FAILED"
 [ "$CASES_FAILED" -eq 0 ]

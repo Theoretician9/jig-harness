@@ -530,6 +530,14 @@ if [ "$TMP_SWEEP_ENABLED" = 1 ]; then
     TMP_ARGS=("$TMP_MODE")
     [ "$DRY_RUN" = 1 ] && TMP_ARGS+=(--dry-run)
     python3 "$TMP_SWEEP" "${TMP_ARGS[@]}" || say "10. уборка /tmp отказала (код $?)"
+    # 10в. Снимки ворот (~/gates-snapshots) — тоже временное, тот же выключатель: без
+    # прогона ворот их никто не убирал. Самый свежий остаётся (gates-snapshot.sh).
+    # Дверь — для стенда проб, как у TMP_SWEEP_SCRIPT.
+    if [ "$DRY_RUN" != 1 ]; then
+        SNAP_OUT="$(bash "${GATES_SNAPSHOT_SCRIPT:-$HERE/../../scripts/gates-snapshot.sh}" --убрать 2>&1)" \
+            || SNAP_OUT="уборка снимков ворот отказала (код $?): $SNAP_OUT"
+        say "10в. $SNAP_OUT"
+    fi
 else
     say "10. уборка /tmp выключена (TMP_SWEEP_ENABLED=0)"
 fi

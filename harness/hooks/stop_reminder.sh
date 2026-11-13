@@ -14,12 +14,13 @@ set -uo pipefail
 
 # shellcheck disable=SC1091
 source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/config.sh"
-conf_path="${HARNESS_INSTALL_CONF:-$(konf_koren)/install.conf}"
+konf_dveri_puti "${BASH_SOURCE[0]}"
+conf_path="$INSTALL_CONF"
 project_dir=""
 if [ -r "$conf_path" ]; then
   # Окружение старше конфига: общий загрузчик вместо голого source (улика
   # 12.09.2026 — проба с TMUX_SESSION в окружении сменила модель в РАБОЧЕЙ панели).
-  konf_zagruzit
+  konf_zagruzit_dveri PROJECT_DIR LOG_DIR DAEMON_OWNED_PATHS DEVMAP_TRACE_FRESH_MIN
   project_dir="${PROJECT_DIR:-}"
 fi
 
@@ -47,7 +48,7 @@ fi
 # нашей блокировки. Блокировать снова = бесконечный цикл «стоп → напоминание»;
 # один показ хвостов за остановку достаточен.
 payload=$(cat 2>/dev/null || true)
-if printf '%s' "$payload" | python3 -c 'import json,sys; raise SystemExit(0 if json.load(sys.stdin).get("stop_hook_active") else 1)' 2>/dev/null; then
+if printf '%s' "$payload" | python3 -I -c 'import json,sys; raise SystemExit(0 if json.load(sys.stdin).get("stop_hook_active") else 1)' 2>/dev/null; then
   отметить_конец_хода
   exit 0
 fi
@@ -62,7 +63,7 @@ fi
 # файлу, уже названо про push: «Сторож, который просит невозможного, учит себя
 # не слушать». На паузе хвостов не показываем: ход закончен, и это верно.
 if [ -n "$project_dir" ] \
-   && python3 "$project_dir/scripts/pause.py" --идёт-ли >/dev/null 2>&1; then
+   && python3 -I "$project_dir/scripts/pause.py" --идёт-ли >/dev/null 2>&1; then
   отметить_конец_хода
   exit 0
 fi
@@ -75,7 +76,7 @@ msgs=()
 # быть выводом из головы — прибор отвечает раньше, чем смена успеет так решить.
 next_work=""
 if [ -f "$project_dir/dev-map.yaml" ]; then
-  next_work=$(python3 "$project_dir/scripts/work-queue.py" \
+  next_work=$(python3 -I "$project_dir/scripts/work-queue.py" \
       "$project_dir/dev-map.yaml" --следующая 2>/dev/null | head -1)
 fi
 
@@ -95,7 +96,8 @@ if [ "${ahead:-0}" -gt 0 ]; then
     # Спрашиваем ИСТОЧНИК, а не читаем ключ своими руками: копия суждения
     # расходится с оригиналом молча. Вызов дешёвый — 0,11 с; без --просить кнопку
     # он не просит и в сеть не ходит, а кнопка не тратится: её гасит само действие.
-    if python3 "${project_dir:-$PROJECT_DIR}/scripts/deploy_guard.py" --действие push \
+    SCRIPTS_REAL="$(dirname "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")")"
+    if python3 -I "$SCRIPTS_REAL/deploy_guard.py" --действие push \
             --только-согласие >/dev/null 2>&1; then
         msgs+=("не отправлено в удалённый репозиторий: $ahead коммит(ов) — git push (сторож выката: можно)")
     else
@@ -107,7 +109,7 @@ fi
 # (DAEMON_OWNED_PATHS в harness.conf, «/» на конце — каталог целиком). Ключа
 # нет — список пуст, и считается всё.
 dirty=$(git status --porcelain -z 2>/dev/null \
-  | python3 -c '
+  | python3 -I -c '
 import sys
 владеет = sys.argv[1].split()
 записи = sys.stdin.buffer.read().decode("utf-8", "replace").split("\0")
@@ -158,7 +160,7 @@ if [ -f "$devmap" ]; then
   # правка .tasks/<id>/журнал.md. Без этого хук требовал «доведи» от задачи,
   # по которой смена только что закоммитила, и сигнал горел на каждом ходе.
   # Порог — данные (DEVMAP_TRACE_FRESH_MIN), не число в коде.
-  wip_report=$(python3 - "$devmap" "${DEVMAP_TRACE_FRESH_MIN:-120}" <<'PY' 2>/dev/null
+  wip_report=$(python3 -I - "$devmap" "${DEVMAP_TRACE_FRESH_MIN:-120}" <<'PY' 2>/dev/null
 import os, re, subprocess, sys, time
 path, fresh_min = sys.argv[1], int(sys.argv[2])
 try:
@@ -238,7 +240,7 @@ esac
 # берёт у work-queue.py, второй сортировщик разошёлся бы с первым молча.
 svodka=""
 if [ -f "$project_dir/scripts/inbox-digest.py" ]; then
-  svodka=$(python3 "$project_dir/scripts/inbox-digest.py" 2>/dev/null || true)
+  svodka=$(python3 -I "$project_dir/scripts/inbox-digest.py" 2>/dev/null || true)
 fi
 
 # Заметки («идёт», «ждёт») информируют и ход не блокируют.

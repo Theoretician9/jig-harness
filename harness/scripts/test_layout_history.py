@@ -228,12 +228,19 @@ def log_dir_with(root: Path, name: str, asked: list | None, consents: list | Non
     return folder
 
 
+def carrier(folder: Path):
+    """Носитель слова стенда: папка — каталог стенда. Судья согласия читает слово у носителя,
+    не у каталога вопроса; модуль owner_word — тот, что импортировал модуль под пробой."""
+    return LH.owner_word.Носитель(папка=folder, uid=None, паспорт={}, граница=folder.parent,
+                                  окно_мин=60, срок_кнопки_мин=15)
+
+
 def consent_for(root: Path, name: str, rows: list, asked_at=Q):
     folder = log_dir_with(root, name, [asked_row(asked_at, ["harness/ОПИСЬ.md"])], rows)
     question = LH.last_question(folder)
     if question is None or unreadable(question):
         raise AssertionError(f"вопрос стенда не прочитан: {question!r}")
-    return LH.consent_after(folder, question)
+    return LH.consent_after(question, carrier(folder))
 
 
 def stand_root() -> Path:
@@ -643,11 +650,34 @@ def case_h9() -> None:
     try:
         folder = log_dir_with(root, "битые-согласия", [asked_row(Q, ["harness/ОПИСЬ.md"])],
                               [consent_row("да, убрать", Q + dt.timedelta(minutes=1)), "{не json"])
-        got = LH.consent_after(folder, LH.last_question(folder))
+        got = LH.consent_after(LH.last_question(folder), carrier(folder))
         PROBE.check("H9", "битая строка согласий → Unreadable", unreadable(got), f"получено {got!r}")
         folder = log_dir_with(root, "нет-согласий", [asked_row(Q, ["harness/ОПИСЬ.md"])], None)
-        got = LH.consent_after(folder, LH.last_question(folder))
+        got = LH.consent_after(LH.last_question(folder), carrier(folder))
         PROBE.check("H9", "файла согласий нет → None", got is None, f"получено {got!r}")
+
+        # Слово — у носителя, а не рядом с вопросом: годное «да, убрать» в каталоге вопроса,
+        # носитель — другой каталог без согласий → None. Носитель не прочитан → Unreadable.
+        folder = log_dir_with(root, "согласие-у-вопроса", [asked_row(Q, ["harness/ОПИСЬ.md"])],
+                              [consent_row("да, убрать", Q + dt.timedelta(minutes=1))])
+        other = log_dir_with(root, "носитель-пуст", None, [])
+        got = LH.consent_after(LH.last_question(folder), carrier(other))
+        PROBE.check("H9", "согласие в каталоге вопроса, носитель другой → None (слово у носителя)",
+                    got is None, f"получено {got!r}")
+        got = LH.consent_after(LH.last_question(folder), carrier(folder))
+        PROBE.check("H9", "пара: тот же каталог носителем → запись", isinstance(got, dict),
+                    f"получено {got!r}")
+        machine = LH.owner_word.носитель
+        def no_carrier():
+            raise LH.owner_word.НетНосителя("паспорт стенда не прочитан")
+        LH.owner_word.носитель = no_carrier
+        try:
+            got = LH.consent_after(LH.last_question(folder))
+        finally:
+            LH.owner_word.носитель = machine
+        PROBE.check("H9", "носитель не дан и машинный не прочитан → Unreadable, не None",
+                    unreadable(got) and "паспорт стенда не прочитан" in str(got.reason),
+                    f"получено {got!r}")
 
         folder = log_dir_with(root, "битый-вопрос", [asked_row(Q, ["a"]), "мусор"], None)
         got = LH.last_question(folder)
@@ -682,7 +712,7 @@ def case_h9() -> None:
         # пробы: предел обрывает чтение, ответ — Unreadable, не память и не «согласия нет».
         folder = log_dir_with(root, "бесконечный", [asked_row(Q, ["harness/ОПИСЬ.md"])], None)
         os.symlink("/dev/zero", folder / "confirmations.jsonl")
-        got = LH.consent_after(folder, LH.last_question(folder))
+        got = LH.consent_after(LH.last_question(folder), carrier(folder))
         PROBE.check("H9", "согласия — ссылка на /dev/zero → Unreadable (чтение с пределом)",
                     unreadable(got), f"получено {got!r}")
 

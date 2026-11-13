@@ -15,7 +15,8 @@
   4 — «Да» старше срока кнопки (15 мин) и повторное «Да» на воссозданный файл — закрыто.
 
 Каждый случай — свой стенд во временном каталоге: секреты, копии, журналы,
-паспорт установки; боевые каталоги не читаются (ключ стенда owner_word).
+паспорт установки; боевые каталоги не читаются. Судье стенд приходит носителем:
+дверь зовёт раннер пробы, который подменяет owner_word.носитель в процессе двери.
 Дверь берётся рядом с пробой; PROTECTED_DELETE_SCRIPT подставляет копию двери
 с мутацией (копию дерева scripts/ целиком: дверь тянет библиотеки рядом).
 
@@ -38,6 +39,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 DELETE = Path(os.environ.get("PROTECTED_DELETE_SCRIPT") or ROOT / "scripts" / "protected-delete.py")
 sys.path.insert(0, str(ROOT / "scripts" / "lib"))
+import config  # noqa: E402
 from selftest_cases import Cases  # noqa: E402
 
 WINDOW_MIN = 60
@@ -45,6 +47,20 @@ TTL_MIN = 15
 
 cases = Cases()
 check = cases.check
+
+# Раннер двери: судья получает носитель стенда подменой owner_word.носитель в процессе двери.
+CARRIER_RUNNER = r"""
+import json, pathlib, runpy, sys
+spec = json.loads(sys.argv[1])
+sys.path.insert(0, spec["lib"])
+import owner_word
+carrier = owner_word.Носитель(папка=pathlib.Path(spec["папка"]), uid=None, паспорт=spec["паспорт"],
+                              граница=pathlib.Path(spec["граница"]), окно_мин=spec["окно_мин"],
+                              срок_кнопки_мин=spec["срок_кнопки_мин"], ручки=spec["ручки"])
+owner_word.носитель = lambda: carrier
+sys.argv = spec["argv"]
+runpy.run_path(spec["argv"][0], run_name="__main__")
+"""
 
 
 def now_iso(ago_s: float = 0) -> str:
@@ -75,10 +91,13 @@ class Door:
             f'TG_CHAT_ID="{ВЛАДЕЛЕЦ}"\n', encoding="utf-8")
         (d / "harness.conf").write_text(
             f"CONFIRM_MAX_AGE_MIN={WINDOW_MIN}\nCONSENT_BUTTON_TTL_MIN={TTL_MIN}\n", encoding="utf-8")
+        # Окружение — для своих каталогов ДВЕРИ (журналы, секреты, копии); судья его не слушает.
         self.env = dict(os.environ, HARNESS_HOME=str(d), HARNESS_INSTALL_CONF=str(d / "install.conf"),
                         HARNESS_CONF=str(d / "harness.conf"), LOG_DIR=str(self.log),
-                        SECRETS_DIR=str(self.secrets), HARNESS_OWNER_WORD_STEND="1",
-                        CONFIRM_MAX_AGE_MIN=str(WINDOW_MIN), CONSENT_BUTTON_TTL_MIN=str(TTL_MIN))
+                        SECRETS_DIR=str(self.secrets))
+        self.carrier = {"lib": str(DELETE.parent / "lib"), "папка": str(self.log), "граница": str(d),
+                        "паспорт": config.из_файла(str(d / "install.conf")), "окно_мин": WINDOW_MIN,
+                        "срок_кнопки_мин": TTL_MIN, "ручки": config.из_файла(str(d / "harness.conf"))}
         self.message_id = 7000
 
     def file(self, name: str) -> Path:
@@ -125,7 +144,8 @@ class Door:
         return self.run(target)[0:2]
 
     def run(self, target: Path) -> tuple[int, bool, str]:
-        done = subprocess.run(["python3", str(DELETE), str(target)],
+        spec = dict(self.carrier, argv=[str(DELETE), str(target)])
+        done = subprocess.run(["python3", "-c", CARRIER_RUNNER, json.dumps(spec, ensure_ascii=False)],
                               capture_output=True, text=True, env=self.env, timeout=60)
         out = (done.stdout + done.stderr).strip()
         if done.returncode not in (0, 1):

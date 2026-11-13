@@ -1087,6 +1087,12 @@ EOF
   делай "[ -d '$PROJECT_DIR' ] || { mkdir -p '$PROJECT_DIR' && chown $AGENT_USER:$AGENT_USER '$PROJECT_DIR'; }"
   делай "mkdir -p '$LOG_DIR' '$HEARTBEAT_DIR' '$STATE_DIR/panel-state' '$STATE_DIR/account' /var/backups/harness"
   делай "chown -R $AGENT_USER:$AGENT_USER '$LOG_DIR' '$HEARTBEAT_DIR' '$STATE_DIR/panel-state' '$STATE_DIR/account' /var/backups/harness"
+  # Подкаталог состояния сети эволюции: STATE_DIR принадлежит root, а agent пишет
+  # только в свой подкаталог. Имя — ключ образца harness.conf (на шаге 1 живой
+  # конфиг ещё не разложен, образец лежит в пакете).
+  local evo_sub; evo_sub=$(sed -n 's/^EVOLUTION_STATE_SUBDIR="\{0,1\}\([A-Za-z0-9_-]*\).*/\1/p' "$SCRIPT_DIR/harness/config/harness.conf")
+  [[ -n "$evo_sub" ]] || { echo "нет EVOLUTION_STATE_SUBDIR в образце harness.conf" >&2; return 1; }
+  делай "install -d -o $AGENT_USER -g $AGENT_USER '$STATE_DIR/$evo_sub'"
   # Каталог аккаунтов смены: ключи не здесь, но состояние читает группа панели.
   делай "chmod 750 '$STATE_DIR/account'"
   проверка "$step" "пользователь агента отвечает" \

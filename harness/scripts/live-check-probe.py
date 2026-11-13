@@ -127,7 +127,10 @@ def выборка_мутаций(проба: str, запись: dict, куда:
     среда.update({"PYTHONDONTWRITEBYTECODE": "1",
                   "HARNESS_PROBE_MUTATIONS": str(выбор),
                   "HARNESS_INVARIANTS": str(пустые),
-                  "LOG_DIR": str(журнал), "HARNESS_LOG_DIR": str(журнал)})
+                  "LOG_DIR": str(журнал)})
+    # events.py берёт HARNESS_LOG_DIR раньше LOG_DIR стенда: каталог журнала
+    # прибора (свой или унаследованный) не должен утекать в проверяемые пробы.
+    среда.pop("HARNESS_LOG_DIR", None)
     return среда
 
 

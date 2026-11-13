@@ -26,8 +26,13 @@
   # Таймерные демоны: systemd, не крон. Потолок — три периода таймера
   # (checks-stream: каждые 20 минут) либо период и сутки запаса (nightly-mutations:
   # по вторникам 09:00, период 10080).
+  # Пишет не в журнал юнита (агенту journalctl его строк не показывает), а в
+  # файл: StandardOutput=append:/var/log/harness/checks-stream.log. Признак —
+  # её приставка «checks-stream:»; строки обёртки («[checks-stream] …») не в счёт.
   harness/demons/checks-stream.sh:
     юнит: harness-checks-stream.service
+    журнал: checks-stream.log
+    признак: 'checks-stream:'
     потолок_минут: 60
   harness/demons/nightly-mutations.sh:
     юнит: harness-nightly-mutations.service
@@ -78,6 +83,23 @@
     зовёт: scripts/tg-dispatcher.sh на каждое сообщение владельца
     журнал: map-from-message.log
     потолок_минут: 1440
+  # Сборщик отчёта о ресурсах: его зовёт обёртка resource-report.sh (крон,
+  # каждые 5 минут, отчёт раз в сутки) и печатает его текст в свой журнал.
+  # Признак — шапка итога «За сутки», её печатает только сборщик; потолок —
+  # три суточных периода, как у гигиены сервера.
+  harness/demons/resource_report.py:
+    зовёт: harness/demons/resource-report.sh (крон */5, отчёт раз в сутки)
+    журнал: resource-report.log
+    признак: 'За сутки'
+    потолок_минут: 4320
+  # Датчики системы: их зовёт evolution-collector.sh (крон 5 * * * *), вывод
+  # идёт в его журнал. Признак — приставка датчиков; строку «self-sensors: код N»
+  # печатает зовущий при сбое, она тоже несёт приставку. Потолок — три часа.
+  scripts/self-sensors.py:
+    зовёт: harness/demons/evolution-collector.sh (крон, ежечасно)
+    журнал: evo-collector.log
+    признак: 'self-sensors: '
+    потолок_минут: 180
 
 # ДЕМОНЫ, КОТОРЫМ МОЛЧАТЬ ЗАКОННО. Улика 18.10.2026: panel-tunnel при панели,
 # выведенной через nginx, не печатает НИЧЕГО — ни в кроновый журнал, ни в свой,

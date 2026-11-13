@@ -9,8 +9,9 @@
 если удалённый ушёл вперёд, git отвергнет не-ff, а новая кнопка нужна после git fetch.
 
 Стенд свой: временный репо с голым удалённым (file://), свой LOG_DIR, свои
-HARNESS_CONF (PUSH_NEEDS_OWNER=1, DEPLOY_CONSENT_STANDING=0) и HARNESS_INSTALL_CONF
-(AUTONOMY=semi), HARNESS_OWNER_WORD_STEND=1; записи consent-buttons.jsonl кладёт сама
+harness.conf (PUSH_NEEDS_OWNER=1, DEPLOY_CONSENT_STANDING=0) и install.conf
+(AUTONOMY=semi). Судье они приходят НОСИТЕЛЕМ: раннер пробы подменяет owner_word.носитель
+в процессе ворот (окружение судья не слушает). Записи consent-buttons.jsonl кладёт сама
 проба — это журнал стенда, не боевой. git идёт через обёртку-счётчик в PATH: она
 считает ls-remote и по флагу стенда виснет на нём.
 Ворота зовутся процессом, но «две смены» и занятость машины сняты подменой в этом
@@ -36,6 +37,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS = ROOT / "scripts"
 sys.path.insert(0, str(SCRIPTS / "lib"))
+import config  # noqa: E402
 from selftest_cases import Cases  # noqa: E402
 
 OWNER = 777000
@@ -144,14 +146,20 @@ done
 exec {git} "$@"
 """
 
-# Ворота процессом; «две смены» и занятость — состояние машины, на стенде их нет.
-RUNNER = """import sys
+# Ворота процессом; «две смены» и занятость — состояние машины, на стенде их нет. Носитель
+# стенда — подменой owner_word.носитель в процессе ворот: дверь зовёт судью без носителя.
+RUNNER = """import json, pathlib, sys
 sys.path.insert(0, sys.argv[1])
 import deploy_guard as g
+spec = json.loads(sys.argv[2])
+carrier = g.слово_вл.Носитель(папка=pathlib.Path(spec["папка"]), uid=None, паспорт=spec["паспорт"],
+                              граница=pathlib.Path(spec["граница"]), окно_мин=spec["окно_мин"],
+                              срок_кнопки_мин=spec["срок_кнопки_мин"], ручки=spec["ручки"])
+g.слово_вл.носитель = lambda: carrier
 g.две_смены = lambda: None
 g.лок_файлы = lambda: []
 g.долгие_процессы = lambda: []
-sys.argv = ["deploy_guard.py", *sys.argv[2:]]
+sys.argv = ["deploy_guard.py", *sys.argv[3:]]
 sys.exit(g.main())
 """
 
@@ -176,12 +184,15 @@ class PushStand:
         (root / "harness.conf").write_text(
             f"PUSH_NEEDS_OWNER=1\nDEPLOY_CONSENT_STANDING=0\nCONFIRM_MAX_AGE_MIN=60\n"
             f"CONSENT_BUTTON_TTL_MIN={TTL_MIN}\nSERVICE_LOCKS_SUBDIR=services\n", encoding="utf-8")
+        # Окружение — для своих журналов и ключей ВОРОТ; судье стенд даёт носитель.
         self.env = dict(os.environ, **GIT_ENV, HARNESS_HOME=str(root),
-                        HARNESS_INSTALL_CONF=str(root / "install.conf"),
                         HARNESS_CONF=str(root / "harness.conf"), LOG_DIR=str(self.log),
-                        HARNESS_LOG_DIR=str(self.log), HARNESS_OWNER_WORD_STEND="1",
-                        CONSENT_BUTTON_TTL_MIN=str(TTL_MIN), PROBA_PUSH_DIR=str(root),
+                        HARNESS_LOG_DIR=str(self.log), PROBA_PUSH_DIR=str(root),
                         PATH=f"{bin_dir}:{os.environ.get('PATH', '')}")
+        self.carrier = json.dumps({"папка": str(self.log), "граница": str(root), "окно_мин": 60,
+                                   "срок_кнопки_мин": TTL_MIN,
+                                   "паспорт": config.из_файла(str(root / "install.conf")),
+                                   "ручки": config.из_файла(str(root / "harness.conf"))}, ensure_ascii=False)
 
     def gate(self, refspec: str | None = None, remote: str = "origin") -> tuple[int | None, str, float]:
         """(rc, вывод, секунды) ворот на команду `git push <remote> <refspec>`."""
@@ -189,7 +200,7 @@ class PushStand:
         start = time.time()
         try:
             done = subprocess.run(
-                ["python3", "-c", RUNNER, str(SCRIPTS), "--действие", "push",
+                ["python3", "-c", RUNNER, str(SCRIPTS), self.carrier, "--действие", "push",
                  "--пуш", remote, refspec, self.bench.repo()],
                 cwd=self.bench.work, capture_output=True, text=True, env=self.env, timeout=60)
         except subprocess.TimeoutExpired:

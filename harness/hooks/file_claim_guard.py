@@ -61,6 +61,8 @@ JOURNAL = "заявки-на-файлы"
 SRC = "scripts/hooks/file_claim_guard.py"
 CLAIM_EVENT = "file.claim"
 WARN_EVENT = "file.claim.warn"
+REPEAT_EVENT = "file.claim.repeat"
+REMIND_EVENT = "file.claim.remind"
 WINDOW_KEY = "FILE_CLAIM_MIN"
 SHARED_KEY = "FILE_CLAIM_SHARED"
 EXCLUSIVE_KEY = "FILE_CLAIM_EXCLUSIVE"
@@ -103,16 +105,10 @@ def journal_path() -> Path:
     return Path(events.log_dir()) / f"{JOURNAL}.jsonl"
 
 
-@functools.lru_cache(maxsize=1)
-def current_task() -> str:
-    # Трейлер Dev-Map из истории называет ПРЕДЫДУЩУЮ задачу — не берём.
-    task, source = events.current_task()
-    return task if source in ("env", "map") and task else "-"
-
-
-def record(event: str, outcome: str, session: str, data: dict, task: str | None = None) -> None:
-    events.emit(SRC, event, outcome, journal="заявки-на-файлы",
-                task=task if task is not None else current_task(),
+def record(event: str, outcome: str, session: str, data: dict, task: str = "-") -> None:
+    # Задачу заявки знает только holder_of (метка запуска): единственная wip карта
+    # или трейлер истории называли бы чужую.
+    events.emit(SRC, event, outcome, journal="заявки-на-файлы", task=task,
                 session=session or None, data=data)
 
 
@@ -285,6 +281,17 @@ def warning(path: str, others: dict, shared: bool, number: int) -> str:
             f"Предупреждение №{number} по этому пути.")
 
 
+def inside_task_card(path: str, task: str) -> bool:
+    """Путь в .tasks/<task>/ проекта или пакета: карточку задачи пишут её исполнители."""
+    return any(path.startswith(f"{str(root).rstrip('/')}/.tasks/{task}/") for root in tree_roots())
+
+
+def is_real_intersection(row: dict, path: str, who: dict) -> bool:
+    """Чужая заявка мешает, если держатель — другая задача и путь не в карточке пишущего.
+    «агент:<id>» — задача неизвестна, это пересечение."""
+    return row.get("task") != who["task"] and not inside_task_card(path, who["task"])
+
+
 def warn_others(paths: list, payload: dict) -> str:
     """Предупреждения о чужих заявках на обычные и общие пути; заявки — строками журнала."""
     agent, session = str(payload["agent_id"]), str(payload.get("session_id") or "")
@@ -292,21 +299,29 @@ def warn_others(paths: list, payload: dict) -> str:
     shared = setting(SHARED_KEY).split()
     rows = recent_rows(time.time(), window_s)
     claims = holders(rows)
+    who = holder_of(payload)
     texts = []
     for path in paths:
-        others = {a: r for a, r in claims.get(path, {}).items() if a != agent}
+        others = {a: r for a, r in claims.get(path, {}).items()
+                  if a != agent and is_real_intersection(r, path, who)}
         mine = claims.get(path, {}).get(agent)
         if mine is None or mine["_age"] > window_s / 2:
             record(CLAIM_EVENT, "ok", session, {"путь": path, "агент": agent,
-                                                 "тип": payload.get("agent_type") or None})
+                                                 "тип": payload.get("agent_type") or None},
+                   task=who["task"])
         is_shared = any(path.endswith("/" + rel.strip("/")) for rel in shared)
         if not others and not (is_shared and mine is None):
             continue
-        number = 1 + sum(1 for r in rows if r.get("event") == WARN_EVENT
-                         and (r.get("data") or {}).get("путь") == path
-                         and (r.get("data") or {}).get("агент") == agent)
-        record(WARN_EVENT, "ok", session, {"путь": path, "агент": agent, "общий": is_shared,
-                                            "занявшие": sorted(others), "номер": number})
+        earlier = sum(1 for r in rows if r.get("event") in (WARN_EVENT, REPEAT_EVENT, REMIND_EVENT)
+                      and (r.get("data") or {}).get("путь") == path
+                      and (r.get("data") or {}).get("агент") == agent)
+        number = 1 + earlier
+        # Только первое предупреждение пары за окно — сигнал пересечения; повтор и
+        # напоминание без держателя судью скорости не питают.
+        event = REMIND_EVENT if not others else REPEAT_EVENT if earlier else WARN_EVENT
+        record(event, "ok", session, {"путь": path, "агент": agent, "общий": is_shared,
+                                       "занявшие": sorted(others), "номер": number},
+               task=who["task"])
         texts.append(warning(path, others, is_shared, number))
     return "\n\n".join(texts)
 

@@ -16,14 +16,11 @@
 # библиотеку использует в работе. Вывод обязан содержать строку от 12 знаков:
 # по ней берётся цитата, и она должна быть ЧУЖИМ текстом.
 #
-# ЖИВОЙ ВЫЗОВ scripts/lib/owner_word.py (18.10.2026). Его предикат — слово
-# владельца в машинном журнале $LOG_DIR/inbox.jsonl (пишет диспетчер, признак
-# авторства — message_id телеграма). Боевую дверь удаления звать нельзя: её
-# зелёный исход — РЕАЛЬНОЕ удаление файла. Поэтому распознаватель читает КОПИЮ
-# боевого журнала: вход настоящий (его собственные слова и message_id
-# телеграма), а боевая дверь не трогается. Подмена пути журнала разрешена
-# только ключом стенда HARNESS_OWNER_WORD_STEND=1 — без него любая подмена
-# даёт «НетНосителя» с названной причиной.
+# ЖИВОЙ ВЫЗОВ scripts/lib/owner_word.py: `--проверить-носитель` строит носитель МАШИНЫ
+# (паспорт установки, карта uid процесса) и печатает его папку. Боевую дверь удаления
+# звать нельзя: её зелёный исход — РЕАЛЬНОЕ удаление файла. Ключа стенда у судьи нет:
+# подменить папку слова окружением нельзя, поэтому прежняя проверка «разрешение на
+# копии журнала» невозможна и заменена проверкой самого носителя.
 
 команды:
   harness/panel/state.py: python3 harness/panel/state.py
@@ -32,8 +29,7 @@
   scripts/build-public.py: source scripts/lib/config.sh && out=$(mktemp -d) && python3 scripts/build-public.py --пакет "/home/$(konf_iz_fajla AGENT_USER)/starter/STARTER-PACKAGE" --куда "$out"
   scripts/download_attachment.py: source scripts/lib/config.sh && konf_zagruzit LOG_DIR && soobshchenie=$(set +o pipefail; grep -rl '"photo"' "$LOG_DIR/inbox/обработано" | head -1) && python3 scripts/download_attachment.py "$soobshchenie"
   scripts/language-level.py: python3 scripts/language-level.py --пересчитать
-  scripts/lib/owner_word.py: |-
-    export T=$(mktemp -d) && cp "$(python3 -c 'import sys;sys.path.insert(0,"scripts/lib");import config;print(config.log_dir())')/inbox.jsonl" "$T/" && HARNESS_OWNER_WORD_STEND=1 python3 -c 'import sys,os,pathlib;sys.path.insert(0,"scripts/lib");import owner_word as s;z=s.разрешение(60*24*40, pathlib.Path(os.environ["T"]));print("разрешение владельца:", z["текст"][:60], "| message_id:", z["message_id"]) if z else print("разрешения в окне нет")'; rm -rf "$T"
+  scripts/lib/owner_word.py: python3 scripts/lib/owner_word.py --проверить-носитель
   scripts/lib/channel_queue.py: python3 scripts/orders.py
   scripts/lib/config.sh: bash scripts/handover-check.sh
   scripts/lib/models.sh: bash scripts/model.sh --список
@@ -105,3 +101,99 @@
   # Покрытие проб мутациями — на живых данных обоих носителей.
   scripts/lib/probe_coverage.py: |
     python3 -B -c "import sys,pathlib as P; sys.path.insert(0,'scripts/lib'); import probe_coverage as p; s=p.covered_probes(P.Path('harness/config/probe-mutations.yaml'), P.Path('harness/config/invariants.yaml')); print('проб с названной мутацией:', len(s)); print('исключений объявлено:', len(p.declared_exceptions(P.Path('harness/config/probe-mutations.yaml'))))"
+  # Порция C2-библиотеки (12): каждую библиотеку зовёт её живой читатель или
+  # однострочный импорт на настоящем входе машины; ничего живого не пишется.
+  # Обёртка проверки ворот на живой проверке имён файлов; журнал секунд уведён во временный каталог.
+  scripts/lib/gates_check.sh: |
+    T=$(mktemp -d) && bash -c 'source scripts/lib/gates_check.sh && LOG_DIR="$1" GATES_TIMING_DIR="$1" && проверка "имена файлов кода" bash -c "git ls-files -- \"*.py\" \"*.sh\" | python3 scripts/check-file-names.py" && cat "$1/gates-timing.jsonl"' _ "$T"; rc=$?; rm -rf "$T"; exit $rc
+  # Предмет пуша ЖИВОГО пакета в его удалённый — путём хука ворот (база — локальная ссылка, без сети).
+  scripts/lib/push_subject.py: |
+    python3 -B -c 'import sys,subprocess as s; sys.path.insert(0,"scripts/lib"); import push_subject as p; r="/home/user/starter/STARTER-PACKAGE"; h=s.check_output(["git","-C",r,"rev-parse","HEAD"],text=True).strip(); x=p.push_subject(r,"harness",h,"master",base="refs/remotes/harness/master"); print(x); print("разбор:", p.parse_subject(x)["ref"])'
+  # Предмет одобрения ЖИВОЙ спеки этой задачи и грязь дерева проекта — как их считает выкат.
+  scripts/lib/door_subjects.py: |
+    python3 -B -c 'import sys; sys.path.insert(0,"scripts/lib"); import door_subjects as d; print(d.spec_subject("hr.zhivaya-proverka-vseh-mehanizmov")); print("грязь дерева проекта для выката, строк:", len(d.tree_dirt(".")))'
+  # Профили аккаунтов смены и ответ обёртке запуска на живом каталоге; путь файла ключа не печатается (И-3).
+  scripts/lib/accounts.py: |
+    python3 -B -c 'import sys; sys.path.insert(0,"scripts/lib"); import accounts as a; print("профили аккаунтов смены:", ", ".join("%s (%s)" % (p.get("имя"), p.get("отпечаток", "")) for p in a.профили())); line, code = a.файл_запуска(); print("ответ обёртке запуска:", "путь файла ключа (скрыт)" if line.startswith("/") else line, "код", code)'
+  # Уборка стенда на живом /proc: свой стенд с мёртвым хозяином и свой процесс в нём.
+  scripts/lib/stand_sweep.sh: |
+    T=$(mktemp -d) && mkdir "$T/stand-1" && (true & wait $!; echo $! > "$T/stand-1/owner") && (PROBA_STAND="$T/stand-1/" setsid sleep 300 >/dev/null 2>&1 &) && sleep 0.5 && bash -c 'source scripts/lib/stand_sweep.sh && sweep_dead_stands "$1/stand-"' _ "$T"; rc=$?; rm -rf "$T"; exit $rc
+  # Флаг ротации: живой путь и ответ судьи флага на настоящей машине.
+  scripts/lib/rotation_flag.py: |
+    python3 -B -c 'import sys; sys.path.insert(0,"scripts/lib"); import rotation_flag as f; print(f.path()); w, d = f.state(); print("флаг ротации:", w, "протухает через", f.stale_min(), "мин")'
+  # Живой потребитель: метрики плана запуска по живому журналу вложенности за неделю.
+  scripts/lib/launch_plan_lib.py: python3 -B scripts/launch-plan.py --метрики --сутки 7 --строка
+  # Дерево процессов этой машины: гнездо, основные агенты, серверы tmux.
+  scripts/lib/agent_processes.py: |
+    python3 -B -c 'import sys; sys.path.insert(0,"scripts/lib"); import agent_processes as a; print("гнездо", a.nest_status(), "основные агенты", a.main_agents(), "серверы tmux", a.tmux_servers(), "claude всего", len(a.claude_pids()))'
+  # Живой потребитель: неотвеченные сообщения владельца за сутки.
+  scripts/lib/channel_reply.py: python3 -B scripts/delivery-latency.py --без-ответа
+  # Живой потребитель: доли загрузки по двум сканам живого /proc и cgroup.
+  scripts/lib/process_load.py: python3 -B scripts/process-dispatcher.py --сейчас
+  # Живой потребитель: состояние конвейера этой задачи ищет её ревью спеки.
+  scripts/lib/spec_review.py: python3 -B scripts/pipeline.py --состояние hr.zhivaya-proverka-vseh-mehanizmov | grep 'ревью спеки'
+  # Хвост ЖИВОГО журнала панели агента в той маске, что идёт владельцу.
+  scripts/lib/agent_pane_log.sh: |
+    source scripts/lib/config.sh && konf_zagruzit && source scripts/lib/agent_pane_log.sh && pane_log_tail "$LOG_DIR" 40
+  # Порция C2-приборы (12): каждый прибор позван на настоящем входе машины так,
+  # как его зовёт работа; всё, что он пишет, уведено во временный каталог.
+  # Статус владельцу по ЖИВОМУ журналу вызовов и живой метке; его pending — во временном каталоге.
+  scripts/status-report.py: |
+    L=$(python3 -B -c 'import sys;sys.path.insert(0,"scripts/lib");import config;print(config.log_dir())') && T=$(mktemp -d) && { cp -p "$L/status-report.last" "$L/status-report.carry" "$T/" 2>/dev/null || true; } && LOG_DIR=$T python3 -B scripts/status-report.py --журнал-вызовов "$L/вызовы-агентов.jsonl" && rc=0 || rc=$?; rm -rf "$T"; exit $rc
+  # Снимок HEAD в настоящем worktree и узкая выборка ворот в нём; журнал прогона и секунды — во временном каталоге.
+  scripts/gates-snapshot.sh: |
+    T=$(mktemp -d) && out=$(LOG_DIR=$T bash scripts/gates-snapshot.sh --только "секреты|гигиена") && echo "$out" && log=${out##*журнал: } && for i in $(seq 600); do tail -n1 "$log" | grep -q '^ВОРОТА-КОНЕЦ' && break; sleep 1; done; cat "$log"; if tail -n1 "$log" | grep -qx 'ВОРОТА-КОНЕЦ rc=0'; then rc=0; else rc=1; fi; rm -rf "$T"; exit $rc
+  # Медленные проверки по ЖИВОМУ журналу секунд ворот за три последних прогона.
+  scripts/gates-timing.py: python3 -B scripts/gates-timing.py --runs 3 --top 5
+  # Строка состояния на ЖИВОМ последнем снимке лимитов подписки; новый снимок — во временный каталог.
+  scripts/statusline_limits.py: |
+    T=$(mktemp -d) && P=$(python3 -B -c 'import sys;sys.path.insert(0,"scripts/lib");import config;print(config.panel_state_dir())') && HARNESS_PANEL_STATE=$T python3 -B scripts/statusline_limits.py < "$P/лимиты-подписки.json" && echo "снимок окон: $(cat "$T/лимиты-подписки.json")" && rc=0 || rc=$?; rm -rf "$T"; exit $rc
+  # Сборка промпта исполнителя из ЖИВОГО эталона личности (код 0 — слой 1 из эталона); модель не зовётся.
+  scripts/self-prompt.py: |
+    T=$(mktemp -d) && python3 -B scripts/self-prompt.py --класс исполнитель --в "$T/prompt.md" && grep -m1 '^# Роль:' "$T/prompt.md" && echo "собрано знаков: $(wc -m < "$T/prompt.md")" && rc=0 || rc=$?; rm -rf "$T"; exit $rc
+  # Обёртка запуска на ЖИВЫХ профилях аккаунтов: ребёнок говорит, есть ли ключ в окружении (значение
+  # не печатается, И-3); весть и карточка тревоги уведены в заглушки, метка — во временный каталог.
+  scripts/as-account.sh: |
+    T=$(mktemp -d) && printf 'echo "весть владельцу (уведена в заглушку): $*" >> "%s/весть"\n' "$T" > "$T/tg.sh" && printf 'import sys\nopen("%s/весть","a").write("карточка тревоги (заглушка): %%s\\n" %% " ".join(sys.argv[1:]))\n' "$T" > "$T/alert.py" && env -u CLAUDE_CODE_OAUTH_TOKEN LOG_DIR=$T TG_SEND=$T/tg.sh HARNESS_ALERT_TASK=$T/alert.py bash scripts/as-account.sh bash -c 'echo "ключ профиля запуска в окружении смены: ${CLAUDE_CODE_OAUTH_TOKEN:+выставлен, длина ${#CLAUDE_CODE_OAUTH_TOKEN}}"' && { cat "$T/весть" 2>/dev/null || true; } && rc=0 || rc=$?; rm -rf "$T"; exit $rc
+  # Режим хакатон на ЖИВОЙ карте и живом ключе срока.
+  scripts/hackathon.py: python3 -B scripts/hackathon.py --проверить-карту dev-map.yaml && python3 -B scripts/hackathon.py --строка --карта dev-map.yaml
+  # План запуска этой задачи по живой карте и живой ёмкости; журнал вложенности и план — во временном каталоге.
+  scripts/launch-plan.py: |
+    T=$(mktemp -d) && HARNESS_LOG_DIR=$T python3 -B scripts/launch-plan.py hr.zhivaya-proverka-vseh-mehanizmov && rc=0 || rc=$?; rm -rf "$T"; exit $rc
+  # Выключатель фоновых на ЖИВОМ конфиге и настоящем id из крона; журнал запусков — во временном каталоге.
+  scripts/run-background.sh: |
+    T=$(mktemp -d) && LOG_DIR=$T bash scripts/run-background.sh resource-report -- true && cat "$T/process-runs.jsonl" && rc=0 || rc=$?; rm -rf "$T"; exit $rc
+  # Порождённый блок system-jobs.yaml: блок вырезан из копии и порождён заново из живой библиотеки процессов — равен живому.
+  scripts/build-system-jobs.py: |
+    T=$(mktemp -d) && sed '/^# >>> порождено из process-library.yaml/,/^# <<</{//!d}' harness/config/system-jobs.yaml > "$T/system-jobs.yaml" && HARNESS_SYSTEM_JOBS=$T/system-jobs.yaml python3 -B scripts/build-system-jobs.py && grep -m1 'Блок ниже порождён' "$T/system-jobs.yaml" && cmp harness/config/system-jobs.yaml "$T/system-jobs.yaml" && echo "порождённый заново блок равен живому" && rc=0 || rc=$?; rm -rf "$T"; exit $rc
+  # Дверь среза: настоящий прогон через sudo-обёртку в harness-checks.slice; ребёнок печатает свою cgroup.
+  scripts/run-in-checks-slice.sh: MUTATION_LOCK_WAIT_MIN=1 CHECKS_RUN_MAX_MIN=2 bash scripts/run-in-checks-slice.sh /bin/cat /proc/self/cgroup
+  # Корневая половина двери: установленная копия равна источнику, позвана через sudo, как её зовёт дверь;
+  # ребёнок печатает cgroup юнита и запись держателя очереди, которую пишет обёртка.
+  scripts/checks-slice-wrapper.sh: |
+    cmp <(sed "s/@AGENT_USER@/$(id -un)/" scripts/checks-slice-wrapper.sh) /usr/local/sbin/harness-run-in-checks && sudo -n /usr/local/sbin/harness-run-in-checks --run-max-min 1 --lock-wait-min 1 "$PWD" -- /bin/cat /proc/self/cgroup /run/lock/harness-checks-slice.lock.owner
+  # Полный прогон судьи независимости от машины: на здоровой машине находит чужие пути (косяк hr.proby-sudyat-mashinu).
+  scripts/check-host-independence.py: python3 -B scripts/check-host-independence.py
+  # Порция C3 (опасные): безопасный режим механизма или стенд через его двери окружения;
+  # живые файлы, которые он может писать, до и после зова равны (md5 в отчёте части 11).
+  # У self-seal.sh команды нет: сторож команд отменяет его зов даже на стенде — эталон меняет владелец.
+  # Сухой ход по ЖИВОМУ /tmp: ничего не удаляет; его журнал и замок уведены в стенд.
+  scripts/tmp-sweep.py: |
+    T=$(mktemp -d) && LOG_DIR=$T python3 -B scripts/tmp-sweep.py --ночь --dry-run && echo "строк журнала сухого хода в стенде: $(cat "$T/уборка-tmp.jsonl" 2>/dev/null | wc -l)" && rc=0 || rc=$?; rm -rf "$T"; exit $rc
+  # Стенд канала: запрос кнопки ложится в журнал СТЕНДА, диспетчер читает только живой — владельцу не уходит ничего.
+  scripts/ask-consent.py: |
+    T=$(mktemp -d) && out=$(HARNESS_LOG_DIR=$T python3 -B scripts/ask-consent.py --вид слой-человека --предмет "человек=владелец (стенд живой проверки)" --почему "живая проверка на стенде канала") && echo "${out%%$'\n'*}" && python3 -B -c 'import json,sys;r=json.loads(open(sys.argv[1]).readline());d=r.get("data",r);print("запрос в журнале стенда: вид", d["вид"], "· цель", d["цель"])' "$T/consent-requests.jsonl" && rc=0 || rc=$?; rm -rf "$T"; exit $rc
+  # Настоящая модель из ПУСТОГО каталога (спека §6.4 п. 4) без MCP; собранная личность и сигнал — в стенде.
+  scripts/claude-run.sh: |
+    T=$(mktemp -d) && E=$(mktemp -d) && R=$PWD && printf 'import sys\nopen("%s/сигнал","a").write(" ".join(sys.argv[1:])+"\\n")\n' "$T" > "$T/alert.py" && ans=$(cd "$E" && LOG_DIR=$T HARNESS_ALERT_TASK=$T/alert.py timeout 240 bash "$R/scripts/claude-run.sh" --класс исполнитель -p 'Назови строку «Метка сборки: …» из своего системного промпта дословно, одной строкой, без пояснений.' --model haiku --mcp-config '{"mcpServers":{}}' --strict-mcp-config < /dev/null) && echo "модель ответила: $ans" && want=$(head -1 "$T/self-prompt/исполнитель.md") && echo "в собранной личности: $want" && grep -qF -- "${want#Метка сборки: }" <<< "$ans" && [ -z "$(ls -A "$E")" ] && echo "каталог зова остался пуст; сигналов: $(cat "$T/сигнал" 2>/dev/null | wc -l)" && rc=0 || rc=$?; rm -rf "$T" "$E"; exit $rc
+  # Две настоящие пробы модели по событию; метка события, журналы зова и сигнал владельцу уведены в стенд.
+  scripts/self-prompt-live.sh: |
+    T=$(mktemp -d) && printf 'import sys\nopen("%s/сигнал","a").write(" ".join(sys.argv[1:])+"\\n")\n' "$T" > "$T/alert.py" && LOG_DIR=$T PROJECT_DIR=$PWD HARNESS_ALERT_TASK=$T/alert.py SELF_PROMPT_LIVE_STATE=$T/state timeout 500 bash scripts/self-prompt-live.sh --ключ живая-проверка-стенд && echo "метка события в стенде: $(cat "$T/state")" && echo "сигнал (в заглушку): $(cat "$T/сигнал")" && rc=0 || rc=$?; rm -rf "$T"; exit $rc
+  # Сверка ЖИВОЙ смены с профилем запуска; profiles.json и state.json — копии в стенде, пишется только стенд.
+  scripts/account-switch.py: |
+    T=$(mktemp -d) && A=$(python3 -B -c 'import sys;sys.path.insert(0,"scripts/lib");import accounts;print(accounts.каталог())') && cp -p "$A/profiles.json" "$A/state.json" "$T/" && HARNESS_ACCOUNT_DIR=$T python3 -B scripts/account-switch.py --проверить && cmp "$A/profiles.json" "$T/profiles.json" && echo "profiles.json стенда равен живому, дверь писала только state.json стенда" && rc=0 || rc=$?; rm -rf "$T"; exit $rc
+  # Счёт ЖИВЫХ смен машины в безопасном режиме: сигналов не шлёт.
+  scripts/one-shift.sh: bash scripts/one-shift.sh --dry-run
+  # Новое значение в КОПИИ instance.yaml: дверь просит кнопку в журнал стенда и без «Да» файл не трогает.
+  scripts/self-set.py: |
+    T=$(mktemp -d) && cp -p harness/self/instance.yaml "$T/instance.yaml" && { HARNESS_LOG_DIR=$T LOG_DIR=$T SELF_INSTANCE=$T/instance.yaml python3 -B scripts/self-set.py человек "владелец (стенд живой проверки)" --почему "живая проверка на стенде" && rc=0 || rc=$?; } && [ "$rc" = 3 ] && cmp harness/self/instance.yaml "$T/instance.yaml" && echo "копия instance.yaml без «Да» побайтно прежняя (код двери 3)" && python3 -B -c 'import json,sys;r=json.loads(open(sys.argv[1]).readline());d=r.get("data",r);print("запрос кнопки в журнале стенда: вид", d["вид"], "· цель", d["цель"])' "$T/consent-requests.jsonl" && rc=0 || rc=$?; rm -rf "$T"; exit $rc

@@ -269,6 +269,22 @@ N-8. Стадия commit-msg читала карту раньше проверк
   (6) битая карта в индексе: срок пуст, без трейлера — встал (карта не
   читается); срок жив, трейлер hr.w — не встал.
 
+КЭШ judge_dependencies (живая проверка ч.12, 12.11.2026): разбор 431 файла
+  стоил 46-131 с на КАЖДЫЙ вызов; touches_harness_guards зовёт его на каждый
+  путь, а гейт (judge_gate_cases) зовёт check-pipeline.py ~430 процессами на
+  одном корне, дописывая в каждый случай комментарий в ОДИН файл — проба висела.
+  Контракт: кэшируется РАЗБОР ФАЙЛА (сырые имена-кандидаты рёбер, до проверки
+  «файл есть») по ключу (абсолютный путь файла, st_mtime_ns, st_size); есть ли
+  кандидат на диске — проверяется при каждом вызове (stat), поэтому появившийся
+  файл виден без сброса. Корень сводится Path(root).resolve(). Кэш живёт в
+  памяти процесса; если задан HARNESS_JUDGE_CACHE (каталог прогона) — ещё и в
+  файле там, общий процессам прогона. Отказ (RuntimeError) не кэшируется.
+  Вызов из кэша НЕ открывает файлов под корнем на чтение (stat — можно); после
+  правки одного файла читается ровно он. Случаи КЭШ 0-8 (judge_cache_cases) —
+  один процесс; КЭШ 5а, 5б, 3а (judge_cache_key_cases) — каждая часть ключа
+  (mtime, размер, корень) видна своей правкой; КЭШ 9-12
+  (judge_cache_process_cases) — отдельные процессы.
+
 Окружение пробы своё: tmp-каталог, свой harness.conf (HARNESS_CONF), свой
 install.conf, LOG_DIR, HARNESS_HOME, копия-образец карты. Боевые harness.conf,
 dev-map.yaml и лок карты не трогаются; путь лока, вышедший за tmp, — отказ.
@@ -281,7 +297,9 @@ import ast
 import datetime as dt
 import fcntl
 import fnmatch
+import builtins
 import importlib.util
+import io
 import json
 import os
 import re
@@ -317,6 +335,8 @@ SANDBOX_ENV = {
     "HARNESS_LOG_DIR": str(LOG_DIR),
     "HARNESS_DOSKA": str(WORK / "doska.json"),
     "PANEL_NO_SUDO": "1",
+    # Кэш разбора суда хакатона — общий процессам ЭТОГО прогона (check-pipeline.py гейта).
+    "HARNESS_JUDGE_CACHE": str(WORK / "judge-cache"),
     "GIT_CONFIG_GLOBAL": "/dev/null",
     "GIT_CONFIG_NOSYSTEM": "1",
 }
@@ -600,6 +620,181 @@ def judge_dependency_cases():
     for path in sorted(set(parsed) | set(EXPLICIT_FORBIDDEN) | {"scripts/commit-msg-gate.sh"}):
         cases.check(f"N-1 touches_harness_guards: {path} запрещён", [path],
                     lib.touches_harness_guards([path], conf_path=conf))
+
+
+def _judge_tree(name, modules):
+    """Дерево суда в песочнице: корни суда, их зависимости — modules {имя: текст}."""
+    root = WORK / name
+    (root / "scripts" / "lib").mkdir(parents=True, exist_ok=True)
+    texts = {"scripts/check-pipeline.py": "import pipeline\n",
+             "scripts/hackathon.py": "import cards\n",
+             "scripts/pre-commit-gate.sh": 'python3 "$HERE/gate_helper.py"\n',
+             "scripts/commit-msg-gate.sh": "true\n",
+             "scripts/pipeline.py": "x = 1\n", "scripts/lib/cards.py": "y = 2\n",
+             "scripts/gate_helper.py": "z = 3\n", **modules}
+    for rel, text in texts.items():
+        (root / rel).write_text(text, encoding="utf-8")
+    return root
+
+
+class _ReadCounter:
+    """Сколько раз за вызов открыт на чтение файл под корнем: пересчёт без открытия не бывает.
+
+    Считает открытия (io.open — через него идёт Path.read_text), а не время и не
+    внутренние имена предмета: кэш вправе звать stat, но не читать текст заново.
+    """
+
+    def __init__(self, root):
+        self.root, self.count = str(Path(root).resolve()), 0
+
+    def __enter__(self):
+        self.saved = io.open
+        def counting(file, *args, **kwargs):
+            if isinstance(file, (str, os.PathLike)) and os.path.abspath(file).startswith(self.root + os.sep):
+                self.count += 1
+            return self.saved(file, *args, **kwargs)
+        io.open = builtins.open = counting
+        return self
+
+    def __exit__(self, *exc):
+        io.open = builtins.open = self.saved
+
+
+def judge_cache_cases():
+    """Кэш judge_dependencies: на один корень — один разбор каждого файла, пока он тот же."""
+    judge = load("hackathon_cache", SOURCE / "scripts" / "hackathon.py").judge_dependencies
+
+    def call(root, spelled=None):
+        with _ReadCounter(root) as reads:
+            return judge(spelled if spelled is not None else root), reads.count
+
+    # fresh.py лежит с начала, но на него никто не ссылается: в итог он попадёт
+    # только правкой содержимого extra.py (КЭШ 5), а не появлением файла.
+    first = _judge_tree("cache-a", {"scripts/pipeline.py": "import extra\n", "scripts/extra.py": "w = 4\n",
+                                    "scripts/fresh.py": "u = 6\n"})
+    second = _judge_tree("cache-b", {})
+    deps_a, reads = call(first)
+    cases.check("КЭШ 0: первый вызов на корень A читает файлы (счётчик жив) и видит extra.py",
+                (True, True), (reads > 0, "scripts/extra.py" in deps_a))
+    again, reads = call(first)
+    cases.check("КЭШ 1: второй вызов на тот же корень — ни одного чтения, тот же итог",
+                (0, deps_a), (reads, again))
+    spelled, reads = call(first, str(first / "scripts" / ".."))
+    cases.check("КЭШ 2: тот же корень другим написанием (строка, «scripts/..») — ключ один, чтений 0",
+                (0, deps_a), (reads, spelled))
+    deps_b, reads = call(second)
+    cases.check("КЭШ 3: другой корень B — свой разбор и свой итог (без extra.py)",
+                (True, False, True), (reads > 0, "scripts/extra.py" in deps_b, deps_b != deps_a))
+    back, reads = call(first)
+    cases.check("КЭШ 4: снова A после B — итог A, чтений 0 (кэш по корню, не одна ячейка)",
+                (0, deps_a), (reads, back))
+
+    (first / "scripts" / "extra.py").write_text("import fresh\nimport later\n", encoding="utf-8")
+    grown, reads = call(first)
+    cases.check("КЭШ 5: изменён файл-вход A (extra.py импортирует fresh) — пересчёт, fresh.py в итоге",
+                (True, False), ("scripts/fresh.py" in grown, "scripts/later.py" in grown))
+    (first / "scripts" / "later.py").write_text("v = 5\n", encoding="utf-8")
+    born, reads = call(first)
+    cases.check("КЭШ 6: появился файл, на который вход уже ссылался (later.py) — он в итоге",
+                True, "scripts/later.py" in born)
+    settled, reads = call(first)
+    cases.check("КЭШ 7: после пересчёта — снова из кэша: чтений 0, итог тот же",
+                (0, born), (reads, settled))
+
+    empty = WORK / "cache-empty"
+    (empty / "scripts").mkdir(parents=True)
+    failures = []
+    for _ in range(2):
+        try:
+            failures.append(("итог", judge(empty)))
+        except RuntimeError:
+            failures.append("отказ")
+    cases.check("КЭШ 8: корень без корней суда — отказ и на повторе (отказ не кэшируется в «можно»)",
+                ["отказ", "отказ"], failures)
+    judge_cache_key_cases(judge)
+    judge_cache_process_cases()
+
+
+def judge_cache_key_cases(judge):
+    """Ключ разбора видит каждую из трёх частей: mtime, размер, абсолютный путь.
+
+    Каждый случай — правка, которую видит ровно одна часть ключа: ключ без неё
+    отдаёт устаревший разбор. Деревья свои, чтобы чужие ключи не совпали случайно.
+    """
+    root = _judge_tree("cache-key", {"scripts/pipeline.py": "import aaaaa\n", "scripts/aaaaa.py": "a = 1\n",
+                                     "scripts/bbbbb.py": "b = 1\n", "scripts/ccccccc.py": "c = 1\n"})
+    entry = root / "scripts" / "pipeline.py"
+    judge(root)
+    entry.write_text("import bbbbb\n", encoding="utf-8")
+    cases.check("КЭШ 5а: правка входа того же размера — пересчёт (ключ видит mtime)",
+                True, "scripts/bbbbb.py" in judge(root))
+    old = entry.stat()
+    entry.write_text("import ccccccc\n", encoding="utf-8")
+    os.utime(entry, ns=(old.st_atime_ns, old.st_mtime_ns))
+    cases.check("КЭШ 5б: правка входа с прежним mtime (cp -p, грубые часы ФС) — пересчёт (ключ видит размер)",
+                True, "scripts/ccccccc.py" in judge(root))
+
+    # Ни одно дерево ещё не разбиралось, mtime назначен один и свой: совпадают
+    # относительный путь, размер и mtime — различает только корень.
+    same = 1_234_567_890_123_456_789
+    pair = []
+    for name, imported in (("cache-key-a", "aaaaa"), ("cache-key-b", "bbbbb")):
+        tree = _judge_tree(name, {"scripts/pipeline.py": f"import {imported}\n",
+                                  "scripts/aaaaa.py": "a = 1\n", "scripts/bbbbb.py": "b = 1\n"})
+        os.utime(tree / "scripts" / "pipeline.py", ns=(same, same))
+        pair.append(tree)
+    deps = [judge(tree) for tree in pair]
+    cases.check("КЭШ 3а: другой корень, тот же путь, размер и mtime — свой разбор (ключ видит корень)",
+                (True, False, False, True),
+                ("scripts/aaaaa.py" in deps[0], "scripts/bbbbb.py" in deps[0],
+                 "scripts/aaaaa.py" in deps[1], "scripts/bbbbb.py" in deps[1]))
+
+
+# Отдельный процесс считает свои открытия под корнем: так зовёт суд check-pipeline.py
+# из гейта (judge_gate_cases — сотни процессов на одном корне песочницы).
+COUNTED_JUDGE = """
+import builtins, importlib.util, io, json, os, sys
+source, root = sys.argv[1], os.path.realpath(sys.argv[2])
+spec = importlib.util.spec_from_file_location("hackathon_counted", source)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+saved, reads = io.open, []
+def counting(file, *args, **kwargs):
+    if isinstance(file, (str, os.PathLike)) and os.path.abspath(file).startswith(root + os.sep):
+        reads.append(str(file))
+    return saved(file, *args, **kwargs)
+io.open = builtins.open = counting
+deps = module.judge_dependencies(root)
+io.open = builtins.open = saved
+print(json.dumps([len(reads), deps]))
+"""
+
+
+def judge_cache_process_cases():
+    """Носитель кэша на прогон: каталог из HARNESS_JUDGE_CACHE, общий процессам прогона."""
+    root = _judge_tree("cache-c", {})
+
+    def run():
+        done = subprocess.run([sys.executable, "-c", COUNTED_JUDGE,
+                               str(SOURCE / "scripts" / "hackathon.py"), str(root)],
+                              capture_output=True, text=True, timeout=120, cwd=WORK)
+        if done.returncode != 0:
+            return -1, done.stderr.strip()[-200:]
+        return tuple(json.loads(done.stdout.strip().splitlines()[-1]))
+
+    first_reads, deps = run()
+    cases.check("КЭШ 9: процесс 1 на корень C — читает файлы, итог не пуст (счётчик жив)",
+                (True, True), (first_reads > 0, bool(deps)))
+    cases.check("КЭШ 10: процесс 2 того же прогона на корень C — чтений 0, тот же итог",
+                (0, deps), run())
+    with open(root / "scripts" / "pipeline.py", "a", encoding="utf-8") as handle:
+        handle.write("# правка случая\n")
+    cases.check("КЭШ 11: процесс 3 после правки ОДНОГО файла (комментарий) — прочитан ровно он, итог тот же",
+                (1, deps), run())
+    (root / "scripts" / "extra2.py").write_text("t = 7\n", encoding="utf-8")
+    (root / "scripts" / "pipeline.py").write_text("import extra2\n", encoding="utf-8")
+    cases.check("КЭШ 12: процесс 4 после правки входа (import extra2) — итог не устаревший",
+                True, "scripts/extra2.py" in run()[1])
 
 
 def cli_cases():
@@ -1039,20 +1234,61 @@ def refused(result, path):
     return rc, REFUSAL in out and path in out
 
 
+def refused_lines(result, paths):
+    """Отказ хакатона и пути отказа, которых нет отдельной строкой «    <путь>».
+
+    Строка целиком, не подстрока: «scripts/lib/x.py» иначе засчитался бы в
+    строке «scripts/lib/x.py.bak», а один путь — в перечне чужих."""
+    rc, out = result
+    lines = set(out.splitlines())
+    return rc, REFUSAL in out, [path for path in paths if f"    {path}" not in lines]
+
+
 def says_hackathon(result):
     rc, out = result
     return rc, "хакатон" in out
 
 
+def entry_class(path, masks):
+    """Класс входа файла суда — признаки, по которым гейт узнаёт запрет.
+
+    Признаки разбором предмета (корни суда, явные запреты, GUARD_PATHS, маски
+    данных), а не списком имён: новый класс появляется сам."""
+    guarded_path = any(fnmatch.fnmatch(path, mask + "*" if mask.endswith("/") else mask)
+                       for mask in GUARD_PATHS.split())
+    return (Path(path).suffix, str(Path(path).parent), path in JUDGE_ROOTS,
+            path in EXPLICIT_FORBIDDEN, guarded_path,
+            any(fnmatch.fnmatch(path, mask) for mask in masks))
+
+
 def judge_gate_cases():
-    """N-1 в гейте: на каждый файл суда — отказ хакатона при живом сроке."""
+    """N-1 в гейте: на каждый файл суда — отказ хакатона при живом сроке.
+
+    Каждый файл судится ОДНИМ коммитом со всеми, а не своим: шаг гейта — два
+    процесса python (~0.6 с), и 440 поштучных коммитов съедали 260 с из 360 с
+    предела живой проверки. Поштучно каждый файл держит библиотечный уровень
+    (judge_dependency_cases: touches_harness_guards на каждый путь); здесь гейт
+    обязан назвать КАЖДЫЙ файл своей строкой отказа. Одиночный коммит — по
+    представителю на класс входа: так виден отказ, который зависит от соседей."""
     future = iso(NOW + dt.timedelta(hours=3))
     hackathon_card = wip_card("хакатон")
+    cards_pair = [hackathon_card, PLAIN_PLAN]
     files = sorted(set(judge_files_by_parsing(SOURCE)) | set(EXPLICIT_FORBIDDEN))
     cases.check("N-1 гейт: файлов суда для прогона > 0", True, bool(files))
+    cases.check(f"N-1 гейт: все {len(files)} файлов суда одним коммитом — код 1, отказ хакатона "
+                "называет КАЖДЫЙ файл своей строкой", (1, True, []),
+                refused_lines(gate_run(cards_pair, cards_pair, files, future, message=TRAILER_W),
+                              files))
+    masks = forbidden_masks_of_source()
+    classes = {}
     for path in files:
-        cases.check(f"N-1 гейт: {path} — код 1, отказ хакатона называет файл", (1, True),
-                    refused(pipeline_run(hackathon_card, path, future), path))
+        classes.setdefault(entry_class(path, masks), path)
+    cases.check("N-1 гейт: классов входа разобрано > 0", True, bool(classes))
+    for path in classes.values():
+        cases.check(f"N-1 гейт: {path} (класс входа) — код 1, отказ хакатона называет файл",
+                    (1, True, []),
+                    refused_lines(gate_run(cards_pair, cards_pair, [path], future,
+                                           message=TRAILER_W), [path]))
 
     # Живой случай ревьюера B: сверка путей отключена тем же коммитом, что трогает deploy.sh.
     target = REPO / "scripts" / "pipeline.py"
@@ -1543,6 +1779,9 @@ def git_root_of(folder):
 def main():
     print(f"── предмет: {SOURCE}; песочница: {WORK} ──")
     try:
+        # Первым: без кэша каждый вызов суда ниже стоит десятки секунд.
+        print("── кэш judge_dependencies: один разбор на корень за процесс ──")
+        guarded("кэш зависимостей суда", judge_cache_cases)
         print("── библиотека scripts/hackathon.py ──")
         guarded("библиотека", lib_cases)
         print("── N-1: зависимости суда хакатона (judge_dependencies) ──")

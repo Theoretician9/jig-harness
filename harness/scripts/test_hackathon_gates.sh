@@ -298,6 +298,7 @@ deploy() {  # $1 — код заглушки режима, $2 — код заг�
             ORDER_FILE="$STAND/poryadok" MODE_JOURNAL="$STAND/mode.log" \
             STUB_MODE_RC="$1" STUB_GATES_RC="$2" \
             HARNESS_INSTALL_CONF="$STAND/install.conf" HARNESS_CONF="$STAND/harness.conf" \
+            HARNESS_DOOR_STAND_HOME="$STAND" \
             timeout 300 bash "$COPY/deploy.sh" 2>&1)
     RC=$?
     printf '%s\n' "$VYVOD" | sed 's/^/      /' | tail -3

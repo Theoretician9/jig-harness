@@ -25,6 +25,25 @@ HERE="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 HOOK="${STOP_REMINDER_UNDER_TEST:-$HERE/stop_reminder.sh}"
 [ -f "$HOOK" ] || { echo "ПРОБА СЛОМАНА: нет $HOOK"; exit 1; }
 
+# Хук берёт конфиг только своей дверью (АР-3): HARNESS_CONF/HARNESS_INSTALL_CONF из
+# окружения он не слушает, а настоящий файл хука пошёл бы на паспорт машины и её LOG_DIR.
+# Поэтому зовём КОПИЮ хука вне PROJECT_DIR машины (с lib/ и deploy_guard.py рядом, как в
+# раскладке) и называем паспорт стенда HARNESS_DOOR_STAND_HOME. HARNESS_INSTALL_CONF и
+# HARNESS_CONF стенда остаются в окружении для детей хука (work-queue.py и др.).
+SRC_SCRIPTS="$HERE/.."
+[ -d "$SRC_SCRIPTS/lib" ] || SRC_SCRIPTS="$HERE/../scripts"
+HOOK_SRC="$HOOK"
+door_copy() {  # $1 — каталог копии: hooks/stop_reminder.sh, lib/, deploy_guard.py
+    mkdir -p "$1/hooks"
+    cp -r "$SRC_SCRIPTS/lib" "$1/lib"
+    cp "$SRC_SCRIPTS/deploy_guard.py" "$1/"
+    cp "$HOOK_SRC" "$1/hooks/stop_reminder.sh"
+}
+DOOR_COPY=$(mktemp -d)
+door_copy "$DOOR_COPY"
+HOOK="$DOOR_COPY/hooks/stop_reminder.sh"
+STAND_HOOK=""   # своя копия хука стенда (ворота-заглушка рядом с ней); пусто — общая
+
 DIRTY_WORDS="изменённых файлов без коммита"
 bad=0
 total=0
@@ -32,6 +51,7 @@ STANDS=()
 cleanup() {
     local d
     for d in "${STANDS[@]}"; do rm -rf "$d"; done
+    rm -rf "$DOOR_COPY"
 }
 trap cleanup EXIT
 
@@ -40,6 +60,7 @@ trap cleanup EXIT
 new_stand() {
     T=$(mktemp -d)
     STANDS+=("$T")
+    STAND_HOOK=""
     local R="$T/repo"
     mkdir -p "$R/память" "$R/docs/приёмка" "$R/docs/приёмка-старая" "$R/scripts" "$T/log"
     printf 'разобрано\n' > "$R/память/.tasks-triaged"
@@ -61,9 +82,10 @@ touch_file() { printf 'правка\n' >> "$T/repo/$1"; }
 run_hook() {
     local rc=0 out
     out=$(cd "$T" && printf '{}' | env -u HANDOVER_MAX_AGE_MIN -u DEVMAP_TRACE_FRESH_MIN \
+            HARNESS_DOOR_STAND_HOME="$T" \
             HARNESS_INSTALL_CONF="$T/install.conf" HARNESS_CONF="$T/harness.conf" \
             PROJECT_DIR="$T/repo" LOG_DIR="$T/log" \
-            timeout 60 bash "$HOOK" 2>&1 >/dev/null) || rc=$?
+            timeout 60 bash "${STAND_HOOK:-$HOOK}" 2>&1 >/dev/null) || rc=$?
     printf '%s' "$rc" > "$T/rc"
     printf '%s' "$out"
 }
@@ -296,19 +318,20 @@ verdict "$([ "$(cat "$T/rc")" = 0 ] && echo 1 || echo 0)" \
 # Слово владельца 05.11.2026: «все вопросы по поводу моего Да должны приходить
 # кнопками в телегу». Хук спрашивает ворота без --просить (кнопку просит только
 # дверь) и при отказе ведёт к ask-consent, а не к «спроси да» текстом.
-# Ворота стенда — заглушка: пишет свои доводы, отвечает кодом из файла.
+# Ворота стенда — заглушка: пишет свои доводы, отвечает кодом из файла. Хук зовёт ворота
+# рядом с СОБОЙ (readlink -f), поэтому заглушка лежит в своей копии хука стенда.
 push_stand() {  # $1 = код ворот стенда
     new_stand "$KEY"
     local R="$T/repo"
-    cat > "$R/scripts/deploy_guard.py" <<'PYEOF'
+    door_copy "$T/door"
+    cat > "$T/door/deploy_guard.py" <<'PYEOF'
 import pathlib, sys
-стенд = pathlib.Path(__file__).resolve().parents[2]
+стенд = pathlib.Path(__file__).resolve().parents[1]
 (стенд / "guard-args").write_text(" ".join(sys.argv[1:]), encoding="utf-8")
 sys.exit(int((стенд / "guard-rc").read_text()))
 PYEOF
+    STAND_HOOK="$T/door/hooks/stop_reminder.sh"
     printf '%s' "$1" > "$T/guard-rc"
-    git -C "$R" add -A
-    git -C "$R" commit -q -m 'ворота стенда'
     git init -q --bare -b master "$T/remote.git"
     git -C "$R" remote add origin "$T/remote.git"
     git -C "$R" push -q -u origin master 2>/dev/null

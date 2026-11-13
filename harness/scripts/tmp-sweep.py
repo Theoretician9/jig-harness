@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Уборка /tmp: отходы проб из реестра удаляются (похожие на данные — через карантин 24 ч), неизвестное не трогается.
+"""Уборка /tmp: отходы проб из реестра и стенды по префиксу харнеса удаляются (похожие на данные — через карантин 24 ч), неизвестное не трогается.
 
 Механизм УДАЛЯЕТ (И-1): запись трогается только после rename в карантин и
 повторной проверки держателей; журнал удалений — условие необратимого шага.
@@ -26,6 +26,9 @@ DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 # Обход рекурсивен: предел питона 1000 кадров, а одна глубокая запись в /tmp иначе
 # роняла бы весь ход каждую ночь. Глубже — отказ этой записи, ход идёт дальше.
 MAX_DEPTH = 400
+# Срок стендов по префиксу харнеса (стенды_харнеса), часов: ключ harness.conf.
+STAND_KEY = "TMP_SWEEP_STALE_H"
+STAND_DEFAULT_H = 24
 
 
 def say(text: str) -> None:
@@ -80,6 +83,13 @@ class Report:
     refused: int = 0
     nameless: int = 0
     skipped: str | None = None
+    # {префикс: [записей, МБ]} — что ход в самом деле убрал.
+    removed: dict = field(default_factory=dict)
+
+    def count_removed(self, prefix, mb):
+        entry = self.removed.setdefault(prefix, [0, 0.0])
+        entry[0] += 1
+        entry[1] += mb
 
 
 # --- держатели ---------------------------------------------------------------
@@ -276,16 +286,32 @@ def is_waste(name, cfg) -> bool:
     return name.startswith(tuple(cfg["отходы_проб"]))
 
 
-def decide(facts, cfg, mode, now) -> Decision:
-    limit_h = cfg["сроки_ч"][f"отходы_{mode}"]
+def stand_prefixes(cfg, uid) -> tuple[tuple, list]:
+    """(префиксы прямо в корне, [(подкаталог, префикс)]) из стенды_харнеса; {uid} — хозяин хода."""
+    top, nested = [], []
+    for item in cfg.get("стенды_харнеса") or []:
+        sub, slash, prefix = item.format(uid=uid).rpartition("/")
+        if slash:
+            nested.append((sub, prefix))
+        else:
+            top.append(prefix)
+    return tuple(top), nested
+
+
+def matched_prefix(name, prefixes) -> str:
+    return max((p for p in prefixes if name.startswith(p)), key=len, default="?")
+
+
+def decide(facts, cfg, mode, now, klass="отходы") -> Decision:
+    limit_h = cfg["сроки_ч"][f"{klass}_{mode}"]
     if (now - facts.newest) / 3600 < limit_h:
-        return Decision("отходы", f"моложе {limit_h} ч", "оставить")
+        return Decision(klass, f"моложе {limit_h} ч", "оставить")
     reason = first_refusal(facts)
     if reason:
-        return Decision("отходы", reason, "отказ")
+        return Decision(klass, reason, "отказ")
     if facts.data_like:
-        return Decision("отходы", "похоже на данные", "карантин")
-    return Decision("отходы", "отход пробы", "удалить")
+        return Decision(klass, "похоже на данные", "карантин")
+    return Decision(klass, "отход пробы", "удалить")
 
 
 # --- журнал ---------------------------------------------------------------
@@ -388,6 +414,9 @@ class Sweep:
         self.root_dev = os.fstat(root_fd).st_dev
         self.holders = None
         self.data_suffixes = tuple(cfg["похоже_на_данные"])
+        self.stands_top, self.stands_nested = stand_prefixes(cfg, expected_uid)
+        self.prefixes = (*cfg["отходы_проб"], *self.stands_top,
+                         *(f"{sub}/{prefix}" for sub, prefix in self.stands_nested))
 
     def facts(self, dir_fd, node, path, skip_top_ctime=False) -> Facts:
         return entry_facts(dir_fd, node, root_dev=self.root_dev, expected_uid=self.uid,
@@ -434,7 +463,7 @@ class Sweep:
                     for item in os.listdir(day_fd):
                         if item not in named:
                             report.nameless += 1
-                        elif named[item] == "отходы":
+                        elif named[item] in ("отходы", "стенды"):
                             self._expire(day_fd, f"{self.root}/{QUARANTINE}/{day}/{item}", item,
                                          report)
                 finally:
@@ -456,6 +485,22 @@ class Sweep:
         left = remove_tree(day_fd, item, self.root_dev, self.uid, self.lstat)
         if not left:
             report.deleted += 1
+            report.count_removed("карантин", facts.size_unique_mb)
+
+    def nested_names(self, sub, prefix) -> list[str]:
+        """Имена с префиксом в подкаталоге корня. Подкаталог-симлинк, чужой или
+        с другой ФС — пусто: внутрь не идём."""
+        try:
+            st = self.lstat(sub, dir_fd=self.root_fd)
+        except FileNotFoundError:
+            return []
+        if not stat.S_ISDIR(st.st_mode) or st.st_uid != self.uid or st.st_dev != self.root_dev:
+            return []
+        fd = os.open(sub, DIR_FLAGS, dir_fd=self.root_fd)
+        try:
+            return sorted(n for n in os.listdir(fd) if n.startswith(prefix))
+        finally:
+            os.close(fd)
 
     def judge_all(self, report, dry_run):
         protected = tuple(self.cfg["защищено"])
@@ -463,23 +508,32 @@ class Sweep:
         for name in sorted(os.listdir(self.root_fd)):
             if name.startswith(protected):
                 continue
-            if not is_waste(name, self.cfg):
+            if is_waste(name, self.cfg):
+                self.judge(name, "отходы", report, dry_run, chosen)
+            elif name.startswith(self.stands_top):
+                self.judge(name, "стенды", report, dry_run, chosen)
+            else:
                 report.decisions[name] = UNKNOWN
-                continue
-            path = f"{self.root}/{name}"
-            facts = self.facts(self.root_fd, name, path)
-            if facts.vanished:
-                continue
-            decision = decide(facts, self.cfg, self.mode, self.now)
-            report.decisions[name] = decision
-            if decision.action == "отказ":
-                report.refused += 1
-                if not dry_run:
-                    journal_write(self.journal, self.row(path, facts, decision,
-                                                         f"отказ: {decision.rule}"))
-            elif decision.action in ("удалить", "карантин") and not dry_run:
-                chosen.append((name, facts, decision))
+        # Подкаталог под защитой (claude-<uid>) судится только по своему префиксу.
+        for sub, prefix in self.stands_nested:
+            for name in self.nested_names(sub, prefix):
+                self.judge(f"{sub}/{name}", "стенды", report, dry_run, chosen)
         return chosen
+
+    def judge(self, name, klass, report, dry_run, chosen):
+        path = f"{self.root}/{name}"
+        facts = self.facts(self.root_fd, name, path)
+        if facts.vanished:
+            return
+        decision = decide(facts, self.cfg, self.mode, self.now, klass)
+        report.decisions[name] = decision
+        if decision.action == "отказ":
+            report.refused += 1
+            if not dry_run:
+                journal_write(self.journal, self.row(path, facts, decision,
+                                                     f"отказ: {decision.rule}"))
+        elif decision.action in ("удалить", "карантин") and not dry_run:
+            chosen.append((name, facts, decision))
 
     def move_to_quarantine(self, chosen):
         """Строка журнала ложится ДО rename: убитый ход оставляет имя, а не безымянную запись."""
@@ -544,6 +598,7 @@ class Sweep:
                                                      куда=f"{self.root}/{rel}"))
             else:
                 report.deleted += 1
+                report.count_removed(matched_prefix(name, self.prefixes), facts.size_unique_mb)
 
 
 def sweep(root, mode, *, expected_uid, holders, geteuid=os.geteuid, lstat=os.lstat,
@@ -590,6 +645,9 @@ def summary(report: Report) -> None:
         say(f"{klass}\t{count}\t-\t{action}")
     say(f"tmp: удалено {report.deleted}, в карантин {report.quarantined}, "
         f"отказов {report.refused}, без строки журнала: {report.nameless}")
+    removed = "; ".join(f"{prefix} {count} зап. {mb:.1f} МБ"
+                        for prefix, (count, mb) in sorted(report.removed.items()))
+    say(f"tmp: убрано по префиксам: {removed or 'ничего'}")
 
 
 def restore(hash12, journal):
@@ -646,12 +704,33 @@ def check_root(path, *, stand):
 
 
 def load_cfg():
+    """Реестр + срок стендов из harness.conf: один срок на оба режима."""
     import yaml
     for candidate in (HERE.parent / "config" / "tmp-sweep.yaml",
                       HERE.parent / "harness" / "config" / "tmp-sweep.yaml"):
         if candidate.is_file():
-            return yaml.safe_load(candidate.read_text(encoding="utf-8"))
+            cfg = yaml.safe_load(candidate.read_text(encoding="utf-8"))
+            hours = stand_hours()
+            cfg["сроки_ч"].update({"стенды_ночь": hours, "стенды_давление": hours})
+            return cfg
     raise FileNotFoundError("нет tmp-sweep.yaml")
+
+
+def stand_hours() -> float:
+    """Окружение старше файла; пусто или не число > 0 — умолчание, со словом вслух."""
+    sys.path.insert(0, str(HERE))
+    from lib import config
+    raw = os.environ.get(STAND_KEY) or config.из_файла(
+        config.путь_harness_conf()).get(STAND_KEY, "")
+    try:
+        value = float(raw)
+    except ValueError:
+        value = 0
+    if value > 0:
+        return int(value) if value.is_integer() else value
+    if raw:
+        say(f"tmp: {STAND_KEY}={raw!r} не число часов — срок стендов {STAND_DEFAULT_H} ч")
+    return STAND_DEFAULT_H
 
 
 def sweep_enabled() -> bool:

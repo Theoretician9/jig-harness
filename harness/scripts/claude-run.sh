@@ -20,6 +20,8 @@ HERE="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 # shellcheck disable=SC1091
 source "$HERE/lib/config.sh"
 konf_zagruzit
+# shellcheck disable=SC1091
+source "$HERE/lib/account_key.sh"
 
 if [ "${1:-}" != "--класс" ] || [ -z "${2:-}" ]; then
     echo "claude-run: нужен первый довод --класс <класс>" >&2
@@ -53,4 +55,7 @@ esac
 [ -s "$f" ] || refuse "файл пуст или не создан"
 head -n 1 "$f" | grep -q '^Метка сборки: ' || refuse "в первой строке нет метки сборки"
 
+# Демоны идут мимо as-account.sh; без ключа профиля claude берёт /login чужой
+# организации. Вести нет: беду входа видит сторож входа. Ключ — только окружение.
+[ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] && account_key_export
 exec "${CLAUDE_BIN:-claude}" --append-system-prompt-file "$f" "$@"

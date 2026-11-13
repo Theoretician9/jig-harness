@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S python3 -I
 # -*- coding: utf-8 -*-
 """Дверь слоя человека: harness/self/instance.yaml пишется только по кнопке «Да».
 
@@ -21,8 +21,7 @@
 строка «слой 2 изменён мимо согласия: <поля>»; пустые обязательные поля — один вопрос
 в сутки.
 
-Двери проб: SELF_INSTANCE (файл слоя 2), MEMORY_LAYERS (файл слоёв),
-SELF_SET_ASK_CONSENT (программа просьбы кнопки вместо scripts/ask-consent.py).
+Двери проб: SELF_INSTANCE (файл слоя 2), MEMORY_LAYERS (файл слоёв).
 """
 from __future__ import annotations
 
@@ -34,7 +33,6 @@ import json
 import os
 import re
 import shutil
-import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -53,7 +51,6 @@ SRC = "scripts/self-set.py"
 EVENT = "self-set.state"
 QUESTION_PERIOD = dt.timedelta(hours=24)
 BYPASS_LINE = "слой 2 изменён мимо согласия:"
-REQUEST_CODE = re.compile(r"[A-Za-z0-9_-]{22}")
 CODE_SHOWN = 8
 
 
@@ -67,10 +64,6 @@ def instance_path() -> Path:
 
 def layers_path() -> Path:
     return Path(os.environ.get("MEMORY_LAYERS") or ROOT / "harness" / "config" / "memory-layers.yaml")
-
-
-def ask_program() -> Path:
-    return Path(os.environ.get("SELF_SET_ASK_CONSENT") or ROOT / "scripts" / "ask-consent.py")
 
 
 def load_instance(path: Path) -> dict:
@@ -210,16 +203,10 @@ def write_atomic(path: Path, text: str) -> None:
 
 def ask_button(subject: str, why: str) -> tuple[int, str]:
     """→ (код программы просьбы, код запроса или текст отказа)."""
-    command = [sys.executable, str(ask_program()), "--вид", KIND, "--предмет", subject, "--почему", why[:200]]
-    try:
-        done = subprocess.run(command, capture_output=True, text=True, timeout=60,
-                              stdin=subprocess.DEVNULL, env=dict(os.environ, HARNESS_LOG_DIR=events.log_dir()))
-    except (OSError, subprocess.TimeoutExpired) as error:
-        return REFUSED_DOOR, f"кнопку не попросил: {type(error).__name__}"
-    lines = [line.strip() for line in (done.stdout + done.stderr).splitlines() if line.strip()]
-    if done.returncode == 0:
-        return 0, next((line for line in lines if REQUEST_CODE.fullmatch(line)), "")
-    return done.returncode, lines[-1] if lines else "ask-consent промолчал"
+    code, answer = owner_word.попросить_кнопку(KIND, subject, why, журнал_просьбы=Path(events.log_dir()))
+    if code == 0:  # ответ — «… код <первые 8 знаков>»
+        return 0, answer.rsplit(" ", 1)[-1]
+    return code, answer
 
 
 def set_field(field: str, value: str, source: str, why: str) -> int:
@@ -232,16 +219,15 @@ def set_field(field: str, value: str, source: str, why: str) -> int:
         print(f"{field}: это значение уже стоит")
         return WRITTEN
     subject = f"{field}={value}"
-    logdir = Path(events.log_dir())
     try:
-        decision = owner_word.последнее_решение(KIND, subject, logdir)
+        decision = owner_word.последнее_решение(KIND, subject)
         if decision and decision["событие"] == "нет":
             if not any(r.get("поле") == field and r.get("значение") == value and r.get("состояние") == "нет"
                        for r in journal_rows()):
                 record(field, value, source, "нет")
             print(f"{field}: владелец нажал «Нет» на это значение — не записано и не прошу снова")
             return REFUSED
-        opened = owner_word.согласие_кнопкой(KIND, subject, logdir)
+        opened = owner_word.согласие_кнопкой(KIND, subject)
     except owner_word.НетНосителя as error:
         raise DoorError(f"журнал кнопок не прочитан: {error}") from None
     if opened is None:

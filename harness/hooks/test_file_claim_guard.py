@@ -20,6 +20,11 @@
   * хук никогда не роняет запись: битый журнал, LOG_DIR-файл, битый вход,
     нечисловое окно — код 0, при внутренней ошибке — строка skipped;
   * who-writes.py: живые заявки по журналу, `--count` — число занятых путей;
+  * настоящее пересечение (12.11.2026: из 103 file.claim.warn за сутки настоящее —
+    одно, судья скорости резал потолок по шуму): warn — только держатель другой
+    задачи (задача — метка «Часть:» запуска, не карта; неизвестная — пересечение),
+    путь не в .tasks/<своя задача>/, заявка держателя живая, пара (агент, путь) —
+    один warn за окно; задача в file.claim — из того же источника;
   * исключительный замок (FILE_CLAIM_EXCLUSIVE) на стенде из двух git-деревьев —
     «проекта» и «пакета»: отказ кодом 2 чужой задаче, держатель — задача по метке
     «Часть:» запуска, снятие коммитом обоих деревьев, дверь на один путь, «брошено»,
@@ -153,7 +158,8 @@ def judge_claim_and_conflict(tmp: Path) -> None:
     check("первая запись пишет одну заявку", 1, len(rows))
     check("в заявке полный путь", stand.path("src/app.py"),
           (rows[0].get("data") or {}).get("путь") if rows else None)
-    check("в заявке задача из HARNESS_TASK", "hr.stand", rows[0].get("task") if rows else None)
+    check("в заявке задача не из HARNESS_TASK: без метки запуска — «агент:<id>»", "агент:agentA",
+          rows[0].get("task") if rows else None)
     code, context = stand.edit("agentA", "src/app.py", tool="Write")
     check("повтор своей записи: молча", (0, ""), (code, context))
     check("повтор своей записи нового следа не пишет", 1, len(stand.claims("agentA")))
@@ -165,7 +171,8 @@ def judge_claim_and_conflict(tmp: Path) -> None:
     check("вторая запись тоже заявлена", 1, len(stand.claims("agentB")))
     code, context = stand.edit("agentB", "src/app.py")
     check("повтор чужой записи: счётчик №2", True, "№2" in context)
-    check("предупреждение оставило след в журнале", 2, len(stand.rows("file.claim.warn")))
+    check("повтор пары (агент, путь) за окно — второго file.claim.warn нет", 1,
+          len(stand.rows("file.claim.warn")))
 
     code, context = stand.edit("agentB", "other/app.py")
     check("одноимённый файл в другом каталоге не занят", (0, ""), (code, context))
@@ -647,6 +654,26 @@ def judge_lock_not_exclusive(tmp: Path) -> None:
     check("общий (SHARED) путь: предупреждение, не отказ", (0, True), (code, "общий файл" in context))
 
 
+def judge_lock_worktree_path(tmp: Path) -> None:
+    """Характеристика Р-2 (hr.per-helper-code-copies, спека §2, Т4): путь в дереве помощника
+    `.claude/worktrees/<id>/…` даёт ключ не из FILE_CLAIM_EXCLUSIVE — замка нет, а заявка
+    пишется и питает «живость». Зелёная ДО кода: хук не меняется, проба держит, что так и
+    останется. Поломка, что оставила бы зелёной: нет — снятие префикса `.claude/worktrees/<id>/`
+    в tree_rel сделало бы ключ исключительным, и первая строка покраснела бы."""
+    stand = held_stand(tmp, "worktree")
+    tree = stand.proj / ".claude" / "worktrees" / "agent-b1"
+    stand.git(stand.proj, "worktree", "add", "-q", "-b", "worktree-agent-b1", str(tree))
+    with (tree / HC).open("a", encoding="utf-8") as fh:
+        fh.write("# ханк помощника в своём дереве\n")
+    before = len(stand.refused())
+    code, _, err = stand.go("b1", f".claude/worktrees/agent-b1/{HC}")
+    check("Т4: чужая грязь в исключительном файле основного, запись в тот же путь своего "
+          "дерева — не отказ", (0, ""), (code, err))
+    check("Т4: строки отказа нет", before, len(stand.refused()))
+    check("Т4: заявка записана с путём дерева", [str(tree / HC)],
+          [(r.get("data") or {}).get("путь") for r in stand.claims("b1")])
+
+
 def judge_lock_never_breaks(tmp: Path) -> None:
     stand = TreeStand(tmp / "nogit")
     stand.part("b1", "hr.B")
@@ -714,6 +741,85 @@ def judge_lock_cost(tmp: Path) -> None:
     check("живость счётчика: исключительный путь зовёт git", True, counter.exists())
 
 
+def judge_real_intersection(tmp: Path) -> None:
+    def warns(stand: TreeStand, agent: str) -> int:
+        return len([r for r in stand.rows("file.claim.warn")
+                    if (r.get("data") or {}).get("агент") == agent])
+
+    stand = TreeStand(tmp / "same-task-workers")
+    stand.part("a1", "hr.A")
+    stand.launch("a2", label="Часть: hr.A#2")
+    stand.go("a1", "src/app.py")
+    check("а) два исполнителя одной задачи, один файл: код 0 и молча", (0, ""),
+          stand.go("a2", "src/app.py")[:2])
+    check("а) два исполнителя одной задачи: file.claim.warn нет", 0, warns(stand, "a2"))
+
+    journal = ".tasks/hr.A/журнал.md"
+    stand = TreeStand(tmp / "own-journal")
+    stand.launch("m1", label="Часть: hr.A#0")
+    stand.part("w1", "hr.A")
+    stand.go("m1", journal)
+    check("б) исполнитель в журнал своей задачи, держатель — её управляющий: молча", (0, ""),
+          stand.go("w1", journal)[:2])
+    check("б) журнал своей задачи: file.claim.warn нет", 0, warns(stand, "w1"))
+
+    stand = TreeStand(tmp / "own-card-other-holder")
+    stand.part("b1", "hr.B")
+    stand.part("w1", "hr.A")
+    stand.go("b1", journal)
+    check("б2) путь в .tasks/<своя задача>/ при держателе чужой задачи: file.claim.warn нет",
+          0, (stand.go("w1", journal), warns(stand, "w1"))[1])
+    code, context, _ = stand.go("b1", journal)
+    check("б3) живость: чужая задача пишет в карточку hr.A — warn есть", (0, True, 1),
+          (code, "w1" in context, warns(stand, "b1")))
+
+    stand = TreeStand(tmp / "two-tasks")
+    stand.part("a1", "hr.A")
+    stand.part("b1", "hr.B")
+    stand.go("a1", "src/app.py")
+    first = stand.go("b1", "src/app.py")
+    stand.go("b1", "src/app.py")
+    stand.go("b1", "src/app.py")
+    check("в) разные задачи, один код-файл: первая правка предупреждает", (0, True),
+          (first[0], "a1" in first[1]))
+    check("в) три правки подряд — file.claim.warn ровно один", 1, warns(stand, "b1"))
+
+    stand = TreeStand(tmp / "unknown-side")
+    stand.part("a1", "hr.A")
+    stand.go("a1", "src/app.py")
+    check("е) задачу пишущего установить нельзя (нет meta.json) — пересечение, warn", 1,
+          (stand.go("zz9", "src/app.py"), warns(stand, "zz9"))[1])
+
+    stand = TreeStand(tmp / "abandoned-holder", window_min="7")
+    stand.part("b1", "hr.B")
+    stand.plant_claim("a1", "src/app.py", minutes_ago=8, task="hr.A")
+    stand.plant_claim("a1", "src/fresh.py", minutes_ago=6, task="hr.A")
+    check("г) держатель чужой задачи брошен (8 мин при окне 7): молча, warn нет", ((0, ""), 0),
+          (stand.go("b1", "src/app.py")[:2], warns(stand, "b1")))
+    check("г) живость границы: держатель 6 мин при окне 7 — warn есть", 1,
+          (stand.go("b1", "src/fresh.py"), warns(stand, "b1"))[1])
+
+    stand = TreeStand(tmp / "shared-first")
+    stand.part("a1", "hr.A")
+    code, context, _ = stand.go("a1", SHARED_REL)
+    check("ж) общий файл, первая запись без держателя: напоминание есть, file.claim.warn нет",
+          (0, True, 0), (code, "общий файл" in context, warns(stand, "a1")))
+
+    stand = TreeStand(tmp / "task-from-label")
+    devmap = stand.base / "dev-map.yaml"
+    devmap.write_text("tasks:\n  - id: hr.map-wip\n    status: wip\n"
+                      "  - id: hr.A\n    status: plan\n", encoding="utf-8")
+    env = {k: v for k, v in stand.env().items() if k != "HARNESS_TASK"}
+    env["HARNESS_DEVMAP"] = str(devmap)
+    stand.part("a1", "hr.A")
+    stand.go("a1", "src/x.py", env=env)
+    rows = stand.claims("a1")
+    check("д) задача в file.claim — из метки «Часть:», не из единственной wip карты", "hr.A",
+          rows[0].get("task") if rows else None)
+    lines = [line for line in stand.who()[1].splitlines() if "src/x.py" in line or "a1" in line]
+    check("д) who-writes называет задачу по метке", True, any("hr.A" in line for line in lines))
+
+
 def judge_lock_who_writes(tmp: Path) -> None:
     stand = TreeStand(tmp / "who-lock", window_min="7")
     stand.plant_claim("a1", HC, minutes_ago=10, task="hr.A")
@@ -760,8 +866,10 @@ def main() -> int:
         for judge in (judge_lock_sick_cases, judge_lock_pair, judge_lock_abandoned_and_unknown,
                       judge_lock_shift, judge_lock_same_task_and_parent, judge_lock_release,
                       judge_lock_refresh_and_junk, judge_lock_script_writes, judge_lock_door,
-                      judge_lock_not_exclusive, judge_lock_never_breaks,
-                      judge_lock_no_package, judge_lock_cost, judge_lock_who_writes):
+                      judge_lock_not_exclusive, judge_lock_worktree_path,
+                      judge_lock_never_breaks,
+                      judge_lock_no_package, judge_lock_cost, judge_lock_who_writes,
+                      judge_real_intersection):
             judge(tmp)
     print(f"SELFTEST: {'зелёный' if not failed else 'КРАСНЫЙ'} ({checked} случаев, неудач {failed})")
     return 1 if failed else 0

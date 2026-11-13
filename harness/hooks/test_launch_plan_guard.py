@@ -430,9 +430,108 @@ def case_tasks_plan(tmp: Path) -> None:
           (code, (last(s).get("data") or {}).get("отказ")))
 
 
+# ─────────── HELPER_WORKTREE: исполнитель — в своём дереве (hr.per-helper-code-copies, Т2) ───────────
+# Спека .tasks/hr.per-helper-code-copies/спека.md §5, Р-4: isolation_verdict() — первой проверкой
+# decide, ДО пропуска «без метки»; ключ — установленный harness.conf (HARNESS_CONF), затем
+# ROOT/harness/config/harness.conf; дверь --door этот отказ не открывает.
+ISOLATION_HINT = 'isolation: "worktree"'
+
+
+def with_key(stand, value: str | None) -> None:
+    text = probe.CONF_TEXT + (f'HELPER_WORKTREE="{value}"\n' if value is not None else "")
+    stand.conf.write_text(text, encoding="utf-8")
+
+
+def launch(prompt: str, subagent_type: str = WORKER, isolation: str | None = None) -> dict:
+    payload = agent(prompt, subagent_type)
+    if isolation is not None:
+        payload["tool_input"]["isolation"] = isolation
+    return payload
+
+
+def case_isolation_key_off(tmp: Path) -> None:
+    # Поломка, что оставила бы зелёной: нет — красна только при требовании isolation и при ключе 0.
+    print("HELPER_WORKTREE=0: isolation не смотрится")
+    s = setup(tmp / "изоляция-0", "красный")
+    l1 = files_of(s, "L")[0]
+    for value in (None, "0", "да"):
+        with_key(s, value)
+        before = len(hook_rows(s))
+        code, err, ctx = hook(s, launch(f"Часть: P/c/L#1\nПравь {l1}."))
+        check(f"ключ {value!r}: исполнитель без isolation — проход, код 0", 0, code)
+        check(f"ключ {value!r}: ни слова об isolation", False,
+              "isolation" in err or "isolation" in ctx)
+        check(f"ключ {value!r}: одна строка журнала, как раньше", 1, len(hook_rows(s)) - before)
+    with_key(s, "0")
+    code, err, _ = hook(s, launch("Без метки: ревью.", subagent_type=WORKER))
+    check("ключ 0: без метки — пропуск, как раньше", 0, code)
+
+
+def case_isolation_key_on(tmp: Path) -> None:
+    # Поломка, что оставила бы зелёной: проверка после пропуска «без метки» (ловит строка
+    # «без метки → 2»); отказ всем типам (ловят explorer и lead без isolation); отказ
+    # вместо старой логики при isolation (ловит «L#9 → отказ 3»).
+    print("HELPER_WORKTREE=1: исполнитель без isolation — отказ")
+    s = setup(tmp / "изоляция-1", "красный")
+    with_key(s, "1")
+    l1 = files_of(s, "L")[0]
+    code, err, _ = hook(s, launch(f"Часть: P/c/L#1\nПравь {l1}."))
+    check("исполнитель без isolation — код 2", 2, code)
+    check("отказ называет поле isolation: \"worktree\"", True, ISOLATION_HINT in err)
+    check("отказ называет очередь слияния", True, "merge-queue.py" in err)
+    # Поломка: «есть поле isolation» вместо «isolation == worktree» — чужое значение прошло бы.
+    code, err, _ = hook(s, launch(f"Часть: P/c/L#1\nПравь {l1}.", isolation="remote"))
+    check("исполнитель с isolation не «worktree» — код 2", 2, code)
+    code, err, _ = hook(s, launch(f"Часть: P/c/L#1\nПравь {l1}.", isolation="worktree"))
+    check("исполнитель с isolation — старая логика: проход", 0, code)
+    code, err, _ = hook(s, launch("Часть: P/c/L#9\nПравь.", isolation="worktree"))
+    check("исполнитель с isolation — старая логика: отказ 3 по плану", (2, False),
+          (code, ISOLATION_HINT in err))
+    code, err, _ = hook(s, launch("Без метки: правь файл.", subagent_type=WORKER))
+    check("без метки «Часть:» — всё равно код 2 (проверка до пропуска)", 2, code)
+    code, err, _ = hook(s, launch("Без метки: найди.", subagent_type="harness-explorer"))
+    check("harness-explorer без isolation — проход", 0, code)
+    code, err, _ = hook(s, launch("Часть: P/c/L\nВеди задачу.", subagent_type=LEAD))
+    check("управляющий без isolation — проход", 0, code)
+    code, err, _ = hook(s, launch("Часть: P/c/L\nВеди задачу.", subagent_type=LEAD,
+                                  isolation="worktree"))
+    check("управляющий С isolation — код 2", 2, code)
+    check("отказ управляющему называет основное дерево", True, "основном дереве" in err)
+    check("дверь открыта", 0, door(s, DOOR_REASON))
+    code, _, _ = hook(s, launch(f"Часть: P/c/L#1\nПравь {l1}."))
+    check("дверь плана запуска отказ isolation не открывает", 2, code)
+
+
+def case_isolation_installed_wins(tmp: Path) -> None:
+    # Поломка, что оставила бы зелёной: ключ только из дерева или только из установленного —
+    # одна из двух строк краснеет.
+    print("HELPER_WORKTREE: установленный конфиг старше конфига дерева")
+    s = setup(tmp / "изоляция-конфиг", "красный")
+    tree = tmp / "дерево-хука"
+    (tree / "scripts" / "hooks").mkdir(parents=True)
+    (tree / "harness" / "config").mkdir(parents=True)
+    (tree / "scripts" / "lib").symlink_to(HERE.parent / "lib")
+    copy = tree / "scripts" / "hooks" / "launch_plan_guard.py"
+    copy.write_bytes(GUARD.read_bytes())
+    (tree / "harness" / "config" / "harness.conf").write_text('HELPER_WORKTREE="1"\n',
+                                                               encoding="utf-8")
+    l1 = files_of(s, "L")[0]
+    payload = json.dumps(launch(f"Часть: P/c/L#1\nПравь {l1}."), ensure_ascii=False)
+
+    def run_copy() -> int:
+        return subprocess.run([sys.executable, str(copy)], env=env(s), input=payload,
+                              capture_output=True, text=True, timeout=120).returncode
+
+    with_key(s, "0")
+    check("установленный 0, дерево 1 — проход", 0, run_copy())
+    with_key(s, None)
+    check("в установленном ключа нет, дерево 1 — отказ", 2, run_copy())
+
+
 CASES = (case_red, case_yellow, case_door, case_skip, case_self_derive, case_stale,
          case_trifle_silent, case_trifle_capacity_zero, case_stale_cache, case_order,
-         case_failure, case_tasks_plan)
+         case_failure, case_tasks_plan, case_isolation_key_off, case_isolation_key_on,
+         case_isolation_installed_wins)
 
 
 def main() -> int:

@@ -13,7 +13,7 @@ consent-buttons.jsonl пишет только этот модуль и толь�
   unsent  <log> <secrets_dir>   → строки JSON {nonce, target, text, reply_markup} для отправки;
                                   target = "<вид>:<цель>" (без вида, с «/» в начале — удаление)
   sent    <log> <nonce> <target> → ответ sendMessage на stdin; пишет «отправлено» только при ok:true
-  judge   <log> <owner_id>      → callback_query на stdin; пишет «да»/«нет», если нажатие прошло
+  judge   <log> <owner_id> [<secrets_dir>] → callback_query на stdin; пишет «да»/«нет», если нажатие прошло
 """
 from __future__ import annotations
 
@@ -109,13 +109,16 @@ def ttl_phrase(ttl: int) -> str:
     return f"{ttl // 60} ч" if ttl >= 120 and ttl % 60 == 0 else f"{ttl} мин"
 
 
+def in_secrets(target: Path, secrets_dir: str) -> bool:
+    # Как у двери: секрет — всё под корнем, а не только файл прямо в нём.
+    return bool(secrets_dir) and target.is_relative_to(os.path.realpath(secrets_dir))
+
+
 def delete_text(request: dict, secrets_dir: str, ttl: int) -> str:
     """Для секрета — каталог, размер и дата, без имени файла: имя может быть ключом доступа."""
     target = Path(str(request["цель"]))
     why = str(request.get("почему") or "")[:WHY_LIMIT]
-    # Как у двери: секрет — всё под корнем, а не только файл прямо в нём.
-    in_secrets = bool(secrets_dir) and target.is_relative_to(os.path.realpath(secrets_dir))
-    if in_secrets:
+    if in_secrets(target, secrets_dir):
         try:
             info = target.stat()
             what = (f"Секрет в каталоге {target.parent}, {info.st_size} байт, изменён "
@@ -359,19 +362,49 @@ def record_sent(log: Path, nonce: str, target: str, response: str) -> str | None
     return None
 
 
-def reject(answer: str, why: str, edit: str | None = None) -> dict:
-    return {"answer": answer, "log": f"нажатие отвергнуто: {why}", "edit": edit}
+def reject(answer: str, why: str, edit: str | None = None,
+           nonce: str | None = None, sent: dict | None = None) -> dict:
+    # nonce и sent — контекст для пинка смене; judge их забирает из вердикта.
+    return {"answer": answer, "log": f"нажатие отвергнуто: {why}", "edit": edit,
+            "nonce": nonce, "sent": sent}
 
 
-def judge(log: Path, owner_id: str, callback: dict) -> dict:
-    """Вердикт для диспетчера: {answer, log, edit, message_id, chat_id}. Записывает решение."""
+def kick_text(verdict: dict, secrets_dir: str) -> str:
+    """Пинок смене о нажатии владельца: что нажато, по какому запросу, что делать дальше."""
+    nonce, sent = verdict.get("nonce"), verdict.get("sent") or {}
+    what = f"решение «{verdict['decision']}» записано" if verdict.get("decision") else verdict["log"]
+    parts = [f"Владелец нажал кнопку: {what}."]
+    if sent:
+        goal = str(sent.get("цель") or "")
+        if sent.get("вид") == owner_word.ВИД_ПО_УМОЛЧАНИЮ and in_secrets(Path(goal), secrets_dir):
+            goal = f"секрет в каталоге {Path(goal).parent}"  # имя файла секрета — ключ доступа (И-3)
+        parts.append(f"Запрос: {sent.get('вид')} «{goal}».")
+    if nonce:
+        parts.append(f"nonce {nonce[:8]}.")
+    parts.append("Журнал кнопок обновлён — сделай следующий шаг по этому запросу.")
+    return " ".join(parts)
+
+
+def judge(log: Path, owner_id: str, callback: dict, secrets_dir: str = "") -> dict:
+    """Вердикт для диспетчера: {answer, log, edit, kick}. Записывает решение.
+
+    kick — пинок смене, только на нажатие владельца (записанное и отвергнутое)."""
     sender = (callback.get("from") or {}).get("id")
     message = callback.get("message") or {}
     chat = (message.get("chat") or {}).get("id")
     if str(sender) != owner_id:
-        return reject("Это не твой запрос", f"чужой from.id={sender}")
-    if str(chat) != owner_id:
-        return reject("Это не твой запрос", f"чужой chat.id={chat}")
+        verdict = reject("Это не твой запрос", f"чужой from.id={sender}")
+    elif str(chat) != owner_id:
+        verdict = reject("Это не твой запрос", f"чужой chat.id={chat}")
+    else:
+        verdict = decide(log, callback, sender, message)
+        verdict["kick"] = kick_text(verdict, secrets_dir)
+    for private in ("nonce", "sent", "decision"):
+        verdict.pop(private, None)
+    return verdict
+
+
+def decide(log: Path, callback: dict, sender, message: dict) -> dict:
     found = CALLBACK_RE.match(str(callback.get("data") or ""))
     if not found:
         return reject("Не понял нажатие", "callback_data не по шаблону")
@@ -379,16 +412,18 @@ def judge(log: Path, owner_id: str, callback: dict) -> dict:
     rows = read_rows(log / BUTTONS)
     sent = last_sent(rows, nonce)
     if sent is None:
-        return reject("Запрос не найден", f"по nonce {nonce[:8]} нет «отправлено»")
+        return reject("Запрос не найден", f"по nonce {nonce[:8]} нет «отправлено»", nonce=nonce)
     message_id = message.get("message_id")
     if str(message_id) != str(sent.get("message_id")):
-        return reject("Нажми в последнем сообщении", f"nonce {nonce[:8]}: сообщение {message_id} не последнее")
+        return reject("Нажми в последнем сообщении", f"nonce {nonce[:8]}: сообщение {message_id} не последнее",
+                      nonce=nonce, sent=sent)
     if decided(rows, nonce):
-        return reject("Уже решено", f"nonce {nonce[:8]}: решение уже записано")
+        return reject("Уже решено", f"nonce {nonce[:8]}: решение уже записано",
+                      nonce=nonce, sent=sent)
     age = minutes_since(sent.get("ts"))
     if age is None or age > owner_word.срок_кнопки_мин(sent.get("вид", owner_word.ВИД_ПО_УМОЛЧАНИЮ)):
         return reject("Запрос устарел — попроси заново", f"nonce {nonce[:8]}: срок кнопки вышел",
-                      edit="Запрос устарел, решение не записано.")
+                      edit="Запрос устарел, решение не записано.", nonce=nonce, sent=sent)
     event = DECISIONS[answer]
     # Вид и цель из «отправлено» (охраняемый носитель), а не из журнала запросов: его сессия может переписать.
     append_row(log, event, {"nonce": nonce, "вид": sent.get("вид", owner_word.ВИД_ПО_УМОЛЧАНИЮ),
@@ -396,7 +431,8 @@ def judge(log: Path, owner_id: str, callback: dict) -> dict:
                             "message_id": message_id, "from_id": sender})
     return {"answer": "Принято" if event == "да" else "Отказ записан",
             "log": f"решение «{event}» записано, nonce {nonce[:8]}",
-            "edit": f"Ответ записан: {event}."}
+            "edit": f"Ответ записан: {event}.",
+            "nonce": nonce, "sent": sent, "decision": event}
 
 
 def main(argv: list[str]) -> int:
@@ -414,7 +450,8 @@ def main(argv: list[str]) -> int:
             callback = json.loads(sys.stdin.read())
         except ValueError:
             callback = {}
-        print(json.dumps(judge(log, argv[3], callback if isinstance(callback, dict) else {}),
+        print(json.dumps(judge(log, argv[3], callback if isinstance(callback, dict) else {},
+                               argv[4] if len(argv) > 4 else ""),
                          ensure_ascii=False))
     return 0
 

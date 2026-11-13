@@ -235,13 +235,21 @@ make_release "$PKG"
 rm "$PKG/harness/self/MANIFEST.sha256"
 # Ветки пусты: проскочи вызов мимо двери в основной путь — отказ конфига (2), не публикация.
 printf 'PROJECT_DIR="%s"\nPUBLIC_BRANCH=""\n' "$PUB/proj" > "$PUB/conf"
+# Дверь берёт конфиг только своей дверью (АР-3): зовём КОПИЮ publish.sh (с lib/) вне
+# PROJECT_DIR машины, паспорт стенда — HARNESS_DOOR_STAND_HOME. Настоящий файл взял бы
+# паспорт машины, и «ветки пусты» перестали бы быть правдой.
+mkdir -p "$PUB/door" "$PUB/home"
+cp "$HERE/publish.sh" "$PUB/door/publish.sh"
+cp -r "$HERE/lib" "$PUB/door/lib"
+cp "$PUB/conf" "$PUB/home/install.conf"
+cp "$PUB/conf" "$PUB/home/harness.conf"
 PUB_DOOR=нет
-grep -qF -- '--манифест-слоя1' "$HERE/publish.sh" && PUB_DOOR=да
+grep -qF -- '--манифест-слоя1' "$PUB/door/publish.sh" && PUB_DOOR=да
 
 publish_manifest() { # $1=прошлый манифест → код; вывод в $PUB/out
     [ "$PUB_DOOR" = да ] || { echo "двери --манифест-слоя1 нет — publish.sh не зовём" > "$PUB/out"; return 1; }
-    HARNESS_CONF="$PUB/conf" HARNESS_INSTALL_CONF="$PUB/conf" \
-        bash "$HERE/publish.sh" --манифест-слоя1 "$PKG" "$1" > "$PUB/out" 2>&1
+    HARNESS_CONF="$PUB/conf" HARNESS_INSTALL_CONF="$PUB/conf" HARNESS_DOOR_STAND_HOME="$PUB/home" \
+        bash "$PUB/door/publish.sh" --манифест-слоя1 "$PKG" "$1" > "$PUB/out" 2>&1
 }
 changed_line() { grep -m1 'меняются личность/стандарты:' "$PUB/out" || echo "строки нет"; }
 names_in_line() { # $1=строка → какие из файлов слоя 1 (и новые) в ней названы

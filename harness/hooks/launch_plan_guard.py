@@ -40,12 +40,15 @@ import yaml
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT / "scripts" / "lib"))
+import config                                            # noqa: E402
 import events                                            # noqa: E402
 
 SRC = "scripts/hooks/launch_plan_guard.py"
 EVENT = "nesting.decision"
 TOOLS = ("Agent", "Task")
 LEAD_TYPE = "harness-lead"
+WORKER_TYPE = "harness-worker"
+ISOLATION_KEY = "HELPER_WORKTREE"
 DOOR_NAME = "launch-plan.door"
 DOOR_TTL_S = 15 * 60
 DOOR_REASON_MIN = 10
@@ -218,11 +221,40 @@ DOOR_HINT = ("Законная дверь на 15 минут: python3 scripts/ho
              "--door 'причина'")
 
 
+def worktree_mode() -> bool:
+    """HELPER_WORKTREE=1: установленный harness.conf, затем конфиг дерева хука; не «1» = 0."""
+    tree_conf = ROOT / "harness" / "config" / "harness.conf"
+    value = (config.из_файла(config.путь_harness_conf()).get(ISOLATION_KEY)
+             or config.из_файла(str(tree_conf)).get(ISOLATION_KEY) or "")
+    return value == "1"
+
+
+def isolation_verdict(kind: str, tool_input: dict) -> str:
+    """Текст отказа, если запуск не по режиму своего дерева; пусто — проход. Дверь --door не открывает."""
+    isolated = tool_input.get("isolation") == "worktree"
+    if kind == WORKER_TYPE and not isolated:
+        return ("HELPER_WORKTREE=1: исполнитель работает в своём дереве. Повтори тот же вызов с "
+                'полем isolation: "worktree". После отчёта: python3 scripts/merge-queue.py '
+                "<ветка из отчёта>")
+    if kind == LEAD_TYPE and isolated:
+        return ("HELPER_WORKTREE=1: управляющий ведёт задачу в основном дереве: сливает очередью "
+                "(python3 scripts/merge-queue.py) и пишет журнал. Повтори вызов без isolation.")
+    return ""
+
+
 def decide(payload: dict) -> tuple:
     """(код, stderr, additionalContext)."""
     if payload.get("tool_name") not in TOOLS:
         return 0, "", ""
     tool_input = payload.get("tool_input") or {}
+    if worktree_mode():
+        refusal = isolation_verdict(str(tool_input.get("subagent_type") or ""), tool_input)
+        if refusal:
+            label = LABEL.search(str(tool_input.get("prompt") or ""))
+            task = label["path"].rstrip("/").split("/")[-1] if label else ""
+            record("refused", task, str(payload.get("session_id") or ""),
+                   {"отказ": "isolation", "тип": str(tool_input.get("subagent_type") or "")})
+            return 2, refusal, ""
     prompt = str(tool_input.get("prompt") or "")
     kind = str(tool_input.get("subagent_type") or "")
     session = str(payload.get("session_id") or "")

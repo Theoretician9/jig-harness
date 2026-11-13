@@ -271,18 +271,34 @@ def write_conf(stand: Path, name: str, ceiling: int, roles: dict = ROLES,
     return path
 
 
-def cards_yaml(cards: dict) -> str:
-    """Карточки plan строками задач карты; название в JSON-кавычках — двоеточие не ломает YAML."""
-    return "".join(f"  - id: {cid}\n    status: plan\n    title: {json.dumps(title, ensure_ascii=False)}\n"
+# Карточки стенда, чья работа ещё идёт (wip), пока стенд не переведён целиком в test: блок задачи судит карта.
+STAND_WIP = ("hr.demo-format", "hr.demo-running")
+
+
+def cards_yaml(cards: dict, default: str = "plan") -> str:
+    """Карточки строками задач карты (STAND_WIP — wip при default plan, остальные — default); название в JSON-кавычках —
+    двоеточие не ломает YAML."""
+    return "".join(f"  - id: {cid}\n    status: {'wip' if cid in STAND_WIP and default == 'plan' else default}\n"
+                   f"    title: {json.dumps(title, ensure_ascii=False)}\n"
                    for cid, title in cards.items())
 
 
-def add_cards(stand: Path, cards: dict) -> None:
+def add_cards(stand: Path, cards: dict, status: str = "plan") -> None:
     with (stand / "dev-map.yaml").open("a", encoding="utf-8") as out:
-        out.write(cards_yaml(cards))
+        out.write(cards_yaml(cards, status))
 
 
-def make_stand() -> Path:
+def set_status(stand: Path, status: str, *ids: str) -> None:
+    """Статус карточек стенда по id: случай, где одним задачам нужен test, а другим — plan/wip."""
+    path = stand / "dev-map.yaml"
+    text = path.read_text(encoding="utf-8")
+    for cid in ids:
+        text, count = re.subn(rf"(- id: {re.escape(cid)}\n    status: )\w+", rf"\g<1>{status}", text)
+        assert count == 1, cid
+    path.write_text(text, encoding="utf-8")
+
+
+def make_stand(card_status: str = "plan") -> Path:
     stand = Path(tempfile.mkdtemp(prefix="proba-statusa-"))
     (stand / "log").mkdir()
     (stand / "project").mkdir()
@@ -306,7 +322,7 @@ def make_stand() -> Path:
         f"    title: {WIP_TITLE}\n"
         "  - id: hr.demo-next\n"
         "    status: plan\n"
-        f"    title: {NEXT_TITLE}\n" + cards_yaml(STAND_CARDS), encoding="utf-8")
+        f"    title: {NEXT_TITLE}\n" + cards_yaml(STAND_CARDS, card_status), encoding="utf-8")
     (stand / "queue.txt").write_text(
         "работа: 2\n"
         "ждут: \n"
@@ -539,7 +555,9 @@ def long_journal(stand: Path, models: tuple = ("opus", "sonnet")) -> Path:
     words = ("сверка", "журнала", "вызовов", "агентов", "по", "сессии", "и", "окну",
              "времени", "со", "сборкой", "дерева", "управляющих", "исполнителей")
     cards = long_cards(40, words)
-    add_cards(stand, cards)
+    # Карточки в test: все сорок — СДЕЛАНО, а «сейчас никто не работает» в тексте отключило бы у сторожа
+    # канала разбор самокомментариев («не рабо» — признак последствия).
+    add_cards(stand, cards, "test")
     rows = []
     for i, cid in enumerate(cards):
         rows.append(launch(f"c-L{i}", f"Часть: {cid}#1 Оркестратор: длинная работа", "harness-lead",
@@ -583,15 +601,17 @@ def case_roles(stand: Path) -> None:
                review=True, ts=day("11:30")),
         launch("c-G", "Часть: hr.demo-roles#5 Разбор вывода", "general-purpose", "sonnet", "c-L",
                ts=day("11:40")),
+        launch("c-H", "Часть: hr.demo-roles#6 Сводка вывода", "general-purpose", "sonnet", "c-L",
+               ts=day("11:50")),
     ]
-    rows += [finish(c, ts=day("12:30")) for c in ("c-T", "c-C", "c-R", "c-G", "c-L")]
+    rows += [finish(c, ts=day("12:30")) for c in ("c-T", "c-C", "c-R", "c-G", "c-H", "c-L")]
     out = run_report(stand, write_journal(stand, rows))
     task = task_of(blocks(out).get(HEADERS[0], []), STAND_CARDS["hr.demo-roles"])
     pairs = who_pairs(field(task, "делали"))
-    need = [(LABELS["opus"], "вёл"), (LABELS["opus"], "проверка"), (LABELS["sonnet"], "тесты"), (LABELS["sonnet"], "помощник"),
-            (LABELS["haiku"], "код")]
-    PROBE.check("роли: lead — вёл (флаг ревью не в счёт), test_ — тесты, worker — код, "
-                "ревью — проверка, иной тип — помощник", pairs == need, pairs or out)
+    need = [(LABELS["opus"], "вёл"), (LABELS["opus"], "проверка"), (LABELS["sonnet"], "разведка"),
+            (LABELS["sonnet"], "тесты"), (LABELS["sonnet"], "помощник"), (LABELS["haiku"], "код")]
+    PROBE.check("роли: lead — вёл (флаг ревью не в счёт), test_ — тесты, worker — код, ревью — проверка, "
+                "«Разбор» — разведка, иной тип — помощник", pairs == need, pairs or out)
     PROBE.check("в отчёте нет иконок и слов прежнего дерева",
                 not any(s in out for s in ("🧭", "🎼", "├", "└", "Оркестратор", "оркестратор")), out)
 
@@ -1013,6 +1033,7 @@ def case_lead_before_mark(stand: Path) -> None:
     ]
     journal = write_journal(stand, rows)
     set_mark(stand, at(30))
+    set_status(stand, "test", "hr.demo-spravka")   # сданная правка; сверка заявок ещё идёт (plan)
     out, done, doing = report_since(stand, journal, conf)
     sverka, spravka = STAND_CARDS["hr.demo-sverka"], STAND_CARDS["hr.demo-spravka"]
     PROBE.check("задача с идущим исполнителем — в ДЕЛАЕТСЯ", bool(task_of(doing, sverka)), doing)
@@ -1286,34 +1307,48 @@ def clock(moment: str) -> str:
     return datetime.fromisoformat(moment).astimezone().strftime("%H:%M")
 
 
-def commits_line(stand: Path) -> str:
-    return line_with(run_report(stand, Path(), mode_conf(stand, "1"),
-                                since_args(stand, stand / "log" / "вызовы-агентов.jsonl")).splitlines(),
-                     COMMITS_HEAD)
+def with_trailer(subject: str, card: str = "hr.demo-cleanup") -> str:
+    """Коммит задачи: трейлер «Dev-Map: <карточка>» — единственное, что делает его работой задачи."""
+    return f"{subject}\n\nDev-Map: {card}"
+
+
+def has_commit_note(text: str) -> bool:
+    """Есть ли в отчёте примечание задачи «коммитов N, последний: …»; ищется РАЗБОРОМ строк."""
+    return any(re.match(r"коммитов \d+, последний: ", l.strip()) for l in text.splitlines())
+
+
+def cleanup_note(stand: Path) -> str:
+    """Примечание о коммитах задачи «уборка» (карточка в test: сделана); нет — пусто."""
+    set_status(stand, "test", "hr.demo-cleanup")
+    out = run_report(stand, Path(), mode_conf(stand, "1"),
+                     since_args(stand, stand / "log" / "вызовы-агентов.jsonl"))
+    return next((l.strip() for l in out.splitlines() if has_commit_note(l)), "")
 
 
 def case_commits_shown(stand: Path) -> None:
     write_journal(stand, lead_rows())
     set_mark(stand, at(100))
-    git_stand(stand / "project", [("Старая работа до метки", at(120)),
-                                  ("Сборщик: строка коммитов", at(50)),
-                                  ("Пробы: стенд коммитов", at(20))])
+    git_stand(stand / "project", [(with_trailer("Старая работа до метки"), at(120)),
+                                  (with_trailer("Сборщик: строка коммитов"), at(50)),
+                                  (with_trailer("Пробы: стенд коммитов"), at(20))])
+    set_status(stand, "test", "hr.demo-cleanup")
     out, done, _ = report_since(stand, stand / "log" / "вызовы-агентов.jsonl", mode_conf(stand, "1"))
-    expect = f"{COMMITS_HEAD} 2, последний: Пробы: стенд коммитов"
-    PROBE.check(f"коммиты после метки — строка «{expect}»", expect in done, done or out)
-    PROBE.check("строка 📝 — последняя в СДЕЛАНО, после задач",
-                bool(done) and done[-1] == expect and bool(task_of(done, CLEANUP)), done)
+    expect = ("2", "Пробы: стенд коммитов")
+    task = task_of(done, CLEANUP)
+    PROBE.check(f"коммиты после метки — у задачи примечание «коммитов {expect[0]}, последний: {expect[1]}»",
+                commit_notes(task) == [expect], task or out)
+    PROBE.check("общей строки 📝 нет", COMMITS_HEAD not in out, out)
     PROBE.check("коммит до метки не считан", "Старая работа" not in out, out)
 
 
 def case_commits_panel(stand: Path) -> None:
     write_journal(stand, lead_rows())
     set_mark(stand, at(100))
-    git_stand(stand / "project", [("Сборщик: строка коммитов", at(50)),
-                                  ("Пробы: стенд коммитов", at(20)), (PANEL_SUBJECT, at(10))])
-    line = commits_line(stand)
-    PROBE.check("панельный коммит не считан и не назван последним",
-                line == f"{COMMITS_HEAD} 2, последний: Пробы: стенд коммитов", line)
+    git_stand(stand / "project", [(with_trailer("Сборщик: строка коммитов"), at(50)),
+                                  (with_trailer("Пробы: стенд коммитов"), at(20)), (PANEL_SUBJECT, at(10))])
+    note = cleanup_note(stand)
+    PROBE.check("панельный коммит (без трейлера) не считан и не назван последним",
+                note == "коммитов 2, последний: Пробы: стенд коммитов", note)
 
 
 def case_idle_phrase(stand: Path) -> None:
@@ -1330,7 +1365,7 @@ def case_idle_phrase(stand: Path) -> None:
     expect = f"с {clock(mark)} нового нет; последний помощник кончил {clock(at(30))}"
     PROBE.check(f"ни помощников, ни коммитов — СДЕЛАНО ровно «{expect}»", done == [expect],
                 done or out)
-    PROBE.check("строки 📝 нет без коммитов", COMMITS_HEAD not in out, out)
+    PROBE.check("примечания о коммитах нет без коммитов", not has_commit_note(out), out)
     journal = write_journal(stand, [r for r in rows if r["event"] != "agent.finish"])
     _, done, _ = report_since(stand, journal, conf)
     PROBE.check(f"концов в журнале нет совсем — СДЕЛАНО ровно «{NOTHING_AT_ALL}»",
@@ -1343,19 +1378,20 @@ def case_commits_no_repo(stand: Path) -> None:
     set_mark(stand, at(30))
     args = since_args(stand, journal)
     out = run_report(stand, journal, conf, args)
-    PROBE.check("PROJECT_DIR не репозиторий: код 0, строки 📝 нет", COMMITS_HEAD not in out, out)
-    repo = git_stand(stand / "repo", [("Свежая работа стенда", at(10))])
+    PROBE.check("PROJECT_DIR не репозиторий: код 0, примечания о коммитах нет", not has_commit_note(out), out)
+    repo = git_stand(stand / "repo", [(with_trailer("Свежая работа стенда"), at(10))])
+    set_status(stand, "test", "hr.demo-cleanup")
     out = run_report(stand, journal, conf, args, env={"PROJECT_DIR": str(repo)})
-    PROBE.check("условие: тот же стенд с репозиторием показывает 📝", COMMITS_HEAD in out, out)
+    PROBE.check("условие: тот же стенд с репозиторием показывает примечание о коммитах", has_commit_note(out), out)
     (stand / "nogit").mkdir()
     out = run_report(stand, journal, conf, args,
                      env={"PROJECT_DIR": str(repo), "PATH": str(stand / "nogit")})
-    PROBE.check("git нет в PATH: код 0, строки 📝 нет", COMMITS_HEAD not in out, out)
+    PROBE.check("git нет в PATH: код 0, примечания о коммитах нет", not has_commit_note(out), out)
     (stand / "install-empty.conf").write_text("", encoding="utf-8")
     # Пустой корень проекта: `git -C ""` взял бы каталог запуска — тут он репозиторий.
     out = run_report(stand, journal, conf, args, cwd=repo,
                      env={"PROJECT_DIR": "", "HARNESS_INSTALL_CONF": str(stand / "install-empty.conf")})
-    PROBE.check("пустой PROJECT_DIR: коммиты каталога запуска не взяты", COMMITS_HEAD not in out, out)
+    PROBE.check("пустой PROJECT_DIR: коммиты каталога запуска не взяты", not has_commit_note(out), out)
 
 
 def sessions_journal(stand: Path) -> Path:
@@ -1387,10 +1423,14 @@ def case_session_filter(stand: Path) -> None:
 def case_commits_only(stand: Path) -> None:
     write_journal(stand, lead_rows())
     set_mark(stand, at(45))
-    git_stand(stand / "project", [("Пробы: стенд коммитов", at(20))])
+    git_stand(stand / "project", [(with_trailer("Пробы: стенд коммитов"), at(20))])
+    set_status(stand, "test", "hr.demo-cleanup")
     out, done, _ = report_since(stand, stand / "log" / "вызовы-агентов.jsonl", mode_conf(stand, "1"))
-    PROBE.check("задач нет, коммит есть: СДЕЛАНО — только строка 📝, без фразы простоя",
-                done == [f"{COMMITS_HEAD} 1, последний: Пробы: стенд коммитов"], done or out)
+    task = task_of(done, CLEANUP)
+    PROBE.check("запусков в окне нет, коммит есть: СДЕЛАНО — задача с одним примечанием о коммите, "
+                "без «делали» и без фразы простоя",
+                commit_notes(task) == [("1", "Пробы: стенд коммитов")] and not field(task, "делали")
+                and len(parse_tasks(done)) == 1 and "нового нет" not in out, done or out)
 
 
 def case_commit_truncated(stand: Path) -> None:
@@ -1400,13 +1440,14 @@ def case_commit_truncated(stand: Path) -> None:
     journal = write_journal(stand, lead_rows())
     set_mark(stand, at(30))
     subject = "Сборщик статуса: " + "длинная тема коммита про очередь и журнал " * 25
-    git_stand(stand / "project", [(subject.strip(), at(10))])
+    git_stand(stand / "project", [(with_trailer(subject.strip()), at(10))])
+    set_status(stand, "test", "hr.demo-cleanup")
     text = run_report(stand, journal, conf, since_args(stand, journal))
-    line = line_with(text.splitlines(), COMMITS_HEAD)
+    line = line_with(text.splitlines(), "коммитов 1, последний")
     PROBE.check(f"длинная тема: отчёт {len(text)} ≤ {CHANNEL_CEILING}",
                 0 < len(text) <= CHANNEL_CEILING, len(text))
-    PROBE.check("длинная тема: строка 📝 обрезана до ≤ 80 с «…»",
-                line.startswith(f"{COMMITS_HEAD} 1, последний: Сборщик статуса")
+    PROBE.check("длинная тема: примечание о коммите обрезано до ≤ 80 с «…»",
+                line.strip().startswith("коммитов 1, последний: Сборщик статуса")
                 and line.endswith("…") and len(line) <= 80, line or text)
     (stand / "install-empty.conf").write_text("", encoding="utf-8")
     done = subprocess.run(
@@ -1495,16 +1536,17 @@ def case_lost_real(stand: Path) -> None:
     ]
     out, got = lost_report(stand, rows)
     doing = got.get(HEADERS[1], [])
-    PROBE.check("ДЕЛАЕТСЯ — «пока ничего»: оркестратор кончил, ребёнок потерян",
-                doing == ["пока ничего"], doing or out)
+    guard = task_of(doing, STAND_CARDS["hr.demo-guard"])
+    PROBE.check("карточка plan: оркестратор кончил, ребёнок потерян — ДЕЛАЕТСЯ с «сейчас никто не работает» "
+                "(потерянный не «делает»)",
+                NOBODY in guard.get("rest", []) and not field(guard, "делают"), doing or out)
     lost = got.get(LOST_HEADER, [])
     line = line_with(lost, STAND_CARDS["hr.demo-guard"])
     PROBE.check(f"потерянный ребёнок в ⚠ задачей словами, с моделью и временем {clock(lost_at)}",
                 len(lost) == 1 and clock(lost_at) in line and LABELS["sonnet"] in line, lost or out)
-    done = got.get(HEADERS[0], [])
-    pairs = who_pairs(field(task_of(done, STAND_CARDS["hr.demo-guard"]), "делали"))
-    PROBE.check("задача в СДЕЛАНО: оркестратор и законченное продолжение в «делали»",
-                pairs == [(LABELS["sonnet"], "вёл"), (LABELS["sonnet"], "код")], done)
+    pairs = who_pairs(field(guard, "делали"))
+    PROBE.check("в «делали»: оркестратор и законченное продолжение",
+                pairs == [(LABELS["sonnet"], "вёл"), (LABELS["sonnet"], "код")], doing)
     PROBE.check("оркестратор в ⚠ не попал: там одна строка, не две", len(lost) == 1, lost or out)
 
 
@@ -1619,6 +1661,7 @@ def case_lost_none_same(stand: Path) -> None:
                ts=at(60)),
         launch("c-R", "Часть: hr.demo-nocard#1 Свежая работа", "harness-worker", "opus", ts=at(20)),
     ]
+    set_status(stand, "test", "hr.demo-cleanup")   # уборка сдана, правка справки ещё идёт (plan)
     out, _ = lost_report(stand, rows)
     opus, sonnet = LABELS["opus"], LABELS["sonnet"]
     expect = "\n".join([
@@ -1672,18 +1715,19 @@ def case_lost_mark_mode(stand: Path) -> None:
         finish("c-W", ts=at(300))])
     out = run_report(stand, journal, conf, since_args(stand, journal))
     got = blocks(out)
-    PROBE.check("корень без жизни 5 ч не в ДЕЛАЕТСЯ, там «пока ничего»",
-                got.get(HEADERS[1]) == ["пока ничего"], got.get(HEADERS[1]) or out)
+    night = STAND_CARDS["hr.demo-night"]
+    doing = got.get(HEADERS[1], [])
+    PROBE.check("корень без жизни 5 ч не «делает»: задача plan в ДЕЛАЕТСЯ с «сейчас никто не работает»",
+                NOBODY in task_of(doing, night).get("rest", []) and not field(task_of(doing, night), "делают"),
+                doing or out)
     line = line_with(got.get(LOST_HEADER, []), STAND_CARDS["hr.demo-night"])
     PROBE.check(f"корень вне окна 12 ч, но живший после метки — в ⚠ с временем {clock(started)}",
                 bool(line) and clock(started) in line, got.get(LOST_HEADER) or out)
-    done = got.get(HEADERS[0], [])
-    night = STAND_CARDS["hr.demo-night"]
-    PROBE.check("ребёнок, кончивший после метки, — его задача в СДЕЛАНО один раз",
-                bool(task_of(done, night)) and all_titles(out).count(night) == 1, out)
+    PROBE.check("ребёнок, кончивший после метки, — его задача в отчёте один раз",
+                bool(task_of(doing, night)) and all_titles(out).count(night) == 1, out)
     PROBE.check("в «делали» — ребёнок, потерянный корень не в счёт",
-                who_pairs(field(task_of(done, night), "делали")) == [(LABELS["sonnet"], "код")],
-                done)
+                who_pairs(field(task_of(doing, night), "делали")) == [(LABELS["sonnet"], "код")],
+                doing)
     journal = write_journal(stand, [
         launch("c-X", "Забытая выгрузка", "harness-worker", "sonnet", ts=started)])
     out = run_report(stand, journal, conf, since_args(stand, journal))
@@ -1718,12 +1762,12 @@ def case_lost_middle(stand: Path) -> None:
     PROBE.check("условие: ребёнок без жизни 4 ч — в ⚠",
                 bool(line_with(got.get(LOST_HEADER, []), STAND_CARDS["hr.demo-memory"])),
                 got.get(LOST_HEADER) or out)
-    done = got.get(HEADERS[0], [])
+    doing = got.get(HEADERS[1], [])
     memory = STAND_CARDS["hr.demo-memory"]
-    PROBE.check("корень и законченный внук — одна задача в СДЕЛАНО, не две",
-                who_pairs(field(task_of(done, memory), "делали"))
+    PROBE.check("корень и законченный внук — одна задача (plan: в ДЕЛАЕТСЯ без «делают»), не две",
+                who_pairs(field(task_of(doing, memory), "делали"))
                 == [(LABELS["opus"], "вёл"), (LABELS["haiku"], "код")]
-                and all_titles(out).count(memory) == 1, done or out)
+                and all_titles(out).count(memory) == 1, doing or out)
 
 
 def case_lost_root_done_child(stand: Path) -> None:
@@ -1740,13 +1784,13 @@ def case_lost_root_done_child(stand: Path) -> None:
     PROBE.check("потерянный корень — в ⚠ задачей словами, одной строкой",
                 len(got.get(LOST_HEADER, [])) == 1
                 and STAND_CARDS["hr.demo-oldclean"] in joined(got, LOST_HEADER), out)
-    PROBE.check("ДЕЛАЕТСЯ — «пока ничего»", got.get(HEADERS[1]) == ["пока ничего"],
-                got.get(HEADERS[1]) or out)
-    done = got.get(HEADERS[0], [])
+    doing = got.get(HEADERS[1], [])
     oldclean = STAND_CARDS["hr.demo-oldclean"]
-    PROBE.check("законченный ребёнок держит задачу в СДЕЛАНО, «делали» — только он",
-                who_pairs(field(task_of(done, oldclean), "делали")) == [(LABELS["sonnet"], "код")]
-                and all_titles(out).count(oldclean) == 1, done or out)
+    PROBE.check("карточка plan: задача в ДЕЛАЕТСЯ с «сейчас никто не работает»",
+                NOBODY in task_of(doing, oldclean).get("rest", []), doing or out)
+    PROBE.check("законченный ребёнок держит задачу, «делали» — только он",
+                who_pairs(field(task_of(doing, oldclean), "делали")) == [(LABELS["sonnet"], "код")]
+                and all_titles(out).count(oldclean) == 1, doing or out)
 
 
 # ── по задачам ──────────────────────────────────────────────────────────────
@@ -2176,12 +2220,15 @@ def case_long_lead(stand: Path) -> None:
         out, done, doing = report_since(stand, journal, mode_conf(stand, mode))
         PROBE.check(f"STATUS_DONE_SINCE_LAST={mode}: ведущий старше окна 12 ч без конца — в ДЕЛАЕТСЯ",
                     bool(task_of(doing, deep)) and not task_of(done, deep), out)
+        # Блок держит и карта (plan); живость ведущего видна только в «делают».
+        PROBE.check(f"STATUS_DONE_SINCE_LAST={mode}: ведущий старше окна — в «делают» (вёл)",
+                    (LABELS["opus"], "вёл") in who_pairs(field(task_of(doing, deep), "делают")), out)
 
 
 def case_cut_reported(stand: Path) -> None:
     cards = {f"hr.demo-rep-{i}": f"Сделанная задача {i:02d}: сторож следит за длинным делом без пауз"
              for i in range(12)}
-    add_cards(stand, cards)
+    add_cards(stand, cards, "test")
     rows = []
     for i, cid in enumerate(cards):
         rows += [launch(f"c-L{i}", "Оркестратор: дело", "harness-lead", "opus", ts=at(200),
@@ -2253,11 +2300,11 @@ def case_doing_running_only(stand: Path) -> None:
 def case_commits_human(stand: Path) -> None:
     write_journal(stand, lead_rows())
     set_mark(stand, at(100))
-    git_stand(stand / "project", [("Карта: три карточки plan из мутаций hr.rotation-hold-not-mute-owner",
+    git_stand(stand / "project", [(with_trailer("Карта: три карточки plan из мутаций hr.rotation-hold-not-mute-owner"),
                                    at(20))])
-    line = commits_line(stand)
-    PROBE.check("условие: строка 📝 есть", line.startswith(COMMITS_HEAD), line)
-    PROBE.check("в строке 📝 нет id карточки и слова plan",
+    line = cleanup_note(stand)
+    PROBE.check("условие: примечание о коммите есть", line.startswith("коммитов 1"), line)
+    PROBE.check("в примечании нет id карточки и слова plan",
                 not CARD_ID.search(line) and "plan" not in line, line)
 
 
@@ -2317,6 +2364,7 @@ def container_rows() -> list:
 
 
 def case_container_running(stand: Path) -> None:
+    set_status(stand, "wip", "hr.demo-format")    # ведущий идёт: задачи его детей в работе
     out, got = lost_report(stand, container_rows())
     doing = got.get(HEADERS[1], [])
     leads = [t for t in parse_tasks(doing) if (LABELS["opus"], "вёл") in who_pairs(field(t, "делают"))]
@@ -2324,6 +2372,7 @@ def case_container_running(stand: Path) -> None:
                 bool(leads) and doing != ["пока ничего"], doing or out)
     PROBE.check("ведущий не стал отдельной задачей и не потерян",
                 PACK not in all_titles(out) and LOST_HEADER not in out, out)
+    set_status(stand, "test", "hr.demo-format")   # ведущий кончил: обе задачи сданы
     out, got = lost_report(stand, container_rows() + [finish("c-L", ts=at(10))])
     titles = all_titles(out)
     PROBE.check("после конца ведущего: ДЕЛАЕТСЯ пусто, задачи детей по разу",
@@ -2338,13 +2387,16 @@ def case_resume_without_life(stand: Path) -> None:
     out, got = lost_report(stand, rows)
     PROBE.check("resume без единого события работы 2,5 ч — не в ⚠ ПОТЕРЯН",
                 LOST_HEADER not in out, out)
-    PROBE.check("и не висит в ДЕЛАЕТСЯ", not task_of(got.get(HEADERS[1], []), STAND_CARDS["hr.demo-bare"]),
-                out)
+    # Карточка стенда plan: в test её ⚠ гасила бы карта, и мутант «resume оживил запуск» прятался бы за ней.
+    # Блок судит карта (plan — ДЕЛАЕТСЯ), здесь судится одно: запуск никто не «делает».
+    PROBE.check("и не «делает»: строки «делают» нет",
+                not field(task_of(got.get(HEADERS[1], []), STAND_CARDS["hr.demo-bare"]), "делают"), out)
 
 
 def case_next_without_done(stand: Path) -> None:
     rows = [launch("c-W", "Уборка", "harness-worker", "sonnet", ts=day("12:30"),
                    part="Часть: hr.demo-next#1"), finish("c-W")]
+    set_status(stand, "test", "hr.demo-next")
     out = run_report(stand, write_journal(stand, rows))
     PROBE.check("условие: задача из очереди сделана — в СДЕЛАНО",
                 bool(task_of(blocks(out).get(HEADERS[0], []), NEXT_TITLE)), out)
@@ -2357,17 +2409,20 @@ LONG_TITLE = ("Сторож убирает за сменой забытые от
 
 
 def case_title_word_cut(stand: Path) -> None:
-    add_cards(stand, {"hr.demo-longtitle": LONG_TITLE})
-    rows = [launch("c-W", "Код", "harness-worker", "sonnet", ts=day("12:30"),
-                   part="Часть: hr.demo-longtitle#1"), finish("c-W")]
-    out = run_report(stand, write_journal(stand, rows))
-    line = line_with(out.splitlines(), "Сторож убирает")
-    head = TASK_LINE.match(line).group(2) if TASK_LINE.match(line) else ""
-    kept = head.removesuffix("…").rstrip(" ,;:—-")
-    PROBE.check("условие: заголовок урезан до ≤ 80 с «…»",
-                len(line) <= 80 and head.endswith("…") and LONG_TITLE.startswith(kept), line or out)
-    PROBE.check("урезка по границе слова, не посреди",
-                bool(kept) and LONG_TITLE[len(kept):len(kept) + 1] in (" ", ",", ";", ":"), line)
+    # Второй заголовок: у LONG_TITLE край строки 80 сам падает на конец слова «какой», и урезка посреди слова
+    # дала бы тот же текст; у «который» край — внутри слова.
+    for n, title in enumerate((LONG_TITLE, LONG_TITLE.replace("какой", "который"))):
+        add_cards(stand, {f"hr.demo-longtitle{n}": title})
+        rows = [launch("c-W", "Код", "harness-worker", "sonnet", ts=day("12:30"),
+                       part=f"Часть: hr.demo-longtitle{n}#1"), finish("c-W")]
+        out = run_report(stand, write_journal(stand, rows))
+        line = line_with(out.splitlines(), "Сторож убирает")
+        head = TASK_LINE.match(line).group(2) if TASK_LINE.match(line) else ""
+        kept = head.removesuffix("…").rstrip(" ,;:—-")
+        PROBE.check(f"условие ({n + 1}): заголовок урезан до ≤ 80 с «…»",
+                    len(line) <= 80 and head.endswith("…") and title.startswith(kept), line or out)
+        PROBE.check(f"урезка по границе слова, не посреди ({n + 1})",
+                    bool(kept) and title[len(kept):len(kept) + 1] in (" ", ",", ";", ":"), line)
 
 
 def case_lost_task_done(stand: Path) -> None:
@@ -2385,6 +2440,414 @@ def case_lost_task_done(stand: Path) -> None:
     out, _ = lost_report(stand, rows)
     PROBE.check("коммит с Dev-Map задачи после запуска — в ⚠ нет", LOST_HEADER not in out, out)
 
+
+# ── правда отчёта: карта, семья карточек, коммиты по задаче (hr.status-report-lies) ──
+# Слово владельца 12.11: «Это верный отчет?», «Корявые отчёты приходят… Надо починить».
+# Отчёты 21:00–23:10 12.11: СДЕЛАНО при карточке wip/plan, «этап: код» у карточки в test,
+# общая строка 📝 читалась как коммит задачи над ней, зонтик и его ребёнок — две задачи,
+# «делали» с запуском пятидневной давности, «Fable», обрубки «— с…».
+# Контракт (журнал .tasks/hr.status-report-lies/журнал.md, приказ запуска 1):
+#   A. Задача с карточкой — блок по карте: test/done/принято → СДЕЛАНО, wip/plan → ДЕЛАЕТСЯ
+#      (все запуски кончились — строка «сейчас никто не работает» вместо «делают»/«этап»).
+#      Задача «дело:…» — по запускам. В отчёте только задачи с работой в окне: свежий запуск
+#      или коммит с трейлером Dev-Map после среза.
+#   B. Карточка в test никогда не в ДЕЛАЕТСЯ с «этап: код».
+#   C. Общей строки «📝 коммитов» нет; у задачи — «коммитов N, последний: <тема>» только из
+#      коммитов «Dev-Map: <id карточки семьи>» после среза.
+#   D. Семья: spec карточки в .tasks/<X>/… (X — другая карточка) — она в семье X. Семья — одна
+#      строка: карточка с последней работой, зонтик — только если дети без работы. Потерянный
+#      запуск с меткой X при показанной карточке в test — не в ⚠. ДАЛЬШЕ без карточек показанной
+#      семьи и без карточек в test/done.
+#   E. «делали/делают» — только запуски окна; подпись из STATUS_MODEL_LABELS, иначе id модели
+#      как есть; описание-разведка (investigate/survey/audit/measure/разбор/замер/исследов…) —
+#      роль «разведка».
+#   F. Строка задачи и ДАЛЬШЕ не кончаются служебным словом перед «…»; заголовок длиннее строки —
+#      поле «коротко», иначе часть до « — » или «: ».
+#   G. В одном сообщении каждый заголовок блока — один раз, каждая задача — в одном блоке.
+NOBODY = "сейчас никто не работает"
+SCOUT = "разведка"
+TASK_COMMITS = re.compile(r"^коммитов (\d+), последний: (.+)$")
+SERVICE_TAIL = re.compile(r"(?:^|\s)(?:с|со|а|не|и|в|во|на|по|для|из|к|ко|от|за|о|об|у|что|как|но|"
+                          r"или|при|без|до|—|-)…$")
+FAMILY_SPEC = ".tasks/hr.lie-umb/спека.md"
+UMB, UMB_A, UMB_B = "hr.lie-umb", "hr.lie-umb-a", "hr.lie-umb-b"
+UMB_TITLE = "Носитель разрешения пишет проверяемое"
+UMB_A_TITLE = "Судья слова без стенда окружения"
+UMB_B_TITLE = "Приёмник слова под своим пользователем"
+NEXT_LIE = "hr.lie-next"
+NEXT_LIE_TITLE = "Следующая работа смены"
+SCOUT_DESCS = ("Investigate file claims and CPU affinity", "Замер скорости сборки")
+STUB_DONE = ("Сторож уборки журналов чистит каталог смены и шлёт владельцу итог за день"
+             " с подробным списком удалённых файлов")
+STUB_NEXT = ("Очередь заявок владельца сверяется с картой и сама поднимает забытые слова"
+             " а не ждёт напоминания владельца в канале")
+
+
+def family(**extra) -> dict:
+    """Зонтик и два ребёнка: spec детей лежит в каталоге зонтика."""
+    cards = {UMB: {"status": "plan", "title": UMB_TITLE},
+             UMB_A: {"status": "test", "title": UMB_A_TITLE, "spec": FAMILY_SPEC},
+             UMB_B: {"status": "plan", "title": UMB_B_TITLE, "spec": FAMILY_SPEC},
+             NEXT_LIE: {"status": "plan", "title": NEXT_LIE_TITLE}}
+    cards.update(extra)
+    return cards
+
+
+def lies_map(stand: Path, cards: dict) -> Path:
+    """Своя карта стенда: id → поля карточки; значения в JSON-кавычках — двоеточие не ломает YAML."""
+    body = ""
+    for cid, card in cards.items():
+        body += f"  - id: {cid}\n" + "".join(f"    {key}: {json.dumps(value, ensure_ascii=False)}\n"
+                                            for key, value in card.items())
+    path = stand / "dev-map-lies.yaml"
+    path.write_text("lines:\n- id: harness\n  tasks:\n" + body, encoding="utf-8")
+    return path
+
+
+def lies_queue(stand: Path, ids: tuple) -> Path:
+    """Вывод `work-queue.py --порядок` без взятой карточки: ДАЛЬШЕ судит только сборщик."""
+    body = "".join(f"  {n}. {cid} · {50 - n} · в очереди\n" for n, cid in enumerate(ids, 1))
+    path = stand / "queue-lies.txt"
+    path.write_text(f"работа: {len(ids)}\nждут: \nсейчас делаем: очередь пуста\n" + body,
+                    encoding="utf-8")
+    return path
+
+
+def lies_report(stand: Path, cards: dict, rows: list, queue: tuple = (),
+                commits: tuple = ()) -> tuple:
+    """(текст, блоки): своя карта, очередь и git стенда; окно — с day("10:00"), то есть 215 мин назад."""
+    if commits:
+        git_stand(stand / "project", [("Начало стенда", at(400)), *commits])
+    journal = write_journal(stand, rows)
+    args = report_args(stand, journal)
+    args[args.index("--карта") + 1] = str(lies_map(stand, cards))
+    args[args.index("--очередь") + 1] = str(lies_queue(stand, queue))
+    out = run_report(stand, journal, args=args)
+    return out, blocks(out)
+
+
+def titles_in(got: dict, head: str) -> list:
+    return [t["title"] for t in parse_tasks(got.get(head, []))]
+
+
+def task_lines(got: dict) -> list:
+    """(блок, заголовок) всех задач СДЕЛАНО и ДЕЛАЕТСЯ разбором."""
+    return [(head, title) for head in HEADERS[:2] for title in titles_in(got, head)]
+
+
+def part(cid: str) -> str:
+    return f"Часть: {cid}#1"
+
+
+def commit_notes(task: dict) -> list:
+    return [m.groups() for m in map(TASK_COMMITS.match, task.get("rest", [])) if m]
+
+
+def case_lies_card_finished(stand: Path) -> None:
+    cards = {"hr.lie-done": {"status": "done", "title": "Сеть серверов делится находками"},
+             "hr.lie-accepted": {"status": "принято", "title": "Уборка временных каталогов"}}
+    rows = [launch("c-L1", "Оркестратор: сеть", "harness-lead", "opus", ts=at(30), part=part("hr.lie-done")),
+            launch("c-W1", "Код сети", "harness-worker", "sonnet", "c-L1", ts=at(20),
+                   part=part("hr.lie-done")),
+            launch("c-L2", "Оркестратор: уборка", "harness-lead", "opus", ts=at(25),
+                   part=part("hr.lie-accepted"))]
+    out, got = lies_report(stand, cards, rows)
+    PROBE.check("условие: запуски живые (блока ⚠ нет), обе задачи в отчёте",
+                LOST_HEADER not in out and len(task_lines(got)) == 2, out)
+    done = titles_in(got, HEADERS[0])
+    PROBE.check("A: карточки done и принято с идущими запусками — в СДЕЛАНО",
+                sorted(done) == sorted(c["title"] for c in cards.values()), out)
+    PROBE.check("A: и не в ДЕЛАЕТСЯ", not titles_in(got, HEADERS[1]), out)
+
+
+def case_lies_card_unfinished(stand: Path) -> None:
+    cards = {"hr.lie-wip": {"status": "wip", "title": "Сеть серверов делится находками"},
+             "hr.lie-plan": {"status": "plan", "title": "Живая проверка механизмов"}}
+    rows = [launch("c-W1", "Код сети", "harness-worker", "sonnet", ts=at(100), part=part("hr.lie-wip")),
+            finish("c-W1", ts=at(90)),
+            launch("c-W2", "Код проверки", "harness-worker", "sonnet", ts=at(80), part=part("hr.lie-plan")),
+            finish("c-W2", ts=at(70)),
+            # Задачи без карточки («дело:…») судятся по запускам, как прежде.
+            launch("c-S1", "Сверка журнала смены", "harness-lead", "opus", ts=at(60)),
+            finish("c-S1", ts=at(50)),
+            launch("c-S2", "Разбор очереди заявок", "harness-lead", "opus", ts=at(10))]
+    out, got = lies_report(stand, cards, rows)
+    doing = got.get(HEADERS[1], [])
+    for cid, card in cards.items():
+        task = task_of(doing, card["title"])
+        PROBE.check(f"A: карточка {card['status']}, все запуски кончились — в ДЕЛАЕТСЯ",
+                    bool(task) and card["title"] not in titles_in(got, HEADERS[0]), out)
+        PROBE.check(f"A: у неё «{NOBODY}», без «делают:» и «этап:»",
+                    NOBODY in task.get("rest", []) and not field(task, "делают") and not field(task, "этап"),
+                    task or out)
+    PROBE.check("A: «дело» без карточки, законченное, — в СДЕЛАНО (по запускам)",
+                "Сверка журнала смены" in titles_in(got, HEADERS[0]), out)
+    PROBE.check("A: «дело» без карточки, идущее, — в ДЕЛАЕТСЯ (по запускам)",
+                "Разбор очереди заявок" in titles_in(got, HEADERS[1]), out)
+
+
+def case_lies_window_work(stand: Path) -> None:
+    cards = {"hr.lie-ctest": {"status": "test", "title": "Сторож портов закрывает забытые"},
+             "hr.lie-cwip": {"status": "wip", "title": "Справка владельца по каналу"},
+             "hr.lie-stale": {"status": "wip", "title": "Давняя сверка таблиц"}}
+    rows = [launch("c-O", "Код сверки", "harness-worker", "sonnet", ts=at(5 * 1440),
+                   part=part("hr.lie-stale")),
+            finish("c-O", ts=at(5 * 1440 - 10))]
+    commits = (("Сторож портов: закрытие\n\nDev-Map: hr.lie-ctest", at(60)),
+               ("Справка: раздел канала\n\nDev-Map: hr.lie-cwip", at(40)),
+               ("Давняя сверка: до среза\n\nDev-Map: hr.lie-stale", at(300)))
+    out, got = lies_report(stand, cards, rows, commits=commits)
+    PROBE.check("A: работа в окне только коммитом, карточка test — в СДЕЛАНО",
+                cards["hr.lie-ctest"]["title"] in titles_in(got, HEADERS[0]), out)
+    wip = task_of(got.get(HEADERS[1], []), cards["hr.lie-cwip"]["title"])
+    PROBE.check(f"A: работа только коммитом, карточка wip — в ДЕЛАЕТСЯ с «{NOBODY}»",
+                NOBODY in wip.get("rest", []), wip or out)
+    PROBE.check("A: карточка без работы в окне (запуск 5 дней назад, коммит до среза) — не в отчёте",
+                cards["hr.lie-stale"]["title"] not in out, out)
+
+
+def case_lies_test_not_coding(stand: Path) -> None:
+    title = "Скорость использует сервер целиком"
+    cards = {"hr.lie-speed": {"status": "test", "title": title}}
+    rows = [launch("c-L", "Оркестратор: скорость", "harness-lead", "opus", ts=at(40), part=part("hr.lie-speed")),
+            launch("c-T", "Пробы судьи скорости", "harness-worker", "opus", "c-L", ts=at(35),
+                   part=part("hr.lie-speed")),
+            finish("c-T", ts=at(30)),
+            launch("c-C", "Код судьи скорости", "harness-worker", "sonnet", "c-L", ts=at(20),
+                   part=part("hr.lie-speed"))]
+    out, got = lies_report(stand, cards, rows)
+    doing = got.get(HEADERS[1], [])
+    PROBE.check("условие: задача в отчёте, запуск кода живой (блока ⚠ нет)",
+                LOST_HEADER not in out and title in [t for _, t in task_lines(got)], out)
+    PROBE.check("B: карточка в test не в ДЕЛАЕТСЯ", title not in titles_in(got, HEADERS[1]), doing or out)
+    PROBE.check("B: «этап: код» нет нигде", not any(l.strip() == "этап: код" for l in out.splitlines()), out)
+
+
+def case_lies_commits_per_task(stand: Path) -> None:
+    cards = {"hr.lie-net": {"status": "test", "title": "Сеть серверов делится находками"},
+             "hr.lie-speed": {"status": "test", "title": "Скорость использует сервер целиком"},
+             "hr.lie-bare": {"status": "test", "title": "Уборка без коммитов"}}
+    rows = []
+    for n, cid in enumerate(cards):
+        rows += [launch(f"c-W{n}", "Код", "harness-worker", "sonnet", ts=at(150 - n), part=part(cid)),
+                 finish(f"c-W{n}", ts=at(140 - n))]
+    commits = (("Сеть: до среза\n\nDev-Map: hr.lie-net", at(300)),
+               ("Сеть: первая часть\n\nDev-Map: hr.lie-net", at(120)),
+               ("Сеть: вторая часть\n\nDev-Map: hr.lie-net", at(90)),
+               ("Скорость: доля CPU\n\nDev-Map: hr.lie-speed", at(60)),
+               ("Чужая правка без карточки", at(30)))
+    out, got = lies_report(stand, cards, rows, commits=commits)
+    done = got.get(HEADERS[0], [])
+    PROBE.check("условие: три задачи в СДЕЛАНО", len(parse_tasks(done)) == 3, out)
+    PROBE.check("C: общей строки «📝 коммитов» нет", COMMITS_HEAD not in out, out)
+    net = task_of(done, cards["hr.lie-net"]["title"])
+    PROBE.check("C: у сети «коммитов 2, последний: Сеть: вторая часть» (до среза не в счёт)",
+                commit_notes(net) == [("2", "Сеть: вторая часть")], net or out)
+    speed = task_of(done, cards["hr.lie-speed"]["title"])
+    PROBE.check("C: у скорости «коммитов 1, последний: Скорость: доля CPU»",
+                commit_notes(speed) == [("1", "Скорость: доля CPU")], speed or out)
+    bare = task_of(done, cards["hr.lie-bare"]["title"])
+    PROBE.check("C: у задачи без своих коммитов строки коммитов нет (чужой не приписан)",
+                bool(bare) and not commit_notes(bare), bare or out)
+    PROBE.check("C: коммит без трейлера нигде не назван", "Чужая правка" not in out, out)
+
+
+def case_lies_family_one_line(stand: Path) -> None:
+    rows = [launch("c-LU", "Оркестратор: носитель", "harness-lead", "opus", ts=at(150), part=part(UMB)),
+            finish("c-LU", ts=at(100)),
+            launch("c-WA", "Код судьи слова", "harness-worker", "sonnet", ts=at(80), part=part(UMB_A)),
+            finish("c-WA", ts=at(50)),
+            # Оборванный помощник зонтика: работа семьи сдана картой ребёнка — не тревога.
+            launch("c-WL", "Код носителя", "harness-worker", "sonnet", ts=at(200), part=part(UMB))]
+    # Коммит зонтика — после среза (215 мин), но ДО оборванного запуска: судья «уже сдана по
+    # коммиту» его не прощает, прощать обязана только карточка ребёнка в test.
+    commits = (("Носитель: стенд судьи\n\nDev-Map: hr.lie-umb", at(208)),)
+    out, got = lies_report(stand, family(), rows, queue=(UMB, UMB_A, NEXT_LIE), commits=commits)
+    lines = [t for _, t in task_lines(got) if t in (UMB_TITLE, UMB_A_TITLE, UMB_B_TITLE)]
+    PROBE.check("D: зонтик и ребёнок — одна строка отчёта", len(lines) == 1, out)
+    PROBE.check("D: показан ребёнок с последней работой, в СДЕЛАНО (его карточка test)",
+                titles_in(got, HEADERS[0]) == [UMB_A_TITLE], out)
+    PROBE.check("D: заголовка зонтика в отчёте нет нигде", UMB_TITLE not in out, out)
+    PROBE.check("D: потерянный помощник зонтика при ребёнке в test — не в ⚠", LOST_HEADER not in out, out)
+    child = task_of(got.get(HEADERS[0], []), UMB_A_TITLE)
+    PROBE.check("C+D: коммит зонтика — у строки семьи «коммитов 1, последний: Носитель: стенд судьи»",
+                commit_notes(child) == [("1", "Носитель: стенд судьи")], child or out)
+    PROBE.check("D: ДАЛЬШЕ — только карточка вне семьи",
+                titles_in(got, HEADERS[2]) == [NEXT_LIE_TITLE], got.get(HEADERS[2]) or out)
+
+
+def case_lies_family_next(stand: Path) -> None:
+    cards = family(**{"hr.lie-tested": {"status": "test", "title": "Уже сданная правка канала"},
+                      "hr.lie-closed": {"status": "done", "title": "Закрытая правка справки"}})
+    rows = [launch("c-WA", "Код судьи слова", "harness-worker", "sonnet", ts=at(60), part=part(UMB_A)),
+            finish("c-WA", ts=at(30))]
+    out, got = lies_report(stand, cards, rows,
+                           queue=(UMB, UMB_B, "hr.lie-tested", "hr.lie-closed", NEXT_LIE))
+    PROBE.check("условие: семья показана строкой ребёнка", UMB_A_TITLE in titles_in(got, HEADERS[0]), out)
+    nxt = titles_in(got, HEADERS[2])
+    PROBE.check("D: ДАЛЬШЕ не предлагает зонтик и брата показанной семьи",
+                bool(nxt) and UMB_TITLE not in nxt and UMB_B_TITLE not in nxt, nxt or out)
+    PROBE.check("D: ДАЛЬШЕ не предлагает карточки в test/done",
+                bool(nxt) and not {"Уже сданная правка канала", "Закрытая правка справки"} & set(nxt), nxt or out)
+    PROBE.check("D: ДАЛЬШЕ ровно [карточка вне семьи]", nxt == [NEXT_LIE_TITLE], nxt or out)
+    rows = [launch("c-WU", "Код носителя", "harness-worker", "sonnet", ts=at(60), part=part(UMB)),
+            finish("c-WU", ts=at(30))]
+    out, got = lies_report(stand, family(), rows)
+    PROBE.check("D: дети без работы — строка семьи с заголовком зонтика",
+                [t for _, t in task_lines(got)] == [UMB_TITLE], out)
+
+
+def case_lies_who_window(stand: Path) -> None:
+    title = "Отчёт о статусе говорит правду"
+    cards = {"hr.lie-who": {"status": "test", "title": title}}
+    rows = [launch("c-OLD", "Код старой части", "harness-worker", "opus", ts=at(5 * 1440),
+                   part=part("hr.lie-who")),
+            finish("c-OLD", ts=at(5 * 1440 - 10)),
+            launch("c-F", SCOUT_DESCS[0], "harness-worker", "fable", ts=at(60), part=part("hr.lie-who")),
+            finish("c-F", ts=at(40)),
+            launch("c-R", SCOUT_DESCS[1], "harness-worker", "haiku", ts=at(55), part=part("hr.lie-who")),
+            finish("c-R", ts=at(35)),
+            launch("c-S", "Код сборщика статуса", "harness-worker", "sonnet", ts=at(50),
+                   part=part("hr.lie-who")),
+            finish("c-S", ts=at(20))]
+    out, got = lies_report(stand, cards, rows)
+    task = next((t for h in HEADERS[:2] for t in parse_tasks(got.get(h, [])) if t["title"] == title), {})
+    pairs = who_pairs(field(task, "делали") or field(task, "делают"))
+    PROBE.check("условие: задача в отчёте со строкой «делали»", bool(pairs), task or out)
+    PROBE.check("E: запуск 5 дней назад не в «делали» (Opus только у него)",
+                bool(pairs) and LABELS["opus"] not in [l for l, _ in pairs], pairs or out)
+    PROBE.check("E: модель вне STATUS_MODEL_LABELS — id как есть «fable», не «Fable»",
+                ("fable", SCOUT) in pairs and "Fable" not in out, pairs or out)
+    PROBE.check(f"E: описание-разведка (англ. и рус.) — роль «{SCOUT}», не «код»",
+                (LABELS["haiku"], SCOUT) in pairs and ("fable", "код") not in pairs, pairs or out)
+    PROBE.check("E: обычный код — «код»", (LABELS["sonnet"], "код") in pairs, pairs or out)
+
+
+def case_lies_short_titles(stand: Path) -> None:
+    cards = {"hr.lie-short": {"status": "test", "коротко": "Правдивый отчёт о статусе",
+                              "title": "Отчёт о статусе говорит правду: сделано и делается по карте, "
+                                       "коммиты по задаче, семья одной строкой"},
+             "hr.lie-dash": {"status": "test",
+                             "title": "Скорость использует сервер целиком — мощность по доле занятого "
+                                      "процессора, а не по средней нагрузке очереди"},
+             "hr.lie-colon": {"status": "test",
+                              "title": "Сеть серверов делится находками: копии шлют отчёты агенту "
+                                       "харнеса, агент улучшает ядро для всех копий"},
+             "hr.lie-fits": {"status": "test", "title": "Уборка журналов — по расписанию"},
+             "hr.lie-nlong": {"status": "plan",
+                              "title": "Очередь заявок сверяется с картой — каждый час сама поднимает "
+                                       "забытые слова владельца из канала"}}
+    rows = []
+    for n, cid in enumerate(list(cards)[:4]):
+        rows += [launch(f"c-W{n}", "Код", "harness-worker", "sonnet", ts=at(150 - 10 * n), part=part(cid)),
+                 finish(f"c-W{n}", ts=at(140 - 10 * n))]
+    out, got = lies_report(stand, cards, rows, queue=("hr.lie-nlong",))
+    done = titles_in(got, HEADERS[0])
+    PROBE.check("условие: четыре задачи в СДЕЛАНО", len(done) == 4, out)
+    PROBE.check("F: длинный заголовок с полем «коротко» — строка «коротко»",
+                "Правдивый отчёт о статусе" in done, done or out)
+    PROBE.check("F: длинный заголовок с « — » — часть до « — »",
+                "Скорость использует сервер целиком" in done, done or out)
+    PROBE.check("F: длинный заголовок с «: » — часть до «: »",
+                "Сеть серверов делится находками" in done, done or out)
+    PROBE.check("F: короткий заголовок с « — » — целиком", "Уборка журналов — по расписанию" in done,
+                done or out)
+    PROBE.check("F: длинный заголовок в ДАЛЬШЕ — часть до « — »",
+                titles_in(got, HEADERS[2]) == ["Очередь заявок сверяется с картой"], got.get(HEADERS[2]) or out)
+
+
+def case_lies_no_stub_tail(stand: Path) -> None:
+    cards = {"hr.lie-stub": {"status": "test", "title": STUB_DONE},
+             "hr.lie-stub-next": {"status": "plan", "title": STUB_NEXT}}
+    rows = [launch("c-W", "Код", "harness-worker", "sonnet", ts=at(60), part=part("hr.lie-stub")),
+            finish("c-W", ts=at(30))]
+    out, got = lies_report(stand, cards, rows, queue=("hr.lie-stub-next",))
+    lines = [l for l in out.splitlines() if TASK_LINE.match(l)]
+    PROBE.check("условие: строка задачи и строка ДАЛЬШЕ разобраны", len(lines) == 2, out)
+    stubs = [l for l in lines if SERVICE_TAIL.search(l)]
+    PROBE.check("F: ни одна строка не кончается служебным словом перед «…» («с…», «а…»)",
+                len(lines) == 2 and not stubs, stubs or out)
+    PROBE.check("F: строки ≤ 80", bool(lines) and all(len(l) <= 80 for l in lines), lines)
+
+
+def case_lies_one_message(stand: Path) -> None:
+    cards = family(**{"hr.lie-speed": {"status": "test", "title": "Скорость использует сервер целиком"},
+                      "hr.lie-wip": {"status": "wip", "title": "Сеть серверов делится находками"}})
+    rows = [launch("c-LU", "Оркестратор: носитель", "harness-lead", "opus", ts=at(30), part=part(UMB)),
+            launch("c-WA", "Код судьи слова", "harness-worker", "sonnet", ts=at(25), part=part(UMB_A)),
+            finish("c-WA", ts=at(10)),
+            launch("c-S", "Код судьи скорости", "harness-worker", "sonnet", ts=at(20), part=part("hr.lie-speed")),
+            launch("c-N", "Код сети", "harness-worker", "sonnet", ts=at(100), part=part("hr.lie-wip")),
+            finish("c-N", ts=at(90)),
+            launch("c-D", "Разбор очереди заявок", "harness-lead", "opus", ts=at(15))]
+    out, got = lies_report(stand, cards, rows, queue=(NEXT_LIE,))
+    lines = out.splitlines()
+    counts = {h: sum(l.startswith(h) for l in lines) for h in HEADERS}
+    PROBE.check("G: каждый заголовок блока — ровно один раз", all(c == 1 for c in counts.values()), counts)
+    found = task_lines(got)
+    PROBE.check("условие: задачи разобраны", len(found) >= 3, out)
+    fam = [(h, t) for h, t in found if t in (UMB_TITLE, UMB_A_TITLE, UMB_B_TITLE)]
+    PROBE.check("G: семья (зонтик идёт, ребёнок сдан) — одна строка в одном блоке", len(fam) == 1, fam or out)
+    titles = [t for _, t in found]
+    PROBE.check("G: каждая задача — один раз во всём сообщении", len(titles) == len(set(titles)), found)
+
+
+def case_lies_family_sibling_lost(stand: Path) -> None:
+    # Прощение ⚠ по семье — только зонтику: брат в plan с оборванным запуском — живая тревога,
+    # сданная карточка соседа его работу не закрывает.
+    rows = [launch("c-WA", "Код судьи слова", "harness-worker", "sonnet", ts=at(80), part=part(UMB_A)),
+            finish("c-WA", ts=at(50)),
+            launch("c-WB", "Код приёмника слова", "harness-worker", "sonnet", ts=at(200), part=part(UMB_B))]
+    out, got = lies_report(stand, family(), rows)
+    PROBE.check("условие: семья показана сданной строкой ребёнка в test",
+                titles_in(got, HEADERS[0]) == [UMB_A_TITLE], out)
+    PROBE.check("D: потерянный запуск брата в plan — в ⚠, сданный сосед его не гасит",
+                bool(line_with(got.get(LOST_HEADER, []), UMB_B_TITLE)), got.get(LOST_HEADER) or out)
+
+def case_lies_nocard_lost(stand: Path) -> None:
+    # Задача без карточки сдана по запускам, но её оборванный запуск — тревога: прощает только зонтик.
+    rows = [launch("c-A", "Сверка журнала смены", "harness-worker", "sonnet", ts=at(80), part=part("hr.lie-nocard")),
+            finish("c-A", ts=at(50)),
+            launch("c-B", "Сверка журнала смены", "harness-worker", "sonnet", ts=at(200), part=part("hr.lie-nocard"))]
+    out, got = lies_report(stand, family(), rows)
+    PROBE.check("условие: задача без карточки в СДЕЛАНО", bool(titles_in(got, HEADERS[0])), out)
+    PROBE.check("D: её потерянный запуск — в ⚠", len(got.get(LOST_HEADER, [])) == 1, got.get(LOST_HEADER) or out)
+
+def case_lies_lost_no_stub(stand: Path) -> None:
+    # Живой отчёт 12.11 23:58: «• Живая проверка …: не самотестом, а…, Opus 5.5, с 21:56» — ⚠ резал
+    # название по знакам, мимо урезки по слову.
+    title = "Живая проверка каждого механизма харнеса: не самотестом, а работой"
+    cards = {"hr.lie-live": {"status": "plan", "title": title}}
+    rows = [launch("c-X", "Код проверки", "harness-worker", "opus", ts=at(200), part=part("hr.lie-live"))]
+    out, got = lies_report(stand, cards, rows)
+    line = line_with(got.get(LOST_HEADER, []), "Живая проверка")
+    head = line.rsplit(", ", 2)[0]
+    PROBE.check("условие: строка ⚠ есть и название урезано", head.endswith("…"), out)
+    PROBE.check("F: название в ⚠ не кончается служебным словом перед «…»", not SERVICE_TAIL.search(head), line)
+    PROBE.check("F: название в ⚠ урезано по слову", title.startswith(head[2:-1]) and
+                title[len(head) - 3] in " ,:", line)
+
+def case_lies_commit_no_empty_brackets(stand: Path) -> None:
+    # Живой отчёт 13.11: «Карта: известный риск Р-8 в карточку Б ()» — id вырезан, скобки остались.
+    write_journal(stand, lead_rows())
+    set_mark(stand, at(100))
+    git_stand(stand / "project", [(with_trailer("Карта: известный риск в карточку Б (hr.word-receiver-own-user)"),
+                                   at(20))])
+    line = cleanup_note(stand)
+    PROBE.check("условие: примечание о коммите есть", line.startswith("коммитов 1"), line)
+    PROBE.check("тема без id — без пустых скобок", line == "коммитов 1, последний: Карта: известный риск в карточку Б",
+                line)
+
+def case_lies_family_child_over_umbrella(stand: Path) -> None:
+    # Зонтик работал ПОЗЖЕ ребёнка — строка семьи всё равно ребёнка: зонтик показывается, только когда у детей
+    # работы в окне нет (контракт D), иначе последний запуск зонтика подменял бы сданную карточку.
+    rows = [launch("c-WA", "Код судьи слова", "harness-worker", "sonnet", ts=at(80), part=part(UMB_A)),
+            finish("c-WA", ts=at(60)),
+            launch("c-LU", "Оркестратор: носитель", "harness-lead", "opus", ts=at(40), part=part(UMB)),
+            finish("c-LU", ts=at(10))]
+    out, got = lies_report(stand, family(), rows)
+    PROBE.check("D: зонтик с работой позже ребёнка — строка семьи ребёнка, одна",
+                [t for _, t in task_lines(got)] == [UMB_A_TITLE], out)
 
 CASES = (
     ("(1) нет работающих → «пока ничего», без метки → «прочее 1»", case_empty_doing),
@@ -2473,14 +2936,69 @@ CASES = (
     ("(58) исполнитель без метки наследует задачу родителя", case_tasks_inherit),
     ("(59) без метки с кириллицей — своя задача, без кириллицы — «прочее»", case_tasks_cyrillic),
     ("(60) ⚠ ПОТЕРЯН — задача словами, модель и время", case_tasks_lost_words),
+    ("(79 A) БОЛЬНОЙ: карточка done/принято с идущим запуском — СДЕЛАНО", case_lies_card_finished),
+    ("(80 A) БОЛЬНОЙ: карточка wip/plan, запуски кончились — ДЕЛАЕТСЯ «сейчас никто не работает»",
+     case_lies_card_unfinished),
+    ("(81 A) в отчёте только задачи с работой в окне: запуск или коммит Dev-Map после среза",
+     case_lies_window_work),
+    ("(82 B) БОЛЬНОЙ: карточка в test не в ДЕЛАЕТСЯ с «этап: код»", case_lies_test_not_coding),
+    ("(83 C) БОЛЬНОЙ: коммиты — у задачи по трейлеру Dev-Map, общей строки 📝 нет",
+     case_lies_commits_per_task),
+    ("(84 D) БОЛЬНОЙ: семья карточек — одна строка, без ⚠ зонтика", case_lies_family_one_line),
+    ("(85 D) ДАЛЬШЕ без показанной семьи и без карточек test/done", case_lies_family_next),
+    ("(86 E) «делали» — только окно; fable как есть; разведка — «разведка»", case_lies_who_window),
+    ("(87 F) длинный заголовок — «коротко» или часть до « — »/«: »", case_lies_short_titles),
+    ("(88 F) БОЛЬНОЙ: строка не кончается «с…»/«а…»", case_lies_no_stub_tail),
+    ("(89 G) одно сообщение: заголовок блока и задача — по разу", case_lies_one_message),
+    ("(90 D) потерянный запуск брата в plan при сданном ребёнке — в ⚠", case_lies_family_sibling_lost),
+    ("(91 D) потерянный запуск задачи без карточки, сданной по запускам, — в ⚠", case_lies_nocard_lost),
+    ("(92 F) название в ⚠ урезано по слову, без «а…»", case_lies_lost_no_stub),
+    ("(93) тема коммита без id — без пустых скобок «()»", case_lies_commit_no_empty_brackets),
+    ("(94 D) зонтик работал позже ребёнка — строка семьи ребёнка", case_lies_family_child_over_umbrella),
 )
+
+
+# Старые случаи, чей стенд ждёт СДЕЛАНО: блок задачи судит карта (контракт A), и карточки стенда в них
+# test; в остальных — plan, и задача с идущим или оборванным запуском остаётся в ДЕЛАЕТСЯ.
+TEST_CARD_CASES = {
+    case_all_sessions,
+    case_container_running,
+    case_cut_reported,
+    case_journal,
+    case_lead_once,
+    case_lead_without_mark_parent,
+    case_nesting,
+    case_next_without_done,
+    case_resume_done_once,
+    case_review_stage,
+    case_role_labels_from_conf,
+    case_roles,
+    case_session_filter,
+    case_tasks_one_entry,
+    case_tasks_part_field,
+    case_tasks_sick,
+    case_tasks_stages,
+    case_tasks_test_words,
+    case_tasks_title,
+    case_window_mode,
+    case_window_parent,
+}
+
+# Карточки, что в этих случаях остаются в работе: идущий запуск при карточке в test — СДЕЛАНО, а случай
+# судит именно «идёт».
+STILL_RUNNING = {
+    case_nesting: ("hr.demo-format",),
+    case_journal: ("hr.demo-format",),
+    case_tasks_stages: ("hr.demo-running",),
+}
 
 
 def main() -> int:
     print(f"модуль: {REPORT}" + ("" if REPORT.is_file() else " — НЕТ"))
     for title, case in CASES:
         PROBE.start(title)
-        stand = make_stand()
+        stand = make_stand("test" if case in TEST_CARD_CASES else "plan")
+        set_status(stand, "wip", *STILL_RUNNING.get(case, ()))
         try:
             case(stand)
         except Exception as error:      # поломка механизма — красный случай, не трасса

@@ -12,7 +12,10 @@ tmux и модель подставлены как в test_ack_receipts.sh. По
 Telegram, отдаёт только типы из allowed_updates, считает answerCallbackQuery и
 editMessageText и снимает журнал кнопок в момент ответа на нажатие.
 Механизмы берутся РЯДОМ с пробой (подмена «из-копии»): мутацию ставят в копию
-дерева и зовут пробу из неё.
+дерева и зовут пробу из неё. Судье стенд приходит только НОСИТЕЛЕМ: дверь удаления и
+ask-consent зовёт раннер пробы, который подменяет owner_word.носитель в их процессе, а
+owner_word.ЗАПРОС_КНОПКИ — обёрткой ask-consent с тем же носителем (просьба кнопки двери идёт
+отдельным процессом). Диспетчер носителя не получает, его срок кнопки — машинный (machine_ttl).
 
     python3 scripts/test_consent_buttons.py [--случай <имя>]...
 Случаи: запрос да чужой повтор срок битый дверь носитель охрана; виды-1 … виды-11 —
@@ -58,6 +61,36 @@ NONCE_RE = re.compile(r"^[A-Za-z0-9_-]{22}$")
 # Причина судьи при битом журнале кнопок (спека §2: НетНосителя).
 UNREAD = "журнал кнопок не прочитан"
 CALLBACK_RE = re.compile(r"^c:([A-Za-z0-9_-]{22}):(y|n)$")
+# Носитель стенда в процессе двери: судья берёт owner_word.носитель. Просьба кнопки двери —
+# ОТДЕЛЬНЫЙ процесс ask-consent (owner_word.ЗАПРОС_КНОПКИ): туда носитель не доходит, поэтому
+# ЗАПРОС_КНОПКИ подменён обёрткой стенда, которая ставит тот же носитель и в своём процессе.
+SET_CARRIER = r"""
+import json, pathlib, runpy, sys
+def set_carrier(spec):
+    sys.path.insert(0, spec["lib"])
+    import owner_word
+    carrier = owner_word.Носитель(папка=pathlib.Path(spec["папка"]), uid=None, паспорт=spec["паспорт"],
+                                  граница=pathlib.Path(spec["граница"]), окно_мин=spec["окно_мин"],
+                                  срок_кнопки_мин=spec["срок_кнопки_мин"], ручки=spec["ручки"])
+    owner_word.носитель = lambda: carrier
+    owner_word.ЗАПРОС_КНОПКИ = pathlib.Path(spec["обёртка"])
+"""
+# Раннер двери (и ask-consent, которого проба зовёт сама): spec — довод, argv двери — в нём.
+CARRIER_RUNNER = SET_CARRIER + r"""
+spec = json.loads(sys.argv[1])
+set_carrier(spec)
+sys.argv = spec["argv"]
+runpy.run_path(spec["argv"][0], run_name="__main__")
+"""
+# Обёртка ask-consent: зовётся вместо него (argv — его доводы), spec лежит рядом с ней.
+# ask-consent берётся из того же дерева, что и lib двери: копия дерева зовёт свою копию.
+ASK_WRAPPER = SET_CARRIER + r"""
+spec = json.loads((pathlib.Path(__file__).parent / "ask-carrier.json").read_text(encoding="utf-8"))
+set_carrier(spec)
+ask = str(pathlib.Path(spec["lib"]).parent / "ask-consent.py")
+sys.argv = [ask, *sys.argv[1:]]
+runpy.run_path(ask, run_name="__main__")
+"""
 KIND_CASES = tuple(f"виды-{n}" for n in range(1, 12))
 CASE_NAMES = ("запрос", "да", "чужой", "повтор", "срок", "битый", "дверь", "носитель", "охрана",
               *KIND_CASES)
@@ -287,6 +320,18 @@ class Yard:
         subprocess.run(["rm", "-rf", str(self.root)])
 
 
+def carrier_run(carrier: dict, argv: list[str], env: dict, cwd: Path | None = None,
+                timeout: int = 60) -> subprocess.CompletedProcess:
+    """argv[0] (дверь или ask-consent) раннером с носителем стенда; обёртка ask-consent — рядом с
+    границей стенда, со spec этого же зова (lib двери решает, чей ask-consent позовут)."""
+    home = Path(carrier["граница"])
+    spec = dict(carrier, обёртка=str(home / "ask-carrier.py"))
+    (home / "ask-carrier.json").write_text(json.dumps(spec, ensure_ascii=False), encoding="utf-8")
+    (home / "ask-carrier.py").write_text(ASK_WRAPPER, encoding="utf-8")
+    return subprocess.run(["python3", "-c", CARRIER_RUNNER, json.dumps(dict(spec, argv=argv), ensure_ascii=False)],
+                          capture_output=True, text=True, env=env, cwd=cwd, timeout=timeout)
+
+
 def fixture_fail(why: str, stand: "Stand | None" = None) -> None:
     print(f"ФИКСТУРА: {why}")
     if stand:
@@ -345,14 +390,17 @@ class Stand:
             f'TMUX_SESSION="proba-consent-{os.getpid()}"\nSERVICE_LOCKS_SUBDIR="services"\n'
             f'PANE_TMUX_TIMEOUT="3"\nPANE_ENTER_DELAY="0.1"\nCONSENT_BUTTON_TTL_MIN={TTL_MIN}\n',
             encoding="utf-8")
+        # ask-consent стенда судит носителем стенда; срок — машинный, как у диспетчера (он без носителя).
+        self.carrier = {"lib": str(LIB), "папка": str(self.log), "граница": str(s), "окно_мин": 60,
+                        "срок_кнопки_мин": machine_ttl(), "паспорт": config.из_файла(str(s / "install.conf")),
+                        "ручки": config.из_файла(str(s / "harness.conf"))}
         # Окружение старше конфига: внешний LOG_DIR иначе увёл бы стенд в боевые журналы.
         self.env = dict(
-            os.environ, **label, LOG_DIR=str(self.log), PROBA_DIR=str(s),
+            os.environ, **label, LOG_DIR=str(self.log), HARNESS_LOG_DIR=str(self.log), PROBA_DIR=str(s),
             PATH=f"{s}/bin:{os.environ.get('PATH', '')}", HARNESS_PANEL_STATE=str(s / "panel"),
             HARNESS_HOME=str(s), HARNESS_INSTALL_CONF=str(s / "install.conf"),
             HARNESS_CONF=str(s / "harness.conf"), HARNESS_SPROSIT_MODEL=str(s / "model.py"),
-            TG_API_BASE=f"http://127.0.0.1:{self.port}", SECRETS_DIR=str(self.secrets),
-            HARNESS_OWNER_WORD_STEND="1", CONSENT_BUTTON_TTL_MIN=str(TTL_MIN))
+            TG_API_BASE=f"http://127.0.0.1:{self.port}", SECRETS_DIR=str(self.secrets))
         disp = subprocess.Popen(["bash", str(DISPATCHER)], stdout=open(s / "dispatcher.out", "w"),
                                 stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
                                 env=self.env, start_new_session=True)
@@ -413,8 +461,8 @@ class Stand:
     def ask(self, target: Path | str, why: str = "проба кнопок") -> tuple[int, str, str | None]:
         if not ASK.exists():
             return 127, f"нет {ASK}", None
-        done = subprocess.run(["python3", str(ASK), "--цель", str(target), "--почему", why],
-                              capture_output=True, text=True, env=self.env, timeout=30)
+        done = carrier_run(self.carrier, [str(ASK), "--цель", str(target), "--почему", why], self.env,
+                           timeout=30)
         lines = done.stdout.strip().splitlines()
         nonce = lines[-1].strip() if done.returncode == 0 and lines else None
         return done.returncode, (done.stdout + done.stderr).strip(), nonce
@@ -711,20 +759,22 @@ def rewrite_request(st: Stand, nonce: str | None, target: Path) -> None:
 
 def probe_ttl(st: Stand) -> None:
     print("— 5. срок кнопки")
+    # Срок у диспетчера — машинный: окружение стенда судья не слушает.
+    ttl = machine_ttl()
     target = st.secret(f"p5-{secrets.token_hex(3)}.txt")
     nonce, mid = st.ask_sent(target)
     check("5) условие: запрос отправлен", True, mid is not None)
     if nonce and mid is not None:
-        age_sent(st, nonce, TTL_MIN + 5)
+        age_sent(st, nonce, ttl + 5)
     cb = st.press(yes_data(nonce), mid) if nonce else None
-    check(f"5а) нажатие через {TTL_MIN + 5} мин после отправки: записи нет", [], st.records(nonce))
+    check(f"5а) нажатие через {ttl + 5} мин после отправки: записи нет", [], st.records(nonce))
     check("5а) ответ вызван и клавиатура снята", (1, True), (st.answers(cb), st.edits(mid) >= 1))
 
     # Запрос старше срока без «отправлено» — не шлётся. Контроль: свежий рядом шлётся.
     stale_target = st.secret(f"p5s-{secrets.token_hex(3)}.txt")
     stale = secrets.token_urlsafe(16)
     with open(st.requests, "a", encoding="utf-8") as fh:
-        fh.write(envelope("scripts/ask-consent.py", REQUEST, now_iso((TTL_MIN + 5) * 60),
+        fh.write(envelope("scripts/ask-consent.py", REQUEST, now_iso((ttl + 5) * 60),
                           {"nonce": stale, "цель": str(stale_target.resolve()),
                            "почему": "старый запрос"}) + "\n")
     _fresh_nonce, fresh_mid = st.ask_sent(st.secret(f"p5f-{secrets.token_hex(3)}.txt"))
@@ -779,10 +829,13 @@ class Door:
             f'TG_CHAT_ID="{OWNER}"\n', encoding="utf-8")
         (d / "harness.conf").write_text(f"CONSENT_BUTTON_TTL_MIN={TTL_MIN}\nCONFIRM_MAX_AGE_MIN=60\n",
                                         encoding="utf-8")
+        # Окружение — для своих каталогов ДВЕРИ (журналы, секреты, копии); судья его не слушает.
         self.env = dict(os.environ, HARNESS_HOME=str(d), HARNESS_INSTALL_CONF=str(d / "install.conf"),
                         HARNESS_CONF=str(d / "harness.conf"), LOG_DIR=str(self.log),
-                        SECRETS_DIR=str(self.secrets), HARNESS_OWNER_WORD_STEND="1",
-                        CONSENT_BUTTON_TTL_MIN=str(TTL_MIN), CONFIRM_MAX_AGE_MIN="60")
+                        HARNESS_LOG_DIR=str(self.log), SECRETS_DIR=str(self.secrets))
+        self.carrier = {"lib": str(LIB), "папка": str(self.log), "граница": str(d), "окно_мин": 60,
+                        "срок_кнопки_мин": TTL_MIN, "паспорт": config.из_файла(str(d / "install.conf")),
+                        "ручки": config.из_файла(str(d / "harness.conf"))}
 
     def file(self, rel: str, root: Path | None = None) -> Path:
         path = (root or self.secrets) / rel
@@ -805,9 +858,12 @@ class Door:
                               {"nonce": nonce or secrets.token_urlsafe(16), "вид": "удаление",
                                "цель": os.path.realpath(target), "почему": "проба"}) + "\n")
 
+    def door(self, door: Path, *argv: str, lib: Path = LIB) -> subprocess.CompletedProcess:
+        """Дверь раннером с носителем стенда."""
+        return carrier_run(dict(self.carrier, lib=str(lib)), [str(door), *argv], self.env)
+
     def delete(self, target: Path, *extra: str) -> tuple[int, str]:
-        done = subprocess.run(["python3", str(DELETE), str(target), *extra],
-                              capture_output=True, text=True, env=self.env, timeout=60)
+        done = self.door(DELETE, str(target), *extra)
         return done.returncode, (done.stdout + done.stderr).strip()
 
 
@@ -932,39 +988,56 @@ def probe_carrier(yard: Yard) -> None:
     check("8б) файла кнопок нет — обычный отказ «согласия нет», не «прочитать не смогли»",
           (1, False), (rc, UNREAD in out))
 
-    probe = ("import json, sys; sys.path.insert(0, sys.argv[1]); import owner_word as o\n"
-             "f = getattr(o, 'согласие_кнопкой', None)\n"
-             "if f is None: print('нет функции'); raise SystemExit\n"
-             "try: print(json.dumps(f('удаление', sys.argv[2], sys.argv[3]), ensure_ascii=False))\n"
-             "except o.НетНосителя: print('НетНосителя')\n")
-    no_key = {k: v for k, v in n.env.items() if k != "HARNESS_OWNER_WORD_STEND"}
+    # Читатель: «носитель» — Носитель стенда аргументом; «каталог» — прежний довод каталога
+    # (его у судьи нет: TypeError); «машина» — без носителя при окружении стенда.
+    probe = ("import json, pathlib, sys; sys.path.insert(0, sys.argv[1]); import owner_word as o\n"
+             "mode, target, logs = sys.argv[2], sys.argv[3], pathlib.Path(sys.argv[4])\n"
+             "ask = {'носитель': lambda: o.согласие_кнопкой('удаление', target, носитель=o.Носитель(\n"
+             "           папка=logs, uid=None, паспорт={'TG_CHAT_ID': sys.argv[5]}, граница=logs.parent,\n"
+             "           окно_мин=60, срок_кнопки_мин=int(sys.argv[6]), ручки={})),\n"
+             "       'каталог': lambda: o.согласие_кнопкой('удаление', target, каталог_логов=logs),\n"
+             "       'машина': lambda: o.согласие_кнопкой('удаление', target)}[mode]\n"
+             "try: print(json.dumps(ask(), ensure_ascii=False))\n"
+             "except o.НетНосителя: print('НетНосителя')\n"
+             "except (TypeError, AttributeError) as trouble: print(type(trouble).__name__)\n")
 
-    def reader(env: dict, target: Path, logs: Path) -> str:
-        done = subprocess.run(["python3", "-c", probe, str(LIB), str(target), str(logs)],
-                              capture_output=True, text=True, env=env, timeout=30)
+    def reader(mode: str, target: Path, logs: Path) -> str:
+        done = subprocess.run(["python3", "-c", probe, str(LIB), mode, str(target), str(logs), str(OWNER),
+                               str(TTL_MIN)], capture_output=True, text=True, env=n.env, timeout=30)
         return (done.stdout.strip().splitlines() or [done.stderr.strip()[-120:]])[-1]
 
-    check("8в) читатель: файла нет — None", "null", reader(n.env, y, n.log))
+    check("8в) читатель с носителем стенда: файла нет — None", "null", reader("носитель", y, n.log))
     n.decide(YES,y, 30)
-    check("8в) читатель без ключа стенда на чужом каталоге — НетНосителя", "НетНосителя",
-          reader(no_key, y, n.log))
+    check("8в) контроль: читатель с носителем стенда видит «Да»", True,
+          reader("носитель", y, n.log).startswith("{"))
+    check("8в) каталога журнала у судьи нет: довод каталог_логов — TypeError", "TypeError",
+          reader("каталог", y, n.log))
+    check("8в) без носителя окружение стенда судью не уводит: у машины этого «Да» нет", "null",
+          reader("машина", y, n.log))
 
     # Срок кнопки: корень машины пробе не подменить, поэтому ожидание — разбор
-    # машинного harness.conf; окружение берётся заведомо отличным от него.
-    ttl = ("import sys; sys.path.insert(0, sys.argv[1]); import owner_word as o\n"
-           "print(o.срок_кнопки_мин())\n")
+    # машинного harness.conf; окружение и носитель берутся заведомо отличными от него.
+    ttl = ("import pathlib, sys; sys.path.insert(0, sys.argv[1]); import owner_word as o\n"
+           "try:\n"
+           "    if sys.argv[2:]:\n"
+           "        logs = pathlib.Path(sys.argv[2])\n"
+           "        print(o.срок_кнопки_мин(носитель=o.Носитель(папка=logs, uid=None, паспорт={},\n"
+           "              граница=logs.parent, окно_мин=60, срок_кнопки_мин=int(sys.argv[3]), ручки={})))\n"
+           "    else:\n"
+           "        print(o.срок_кнопки_мин())\n"
+           "except (TypeError, AttributeError) as trouble: print(type(trouble).__name__)\n")
     machine = machine_ttl()
     longer = str(machine + 1000)
 
-    def ttl_of(env: dict) -> str:
-        done = subprocess.run(["python3", "-c", ttl, str(LIB)], capture_output=True, text=True,
+    def ttl_of(env: dict, *carrier: str) -> str:
+        done = subprocess.run(["python3", "-c", ttl, str(LIB), *carrier], capture_output=True, text=True,
                               env=env, timeout=30)
         return (done.stdout.strip().splitlines() or [done.stderr.strip()[-120:]])[-1]
 
-    check("8г) контроль: на стенде срок кнопки — из окружения", longer,
+    check("8г) контроль: срок кнопки — у носителя (носитель стенда со своим сроком)", longer,
+          ttl_of(n.env, str(n.log), longer))
+    check(f"8г) без носителя окружение срок не продлевает (машина: {machine})", str(machine),
           ttl_of(dict(n.env, CONSENT_BUTTON_TTL_MIN=longer)))
-    check(f"8г) без ключа стенда окружение срок не продлевает (машина: {machine})", str(machine),
-          ttl_of(dict(no_key, CONSENT_BUTTON_TTL_MIN=longer)))
 
 
 # ── 9. охрана ───────────────────────────────────────────────────────────────
@@ -1057,12 +1130,12 @@ def script(path: Path, text: str) -> Path:
     return path
 
 
-def ask_raw(env: dict, args: list[str], cwd: Path | None = None) -> tuple[int | None, str, str | None, float]:
-    """ask-consent.py с любыми ключами → (rc, вывод, nonce, секунды)."""
+def ask_raw(carrier: dict, env: dict, args: list[str],
+            cwd: Path | None = None) -> tuple[int | None, str, str | None, float]:
+    """ask-consent.py с любыми ключами раннером с носителем стенда → (rc, вывод, nonce, секунды)."""
     start = time.time()
     try:
-        done = subprocess.run(["python3", str(ASK), *args], capture_output=True, text=True,
-                              env=dict(env, **GIT_ENV), cwd=cwd, timeout=40)
+        done = carrier_run(carrier, [str(ASK), *args], dict(env, **GIT_ENV), cwd=cwd, timeout=40)
     except subprocess.TimeoutExpired:
         return None, "ask-consent.py висит дольше 40 с", None, time.time() - start
     nonce = next((s.strip() for s in done.stdout.splitlines() if NONCE_RE.match(s.strip())), None)
@@ -1108,7 +1181,7 @@ def probe_kind_request(st: Stand) -> None:
     print("— виды-1. запрос пуша: строка, команда с хэшем, текст владельцу")
     b = GitBench(st.yard.root / "v1")
     sha = b.head()
-    rc, out, nonce, _ = ask_raw(st.env, push_args(b), st.dir)
+    rc, out, nonce, _ = ask_raw(st.carrier, st.env, push_args(b), st.dir)
     check("в1а) ask-consent.py --вид пуш: код 0 и nonce", (0, True), (rc, bool(nonce)))
     req = request_of(st.requests, nonce)
     check("в1б) строка запроса: вид «пуш»", "пуш", req.get("вид"))
@@ -1131,7 +1204,7 @@ def probe_kind_request(st: Stand) -> None:
     user = f"tok-{secrets.token_hex(4)}"
     ssh = script(st.yard.root / "v1-bin" / "ssh", FAKE_SSH)
     git("remote", "set-url", "origin", f"ssh://{user}@stand.invalid{s.remote}", cwd=s.work)
-    rc, out, nonce_s, _ = ask_raw(dict(st.env, GIT_SSH_COMMAND=str(ssh)), push_args(s), st.dir)
+    rc, out, nonce_s, _ = ask_raw(st.carrier, dict(st.env, GIT_SSH_COMMAND=str(ssh)), push_args(s), st.dir)
     check(f"в1е) ssh-адрес с учёткой: запрос принят [{out[-160:]}]", 0, rc)
     target = str(request_of(st.requests, nonce_s).get("цель", user))
     check("в1е) цель с хостом и без учётки (И-3)", (True, False), ("stand.invalid" in target, user in target))
@@ -1149,7 +1222,7 @@ def probe_kind_replace(st: Stand) -> None:
     git("replace", head, benign, cwd=b.work)
     check("в2) условие: с подменой git log показывает «benign»", "benign",
           git("log", "-1", "--format=%s", head, cwd=b.work))
-    rc, out, nonce, _ = ask_raw(st.env, push_args(b), st.dir)
+    rc, out, nonce, _ = ask_raw(st.carrier, st.env, push_args(b), st.dir)
     check(f"в2а) запрос принят [{out[-160:]}]", 0, rc)
     text = sent_form(st, nonce).get("text", "")
     check("в2б) «2 коммита», настоящие «evil 1» и «evil 2», «benign» нет", (True, True, True, False),
@@ -1167,14 +1240,14 @@ def probe_kind_refusals(yard: Yard) -> None:
         return GitBench(yard.root / f"v3-{next(numbers)}", ahead)
 
     lines = line_count(requests)
-    rc, out, _nonce, _ = ask_raw(d.env, push_args(bench()), d.dir)
+    rc, out, _nonce, _ = ask_raw(d.carrier, d.env, push_args(bench()), d.dir)
     check(f"в3а) контроль: годный запрос — код 0 и строка [{out[-160:]}]", (0, lines + 1),
           (rc, line_count(requests)))
 
     def refused(label: str, args: list[str], extra_env: dict | None = None, reason: str = "",
                 limit: float = 0, parsed: bool = True) -> None:
         lines = line_count(requests)
-        rc, out, _nonce, took = ask_raw(dict(d.env, **(extra_env or {})), args, d.dir)
+        rc, out, _nonce, took = ask_raw(d.carrier, dict(d.env, **(extra_env or {})), args, d.dir)
         check(f"{label}: код 2, строки нет", (2, lines), (rc, line_count(requests)))
         if parsed:
             # Ключи годные: отказ обязан быть по сути, а не разбором аргументов.
@@ -1215,7 +1288,7 @@ def probe_kind_default(yard: Yard) -> None:
     print("— виды-4. --цель без --вид — запрос вида «удаление»")
     d = Door(yard, "v4")
     f = d.file("v4.txt")
-    rc, _out, nonce, _ = ask_raw(d.env, ["--цель", str(f), "--почему", "проба"])
+    rc, _out, nonce, _ = ask_raw(d.carrier, d.env, ["--цель", str(f), "--почему", "проба"])
     check("в4а) код 0 и nonce", (0, True), (rc, bool(nonce)))
     req = request_of(d.log / "consent-requests.jsonl", nonce)
     check("в4б) строка запроса: вид «удаление», цель realpath", ("удаление", str(f.resolve())),
@@ -1226,7 +1299,7 @@ def probe_kind_yes(st: Stand) -> None:
     print("— виды-5. «Да» на пуш: вид и цель — из «отправлено»")
     b = GitBench(st.yard.root / "v5")
     subject = b.subject()
-    _rc, _out, nonce, _ = ask_raw(st.env, push_args(b), st.dir)
+    _rc, _out, nonce, _ = ask_raw(st.carrier, st.env, push_args(b), st.dir)
     sent_form(st, nonce)
     mid = st.sent_id(nonce)
     check("в5) условие: запрос пуша отправлен", True, mid is not None)
@@ -1288,8 +1361,7 @@ def probe_kind_hang(yard: Yard) -> None:
                           {"nonce": nonce, "вид": "пуш", "цель": b.subject(), "почему": "проба"}) + "\n")
     script(yard.root / "v7-bin" / "git", GIT_HANG_LOG.format(git=REAL_GIT))
     env = dict(os.environ, **GIT_ENV, PATH=f"{yard.root / 'v7-bin'}:{os.environ.get('PATH', '')}",
-               LOG_DIR=str(log), HARNESS_LOG_DIR=str(log), HARNESS_OWNER_WORD_STEND="1",
-               CONSENT_BUTTON_TTL_MIN=str(TTL_MIN))
+               LOG_DIR=str(log), HARNESS_LOG_DIR=str(log))
     start = time.time()
     try:
         done = subprocess.run(["python3", str(LIB_BUTTONS), "unsent", str(log), str(yard.root / "v7-sec")],
@@ -1328,8 +1400,7 @@ def probe_kind_ask_door(yard: Yard) -> None:
     (tree / "lib").symlink_to(LIB)
     script(tree / "tg_send.sh", TG_STUB)
     f = d.file("v9.txt")
-    done = subprocess.run(["python3", str(tree / "protected-delete.py"), str(f), "--спросить"],
-                          capture_output=True, text=True, env=d.env, timeout=60)
+    done = d.door(tree / "protected-delete.py", str(f), "--спросить", lib=tree / "lib")
     rows = [data_of(r) for r in read_jsonl(d.log / "consent-requests.jsonl") if r.get("event") == REQUEST]
     check("в9а) одна строка запроса: вид «удаление», цель realpath", [("удаление", str(f.resolve()))],
           [(r.get("вид"), r.get("цель")) for r in rows])
@@ -1342,7 +1413,7 @@ def probe_kind_ask_door(yard: Yard) -> None:
 def probe_kind_tables(yard: Yard) -> None:
     print("— виды-10. таблицы по виду: ключи == ВИДЫ_СОГЛАСИЯ")
     done = subprocess.run(["python3", "-c", TABLES_PY, str(LIB), str(ASK)], capture_output=True,
-                          text=True, timeout=60, env=dict(os.environ, HARNESS_OWNER_WORD_STEND="1"))
+                          text=True, timeout=60)
     try:
         found = json.loads(done.stdout.strip().splitlines()[-1])
     except (ValueError, IndexError):

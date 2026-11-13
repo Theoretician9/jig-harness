@@ -66,19 +66,87 @@ conf() {  # пишет harness.conf стенда; $1 — добавочные с
     } > "$STAND/harness.conf"
 }
 
-run_deploy() {  # $@ — ключи deploy.sh; печатает вывод, код — в RC
+run_deploy() {  # $@ — ключи deploy.sh; печатает вывод, код — в RC (копия scripts/ с обёрткой ворот)
     VYVOD=$(PATH="$FAKEBIN:$PATH" DOCKER_JOURNAL="$STAND/docker.log" \
             HARNESS_INSTALL_CONF="$STAND/install.conf" HARNESS_CONF="$STAND/harness.conf" \
-            timeout 300 bash "$HERE/deploy.sh" "$@" 2>&1)
+            timeout 300 bash "$SCRIPTS_COPY/deploy.sh" "$@" 2>&1)
     RC=$?
     printf '%s\n' "$VYVOD" | sed 's/^/      /' | tail -6
 }
 
-# Ключи согласия ворота читают у машины; на стенде — из файлов окружения: без ключа стенда
-# выкат стенда судился бы по harness.conf машины. Журнал входящих есть всегда — без него
-# отзыв прочитать нечем, и это отказ.
-export HARNESS_OWNER_WORD_STEND=1 HARNESS_LOG_DIR="$STAND/zhurnal"
+# Журнал слова и ключи согласия судья берёт у носителя: отдельным процессом — у машины,
+# поэтому ворота стенда идут обёрткой с носителем стенда. Журнал входящих есть всегда —
+# без него отзыв прочитать нечем, и это отказ.
+export HARNESS_LOG_DIR="$STAND/zhurnal"
+# Дверь берёт конфиг только своей дверью (АР-3): HARNESS_INSTALL_CONF/HARNESS_CONF она не
+# слушает, а паспорт стенда называет HARNESS_DOOR_STAND_HOME — и только КОПИИ вне PROJECT_DIR
+# машины. Поэтому каждый запуск ниже — копия deploy.sh в $STAND; настоящий файл пошёл бы на
+# паспорт машины. HARNESS_INSTALL_CONF/HARNESS_CONF остаются для детей двери.
+export HARNESS_DOOR_STAND_HOME="$STAND"
 : > "$STAND/zhurnal/inbox.jsonl"
+
+# Обёртка ворот пробы: настоящие ворота deploy_guard.py в процессе обёртки, их судье —
+# носитель стенда. После карточки А судья не слушает окружение ни при каком ключе
+# (спека §3.2), и отдельным процессом дверь «Да» стенда не видит — открытие проба
+# судит только так (отступление 7 плана), отказ — и отдельным процессом.
+# Без Носитель у судьи (до А3) обёртка печатает «ОБЁРТКА ПРОБЫ: …» и выходит кодом 3.
+obertka_vorot() {  # $1=файл обёртки $2=настоящие ворота $3=паспорт стенда $4=ручки стенда
+    # Путь обёртки бывает ссылкой на настоящие ворота (проект стенда из ссылок): открыть его
+    # на запись значило бы переписать сами ворота, поэтому ссылка снимается до записи.
+    rm -f "$1"
+    python3 - "$1" "$(readlink -f "$2")" "$3" "$4" <<'PY'
+import sys
+out, real, passport, handles = sys.argv[1:5]
+head = f"REAL, PASSPORT, HANDLES = {real!r}, {passport!r}, {handles!r}\n"
+body = r'''
+import dataclasses, importlib.util, pathlib, sys
+
+def number(value, default):
+    text = str(value or "").strip()
+    return int(text) if text.isdigit() else default
+
+def stand_carrier(judge, config):
+    cls = getattr(judge, "Носитель", None)
+    if cls is None or not dataclasses.is_dataclass(cls):
+        raise LookupError("в судье нет dataclass Носитель")
+    values, keys = config.из_файла(PASSPORT), config.из_файла(HANDLES)
+    folder = pathlib.Path(values.get("LOG_DIR") or PASSPORT)
+    known = {"папка": folder, "uid": None, "паспорт": values, "граница": folder,
+             "окно_мин": number(keys.get("CONFIRM_MAX_AGE_MIN"), 60),
+             "срок_кнопки_мин": number(keys.get("CONSENT_BUTTON_TTL_MIN"), None), "ручки": keys}
+    fields = dataclasses.fields(cls)
+    unknown = [f.name for f in fields if f.name not in known
+               and f.default is dataclasses.MISSING and f.default_factory is dataclasses.MISSING]
+    if unknown:
+        raise LookupError(f"у Носитель обязательные поля, которых проба не знает: {unknown}")
+    return cls(**{f.name: known[f.name] for f in fields if f.name in known})
+
+sys.argv[0] = REAL
+spec = importlib.util.spec_from_file_location("deploy_guard", REAL)
+door = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(door)
+try:
+    carrier = stand_carrier(door.слово_вл, door.конф)
+except LookupError as trouble:
+    print(f"ОБЁРТКА ПРОБЫ: {trouble}")
+    sys.exit(3)
+door.слово_вл.носитель = lambda: carrier
+sys.exit(door.main())
+'''
+with open(out, "w", encoding="utf-8") as fh:
+    fh.write("# Обёртка пробы (носитель стенда): сгенерирована пробой, не править.\n" + head + body)
+PY
+}
+
+# Копия scripts/ стенда: deploy.sh зовёт ворота рядом с собой ($SCRIPT_DIR по readlink -f).
+# Шаг 7 зовёт сверку карты и автопамяти ПРОЕКТА; на стенде их нет — в копии их нет тоже,
+# автопамять заглушена, чтобы проба не трогала машину.
+SCRIPTS_COPY="$STAND/scripts"
+mkdir -p "$SCRIPTS_COPY"
+cp "$HERE/deploy.sh" "$HERE/check-secrets.sh" "$SCRIPTS_COPY/"
+cp -r "$HERE/lib" "$SCRIPTS_COPY/"
+printf 'import sys\nsys.exit(0)\n' > "$SCRIPTS_COPY/fix-claude-mem-project.py"
+obertka_vorot "$SCRIPTS_COPY/deploy_guard.py" "$HERE/deploy_guard.py" "$STAND/install.conf" "$STAND/harness.conf"
 
 svezhee_da() {  # свежее «Да» кнопкой на предмет выката «<sha продукта> <realpath дерева>»
     # Секунда паузы: строка журнала выкатов прошлого случая в ту же секунду погасила бы это «Да».
@@ -113,8 +181,9 @@ itog "да" "$(has "$VYVOD" "STACK_BUILD_CMD")" "отказ называет п�
 # «--план» доезжал искажённым и шёл мимо плана в ворота (ревью 14.10.2026).
 run_bare() {  # $@ — ключи deploy.sh; docker «мёртв», окружение пустое
     VYVOD=$(env -i PATH="$FAKEBIN:/usr/bin:/bin" HOME="$STAND" DOCKER_DEAD=1 \
+            HARNESS_DOOR_STAND_HOME="$STAND" \
             HARNESS_INSTALL_CONF="$STAND/install.conf" HARNESS_CONF="$STAND/harness.conf" \
-            timeout 120 bash "$HERE/deploy.sh" "$@" 2>&1)
+            timeout 120 bash "$SCRIPTS_COPY/deploy.sh" "$@" 2>&1)
     RC=$?
     printf '%s\n' "$VYVOD" | sed 's/^/      /' | tail -4
 }
@@ -249,13 +318,6 @@ STACK_RELEASE_CMD=\"echo peresozdanie >> $STAND/poryadok\"
 STACK_HEALTH_CMD=\"true\"
 DEVMAP_AUDIT_DAYS=0"
 svezhee_da
-# Шаг 7 зовёт сверку карты и автопамяти ПРОЕКТА; на стенде их нет — подменяем
-# каталог скриптов копией без них, чтобы проба не трогала машину.
-SCRIPTS_COPY="$STAND/scripts"
-mkdir -p "$SCRIPTS_COPY"
-cp "$HERE/deploy.sh" "$HERE/deploy_guard.py" "$HERE/check-secrets.sh" "$SCRIPTS_COPY/"
-cp -r "$HERE/lib" "$SCRIPTS_COPY/"
-printf 'import sys\nsys.exit(0)\n' > "$SCRIPTS_COPY/fix-claude-mem-project.py"
 VYVOD=$(PATH="$FAKEBIN:$PATH" DOCKER_JOURNAL="$STAND/docker.log" \
         HARNESS_INSTALL_CONF="$STAND/install.conf" HARNESS_CONF="$STAND/harness.conf" \
         timeout 300 bash "$SCRIPTS_COPY/deploy.sh" 2>&1)
@@ -288,12 +350,12 @@ STACK_HEALTH_URL=\"$DEAD_URL\""
 svezhee_da
 # Каталог скриптов есть и в продукте (пустой, гит его не видит): так
 # ошибочный путь разрешается в ЧУЖОЕ дерево, а не в пустоту, и это видно.
-mkdir -p "$PRODUCT/$(basename "$HERE")"
-SAM="$(readlink -f "$HERE/deploy.sh")"
-VYVOD=$(cd "$(dirname "$HERE")" && env -i PATH="$SGBIN:$FAKEBIN:/usr/bin:/bin" HOME="$STAND" \
-        DOCKER_DEAD=1 SG_JOURNAL="$STAND/sg.log" \
+mkdir -p "$PRODUCT/$(basename "$SCRIPTS_COPY")"
+SAM="$(readlink -f "$SCRIPTS_COPY/deploy.sh")"
+VYVOD=$(cd "$(dirname "$SCRIPTS_COPY")" && env -i PATH="$SGBIN:$FAKEBIN:/usr/bin:/bin" HOME="$STAND" \
+        DOCKER_DEAD=1 SG_JOURNAL="$STAND/sg.log" HARNESS_DOOR_STAND_HOME="$STAND" \
         HARNESS_INSTALL_CONF="$STAND/install.conf" HARNESS_CONF="$STAND/harness.conf" \
-        timeout 120 bash "./$(basename "$HERE")/deploy.sh" --силой 2>&1)
+        timeout 120 bash "./$(basename "$SCRIPTS_COPY")/deploy.sh" --силой 2>&1)
 RC=$?
 printf '%s\n' "$VYVOD" | sed 's/^/      /' | tail -3
 itog "да" "$(has "$VYVOD" "перезапуск под sg docker")" "ветка sg достигнута"
@@ -313,10 +375,13 @@ run_copy() {  # $1 — каталог копии скриптов, дальше 
     printf '%s\n' "$VYVOD" | sed 's/^/      /' | tail -3
 }
 sborok() { grep -c '^sborka$' "$STAND/poryadok" 2>/dev/null || true; }
-soglasie_zhivo() {  # спросить ворота стенда: открывает ли ещё кнопка «Да»
-    PATH="$FAKEBIN:$PATH" HARNESS_INSTALL_CONF="$STAND/install.conf" HARNESS_CONF="$STAND/harness.conf" \
-        timeout 60 python3 "$SCRIPTS_COPY/deploy_guard.py" --только-согласие 2>&1 \
-        | grep -q "согласие владельца есть" && echo да || echo нет
+soglasie_zhivo() {  # спросить ворота стенда: открывает ли ещё кнопка «Да»; «обёртка» — судить нечем
+    local otvet
+    otvet=$(PATH="$FAKEBIN:$PATH" HARNESS_INSTALL_CONF="$STAND/install.conf" HARNESS_CONF="$STAND/harness.conf" \
+        timeout 60 python3 "$SCRIPTS_COPY/deploy_guard.py" --только-согласие 2>&1)
+    if printf '%s' "$otvet" | grep -q "ОБЁРТКА ПРОБЫ"; then echo обёртка
+    elif printf '%s' "$otvet" | grep -q "согласие владельца есть"; then echo да
+    else echo нет; fi
 }
 
 # Окно «той же попытки» закрыто (-1): иначе второй выкат шёл бы законно как
@@ -436,7 +501,7 @@ echo "── 14. HEAD сдвинулся после ворот — выкат о
 KOPIYA_SDVIG="$STAND/scripts-sdvig"
 mkdir -p "$KOPIYA_SDVIG"
 cp "$HERE/deploy.sh" "$HERE/check-secrets.sh" "$KOPIYA_SDVIG/"
-cp "$HERE/deploy_guard.py" "$KOPIYA_SDVIG/deploy_guard_real.py"
+obertka_vorot "$KOPIYA_SDVIG/deploy_guard_real.py" "$HERE/deploy_guard.py" "$STAND/install.conf" "$STAND/harness.conf"
 cp -r "$HERE/lib" "$KOPIYA_SDVIG/"
 printf 'import sys\nsys.exit(0)\n' > "$KOPIYA_SDVIG/fix-claude-mem-project.py"
 cat > "$KOPIYA_SDVIG/deploy_guard.py" <<'PY'

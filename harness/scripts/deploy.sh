@@ -34,8 +34,7 @@ set -euo pipefail
 # ── конфиги ─────────────────────────────────────────────────────────────────
 source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/lib/config.sh"
 source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/lib/events.sh"
-INSTALL_CONF="${HARNESS_INSTALL_CONF:-$(konf_koren)/install.conf}"
-HARNESS_CONF="${HARNESS_CONF:-$(konf_koren)/harness.conf}"
+konf_dveri_puti "${BASH_SOURCE[0]}"
 [ -r "$INSTALL_CONF" ] || { echo "deploy: нет $INSTALL_CONF — установка не завершена (01-SPEC §0)"; exit 1; }
 # shellcheck disable=SC1090
 # Конфиги грузятся так, чтобы ОКРУЖЕНИЕ было старше файла: иначе проба с
@@ -44,7 +43,7 @@ HARNESS_CONF="${HARNESS_CONF:-$(konf_koren)/harness.conf}"
 # Путь берётся по РЕАЛЬНОМУ файлу (readlink -f): pre-commit подключён в
 # .git/hooks симлинком, и dirname дал бы .git/hooks, где библиотеки нет.
 # Поймано первым же коммитом после правки, 12.09.2026.
-konf_zagruzit PROJECT_DIR LOG_DIR TMUX_SESSION SECRETS_DIR AGENT_START_CMD DOCKER_SWEEP_ENABLED
+konf_zagruzit_dveri PROJECT_DIR LOG_DIR TMUX_SESSION SECRETS_DIR AGENT_START_CMD DOCKER_SWEEP_ENABLED BACKUP_DIR DB_ADMIN_USER DEVMAP_AUDIT_DAYS HARNESS_LOG_DIR PRODUCT_DIR PRODUCT_REPO STACK_BUILD_CMD STACK_BUILD_NOCACHE_CMD STACK_CRON_SRC STACK_DB_DUMP_CMD STACK_DB_RESTORE_HINT STACK_HEALTH_CMD STACK_HEALTH_URL STACK_IMAGES STACK_MANIFESTS STACK_MIGRATE_CMD STACK_PROXY_RELOAD_CMD STACK_RELEASE_CMD STACK_UP_CMD
 # harness.conf несёт секцию STACK_*; без него продукт заведомо не задан.
 : "${PROJECT_DIR:?в install.conf пуст PROJECT_DIR}" "${LOG_DIR:?пуст LOG_DIR}"
 
@@ -153,7 +152,7 @@ fi
 # прячут правку от голого `status --porcelain`.
 TREE_DIRTY=""
 if git -C "$PRODUCT_TREE" rev-parse --git-dir >/dev/null 2>&1; then
-    TREE_DIRTY=$(python3 "$SCRIPT_DIR/lib/door_subjects.py" грязь "$PRODUCT_TREE" 2>&1) \
+    TREE_DIRTY=$(python3 -I "$SCRIPT_DIR/lib/door_subjects.py" грязь "$PRODUCT_TREE" 2>&1) \
         || TREE_DIRTY="git не ответил: $TREE_DIRTY"
 fi
 TREE_NOTE="чисто"
@@ -251,7 +250,7 @@ printf '%s\nвыкат deploy.sh, начат %s\n' "$$" "$(date -Is)" > "$DEPLOY
 # 04.08 выкат перезапустил воркер и убил чужую сборку (улика в deploy_guard.py).
 GATE_RC=0
 # --просить: нет кнопки — ворота сами просят её у владельца; каталог журналов передаётся явно.
-GATE_OUT=$(HARNESS_LOG_DIR="$LOG_DIR" python3 "$SCRIPT_DIR/deploy_guard.py" --просить $GATE_FORCE ${GATE_SUBJECT[@]+"${GATE_SUBJECT[@]}"} 2>&1) || GATE_RC=$?
+GATE_OUT=$(HARNESS_LOG_DIR="$LOG_DIR" python3 -I "$SCRIPT_DIR/deploy_guard.py" --просить $GATE_FORCE ${GATE_SUBJECT[@]+"${GATE_SUBJECT[@]}"} 2>&1) || GATE_RC=$?
 printf '%s\n' "$GATE_OUT"
 # Код 2 — ворота не поняли ключи (будущий ключ, не прошедший разбор выше):
 # «занято» тут было бы ложью о причине.
@@ -269,7 +268,7 @@ bash "$SCRIPT_DIR/check-secrets.sh" "$PRODUCT_TREE" || { say "секреты в 
 
 # ── 1б. Режим хакатон: вместо полных ворот — быстрое подмножество ───────────
 # Откат на :previous и живой смоук ниже не меняются: быстрее ворота, не выкат.
-if python3 "$SCRIPT_DIR/hackathon.py" --активен --карта "$PROJECT_DIR/dev-map.yaml" >/dev/null 2>&1; then
+if python3 -I "$SCRIPT_DIR/hackathon.py" --активен --карта "$PROJECT_DIR/dev-map.yaml" >/dev/null 2>&1; then
     say "режим хакатон: быстрые ворота (gates.sh --хакатон)"
     bash "$SCRIPT_DIR/gates.sh" --хакатон || { say "быстрые ворота хакатона красные — выкат отменён"; exit 1; }
 fi
@@ -279,7 +278,7 @@ fi
 # коммит, пришедший за это время, уехал бы под согласием на другой sha.
 tree_head() { GIT_NO_REPLACE_OBJECTS=1 git -C "$PRODUCT_TREE" rev-parse HEAD 2>/dev/null || true; }
 if [ -n "$DEPLOY_SHA" ]; then
-    NOW_DIRTY=$(python3 "$SCRIPT_DIR/lib/door_subjects.py" грязь "$PRODUCT_TREE" 2>&1) || NOW_DIRTY="git не ответил: $NOW_DIRTY"
+    NOW_DIRTY=$(python3 -I "$SCRIPT_DIR/lib/door_subjects.py" грязь "$PRODUCT_TREE" 2>&1) || NOW_DIRTY="git не ответил: $NOW_DIRTY"
     if [ "$(tree_head)" != "$DEPLOY_SHA" ] || [ -n "$NOW_DIRTY" ]; then
         say "HEAD сдвинулся или дерево изменилось после согласия — выкат отменён (одобрен ${DEPLOY_SHA:0:8}, сейчас $(tree_head | cut -c1-8))"
         exit 1
@@ -498,7 +497,7 @@ fi
 
 # Улика шаблона: автопамять «залипает» на имени подкаталога — сводим осколки
 # здесь же, где и пропуски в карте. Не блокирует деплой.
-python3 "$SCRIPT_DIR/fix-claude-mem-project.py" || say "сведение имён автопамяти не отработало (деплой не затронут)"
+python3 -I "$SCRIPT_DIR/fix-claude-mem-project.py" || say "сведение имён автопамяти не отработало (деплой не затронут)"
 
 # ── 7б. Расписание продукта: ночные расчёты ставятся ВЫКАТОМ ────────────────
 # Улика 10.09.2026: в crontab сервера было восемь строк, и все восемь —

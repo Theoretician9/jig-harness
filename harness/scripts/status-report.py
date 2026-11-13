@@ -5,27 +5,40 @@
 запусков непонятно, нужны задачи, а под ними — кто делал и какие стадии. Форма:
 
     ✅ СДЕЛАНО
-    1. <заголовок задачи>
+    1. <короткое название задачи>
        делали: <подпись> (<роль>), <подпись> (<роль> и <роль>)
        этапы: тест ✔ код ✔ проверка ✔ мутации ✔ коммит ✔
+       коммитов N, последний: <тема>      (только коммиты «Dev-Map: <id>» семьи после среза)
     прочее N                  (помощники без метки задачи)
-    📝 коммитов N, последний: …
     🔄 ДЕЛАЕТСЯ               (пусто — «пока ничего»)
-    2. <заголовок задачи>
-       делают: <подпись> (<роль>)
+    2. <короткое название задачи>
+       делали: <подпись> (<роль>)         (кто уже кончил)
+       делают: <подпись> (<роль>)         (идущие; нет идущих — «сейчас никто не работает»)
        этап: <этап последнего идущего запуска>
     ⚠ ПОТЕРЯН                 (только если есть потерянные запуски; иначе блока нет)
     • <описание>, с HH:MM      (не больше 3, остаток — «и ещё N»)
     ⏭ ДАЛЬШЕ
     3. <название карточки очереди>     (нумерация сквозная)
 
+Блок задачи с карточкой судит КАРТА, не запуски: test/done/принято — СДЕЛАНО (даже если запуск идёт),
+wip/plan — ДЕЛАЕТСЯ (даже если все запуски кончились). Задача без карточки («дело:…») — по запускам:
+есть идущий не потерянный — ДЕЛАЕТСЯ, иначе СДЕЛАНО. В отчёт входит задача только с работой в окне:
+свежий запуск или коммит «Dev-Map: <id>» после среза. Строки «📝 коммитов» нет: коммиты — примечание
+задачи.
+Семья: карточка, чья spec лежит в .tasks/<X>/…, где X — другая карточка, входит в семью X. Семья —
+одна строка: член с последней работой (зонтик X — только если у детей работы нет); коммиты — всей
+семьи. Потерянный запуск семьи, показанной как сданная, не в ⚠; ДАЛЬШЕ не предлагает показанную
+семью и карточки test/done/принято.
+Название: поле карточки «коротко»; иначе заголовок, а длиннее строки — его часть до « — » или «: ».
+Урезка строки не оставляет служебное слово или тире перед «…».
 Задача — id из метки «Часть: <id>#n» в описании запуска; исполнитель без метки наследует задачу
 родителя по дереву запусков; запуск без метки и без родителя с задачей, но с русским описанием, —
-своя задача (заголовок — описание; ярлык «Оркестратор:» с двоеточием отрезается, без двоеточия остаётся); «прочее» — остальные. Запуски с одной
-задачей — в одном блоке (есть идущий не потерянный запуск — ДЕЛАЕТСЯ, иначе СДЕЛАНО). Роль запуска:
+своя задача (заголовок — описание; ярлык «Оркестратор:» с двоеточием отрезается, без двоеточия остаётся); «прочее» — остальные. «делали/делают» —
+только запуски окна; подпись модели — из STATUS_MODEL_LABELS, нет там — id модели как есть. Роль запуска:
 harness-lead — «вёл»; описание начинается со слова «ревью»/«review» — «проверка» (помощник,
 правящий код по итогам ревью, — «код», хотя хук и ставит ему флаг «ревью»); слова тест/проба/test/probe в
-описании — «тесты»; harness-worker — «код»; иное — «помощник».
+описании — «тесты»; investigate/survey/audit/measure/разбор/замер/исследов — «разведка»; harness-worker —
+«код»; иное — «помощник».
 
     status-report.py [--журнал-вызовов F] [--карта F] [--очередь F] [--модели F]
                      [--сессия ID] [--с ISO-время]    (сессия по умолчанию пуста: весь журнал установки)
@@ -66,9 +79,8 @@ NOTHING = "пока ничего"
 NOTHING_NEW = "пока нового нет"
 # Простой виден как простой: с какого часа тихо и когда кончил последний помощник журнала.
 IDLE_SINCE = "с {since} нового нет; последний помощник кончил {last}"
-COMMITS_LINE = "📝 коммитов {count}, последний: {subject}"
-# Правки памяти с панели делает владелец руками, это не работа смены.
-PANEL_COMMIT_PREFIX = "Правка памяти с панели"
+COMMITS_NOTE = "коммитов {count}, последний: {subject}"
+NOBODY_NOTE = "сейчас никто не работает"
 GIT_TIMEOUT = 30
 QUEUE_EMPTY = "очередь пуста"
 QUEUE_UNAVAILABLE = "очередь недоступна"
@@ -91,19 +103,28 @@ FINISHED_CARD_STATUSES = ("test", "done", "принято")
 H_DONE, H_DOING, H_NEXT = config.STATUS_HEADERS
 
 # Этап — слово для владельца; для идущего запуска он выводится из его роли.
-STAGE_OF_ROLE = {"вёл": "ведение задачи", "тесты": "тест", "код": "код",
+STAGE_OF_ROLE = {"вёл": "ведение задачи", "разведка": "разведка", "тесты": "тест", "код": "код",
                  "проверка": "проверка", "помощник": "работа"}
 DEFAULT_TITLE = "работа"
 
 TASK_MARK = re.compile(r"Часть:\s*((?:hr|pr)\.[\w.-]*\w)")
 CARD_ID = re.compile(r"\b(?:hr|pr)\.[\w.-]*\w(?:#\d+)?")
-DANGLING_TAIL = re.compile(r"(?:\s+(?:для|по|в|на|из|к|с|и|от|за))+\s*$")
+EMPTY_BRACKETS = re.compile(r"\(\s*[,;]?\s*\)")
+# Служебное слово или тире в хвосте читается как оборванная мысль: «…, а не…», «… — с…».
+DANGLING_TAIL = re.compile(r"(?:\s+(?:для|по|в|на|из|к|ко|с|со|и|а|но|не|от|за|о|об|у|что|как|или|при|без|до|во|—|-))+\s*$")
+TITLE_SPLITS = (" — ", ": ")
+# Место под «N. » перед заголовком в строке LINE_MAX.
+NUMBER_ROOM = 4
+NOTE_INDENT = 3   # отступ примечания под задачей
+SPEC_FOLDER = re.compile(r"\.tasks/([^/]+)/")
+DEV_MAP_TRAILER = re.compile(r"^Dev-Map:\s*(\S+)\s*$", re.MULTILINE)
 CYRILLIC = re.compile(r"[а-яё]", re.IGNORECASE)
 LATIN_TOKEN = re.compile(r"\S*[A-Za-z]\S*")
 # Порядок ролей в «делали/делают»: вёл → тесты → код → проверка.
-ROLE_ORDER = {"вёл": 0, "тесты": 1, "код": 2, "проверка": 3, "помощник": 4}
+ROLE_ORDER = {"вёл": 0, "разведка": 1, "тесты": 2, "код": 3, "проверка": 4, "помощник": 5}
 # «ревью» только в начале описания: слово посреди («правки по ревью») отмечает того, кто правит код.
 TEST_WORD = re.compile(r"\b(?:тест\w*|проб(?:а|ы|у|ой|е)|tests?|probes?)\b|test_", re.IGNORECASE)
+SCOUT_WORD = re.compile(r"investigat|survey|audit|measur|разбор|замер|исследов", re.IGNORECASE)
 REVIEW_START = re.compile(r"(?:ревью|review)\b", re.IGNORECASE)
 
 
@@ -137,6 +158,8 @@ class Launch:
             return "проверка"
         if TEST_WORD.search(self.desc):
             return "тесты"
+        if SCOUT_WORD.search(self.desc):
+            return "разведка"
         return "код" if self.kind == "harness-worker" else "помощник"
 
 
@@ -144,6 +167,12 @@ class Task(NamedTuple):
     key: str
     members: list      # запуски по времени, без потерянных
     running: list      # из них идущие и свежие
+    window: list       # из них работа окна: о ней «делали/делают»
+
+
+class Commit(NamedTuple):
+    ts: datetime
+    subject: str
 
 
 class Entry(NamedTuple):
@@ -180,7 +209,8 @@ def parse_labels(raw: str) -> dict:
 
 
 def label_of(labels: dict, model: str) -> str:
-    return labels.get(model) or (model.capitalize() if model else "модель не названа")
+    # Модель вне STATUS_MODEL_LABELS называется своим id: выдуманная подпись — враньё.
+    return labels.get(model) or model or "модель не названа"
 
 
 def read_rows(path: Path):
@@ -332,18 +362,60 @@ def attach_containers(tasks: dict, launches: dict, containers: dict) -> None:
                 tasks[key].sort(key=lambda n: n.ts)
 
 
-def split_tasks(tasks: dict, gone: set, carry: set) -> tuple:
-    """(СДЕЛАНО, ДЕЛАЕТСЯ): есть идущий непотерянный запуск — задача идёт; иначе законченная, если есть
-    свежий конец или она осталась несообщённой с прошлой сборки (carry)."""
-    done, doing = [], []
-    for key, everyone in tasks.items():
-        members = [m for m in everyone if m.call not in gone]
-        running = [m for m in members if not m.done]
-        if running:
-            doing.append(Task(key, members, running))
-        elif key in carry or any(m.fresh for m in members):
-            done.append(Task(key, members, running))
-    return done, doing
+def has_window_work(key: str, members: list, carry: set, commits: dict) -> bool:
+    """Работа в окне: свежий запуск, коммит «Dev-Map» после среза или несообщённое с прошлой сборки."""
+    return key in carry or key in commits or any(m.fresh for m in members)
+
+
+def window_tasks(tasks: dict, gone: set, carry: set, commits: dict, cards: dict) -> list:
+    """Задачи с работой в окне. Коммит без запуска считается только у известной карточки."""
+    found = []
+    for key in list(tasks) + [k for k in commits if k in cards and k not in tasks]:
+        members = [m for m in tasks.get(key, []) if m.call not in gone]
+        if not has_window_work(key, members, carry, commits):
+            continue
+        fresh = [m for m in members if m.fresh]
+        found.append(Task(key, members, [m for m in members if not m.done], fresh or (members if key in carry else [])))
+    return found
+
+
+def family_root(key: str, cards: dict) -> str:
+    """Зонтик семьи: карточка, в чьей папке .tasks/<X>/ лежит спека этой карточки; иначе она сама."""
+    found = SPEC_FOLDER.search(str((cards.get(key) or {}).get("spec") or ""))
+    return found.group(1) if found and found.group(1) != key and found.group(1) in cards else key
+
+
+def work_time(task: Task, commits: dict, now: datetime) -> datetime:
+    """Когда в задаче последний раз работали: идущий запуск — сейчас, иначе конец запуска или коммит."""
+    moments = [m.finished_at or now for m in task.window] + [c.ts for c in commits.get(task.key, [])]
+    return max(moments, default=datetime.min.replace(tzinfo=timezone.utc))
+
+
+def one_per_family(found: list, cards: dict, commits: dict) -> list:
+    """Семья — одна строка: член с последней работой; зонтик — только если у детей работы нет."""
+    now = datetime.now(timezone.utc)
+    groups = {}
+    for task in found:
+        groups.setdefault(family_root(task.key, cards), []).append(task)
+    picked = []
+    for root, group in groups.items():
+        pool = [t for t in group if t.key != root] or group
+        picked.append(max(pool, key=lambda t: work_time(t, commits, now)))
+    return picked
+
+
+def is_finished(task: Task, cards: dict) -> bool:
+    """Карточка решает: test/done/принято — сделано, иначе делается, хоть никто и не работает. Задача без
+    карточки («дело:…») — по запускам: идущих нет — сделана."""
+    card = cards.get(task.key)
+    if card:
+        return card.get("status") in FINISHED_CARD_STATUSES
+    return not task.running
+
+
+def split_tasks(found: list, cards: dict) -> tuple:
+    done = [t for t in found if is_finished(t, cards)]
+    return done, [t for t in found if not is_finished(t, cards)]
 
 
 def who_line(members: list, labels: dict) -> str:
@@ -359,9 +431,20 @@ def card_index(dev_map: dict) -> dict:
     return {t.get("id"): t for line in dev_map.get("lines") or [] for t in line.get("tasks") or []}
 
 
+def short_title(card: dict) -> str:
+    """Подпись для строки: поле «коротко»; иначе целый заголовок, а длинный — часть до « — » или «: »."""
+    own = str(card.get("коротко") or "").strip()
+    title = str(card.get("title") or "").strip()
+    if own or len(title) <= LINE_MAX - NUMBER_ROOM:
+        return own or title
+    # Тире отделяет суть от пояснения грубее, чем двоеточие: «Скорость: харнес … — мощность по …».
+    sep = next((s for s in TITLE_SPLITS if s in title), "")
+    return title.split(sep, 1)[0] if sep else title
+
+
 def title_of(key: str, members: list, cards: dict) -> str:
     """Название карточки, если оно русское; иначе — описание запуска без латиницы и ярлыка роли."""
-    card = str((cards.get(key) or {}).get("title") or "").strip()
+    card = short_title(cards.get(key) or {})
     if CYRILLIC.search(card):
         return card
     text = next((t for t in (russian_only(m.desc) for m in members) if t), DEFAULT_TITLE)
@@ -389,10 +472,14 @@ def task_commits(project: str, task_id: str) -> str:
     return git_output(project, "log", "-E", dev_map_grep(task_id), "--name-only", "--format=%s")
 
 
-def task_finished(launch: Launch, cards: dict, project: str) -> bool:
-    """Задача оборванного запуска уже сделана: карточка в test/done/принято или после запуска есть её коммит."""
+def task_finished(launch: Launch, cards: dict, project: str, umbrellas_done: set) -> bool:
+    """Задача оборванного запуска уже сделана: карточка в test/done/принято, она зонтик семьи, показанной
+    сданной, или после запуска есть её коммит."""
     if not launch.key or launch.key.startswith(SYNTHETIC_PREFIX):
         return False
+    # Сданный ребёнок закрывает работу зонтика, но не брата: у брата своя карточка и своя тревога.
+    if launch.key in umbrellas_done:
+        return True
     if (cards.get(launch.key) or {}).get("status") in FINISHED_CARD_STATUSES:
         return True
     return bool(git_output(project, "log", "-E", dev_map_grep(launch.key),
@@ -424,18 +511,30 @@ def done_stages(task: Task, project: str) -> str:
     return " ".join(f"{name} ✔" for name, ok in stages.items() if ok)
 
 
-def done_entry(task: Task, titles: dict, labels: dict, project: str) -> Entry:
-    notes = [f"делали: {who_line(task.members, labels)}"]
+def commit_note(commits: list) -> list:
+    # Тема коммита бывает в сотни знаков; примечания не режутся Section, потому режем тут.
+    note = COMMITS_NOTE.format(count=len(commits), subject=commits[0].subject) if commits else ""
+    return [clip(note, LINE_MAX - NOTE_INDENT)] if note else []
+
+
+def who_notes(verb: str, members: list, labels: dict) -> list:
+    return [f"{verb}: {who_line(members, labels)}"] if members else []
+
+
+def done_entry(task: Task, titles: dict, labels: dict, project: str, commits: list) -> Entry:
     stages = done_stages(task, project)
-    return Entry(task.key, titles[task.key], notes + ([f"этапы: {stages}"] if stages else []))
+    notes = who_notes("делали", task.window, labels) + ([f"этапы: {stages}"] if stages else [])
+    return Entry(task.key, titles[task.key], notes + commit_note(commits))
 
 
-def doing_entry(task: Task, titles: dict, labels: dict) -> Entry:
-    """«делают» — только идущие; кто уже закончил, — строкой «делали»."""
-    finished = [m for m in task.members if m.done]
-    notes = [f"делали: {who_line(finished, labels)}"] if finished else []
-    stage = STAGE_OF_ROLE[task.running[-1].role]
-    return Entry(task.key, titles[task.key], notes + [f"делают: {who_line(task.running, labels)}", f"этап: {stage}"])
+def doing_entry(task: Task, titles: dict, labels: dict, commits: list) -> Entry:
+    """«делают» — только идущие; кто уже закончил, — строкой «делали»; идущих нет — «сейчас никто не работает»."""
+    notes = who_notes("делали", [m for m in task.window if m.done], labels)
+    if task.running:
+        notes += [f"делают: {who_line(task.running, labels)}", f"этап: {STAGE_OF_ROLE[task.running[-1].role]}"]
+    else:
+        notes.append(NOBODY_NOTE)
+    return Entry(task.key, titles[task.key], notes + commit_note(commits))
 
 
 def clip(line: str, width: int) -> str:
@@ -445,7 +544,11 @@ def clip(line: str, width: int) -> str:
     head = line[:width - 1]
     if line[width - 1] != " " and " " in head:
         head = head[:head.rindex(" ")]
-    return head.rstrip(" ,;:—-") + "…"
+    # Служебное слово перед «…» — обрубок мысли; срезается вместе с тире.
+    head = head.rstrip(" ,;:—-")
+    while (trimmed := DANGLING_TAIL.sub("", head).rstrip(" ,;:—-")) != head:
+        head = trimmed
+    return head + "…"
 
 
 def tasks_word(count: int) -> str:
@@ -455,10 +558,10 @@ def tasks_word(count: int) -> str:
 
 
 class Section:
-    """Блок отчёта: задачи (сколько показано — shown, остаток сворачивается), «прочее», хвост."""
+    """Блок отчёта: задачи (сколько показано — shown, остаток сворачивается), «прочее»."""
 
-    def __init__(self, header: str, entries: list, loose: int, empty: str, tail: str = "") -> None:
-        self.header, self.entries, self.loose, self.empty, self.tail = header, entries, loose, empty, tail
+    def __init__(self, header: str, entries: list, loose: int, empty: str) -> None:
+        self.header, self.entries, self.loose, self.empty = header, entries, loose, empty
         self.shown = len(entries)
         self.bare = 0   # сколько показанных с конца идут одним заголовком, без примечаний
 
@@ -488,8 +591,6 @@ class Section:
             lines.append(f"ещё {hidden} {tasks_word(hidden)}")
         if self.loose:
             lines.append(f"прочее {self.loose}")
-        if self.tail:
-            lines.append(clip(self.tail, width))
         return lines if len(lines) > 1 else lines + [self.empty]
 
 
@@ -519,7 +620,7 @@ def lost_lines(lost: list, shown: int, width: int) -> list:
         line = LOST_LINE.format(title=item.title, **fields)
         if len(line) > width:
             room = width - len(LOST_LINE.format(title="…", **fields))
-            line = LOST_LINE.format(title=item.title[:max(room, 1)].rstrip() + "…", **fields)
+            line = LOST_LINE.format(title=clip(item.title, max(room, 1) + 1), **fields)
         lines.append(line)
     if len(lost) > shown:
         lines.append(LOST_MORE.format(count=len(lost) - shown))
@@ -527,18 +628,18 @@ def lost_lines(lost: list, shown: int, width: int) -> list:
 
 
 def next_cards(queue_text: str, dev_map: dict, taken: set) -> list:
-    """Названия первых не начатых карточек очереди, кроме взятой сейчас («сейчас делаем: <id> — …»)
-    и тех, что уже показаны выше как задачи."""
+    """Названия первых не начатых карточек очереди, кроме взятой сейчас («сейчас делаем: <id> — …»),
+    показанных выше (taken — их семьи) и уже сданных (test/done/принято)."""
     tasks = card_index(dev_map)
     current = re.search(r"^сейчас делаем:\s*(\S+)\s+—", queue_text, re.MULTILINE)
     skip = current.group(1) if current else ""
     titles = []
     for match in re.finditer(r"^\s*\d+\.\s+(\S+)\s+·", queue_text, re.MULTILINE):
         task = tasks.get(match.group(1))
-        if match.group(1) in taken:
+        if match.group(1) in taken or (task or {}).get("status") in FINISHED_CARD_STATUSES:
             continue
         if task and match.group(1) != skip and task.get("status") != "wip":
-            titles.append(clean_desc(str(task.get("title") or "")))
+            titles.append(clean_desc(short_title(task)))
     return titles[:NEXT_MAX]
 
 
@@ -605,15 +706,33 @@ def commit_carry(log_dir: str) -> None:
         write_atomic(Path(log_dir) / CARRY_NAME, pending.read_text(encoding="utf-8"))
 
 
-def commits_since(project_root: str, mark: datetime) -> list:
-    """Темы коммитов после метки, без правок памяти с панели."""
-    log = git_output(project_root, "log", f"--since={mark.isoformat()}", "--format=%s")
-    return [human_subject(s) for s in log.splitlines() if s and not s.startswith(PANEL_COMMIT_PREFIX)]
+def card_commits(project: str, since: datetime) -> dict:
+    """Карточка → коммиты после среза с её трейлером «Dev-Map: <id>», новые первыми. Коммит без трейлера
+    ничьей работой не считается."""
+    # Срез — в коде, не в `--since`: git обрывает обход на первом старом коммите, а даты в истории бывают не по порядку.
+    log = git_output(project, "log", "--grep=^Dev-Map:", "--format=%x01%ct%x02%s%x02%b")
+    found = {}
+    for record in log.split("\x01")[1:]:
+        stamp, subject, body = record.split("\x02", 2)
+        commit = Commit(datetime.fromtimestamp(int(stamp), timezone.utc), human_subject(subject))
+        if commit.ts < since:
+            continue
+        for card_id in DEV_MAP_TRAILER.findall(body):
+            found.setdefault(card_id, []).append(commit)
+    return found
+
+
+def family_commits(root: str, cards: dict, commits: dict) -> list:
+    """Коммиты всей семьи карточек, новые первыми."""
+    every = [c for key, found in commits.items() if family_root(key, cards) == root for c in found]
+    return sorted(every, key=lambda c: c.ts, reverse=True)
 
 
 def human_subject(subject: str) -> str:
     """Тема коммита без id карточки и служебного слова plan: владельцу они ничего не говорят."""
-    return re.sub(r"\s+", " ", re.sub(r"\bplan\b", "", CARD_ID.sub("", subject))).strip(" :,-")
+    # Скобки, где был только id, пустеют: «(hr.x)» → «()» читается как обрыв.
+    bare = EMPTY_BRACKETS.sub("", re.sub(r"\bplan\b", "", CARD_ID.sub("", subject)))
+    return re.sub(r"\s+", " ", bare).strip(" :,-")
 
 
 def last_finish(rows: list) -> datetime | None:
@@ -712,25 +831,29 @@ def main() -> int:
     lost, gone = split_lost(launches, rows, cut, lost_after)
     lost = [n for n in lost if n.call not in containers]
     tasks, loose = group_by_task(launches, containers)
-    titles = {key: title_of(key, members, cards) for key, members in tasks.items()}
+    quiet_from = mark or since
+    commits = card_commits(project, quiet_from)
+    titles = {key: title_of(key, tasks.get(key, []), cards) for key in list(tasks) + list(commits)}
     attach_containers(tasks, launches, containers)
     carry = read_keys(Path(log_dir) / CARRY_NAME) if mark else set()
-    done, doing = split_tasks(tasks, gone, carry)
-    quiet_from = mark or since
-    commits = commits_since(project, quiet_from)
+    shown = one_per_family(window_tasks(tasks, gone, carry, commits, cards), cards, commits)
+    done, doing = split_tasks(shown, cards)
     queue_text = queue_text_of(args, map_path)
-    upcoming = next_cards(queue_text, dev_map, {t.key for t in done + doing}) if queue_text is not None else []
+    shown_roots = {family_root(t.key, cards) for t in shown}
+    taken = {cid for cid in cards if family_root(cid, cards) in shown_roots}
+    upcoming = next_cards(queue_text, dev_map, taken) if queue_text is not None else []
     done_empty = idle_phrase(quiet_from, last_finish(rows)) if since_last else NOTHING
-    commits_line = COMMITS_LINE.format(count=len(commits), subject=commits[0]) if commits else ""
     fresh_loose = [n for n in loose if n.fresh and n.call not in gone]
+    commits_of = lambda t: family_commits(family_root(t.key, cards), cards, commits)
     sections = [
-        Section(H_DONE, [done_entry(t, titles, labels, project) for t in done],
-                sum(n.done for n in fresh_loose), done_empty, commits_line),
-        Section(H_DOING, [doing_entry(t, titles, labels) for t in doing],
-                sum(not n.done for n in fresh_loose), NOTHING),
+        Section(H_DONE, [done_entry(t, titles, labels, project, commits_of(t)) for t in done],
+                sum(n.done for n in fresh_loose), done_empty),
+        Section(H_DOING, [doing_entry(t, titles, labels, commits_of(t)) for t in doing], sum(not n.done for n in fresh_loose), NOTHING),
     ]
     fallback = QUEUE_EMPTY if queue_text is not None else QUEUE_UNAVAILABLE
-    print(assemble(Report(sections, lost_items(lost, titles, labels, lambda n: task_finished(n, cards, project)), upcoming, fallback), ceiling))
+    umbrellas_done = {root for t in done if (root := family_root(t.key, cards)) != t.key}
+    finished = lambda n: task_finished(n, cards, project, umbrellas_done)
+    print(assemble(Report(sections, lost_items(lost, titles, labels, finished), upcoming, fallback), ceiling))
     write_atomic(Path(log_dir) / PENDING_NAME, json.dumps(sections[0].hidden_keys(), ensure_ascii=False))
     return 0
 

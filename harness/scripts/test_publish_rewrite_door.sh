@@ -37,9 +37,9 @@ trap 'chmod -R u+w "$ROOT" 2>/dev/null; rm -rf "$ROOT"' EXIT
 export HOME="$ROOT/home"
 mkdir -p "$HOME"
 export GIT_CONFIG_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0 GIT_ALLOW_PROTOCOL=file GIT_SSH_COMMAND=false
-# Ключи согласия ворота читают у машины; на стенде — из файлов окружения: без ключа стенда
-# двери стенда судились бы по harness.conf машины.
-export HARNESS_OWNER_WORD_STEND=1
+# Журнал слова и ключи согласия судья берёт у носителя: отдельным процессом — у машины.
+# Поэтому ворота стенда — обёртка с носителем стенда (obertka_vorot ниже): её зовут и
+# publish.sh проекта стенда, и прямые вызовы ворот (guard).
 git config --global user.name "proba-stend"
 git config --global user.email "proba-stend@stend.invalid"
 git config --global init.defaultBranch master
@@ -87,12 +87,68 @@ make_package() { # $1=стенд: подставной пакет, как proba_
     git -C "$p" remote add jig "$1/remote.git"
 }
 
+# Обёртка ворот пробы: настоящие ворота deploy_guard.py в процессе обёртки, их судье —
+# носитель стенда. После карточки А судья не слушает окружение ни при каком ключе
+# (спека §3.2), и отдельным процессом дверь «Да» стенда не видит — открытие проба
+# судит только так (отступление 7 плана), отказ — и отдельным процессом.
+# Без Носитель у судьи (до А3) обёртка печатает «ОБЁРТКА ПРОБЫ: …» и выходит кодом 3.
+obertka_vorot() {  # $1=файл обёртки $2=настоящие ворота $3=паспорт стенда $4=ручки стенда
+    # Путь обёртки бывает ссылкой на настоящие ворота (проект стенда из ссылок): открыть его
+    # на запись значило бы переписать сами ворота, поэтому ссылка снимается до записи.
+    rm -f "$1"
+    python3 - "$1" "$(readlink -f "$2")" "$3" "$4" <<'PY'
+import sys
+out, real, passport, handles = sys.argv[1:5]
+head = f"REAL, PASSPORT, HANDLES = {real!r}, {passport!r}, {handles!r}\n"
+body = r'''
+import dataclasses, importlib.util, pathlib, sys
+
+def number(value, default):
+    text = str(value or "").strip()
+    return int(text) if text.isdigit() else default
+
+def stand_carrier(judge, config):
+    cls = getattr(judge, "Носитель", None)
+    if cls is None or not dataclasses.is_dataclass(cls):
+        raise LookupError("в судье нет dataclass Носитель")
+    values, keys = config.из_файла(PASSPORT), config.из_файла(HANDLES)
+    folder = pathlib.Path(values.get("LOG_DIR") or PASSPORT)
+    known = {"папка": folder, "uid": None, "паспорт": values, "граница": folder,
+             "окно_мин": number(keys.get("CONFIRM_MAX_AGE_MIN"), 60),
+             "срок_кнопки_мин": number(keys.get("CONSENT_BUTTON_TTL_MIN"), None), "ручки": keys}
+    fields = dataclasses.fields(cls)
+    unknown = [f.name for f in fields if f.name not in known
+               and f.default is dataclasses.MISSING and f.default_factory is dataclasses.MISSING]
+    if unknown:
+        raise LookupError(f"у Носитель обязательные поля, которых проба не знает: {unknown}")
+    return cls(**{f.name: known[f.name] for f in fields if f.name in known})
+
+sys.argv[0] = REAL
+spec = importlib.util.spec_from_file_location("deploy_guard", REAL)
+door = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(door)
+try:
+    carrier = stand_carrier(door.слово_вл, door.конф)
+except LookupError as trouble:
+    print(f"ОБЁРТКА ПРОБЫ: {trouble}")
+    sys.exit(3)
+door.слово_вл.носитель = lambda: carrier
+sys.exit(door.main())
+'''
+with open(out, "w", encoding="utf-8") as fh:
+    fh.write("# Обёртка пробы (носитель стенда): сгенерирована пробой, не править.\n" + head + body)
+PY
+}
+
 make_project() { # $1=стенд: проект — ссылки на настоящие скрипты, ворота и канал заглушены
     local pr="$1/proj" f
     mkdir -p "$pr/scripts"
     for f in "$SCRIPTS_DIR"/*; do ln -s "$f" "$pr/scripts/$(basename "$f")"; done
-    rm -f "$pr/scripts/gates.sh" "$pr/scripts/tg_send.sh" "$pr/scripts/deploy.sh"
-    ln -sfn "$GUARD_PY" "$pr/scripts/deploy_guard.py"
+    rm -f "$pr/scripts/gates.sh" "$pr/scripts/tg_send.sh" "$pr/scripts/deploy.sh" "$pr/scripts/publish.sh"
+    # Дверь — КОПИЯ файлом (АР-3): настоящий publish.sh взял бы паспорт машины и её
+    # tg_send.sh рядом с собой; копия вне PROJECT_DIR машины верит HARNESS_DOOR_STAND_HOME.
+    cp "$PUBLISH_SH" "$pr/scripts/publish.sh"
+    obertka_vorot "$pr/scripts/deploy_guard.py" "$GUARD_PY" "$1/install.conf" "$1/harness.conf"
     # Ворота обычного пути в режим переписи не входят. Заглушка пишет, что её
     # звали, и отказывает, пока стенд не разрешит (файл gates-rc): так старый
     # код без режима останавливается на замке 1 и ничего не публикует.
@@ -316,9 +372,12 @@ set_window() { # $1=стенд $2=минуты: порог свежести «д
 
 guard() { # $1=стенд, дальше доводы deploy_guard.py; вывод, код — последней строкой
     local s="$1"; shift
+    # Своя обёртка ворот у каждого стенда: у стендов Б3 проекта нет, а ворота нужны.
+    [ -f "$s/vorota-obertka.py" ] \
+        || obertka_vorot "$s/vorota-obertka.py" "$GUARD_PY" "$s/install.conf" "$s/harness.conf"
     ( export HARNESS_HOME="$s" HARNESS_CONF="$s/harness.conf" HARNESS_INSTALL_CONF="$s/install.conf" \
              HARNESS_LOG_DIR="$s/log" LOG_DIR="$s/log"
-      python3 "$GUARD_PY" "$@" 2>&1
+      python3 "$s/vorota-obertka.py" "$@" 2>&1
       echo "rc=$?" )
 }
 
@@ -333,6 +392,7 @@ run_publish() { # $1=стенд, дальше — доводы publish.sh; пе�
         # Каждый ключ, который загрузчик конфига сохраняет из окружения, задан
         # стендом: унаследованный PROJECT_DIR увёл бы скрипт на живой проект.
         export HARNESS_HOME="$s" HARNESS_CONF="$s/harness.conf" HARNESS_INSTALL_CONF="$s/install.conf" \
+               HARNESS_DOOR_STAND_HOME="$s" \
                HARNESS_LOG_DIR="$s/log" LOG_DIR="$s/log" PROJECT_DIR="$s/proj" STARTER_DIR="$s/pkg" \
                PUBLIC_REMOTE=jig PUBLIC_BRANCH=master PUBLIC_BUILD_DIR="$s/build" \
                PUBLIC_COMMIT_NAME=proba-harness PUBLIC_COMMIT_EMAIL=proba@harness.local \
@@ -340,7 +400,7 @@ run_publish() { # $1=стенд, дальше — доводы publish.sh; пе�
                STATE_DIR="$s/state" HEARTBEAT_DIR="$s/state/hb" PANEL_STATE_DIR="$s/state/panel" \
                SECRETS_DIR="$s/state/secrets" PATH="$s/bin:$PATH"
         unset INSTALL_CONF PACKAGE_DIR
-        timeout 300 bash "$PUBLISH_SH" "$@" 2>&1
+        timeout 300 bash "$s/proj/scripts/publish.sh" "$@" 2>&1
         echo "rc=$?"
     )
 }

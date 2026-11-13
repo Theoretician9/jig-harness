@@ -17,6 +17,9 @@ import sys
 import traceback
 import urllib.parse
 
+import settings  # noqa: F401 — кладёт каталог scripts/lib в sys.path
+import process_state
+
 СТИЛЬ = """
 :root{
   --фон:#0e0f12; --карта:#17191f; --карта2:#1d2028; --рамка:#252932;
@@ -828,14 +831,31 @@ summary{cursor:pointer;color:var(--тихо);font-size:.9rem}
   .таблица td:first-child details{margin-top:0;font-weight:400}
   .таблица td:first-child::before{display:none}
   .таблица td.пуст{display:none}
+  .расходы tr{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:0 10px;padding:4px 10px;font-size:13px}
+  .расходы td{display:block;overflow-wrap:anywhere;padding:0;line-height:1.25}
+  .расходы td::before{content:attr(data-label) ": ";color:var(--тихо)}
+  .расходы td:first-child{display:block;font-weight:600;padding-bottom:0}
+  .расходы td[data-label="Запуски"]{grid-column:1 / -1}
+  .расходы td[data-label="Состояние"]::before,.расходы td:first-child::before{display:none}
+  .расходы td[data-label="Состояние"]{text-align:right}
+  .расходы td[data-label="Состояние"] .мелко{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 }
 """
 
-PROCESS_WINDOWS = {"sejchas": ("сейчас", "Сейчас"), "24ch": ("24ч", "24 ч"), "7d": ("7д", "7 сут")}
+PROCESS_WINDOWS = {"24ch": ("24ч", "24 ч"), "7d": ("7д", "7 сут")}
+PROCESS_NOW_WINDOW = "сейчас"          # «10 мин» — отдельный столбец таблицы, не вкладка
+PROCESS_SHOWN = 20
+PROCESS_ROLLUP = "Системные службы сервера"
+PROCESS_TABLE_KINDS = ("constant", "scheduled", "boot")
+PROCESS_SUMMED = ("доля_ёмкости_проц", "ядро_ч", "память_пик_мб", "токены", "доля_токенов_проц", "запусков")
+PROCESS_WHY_LIMIT = 120
+PROCESS_WINDOW_HOURS = {"24ч": 24, "7д": 168}
+PROCESS_PROTECTED_STATES = ("failed", "skipped", "stopped", "unknown")
+PROCESS_STATE_COLORS = {"running": "зелёная", "done": "зелёная", "failed": "красная", "stopped": "жёлтая",
+                        "skipped": "жёлтая", "disabled": "жёлтая"}
 PROCESS_SORTS = {"cpu": "ядро_ч", "mem": "память_пик_мб", "runs": "запусков", "tok": "токены"}
 PROCESS_FILTER_CLASSES = ("фоновый", "по внутреннему действию", "сторонний")
 PROCESS_FILTER_STATES = {"idut": "включены", "pogasheny": "погашены ключом", "isklyucheniya": "исключения"}
-PROCESS_STALE_MIN = 30
 PROCESS_CLASS_WORDS = {"фоновый": "фоновый: работает сам, по расписанию или службой",
                        "по внутреннему действию": "по внутреннему действию: запускается действием, не по времени",
                        "сторонний": "сторонний: чужая программа на сервере"}
@@ -856,9 +876,6 @@ PROCESS_PARALLEL = "helpers"
 PROCESS_ACCURACY = {"сервер": "доля делит итог cgroup по дереву процессов",
                     "запуски": "время запусков оценено по меткам и транскриптам",
                     "токены": "владелец вызова определён по журналам и транскриптам"}
-PROCESS_COLUMNS = (("ядро-ч", "сервер"), ("% ёмкости", "сервер"), ("память пик/ср", "сервер"),
-                   ("запусков", "запуски"), ("в работе", "запуски"), ("доля запусков", "запуски"),
-                   ("токены", "токены"), ("доля токенов", "токены"))
 
 
 def _e(value) -> str:
@@ -1057,11 +1074,6 @@ def _p_library(library: dict, params: dict) -> str:
 
 # ── расходы ──
 
-def _p_sorted(rows: list, sort: str) -> list:
-    field = PROCESS_SORTS.get(sort, "ядро_ч")
-    return sorted(rows, key=lambda r: (r.get(field) is None, -(r.get(field) or 0), r["id"]))
-
-
 def _p_sum(rows: list, field: str):
     values = [r[field] for r in rows if r.get(field) is not None]
     return sum(values) if values else None
@@ -1079,7 +1091,7 @@ def _p_stamp(view: dict, now: float) -> str:
     taken, age = _p_age(view, now)
     if taken is None:
         return '<span class="тихо">время снятия неизвестно</span>'
-    stale = ' <span class="пилюля жёлтая">витрина устарела</span>' if age > PROCESS_STALE_MIN else ""
+    stale = ' <span class="пилюля жёлтая">витрина устарела</span>' if age > process_state.PROCESS_STALE_MIN else ""
     return f'снято {dt.datetime.fromtimestamp(taken):%H:%M} ({round(age)} мин назад){stale}'
 
 
@@ -1136,42 +1148,209 @@ def _p_groups(rows: list, names: dict, failed: list) -> str:
         for group, title, field, unit in PROCESS_BARS) + '</div>'
 
 
-def _p_row(row: dict, names: dict, constant: set, broken: bool) -> str:
-    accuracy = row.get("точность") or {}
-    always = row["id"] in constant
+def _p_dash(reason: str) -> str:
+    return f'<span class="тихо" title="нет данных: {_e(reason)}">—</span>'
 
-    def run_cell(value, unit="", fmt=_p_number, dash=False):
-        if value is None:
-            return "—" if dash and always else '<span class="тихо">постоянно</span>' if always else _p_missing()
-        return _p_cell(fmt(value), accuracy.get("запуски", "точно"), "запуски", unit)
-    server = accuracy.get("сервер", "точно")
-    peak = row.get("память_пик_мб")
-    memory = _p_missing() if peak is None else _p_cell(
-        f"{_p_number(peak)} / {_p_number(row.get('память_ср_мб')) or '—'} МБ", server, "сервер")
-    core_hours = _p_failure() if broken else _p_cell(_p_number(row.get("ядро_ч")), server, "сервер")
-    share = _p_failure() if broken else _p_cell(_p_number(row.get("доля_ёмкости_проц")), server, "сервер", " %")
-    cells = [core_hours, share, memory, run_cell(row.get("запусков")),
-             run_cell(row.get("в_работе_ч"), fmt=lambda hours: _p_duration(hours * 3600)),
-             run_cell(row.get("доля_запусков_проц"), " %", dash=True),
-             _p_cell(_p_number(row.get("токены")), accuracy.get("токены", "точно"), "токены"),
-             _p_cell(_p_number(row.get("доля_токенов_проц")), accuracy.get("токены", "точно"), "токены", " %")]
+
+def _p_sum_rows(rows: list) -> dict:
+    """Сумма числовых полей строк: свёрнутые службы показываются одной строкой."""
+    total = {}
+    for field in PROCESS_SUMMED:
+        values = [r[field] for r in rows if r.get(field) is not None]
+        total[field] = sum(values) if values else None
+    return total
+
+
+def _p_window_rows(view: dict, key: str) -> dict:
+    return {r["id"]: r for r in (view["окна"].get(key) or {}).get("строки") or []}
+
+
+def _p_entries(view: dict, params: dict, states: dict) -> list:
+    """Строки таблицы: выборки двух окон, записи библиотеки постоянных, плановых и загрузочных процессов
+    (без выборок они остаются строкой без чисел) и упавшие юниты вне библиотеки."""
+    label, _ = PROCESS_WINDOWS[params["okno"]]
+    now_rows, long_rows = _p_window_rows(view, PROCESS_NOW_WINDOW), _p_window_rows(view, label)
+    listed = {i for i, entry in states.items() if entry["kind"] in PROCESS_TABLE_KINDS or entry["kind"] is None}
+    return [{"id": i, "now": now_rows.get(i), "long": long_rows.get(i), "state": states.get(i)}
+            for i in sorted({*now_rows, *long_rows, *listed})]
+
+
+def _p_is_system(entry: dict, names: dict) -> bool:
+    ident = entry["id"]
+    state = entry["state"] or {}
+    return (ident.endswith((".service", ".scope")) and ident not in names and state.get("value") != "failed"
+            and not ident.startswith(("harness-", "run-u")))
+
+
+def _p_rollup(entries: list, names: dict) -> list:
+    """Системные службы вне библиотеки — одна строка; упавшие и прочие остаются своими."""
+    system = [e for e in entries if _p_is_system(e, names)]
+    if not system:
+        return entries
+    total = {key: _p_sum_rows([e[key] or {} for e in system]) for key in ("now", "long")}
+    rolled = {"id": PROCESS_ROLLUP, "now": total["now"], "long": total["long"], "state": None,
+              "members": sorted(e["id"] for e in system)}
+    return [e for e in entries if e not in system] + [rolled]
+
+
+def _p_rank(entry: dict) -> int:
+    """0 — упал; 1 — пропущен, не запущен или неизвестен у постоянных, плановых и загрузочных; 2 — прочее."""
+    state = entry["state"]
+    if state and state["value"] == "failed":
+        return 0
+    if state and state["kind"] in PROCESS_TABLE_KINDS and state["value"] in PROCESS_PROTECTED_STATES:
+        return 1
+    return 2
+
+
+def _p_protected(entry: dict) -> bool:
+    return _p_rank(entry) < 2
+
+
+def _p_order(entries: list, sort: str) -> list:
+    field = PROCESS_SORTS.get(sort, "ядро_ч")
+
+    def amount(entry):
+        value = (entry["long"] or {}).get(field)
+        return (value is None, -(value or 0))
+    if sort:
+        return sorted(entries, key=lambda e: (*amount(e), e["id"]))
+    return sorted(entries, key=lambda e: (_p_rank(e), *amount(e), e["id"]))
+
+
+def _p_state_cell(state, reason: str, now: float) -> str:
+    if state is None:
+        return _p_dash(reason)
+    value, why = state["value"], state["why"][:PROCESS_WHY_LIMIT]
+    word = f"идёт: {state['running_n']}" if state["kind"] == "on_demand" and state["running_n"] else \
+        process_state.LABELS[value]
+    pill = f'<span class="пилюля {PROCESS_STATE_COLORS.get(value, "серая")}">{_e(word)}</span>'
+    notes = [_e(why)] if why else []
+    if state["source"] in ("docker", "витрина диспетчера") and state["checked"]:
+        notes.append(f"проверено {round((now - state['checked']) / 60)} мин назад")
+    # На телефоне строка причины режется многоточием: полный текст остаётся в title.
+    return pill + "".join(f'<div class="мелко" title="{note}">{note}</div>' for note in notes)
+
+
+def _p_last_run(last: dict, now: float) -> str:
+    at = process_state.clock(dt.datetime.fromisoformat(last["at"]).timestamp(), now)
+    if last["outcome"] == "running":
+        return f"идёт с {at}"
+    mark = "✓" if last["rc"] == 0 else "✗"
+    took = f" {_p_duration(last['seconds'])}" if last.get("seconds") is not None else ""
+    return f"посл. {at} {mark}{took}"
+
+
+def _p_runs_cell(entry: dict, window_label: str, schedule_words: str, now: float) -> str:
+    state, row = entry["state"], entry["long"] or {}
+    kind = state["kind"] if state else None
+    count = row.get("запусков")
+    per_window = f"{_p_number(count)} за {window_label}" if count is not None else None
+    if kind == "constant":
+        since = state["since"]
+        stopped, running = state["value"] == "stopped", state["value"] == "running"
+        text = ("работает" if running else "не запущен") + (f" с {dt.datetime.fromtimestamp(since):%d.%m %H:%M}" if since and (running or stopped) else "")
+        return _e(text) if running or stopped else _p_dash("состояние неизвестно")
+    if kind == "boot":
+        since = state["since"]
+        return _e(f"при загрузке {process_state.clock(since, now)}") if since else _p_dash("время загрузочного запуска неизвестно")
+    parts = [per_window] if per_window else []
+    if kind == "scheduled":
+        skipped = row.get("пропусков")
+        if state["last_run"]:
+            parts.append(_p_last_run(state["last_run"], now))
+        text = _e(" · ".join(parts)) + (f" · пропусков {_p_number(skipped)}" if skipped else "")
+        if state["next_run"]:
+            text += f'<div class="мелко">след. {_e(_p_when(state["next_run"], now))} ({_e(schedule_words)})</div>'
+        elif state["next_note"]:
+            text += f'<div class="мелко">{_e(state["next_note"])}</div>'
+        return text if parts or state["next_run"] or state["next_note"] else _p_dash("запусков за окно не было")
+    return _e(per_window) if per_window else _p_dash("запусков за окно нет")
+
+
+def _p_runs_title(row: dict) -> str:
+    parts = []
+    if row.get("в_работе_ч") is not None:
+        parts.append(f"в работе {_p_duration(row['в_работе_ч'] * 3600)}")
+    if row.get("доля_запусков_проц") is not None:
+        parts.append(f"доля запусков {_p_number(row['доля_запусков_проц'])} %")
+    return f' title="{_e(" · ".join(parts))}"' if parts else ""
+
+
+def _p_cpu_cell(row, broken: bool, reason: str) -> str:
+    if row is None or row.get("доля_ёмкости_проц") is None:
+        return _p_dash(reason)
+    if broken:
+        return _p_failure()
+    return _p_cell(_p_number(row["доля_ёмкости_проц"]), (row.get("точность") or {}).get("сервер", "точно"), "сервер", " %")
+
+
+def _p_tokens_cell(row) -> str:
+    tokens = (row or {}).get("токены")
+    if tokens is None:
+        return _p_dash("токенов за окно нет")
+    amount = f"{_p_number(tokens / 1e6)} млн" if tokens >= 1e6 else _p_number(tokens)
+    share = row.get("доля_токенов_проц")
+    if share is None:
+        return _e(amount)
+    return f"{_e(amount)} · " + _p_cell(_p_number(share), (row.get("точность") or {}).get("токены", "точно"), "токены", " %")
+
+
+def _p_name_cell(entry: dict, names: dict) -> str:
+    if "members" in entry:
+        listing = ", ".join(entry["members"])
+        return (f'{_e(PROCESS_ROLLUP)} ({len(entry["members"])})<details><summary>какие службы</summary>'
+                f'<div class="файлы">{_e(listing)}</div></details>')
     parallel = (' <span class="мелко" title="помощники работают одновременно: время запусков суммируется, '
-                'доля по времени выходит больше доли по ядрам">параллельно</span>' if row["id"] == PROCESS_PARALLEL else "")
-    first = f'<td data-label="процесс">{_e(_p_name(row["id"], names))}{parallel}</td>'
-    empty = {True: ' class="пуст"', False: ""}
-    return "<tr>" + first + "".join(
-        f'<td data-label="{_e(label)}"{empty["не измерено" in cell]}>{cell}</td>'
-        for (label, _), cell in zip(PROCESS_COLUMNS, cells)) + "</tr>"
+                'доля по времени выходит больше доли по ядрам">параллельно</span>' if entry["id"] == PROCESS_PARALLEL else "")
+    return _e(_p_name(entry["id"], names)) + parallel
 
 
-def _p_table(rows: list, names: dict, constant: set, params: dict, broken: set) -> str:
+def _p_row(entry: dict, ctx: dict) -> str:
+    """Одна строка таблицы расходов; ctx — общее для всех строк (подписи, окна, время)."""
+    row, short = entry["long"] or {}, entry["now"]
+    window, accuracy = ctx["window_name"], row.get("точность") or {}
+    broken = {key: entry[key] is not None and _p_broken(entry[key], ctx["covered"][key], ctx["cores"])
+              for key in ("now", "long")}
+    peak = row.get("память_пик_мб")
+    memory = _p_dash("памяти за окно нет") if peak is None else _p_cell(
+        f"{_p_number(peak)} МБ", accuracy.get("сервер", "точно"), "сервер")
+    reason_state = ("сводная строка: у каждой службы своё состояние" if "members" in entry
+                    else ctx["states_reason"] or "вне библиотеки: состояние не определяется")
+    schedule_words = ctx["schedules"].get(entry["id"], "")
+    cells = [("Название", _p_name_cell(entry, ctx["names"]), ""),
+             ("Состояние", _p_state_cell(entry["state"], reason_state, ctx["now"]), ""),
+             ("Запуски", _p_runs_cell(entry, window, schedule_words, ctx["now"]), _p_runs_title(row)),
+             ("ЦП 10 мин", _p_cpu_cell(short, broken["now"], "замера за 10 минут нет"), ""),
+             (f"ЦП {ctx['window_name']}", _p_cpu_cell(entry["long"], broken["long"], "замера за окно нет"), ""),
+             ("Память пик", memory, ""), (f"Токены {ctx['window_name']}", _p_tokens_cell(entry["long"]), "")]
+    return "<tr>" + "".join(f'<td data-label="{_e(name)}"{title}>{cell}</td>' for name, cell, title in cells) + "</tr>"
+
+
+def _p_table(entries: list, ctx: dict) -> str:
+    head = "<thead><tr>" + "".join(f"<th>{_e(name)}</th>" for name in ctx["columns"]) + "</tr></thead>"
+    body = "".join(_p_row(e, ctx) for e in entries)
+    return f'<table class="таблица расходы">{head}<tbody>{body}</tbody></table>'
+
+
+def _p_sort_links(params: dict) -> str:
     sorts = "".join(f'<a class="пилюля{" вкл" if params["sort"] == key else ""}" href="{_p_href(params, "cost", sort=key)}">'
                     f'{label}</a>' for key, label in (("cpu", "по ядрам"), ("mem", "по памяти"),
                                                      ("runs", "по запускам"), ("tok", "по токенам")))
-    head = "<thead><tr><th>процесс</th>" + "".join(f"<th>{_e(label)}</th>" for label, _ in PROCESS_COLUMNS) + "</tr></thead>"
-    body = "".join(_p_row(r, names, constant, id(r) in broken) for r in _p_sorted(rows, params["sort"]))
-    return (f'<details><summary>Все процессы ({len(rows)})</summary><div class="фильтры" style="margin-top:10px">{sorts}</div>'
-            f'<table class="таблица">{head}<tbody>{body}</tbody></table></details>')
+    return f'<div class="фильтры">{sorts}</div>'
+
+
+def _p_tables(entries: list, params: dict, ctx: dict) -> str:
+    """Первые 20 строк и все не-зелёные видны, остальное — под «ещё N процессов»."""
+    ordered = _p_order(entries, params["sort"])
+    rest = [e for e in ordered[PROCESS_SHOWN:] if not _p_protected(e)]
+    shown = [e for e in ordered if not any(e is r for r in rest)]
+    out = _p_sort_links(params) + _p_table(shown, ctx)
+    if rest:
+        share = _p_sum([e["long"] or {} for e in rest], "доля_ёмкости_проц")
+        tail = f" — ≈ {_p_number(share)} % ядра за {ctx['window_name']}" if share is not None else ""
+        out += (f'<details><summary>ещё {len(rest)} процессов{_e(tail)}</summary>{_p_table(rest, ctx)}</details>')
+    return out
 
 
 def _p_unmarked(view: dict, window: dict, rows: list) -> dict:
@@ -1200,11 +1379,9 @@ def _p_footer(view: dict, window: dict, rows: list) -> str:
 
 
 def _p_coverage(covered, label: str) -> str:
-    hours = {"24ч": 24, "7д": 168}.get(label)
     if covered is None:
         return "данных нет"
-    return (f"последние 10 минут, данных {_p_number(covered * 60)} мин" if hours is None
-            else f"данных {_p_number(covered)} ч из {hours}")
+    return f"данных {_p_number(covered)} ч из {PROCESS_WINDOW_HOURS[label]}"
 
 
 def _p_tile(title: str, value: str, note: str) -> str:
@@ -1232,14 +1409,16 @@ def _p_tiles(window: dict, rows: list, good: list, failed: list, label: str) -> 
     return f'<div class="итоги">{"".join(tiles)}</div>'
 
 
-def _p_cost(view: dict, names: dict, constant: set, params: dict, now: float, cores) -> str:
+def _p_cost(view: dict, names: dict, states: dict, schedules: dict, params: dict, now: float, cores) -> str:
     if view.get("нет данных"):
         return f'<div class="карта пусто">{_e(view["нет данных"])}</div>'
-    label, _ = PROCESS_WINDOWS[params["okno"]]
+    label, window_name = PROCESS_WINDOWS[params["okno"]]
     window = view["окна"].get(label) or {}
     rows = window.get("строки") or []
     note = f'<div class="мелко">{_p_stamp(view, now)}</div>'
-    if not rows:
+    states_reason = states.get("нет данных")
+    entries = _p_rollup(_p_entries(view, params, {} if states_reason else states), names)
+    if not entries:
         return _p_windows(params) + note + '<div class="карта пусто">За это окно данных пока нет</div>'
     covered = window.get("покрытие_ч")
     broken = {id(r) for r in rows if _p_broken(r, covered, cores)}
@@ -1248,9 +1427,13 @@ def _p_cost(view: dict, names: dict, constant: set, params: dict, now: float, co
     dropped = window.get("отброшено_строк", view.get("отброшено_строк"))
     dropped_pill = (f' <span class="пилюля жёлтая">отброшено {_e(_p_number(dropped))} выборок со сбоем замера</span>'
                     if isinstance(dropped, (int, float)) and dropped > 0 else "")
+    columns = ("Название", "Состояние", "Запуски", "ЦП 10 мин", f"ЦП {window_name}", "Память пик", f"Токены {window_name}")
+    ctx = {"names": names, "schedules": schedules, "now": now, "cores": cores, "columns": columns,
+           "window_name": window_name, "states_reason": states_reason,
+           "covered": {"now": (view["окна"].get(PROCESS_NOW_WINDOW) or {}).get("покрытие_ч"), "long": covered}}
     return (_p_windows(params) + f'<div class="мелко">{_p_stamp(view, now)}{dropped_pill}</div>'
             + _p_tiles(window, rows, good, failed, label) + _p_groups(good, names, failed)
-            + _p_table(rows, names, constant, params, broken) + _p_footer(view, window, rows))
+            + _p_tables(entries, params, ctx) + _p_footer(view, window, rows))
 
 
 # ── служба проверок ──
@@ -1275,14 +1458,24 @@ def _p_slice(cut: dict) -> str:
             f'<div class="мелко" style="margin-top:8px">торможений по ядрам: {throttled} · {extra}</div></div>')
 
 
-def _p_runs(runs: list, now: float) -> str:
+def _p_exit_pill(code, record: dict, limit: int) -> str:
+    """Подпись кода выхода — та же, что в таблице расходов: подписывает process_state."""
+    if code is None:
+        return '<span class="пилюля серая">без кода</span>'
+    if code == 0:
+        return '<span class="пилюля зелёная">успешно</span>'
+    value, why = process_state.exit_state(record, code, limit)
+    if value == "skipped":
+        return f'<span class="пилюля жёлтая">пропущен: {_e(why)}</span>'
+    return f'<span class="пилюля красная">{_e(why)}</span>'
+
+
+def _p_runs(runs: list, now: float, record: dict, limit: int) -> str:
     if not runs:
         return '<span class="тихо">прогонов ещё не было</span>'
 
     def line(run):
-        code = run["rc"]
-        pill = ('<span class="пилюля серая">без кода</span>' if code is None else
-                '<span class="пилюля зелёная">успешно</span>' if code == 0 else f'<span class="пилюля красная">код {_e(code)}</span>')
+        pill = _p_exit_pill(run["rc"], record, limit)
         cpu = "" if run["cpu_с"] is None else f', CPU {_p_number(run["cpu_с"])} с'
         return f'{_e(_p_when(run["ts"], now))}, {_e(_p_duration(run["с"]))}{_e(cpu)} {pill}'
     more = (f"<details><summary>последние прогоны ({len(runs)})</summary>"
@@ -1290,7 +1483,7 @@ def _p_runs(runs: list, now: float) -> str:
     return line(runs[0]) + more
 
 
-def _p_timer_row(timer: dict, now: float) -> str:
+def _p_timer_row(timer: dict, now: float, record: dict, limit: int) -> str:
     if timer["идёт_с"]:
         upcoming = f'<span class="пилюля зелёная">идёт с {_e(timer["идёт_с"])}</span>'
     elif not timer["включён"]:
@@ -1302,17 +1495,19 @@ def _p_timer_row(timer: dict, now: float) -> str:
     cells = [("процесс", f'{_e(timer["название"])}<details><summary>подробнее</summary>'
                          f'<div class="файлы">{_e(timer["юнит"])}</div></details>'),
              ("расписание", _e(timer["расписание"])), ("следующий", upcoming),
-             ("последний", _p_runs(timer["прогоны"], now))]
+             ("последний", _p_runs(timer["прогоны"], now, record, limit))]
     return "<tr>" + "".join(f'<td data-label="{label}">{cell}</td>' for label, cell in cells) + "</tr>"
 
 
-def _p_checks(checks: dict, now: float) -> str:
+def _p_checks(checks: dict, now: float, cards: dict) -> str:
     note = '<div class="мелко">Отдельная служба со своим потолком ядер и памяти: ключ выключателя её не гасит.</div>'
     if checks.get("нет данных"):
         return note + f'<div class="карта пусто">{_e(checks["нет данных"])}</div>'
+    # Без записи библиотеки (не прочиталась) прогон подписывается как у не-демона: блок от неё не падает.
+    limit = process_state.limit_code()
     table = ('<table class="таблица"><thead><tr><th>процесс</th><th>расписание</th><th>следующий запуск</th>'
              '<th>последний прогон</th></tr></thead><tbody>'
-             + "".join(_p_timer_row(t, now) for t in checks["таймеры"]) + "</tbody></table>")
+             + "".join(_p_timer_row(t, now, cards.get(t["id"], {}), limit) for t in checks["таймеры"]) + "</tbody></table>")
     return note + _p_slice(checks["срез"]) + '<div style="margin-top:14px">' + table + "</div>"
 
 
@@ -1327,13 +1522,14 @@ def _p_section(anchor: str, title: str, subject: str, build) -> str:
     return f'<section class="раздел" id="{anchor}"><h2>{_e(title)}</h2>{inner}</section>'
 
 
-def processes_page(data: dict, window: str = "24ch", klass: str = "", vkl: str = "", sort: str = "cpu",
+def processes_page(data: dict, window: str = "24ch", klass: str = "", vkl: str = "", sort: str = "",
                    query: str = "") -> str:
     """Раздел «Процессы». Параметры уже разобраны сервером; неизвестное окно и сортировка — значения по умолчанию."""
     params = {"okno": window if window in PROCESS_WINDOWS else "24ch", "klass": klass, "vkl": vkl,
-              "sort": sort if sort in PROCESS_SORTS else "cpu", "q": query}
+              "sort": sort if sort in PROCESS_SORTS else "", "q": query}
     names = data.get("названия") or {}
-    constant = {c["id"] for c in (data["библиотека"].get("записи") or []) if c["запуск"] in ("служба", "контейнер")}
+    cards = {c["id"]: c for c in data["библиотека"].get("записи") or []}
+    schedules = {ident: card["расписание"] for ident, card in cards.items()}
     now = data.get("снято") or dt.datetime.now().timestamp()
     head = ('<div class="шапка"><div style="display:flex;align-items:center;gap:12px">'
             '<div class="значок">✳</div><h1>Процессы харнеса</h1></div>'
@@ -1343,6 +1539,6 @@ def processes_page(data: dict, window: str = "24ch", klass: str = "", vkl: str =
     body = (head
             + _p_section("lib", "Библиотека процессов", "данные библиотеки", lambda: _p_library(data["библиотека"], params))
             + _p_section("cost", "Расходы: диспетчер", "строку в витрине диспетчера",
-                         lambda: _p_cost(data["диспетчер"], names, constant, params, now, data.get("ядер")))
-            + _p_section("checks", "Служба проверок", "данные службы проверок", lambda: _p_checks(data["проверки"], now)))
+                         lambda: _p_cost(data["диспетчер"], names, data["состояния"], schedules, params, now, data.get("ядер")))
+            + _p_section("checks", "Служба проверок", "данные службы проверок", lambda: _p_checks(data["проверки"], now, cards)))
     return _страница("Процессы харнеса", f"<style>{PROCESS_STYLE}</style>{body}")

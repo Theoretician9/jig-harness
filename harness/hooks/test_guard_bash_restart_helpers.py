@@ -21,14 +21,18 @@ tg-dispatcher.sh — его перезапуск помощников не за�
 вызывающего хук.
 
 Стенд на каждый случай свой: каталог транскриптов проекта (CLAUDE_PROJECTS_DIR),
-паспорт установки с PROJECT_DIR и LOG_DIR, журнал входящих владельца для двери
-(ключ стенда HARNESS_OWNER_WORD_STEND=1). Сторож берётся рядом с пробой либо из
-GUARD_UNDER_TEST (дверь мутаций, как у test_guard_bash.py).
+паспорт установки с PROJECT_DIR и LOG_DIR, журнал входящих владельца для двери.
+Журнал судье подаёт носитель стенда (папка root/log, окно 60): сторож идёт обёрткой —
+дочерним процессом пробы, который импортирует сторож, подменяет owner_word.носитель и
+зовёт main(). Окружение после карточки А судье не хозяин. Сторож берётся рядом с пробой
+либо из GUARD_UNDER_TEST (дверь мутаций, как у test_guard_bash.py).
 Прогон: python3 scripts/hooks/test_guard_bash_restart_helpers.py
 """
 from __future__ import annotations
 
+import dataclasses
 import datetime
+import importlib.util
 import json
 import os
 import shutil
@@ -40,6 +44,46 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 GUARD = Path(os.environ.get("GUARD_UNDER_TEST") or HERE / "guard_bash.py")
+WRAPPER = "--обёртка-сторожа"
+# Код обёртки, у которой судья без Носитель: ни 0, ни 2 — случай краснеет, а не проходит.
+WRAPPER_FAILED = 3
+WINDOW_MIN = 60
+
+
+def stand_carrier(judge, log: Path, passport: dict):
+    """Носитель стенда: папка слова — log стенда, окно 60. LookupError — у судьи нет Носитель (до А3)."""
+    cls = getattr(judge, "Носитель", None)
+    if cls is None or not dataclasses.is_dataclass(cls):
+        raise LookupError("в судье нет dataclass Носитель")
+    known = {"папка": log, "uid": None, "паспорт": passport, "граница": log, "окно_мин": WINDOW_MIN,
+             "срок_кнопки_мин": None, "ручки": {}}
+    fields = dataclasses.fields(cls)
+    unknown = [f.name for f in fields if f.name not in known
+               and f.default is dataclasses.MISSING and f.default_factory is dataclasses.MISSING]
+    if unknown:
+        raise LookupError(f"у Носитель обязательные поля, которых проба не знает: {unknown}")
+    return cls(**{f.name: known[f.name] for f in fields if f.name in known})
+
+
+def wrapped_guard(guard_path: str, passport_path: str) -> int:
+    """Дочерний процесс: сторож из guard_path, его судье — носитель стенда, вход — main() со stdin."""
+    spec = importlib.util.spec_from_file_location("guard_под_пробой", guard_path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    passport = module.конф.из_файла(passport_path)
+    try:
+        carrier = stand_carrier(module.слово_вл, Path(passport.get("LOG_DIR") or passport_path), passport)
+    except LookupError as trouble:
+        print(f"ОБЁРТКА ПРОБЫ: {trouble}", file=sys.stderr)
+        return WRAPPER_FAILED
+    module.слово_вл.носитель = lambda: carrier
+    return module.main()
+
+
+# Обёртка — до стенда модуля (ROOT ниже): дочернему процессу свой двор не нужен.
+if __name__ == "__main__" and sys.argv[1:2] == [WRAPPER]:
+    sys.exit(wrapped_guard(*sys.argv[2:4]))
+
 SID = "5d2a9c1e-7b3f-4e10-9a8d-0c1b2a3f4e5d"
 HEADLESS_SID = "9ef19392-0000-4000-8000-000000000001"
 HELPER = "a1511aa2c0ffee001"
@@ -148,12 +192,13 @@ def guard(command: str, st: dict, caller: str | None = None, guard_path: Path = 
     env.update({"LOG_DIR": str(st["root"] / "log"), "HELPER_FRESH_MIN": "20", "HELPER_HUNG_MIN": "120",
                 "HARNESS_INSTALL_CONF": str(st["root"] / "install.conf"),
                 "CLAUDE_PROJECTS_DIR": str(st["root"] / "projects"),
-                "HARNESS_OWNER_WORD_STEND": "1", "CONFIRM_MAX_AGE_MIN": "60",
                 "PYTHONDONTWRITEBYTECODE": "1"})
     payload = {"hook_event_name": "PreToolUse", "tool_name": "Bash", "session_id": SID,
                "transcript_path": str(st["caller"]) if caller is None else caller,
                "tool_input": {"command": command}}
-    return subprocess.run([sys.executable, str(guard_path)], input=json.dumps(payload, ensure_ascii=False),
+    wrapper = [sys.executable, str(Path(__file__).resolve()), WRAPPER, str(guard_path),
+               str(st["root"] / "install.conf")]
+    return subprocess.run(wrapper, input=json.dumps(payload, ensure_ascii=False),
                           env=env, capture_output=True, text=True, timeout=60)
 
 

@@ -48,11 +48,21 @@ print(len(d), "—", ", ".join(x["проверка"] for x in d))' "$snap/harnes
     echo "ВОРОТА-КОНЕЦ rc=$rc"
 }
 
+# Самый свежий снимок остаётся всегда: по нему смотрят, что судили последние ворота.
+# Итог — в PRUNED_N и PRUNED_KB (их печатает --убрать).
 prune_old() {  # $1 = живой корень, $2 = каталог снимков
-    local d
+    local d newest kb
+    PRUNED_N=0 PRUNED_KB=0
+    # Пустой каталог: ls отвечает кодом 2, а pipefail с set -e уронил бы весь прогон.
+    newest="$(ls -1td -- "$2"/*/ 2>/dev/null | head -1)" || true
     for d in "$2"/*/; do
+        [ "$d" = "$newest" ] && continue
+        # Глоб «*/» разворачивает симлинк, а rm -rf -- "ссылка/" вычистил бы его цель.
+        [ -L "${d%/}" ] && continue
         [ -n "$(find "$d" -maxdepth 0 -mmin +"$KEEP_MIN" 2>/dev/null)" ] || continue
+        kb="$(du -sk -- "$d" 2>/dev/null | cut -f1)"
         git -C "$1" worktree remove --force "$d" 2>/dev/null || rm -rf -- "$d"
+        [ -e "$d" ] || { PRUNED_N=$((PRUNED_N + 1)); PRUNED_KB=$((PRUNED_KB + ${kb:-0})); }
     done
     git -C "$1" worktree prune
 }
@@ -73,6 +83,14 @@ case "$(readlink -m "$BASE")/" in
         echo "gates-snapshot: место снимков $BASE под /tmp — уборка /tmp снесла бы снимок посреди прогона" >&2
         exit 2 ;;
 esac
+# Уборка без прогона — шаг ночной уборки диска (disk-cleanup.sh): снимки копятся и
+# тогда, когда ворота не гоняются, а без прогона prune_old не звался.
+if [ "${1:-}" = "--убрать" ]; then
+    [ -d "$BASE" ] || { echo "снимки ворот: каталога $BASE нет — убирать нечего"; exit 0; }
+    prune_old "$ROOT" "$BASE"
+    echo "снимки ворот: убрано $PRUNED_N, $((PRUNED_KB / 1024)) МБ; осталось $(find "$BASE" -mindepth 1 -maxdepth 1 -type d | wc -l) (самый свежий — всегда)"
+    exit 0
+fi
 mkdir -p "$BASE"
 chmod 700 "$BASE"
 prune_old "$ROOT" "$BASE"

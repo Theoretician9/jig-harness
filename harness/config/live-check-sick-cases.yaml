@@ -303,6 +303,10 @@
     команда: python3 scripts/check-host-independence.py --selftest
     чем_ломать: sed -i "s/if код != как_обычно]/if False]/" scripts/check-host-independence.py
     ждём_в_отказе: 'ПЛОХО БОЛЬНОЙ СЛУЧАЙ: проверка, зелёная только в доме хозяина'
+    # Здоровая половина узкая: полный круг (356 проверок) идёт ~3 ч, больше предела
+    # прибора. Взяты две проверки с находками полного прогона 17.10.
+    здоровая_команда: python3 scripts/check-host-independence.py --только "сроки-самотест" "классы живой проверки"
+    ждём_в_здоровом: '[хозяин машины] чисто'
   scripts/check-panel-permissions.py:
     команда: python3 scripts/check-panel-permissions.py --selftest
     чем_ломать: sed -i "/^ОТКАЗ_ПРАВ/s/Permission denied|Отказано в доступе|.\[Errno 13.\]/NET-TAKOGO-OTKAZA/"
@@ -389,6 +393,7 @@
     команда: python3 scripts/check-package-leftovers.py
     больной_довод: T=$(mktemp -d) && mkdir -p "$T/harness/память" "$T/harness/config" && printf '[[net-takoj-zapisi]]\n' > "$T/harness/память/a.md" && python3 scripts/check-package-leftovers.py --package "$T"
     ждём_в_отказе: ссылка в пустоту
+    ждём_в_здоровом: 'чисто: записей памяти'
   scripts/check-release-notes.py:
     команда: T=$(mktemp -d) && cp /home/user/starter/STARTER-PACKAGE/ЧТО-НОВОГО.md "$T/" && python3 scripts/check-release-notes.py "$T"
     больной_довод: T=$(mktemp -d) && printf '## 2026-10-27 — пустая запись\n' > "$T/ЧТО-НОВОГО.md" && python3 scripts/check-release-notes.py "$T"
@@ -397,6 +402,7 @@
     команда: python3 scripts/check-sample-config-keys.py
     больной_довод: T=$(mktemp -d) && true > "$T/sample.conf" && python3 scripts/check-sample-config-keys.py --sample "$T/sample.conf"
     ждём_в_отказе: нет в образце
+    ждём_в_здоровом: ключей живого конфига
   scripts/check-stack-registry.py:
     команда: python3 scripts/check-stack-registry.py
     больной_довод: T=$(mktemp -d) && printf 'части:\n  []\n' > "$T/r.yaml" && HARNESS_STACK_REGISTRY="$T/r.yaml" python3 scripts/check-stack-registry.py
@@ -438,3 +444,44 @@
     команда: python3 scripts/check-event-writers.py
     чем_ломать: printf 'echo x >> "$LOG_DIR/chuzhoj.jsonl"\n' >> scripts/live-check.sh
     ждём_в_отказе: мимо events.emit
+  # Сверка квитанций «принял»: свой журнал доставки и входящее старше порога без
+  # квитанции — судья обязан назвать сообщение. Здоровый зов — как его зовёт
+  # dispatcher-stall-watch.sh, на живом LOG_DIR.
+  scripts/check-ack-receipts.py:
+    команда: L=$(bash -c '. scripts/lib/config.sh && konf_zagruzit && echo "$LOG_DIR"') && python3 scripts/check-ack-receipts.py --log-dir "$L" --hours 6 --grace 60
+    больной_довод: L=$(mktemp -d) && mkdir -p "$L/inbox" && now=$(date +%s) && printf '{"event":"delivery.ack_journal_on","data":{"started_at":%s}}\n' "$((now-1000))" > "$L/доставка.jsonl" && touch "$L/inbox/$((now-500)).txt" && python3 scripts/check-ack-receipts.py --log-dir "$L" --hours 6 --grace 60
+    ждём_в_отказе: квитанции «принял» нет
+  # Полнота библиотеки процессов: демон в дереве без записи в библиотеке.
+  # Префикс крона — боевой проект, как у pre-commit: в клоне свои пути крона
+  # иначе не узнать, и чистая копия была бы красной по чужой причине.
+  scripts/check-process-library.py:
+    команда: python3 scripts/check-process-library.py --root . --project-dir "$(. /etc/harness/install.conf && echo "$PROJECT_DIR")"
+    чем_ломать: printf '#!/bin/sh\necho sick\n' > harness/demons/sick_case_demon.sh
+    ждём_в_отказе: 'НАРУШЕНИЕ без записи: harness/demons :: harness/demons/sick_case_demon.sh'
+    ждём_в_здоровом: 'check-process-library: чисто'
+  # Суд хакатона по трейлеру: карточка уровня «хакатон» в индексе, режим выключен.
+  # Второй файл в индексе нужен затем, что коммит одной карты — законная дверь
+  # выхода из хакатона, и судья её честно пропускает.
+  scripts/commit-msg-gate.sh:
+    команда: >-
+      M=$(mktemp) && printf 'x\n\nDev-Map: hr.sick-case-hackathon\n' > "$M" && bash scripts/commit-msg-gate.sh "$M"
+    чем_ломать: >-
+      printf 'sick_case_card: { id: hr.sick-case-hackathon, status: plan, глубина: { уровень: хакатон } }\n' >> dev-map.yaml && printf 'x\n' > scripts/sick_case_second.txt
+    ждём_в_отказе: срок хакатона вышел или не задан
+  scripts/check-tmux-isolation.py:
+    команда: python3 scripts/check-tmux-isolation.py
+    чем_ломать: printf '#!/usr/bin/env bash\nTMUX_TMPDIR=/tmp/sick tmux kill-server\n' > scripts/sick_case_tmux.sh
+    ждём_в_отказе: УБОРКА МИМО СВОЕГО СЕРВЕРА
+    ждём_в_здоровом: tmux бьёт только в свой сервер
+  # Прополка без потерь: ORDERS.md опустел, а в архив прополки ничего не легло.
+  scripts/check-memory-weeding.py:
+    команда: python3 scripts/check-memory-weeding.py
+    чем_ломать: true > память/ORDERS.md
+    ждём_в_отказе: ушло без переноса в
+  # Пять бумажных гейтов коммита: в индексе файл харнеса, разошедшийся с пакетом.
+  # Предел поднят: пайплайн на пустом индексе под нагрузкой машины идёт ~50 с,
+  # и с умолчанием 30 с чистая копия краснеет обрывом, а не правилом.
+  scripts/precheck.py:
+    команда: python3 scripts/precheck.py --предел 300
+    чем_ломать: printf '# sick case\n' >> scripts/live-check.sh
+    ждём_в_отказе: коммит будет отменён

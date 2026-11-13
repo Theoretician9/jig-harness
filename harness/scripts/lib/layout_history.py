@@ -19,6 +19,7 @@ import yaml
 sys.path.insert(0, str(Path(__file__).parent))
 import layout_journal  # noqa: E402
 import layout_manifest  # noqa: E402
+import owner_word  # noqa: E402
 
 EMPTY_BLOB = "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391"
 ZERO_BLOB = "0" * 40
@@ -250,12 +251,17 @@ def last_question(log_dir):
     return Question(row["_ts"], paths)
 
 
-def consent_after(log_dir, question: Question):
+def consent_after(question: Question, носитель=None):
     """Последнее «да, убрать» владельца в окне вопрос→ответ: позже вопроса и не позже
     7 суток после него. Окно от вопроса, а не от «сейчас»: раскладка идёт со следующим
     обновлением, и согласие не должно сгорать, если обновления реже раза в неделю.
-    message_id обязателен — по нему видно, что слово пришло из канала, а не записано рукой."""
-    rows = _rows(Path(log_dir) / CONSENT_LOG)
+    message_id обязателен — по нему видно, что слово пришло из канала, а не записано рукой.
+    Папку слова даёт носитель (у машины — свой), а не каталог вопроса: вопрос лежит в LOG_DIR."""
+    try:
+        folder = (носитель if носитель is not None else owner_word.носитель()).папка
+    except owner_word.НетНосителя as trouble:
+        return Unreadable(str(trouble))
+    rows = _rows(Path(folder) / CONSENT_LOG)
     if not isinstance(rows, list):
         return rows
     last = question.ts + dt.timedelta(days=CONSENT_MAX_AGE_DAYS)

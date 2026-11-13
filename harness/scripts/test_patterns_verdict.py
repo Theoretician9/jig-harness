@@ -232,15 +232,17 @@ def вердикт(строка: str) -> tuple[int, str]:
 ВЛАДЕЛЕЦ = "4242"
 
 
+ПАСПОРТ = {"AUTONOMY": "semi", "TG_CHAT_ID": ВЛАДЕЛЕЦ}
+
+
 def _загрузить_ворота(пустой_каталог: str):
-    # Ключи ручек ворота читают у машины; на стенде — из файла окружения, его пишем сами.
+    # Ключи ручек и паспорт ворота читают у носителя; стенд даёт его сам в каждом случае
+    # (_открыто). Файл ручек — для своих ключей двери, судья окружение не слушает.
     конфиги = Path(пустой_каталог) / "конфиги"
     конфиги.mkdir()
     (конфиги / "harness.conf").write_text(
         "".join(f'{к}="{з}"\n' for к, з in РУЧКИ.items()), encoding="utf-8")
-    (конфиги / "install.conf").write_text(f'AUTONOMY="semi"\nTG_CHAT_ID="{ВЛАДЕЛЕЦ}"\n', encoding="utf-8")
-    os.environ.update(HARNESS_OWNER_WORD_STEND="1", HARNESS_CONF=str(конфиги / "harness.conf"),
-                      HARNESS_INSTALL_CONF=str(конфиги / "install.conf"))
+    os.environ["HARNESS_CONF"] = str(конфиги / "harness.conf")
     os.environ["HARNESS_LOG_DIR"] = пустой_каталог
     спец = importlib.util.spec_from_file_location("deploy_guard_под_пробой", ВОРОТА)
     ворота = importlib.util.module_from_spec(спец)
@@ -298,6 +300,10 @@ def _открыто(ворота, действие: str, *, записи=(), о�
                  "message_id": "1", "text": сообщение}, ensure_ascii=False) + "\n",
                 encoding="utf-8")
         ворота.LOG_DIR = двор
+        судья = ворота.слово_вл
+        носитель = судья.Носитель(папка=двор, uid=None, паспорт=dict(ПАСПОРТ), граница=двор, окно_мин=60,
+                                  срок_кнопки_мин=None, ручки=dict(РУЧКИ))
+        судья.носитель = lambda: носитель
         with contextlib.redirect_stdout(io.StringIO()):
             return ворота.нет_согласия(действие) is None
 

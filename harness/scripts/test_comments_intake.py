@@ -87,7 +87,6 @@ with tempfile.TemporaryDirectory() as tmp:
                HARNESS_CONF=str(root / "harness.conf"),
                LOG_DIR=str(logs),
                HARNESS_LOG_DIR=str(logs),
-               HARNESS_OWNER_WORD_STEND="1",
                PANEL_STATE_DIR=str(panel_state))
     os.environ.update(env)
     delivered = logs / "panel-comments-delivered.jsonl"
@@ -240,6 +239,15 @@ with tempfile.TemporaryDirectory() as tmp:
 
     guard = load("deploy_guard_proba", HERE / "deploy_guard.py")
     approval = load("spec_approval_proba", HERE / "spec_approval.py")
+    judge = guard.слово_вл
+
+    def stand_carrier(folder: Path):
+        """Носитель стенда — единственный путь стенда к судье: окружение он не слушает."""
+        return judge.Носитель(папка=folder, uid=None, паспорт=judge.конф.из_файла(str(root / "install.conf")),
+                              граница=root, окно_мин=60, срок_кнопки_мин=None,
+                              ручки=judge.конф.из_файла(str(root / "harness.conf")))
+
+    judge.носитель = lambda: stand_carrier(logs)
 
     # Проба обязана уметь видеть согласие — иначе «не нашли» ничего не стоит.
     # Контроль в ДРУГОМ каталоге: тот же текст во входящих видит одобрение, а
@@ -260,12 +268,14 @@ with tempfile.TemporaryDirectory() as tmp:
             ensure_ascii=False) + "\n", encoding="utf-8")
     real_log_dir = guard.LOG_DIR
     guard.LOG_DIR = control
+    judge.носитель = lambda: stand_carrier(control)
     os.environ["HARNESS_LOG_DIR"] = str(control)
     try:
         sees_guard = guard.нет_согласия("deploy") is None
         sees_approval = any("выкатывай" in r["текст"] for r in approval.слова_владельца(0))
     finally:
         guard.LOG_DIR = real_log_dir
+        judge.носитель = lambda: stand_carrier(logs)
         os.environ["HARNESS_LOG_DIR"] = str(logs)
     if sees_guard and sees_approval:
         path_ok("контроль: кнопку на выкат ворота видят, «да, выкатывай» во входящих видит одобрение")

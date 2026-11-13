@@ -103,9 +103,9 @@ NOTIFICATION = re.compile(r"<task-id>(a[0-9a-f]{16})</task-id>")
 # нужно только там, где может лежать запуск, возобновление или уведомление.
 LEDGER_NEEDLES = ("async_launched", "SendMessage", '"is_error":true', '"is_error": true', 'success', "<task-id>a")
 HELPER_FRESH_DEFAULT_MIN = 20
-# Потолок «завис»: самый долгий живой вызов в замере ревью — 49 мин, 120 — запас
-# в 2,4 раза; ниже этого молчащий помощник ещё считается идущим.
-HELPER_HUNG_DEFAULT_MIN = 120
+# Потолок «завис»: минут без продвижения (ответ или результат инструмента).
+# Ждать помощников вечно дороже, чем ошибочно назвать зависшим долгий инструмент.
+HELPER_HUNG_DEFAULT_MIN = 30
 # Запуск помощника не фоном: tool_use в транскрипте родителя, ответ — tool_result
 # с тем же id. Отбор строк регулярками, без разбора JSON: tool_result в
 # транскрипте на порядки больше запусков.
@@ -137,7 +137,7 @@ class Helper:
     description: str
     answer_min: int      # с последнего успешного ответа; ответов не было — с начала запуска
     running_min: int
-    silent_min: int      # транскрипт помощника не пишется (mtime), для строки зависшего
+    silent_min: int      # минут без продвижения помощника (ответ или результат инструмента)
 
 
 @dataclass
@@ -387,6 +387,40 @@ def _mtime(path) -> float | None:
         return None   # помощник исчез между перечислением и чтением
 
 
+def _is_progress(record) -> bool:
+    """Продвижение помощника: его ответ или результат его инструмента.
+
+    Уведомления, вложения и очередь тоже дописывают транскрипт, но молчащего
+    помощника не двигают.
+    """
+    if record.get("type") == "assistant":
+        return True
+    message = record.get("message")
+    content = message.get("content") if record.get("type") == "user" and isinstance(message, dict) else None
+    return isinstance(content, list) and any(
+        isinstance(b, dict) and b.get("type") == "tool_result" for b in content)
+
+
+def _last_progress(paths, at: float) -> float | None:
+    moments = [_epoch(r.get("timestamp")) for path in paths
+               for r in _lines(path, ('"assistant"', '"tool_result"')) if _is_progress(r)]
+    return max((m for m in moments if m is not None and m <= at), default=None)
+
+
+def _with_live_descendants(paths, files, ledger):
+    """Транскрипты и их ещё не закончившие потомки: управляющий жив, пока идёт его исполнитель."""
+    ids = {p.stem[len("agent-"):] for p in paths}
+    kids = [p for agent_id, p in files.items() if _meta(p).get("parentAgentId") in ids
+            and (agent_id not in ledger or ledger[agent_id].notified_at is None)]
+    return [*paths, *(_with_live_descendants(kids, files, ledger) if kids else [])]
+
+
+def _orphan(path, ledger) -> bool:
+    """Родитель помощника уже закончил: его результат принимать некому."""
+    parent = ledger.get(_meta(path).get("parentAgentId"))
+    return parent is not None and parent.notified_at is not None
+
+
 def _minutes_since(moment: float, at: float) -> int:
     return max(0, int((at - moment) // 60))
 
@@ -418,8 +452,9 @@ def work_judgement(main_path, at: float, fresh_min: int, hung_min: int = HELPER_
     fresh_sec, hung_sec = fresh_min * 60, hung_min * 60
     live, hung, ages = [], [], []
 
-    def place(helper: Helper, answered, refused, silent_sec):
-        (hung if silent_sec >= hung_sec else live).append(helper)
+    def place(helper: Helper, answered, refused, silent_sec, orphan=False):
+        limit = min(fresh_sec, hung_sec) if orphan else hung_sec
+        (hung if silent_sec >= limit else live).append(helper)
         if _is_fresh_work(answered, refused, at, fresh_sec):
             ages.append(max(0, at - answered))
 
@@ -429,10 +464,10 @@ def work_judgement(main_path, at: float, fresh_min: int, hung_min: int = HELPER_
         path = files.get(agent_id)
         answered, refused = _answers(path, at) if path else (None, None)
         started = entry.started_at if entry.started_at is not None else entry.activated_at
-        written = _mtime(path) if path else None
-        silent_since = max(started, min(written, at)) if written is not None else started
+        written = _last_progress(_with_live_descendants([path], files, ledger), at) if path else None
+        silent_since = max(started, written) if written is not None else started
         helper = _make_helper(agent_id, _description(path) if path else "", answered, started, silent_since, at)
-        place(helper, answered, refused, at - silent_since)
+        place(helper, answered, refused, at - silent_since, bool(path) and _orphan(path, ledger))
 
     # Файлы вне реестра: помощник не фоном (его вызов открыт) либо реестр не узнал живого.
     registered = set(ledger)
@@ -447,10 +482,10 @@ def work_judgement(main_path, at: float, fresh_min: int, hung_min: int = HELPER_
         answers = [_answers(path, at) for path in mine]
         answered = max((a for a, _ in answers if a is not None), default=None)
         refused = max((r for _, r in answers if r is not None), default=None)
-        written = max((m for m in map(_mtime, mine) if m is not None), default=None)
-        silent_since = max(moment, min(written, at)) if written is not None else moment
+        written = _last_progress(_with_live_descendants(mine, files, ledger), at)
+        silent_since = max(moment, written) if written is not None else moment
         place(_make_helper(call, description, answered, moment, silent_since, at),
-              answered, refused, at - silent_since)
+              answered, refused, at - silent_since, any(_orphan(path, ledger) for path in mine))
 
     if not open_calls:
         unknown = []
@@ -763,6 +798,70 @@ def _selftest() -> int:
     проба("успешный SendMessage (success:true) — помощник идёт", (len(j.helpers), len(j.hung)), (1, 0))
     j = суд(сцена("завис", запуск_фоном(300) + [ответ_главной], [ответ_помощника(130)], 130))
     проба("молчит 130 мин (> 120) — завис, а не идёт", (len(j.helpers), len(j.hung)), (0, 1))
+    # БОЛЬНОЙ СЛУЧАЙ 13.11: служебная строка (уведомление, вложение) двигала mtime
+    # транскрипта и обнуляла молчание помощника, который ничего не делал.
+    # «progress» несёт вложенный ответ: грубый отбор строк его пропускает, решает
+    # разбор записи.
+    служебная = lambda минут: [
+        запись("user", минут, origin={"kind": "task-notification"}, message={"content":
+            "[SYSTEM NOTIFICATION - NOT USER INPUT]"}),
+        запись("attachment", минут),
+        запись("progress", минут, data={"message": {"type": "assistant"}})]
+    суд30 = lambda путь: work_judgement(путь, сейчас, 20, 30)
+    ид = lambda строки: [h.agent_id for h in строки]
+    j = суд30(сцена("служебные-строки", запуск_фоном(300) + [ответ_главной],
+          [ответ_помощника(45), *служебная(1)], 0))
+    проба("БОЛЬНОЙ СЛУЧАЙ 13.11: после ответа 45 мин назад только служебные строки — завис",
+          (len(j.helpers), len(j.hung)), (0, 1))
+    j = суд30(сцена("результат-инструмента", запуск_фоном(300) + [ответ_главной],
+          [ответ_помощника(45), запись("user", 5, message={"content": [
+              {"type": "tool_result", "tool_use_id": "toolu_x", "content": "вывод"}]})], 0))
+    проба("результат инструмента 5 мин назад — продвижение, идёт", (len(j.helpers), len(j.hung)), (1, 0))
+    родитель = "a" + "2" * 16
+    запуск_родителя = запись("user", 400, message={"content": "запуск"},
+                             toolUseResult={"status": "async_launched", "agentId": родитель})
+    родитель_закончил = запись("user", 90, message={"content":
+        "<task-notification>\n<task-id>" + родитель + "</task-id>\n</task-notification>"})
+    ребёнок = {"parentAgentId": родитель, "spawnDepth": 2}
+    j = суд30(сцена("сирота", запуск_фоном(300) + [запуск_родителя, родитель_закончил, ответ_главной],
+          [ответ_помощника(25)], 25, ребёнок))
+    проба("БОЛЬНОЙ СЛУЧАЙ 13.11: родитель закончил, помощник молчит 25 мин (>20) — завис",
+          (helper_id in ид(j.hung), helper_id in ид(j.helpers)), (True, False))
+    j = суд30(сцена("не-сирота", запуск_фоном(300) + [запуск_родителя, ответ_главной],
+          [ответ_помощника(25)], 25, ребёнок))
+    проба("родитель ещё идёт, помощник молчит 25 мин — идёт",
+          (helper_id in ид(j.hung), helper_id in ид(j.helpers)), (False, True))
+    j = суд30(сцена("сирота-работает", запуск_фоном(300) + [запуск_родителя, родитель_закончил, ответ_главной],
+          [ответ_помощника(5)], 5, ребёнок))
+    проба("родитель закончил, но помощник отвечал 5 мин назад — идёт",
+          (helper_id in ид(j.hung), helper_id in ид(j.helpers)), (False, True))
+    # M1: управляющий молча ждёт своего исполнителя — жив, пока тот продвигается.
+    исполнитель = "a" + "3" * 16
+
+    def сцена_с_исполнителем(имя, шаг_исполнителя_мин_назад, уведомление_мин_назад=None):
+        запуск_исполнителя = запись("user", 40, message={"content": "запуск"},
+                                    toolUseResult={"status": "async_launched", "agentId": исполнитель})
+        конец = [] if уведомление_мин_назад is None else [запись("user", уведомление_мин_назад, message={"content":
+            "<task-notification>\n<task-id>" + исполнитель + "</task-id>\n</task-notification>"})]
+        путь = сцена(имя, запуск_фоном(300) + [ответ_главной],
+                     [ответ_помощника(45), запуск_исполнителя, *конец], 45)
+        файл = os.path.join(os.path.dirname(путь), "s", "subagents", f"agent-{исполнитель}.jsonl")
+        with open(файл, "w", encoding="utf-8") as фх:
+            фх.write(json.dumps(запись("assistant", шаг_исполнителя_мин_назад, agentId=исполнитель,
+                                       isSidechain=True, message={"content": [{"type": "text", "text": "шаг"}]}),
+                                ensure_ascii=False) + "\n")
+        with open(файл[:-len(".jsonl")] + ".meta.json", "w", encoding="utf-8") as фх:
+            json.dump({"parentAgentId": helper_id}, фх)
+        return путь
+    j = суд30(сцена_с_исполнителем("исполнитель-идёт", 3))
+    проба("M1: исполнитель шагнул 3 мин назад — управляющий идёт, не завис",
+          (helper_id in ид(j.hung), helper_id in ид(j.helpers)), (False, True))
+    j = суд30(сцена_с_исполнителем("исполнитель-молчит", 35))
+    проба("M1: исполнитель молчит 35 мин — оба зависли",
+          (helper_id in ид(j.hung), исполнитель in ид(j.hung)), (True, True))
+    j = суд30(сцена_с_исполнителем("исполнитель-закончил", 21, 20))
+    проба("M1: исполнитель закончил (уведомление) — его шаг управляющему не засчитан, завис",
+          (helper_id in ид(j.hung), исполнитель in ид(j.helpers) + ид(j.hung)), (True, False))
     j = суд(сцена("не-фоном", [вызов_не_фоном(30), ответ_главной], [ответ_помощника(1)], 1))
     проба("вызов не фоном без результата — идёт, строка несёт id вызова и описание",
           [(h.agent_id, h.description) for h in j.helpers], [("toolu_fg", "не-фон")])

@@ -9,8 +9,9 @@
 при ЖИВОЙ кнопке — иначе красное давала бы её нехватка, а не форма.
 
 Стенд свой на каждый случай: своё LOG_DIR с журналом входящих и журналом кнопок,
-боевые журналы не читаются. Ключ стенда HARNESS_OWNER_WORD_STEND=1 — без него
-подмена каталога журнала сама есть отказ двери.
+боевые журналы не читаются. Судье стенд приходит носителем: сторож зовёт раннер
+пробы, который подменяет owner_word.носитель в процессе сторожа (окружение судья не
+слушает). HARNESS_INSTALL_CONF — для своих журналов сторожа (след, исключения).
 """
 import datetime
 import json
@@ -22,6 +23,7 @@ import tempfile
 
 КОРЕНЬ = pathlib.Path(sys.argv[1]) if len(sys.argv) > 1 else pathlib.Path(__file__).resolve().parent.parent
 ХУК = str(КОРЕНЬ / 'scripts' / 'hooks' / 'guard_bash.py')
+БИБЛИОТЕКА = str(КОРЕНЬ / 'scripts' / 'lib')
 ЦЕЛЬ = '/var/lib/harness/secrets'
 # Владелец стенда: судья засчитывает «Да» только с этим from_id (TG_CHAT_ID конфига стенда).
 ВЛАДЕЛЕЦ = 4242
@@ -29,13 +31,30 @@ import tempfile
 
 плохо = 0
 
+# Раннер двери: судья получает носитель стенда подменой owner_word.носитель в процессе двери.
+CARRIER_RUNNER = r"""
+import json, pathlib, runpy, sys
+spec = json.loads(sys.argv[1])
+sys.path.insert(0, spec["lib"])
+import owner_word
+carrier = owner_word.Носитель(папка=pathlib.Path(spec["папка"]), uid=None, паспорт=spec["паспорт"],
+                              граница=pathlib.Path(spec["граница"]), окно_мин=spec["окно_мин"],
+                              срок_кнопки_мин=spec["срок_кнопки_мин"], ручки=spec["ручки"])
+owner_word.носитель = lambda: carrier
+sys.argv = spec["argv"]
+runpy.run_path(spec["argv"][0], run_name="__main__")
+"""
+
 
 def позвать(команда: str, конф: pathlib.Path) -> int:
-    среда = dict(os.environ, HARNESS_INSTALL_CONF=str(конф),
-                 HARNESS_OWNER_WORD_STEND='1')
-    готово = subprocess.run([sys.executable, ХУК], input=json.dumps(
-        {"tool_name": "Bash", "tool_input": {"command": команда}}),
-        capture_output=True, text=True, env=среда, check=False)
+    среда = dict(os.environ, HARNESS_INSTALL_CONF=str(конф))
+    двор = конф.parent / 'log'
+    носитель = {"lib": БИБЛИОТЕКА, "папка": str(двор), "граница": str(конф.parent),
+                "паспорт": {"LOG_DIR": str(двор), "TG_CHAT_ID": str(ВЛАДЕЛЕЦ)}, "окно_мин": 60,
+                "срок_кнопки_мин": None, "ручки": {}, "argv": [ХУК]}
+    готово = subprocess.run([sys.executable, '-c', CARRIER_RUNNER, json.dumps(носитель, ensure_ascii=False)],
+                            input=json.dumps({"tool_name": "Bash", "tool_input": {"command": команда}}),
+                            capture_output=True, text=True, env=среда, check=False)
     return готово.returncode
 
 

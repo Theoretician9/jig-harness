@@ -433,6 +433,19 @@ verdict "$(grep -q -- '--key devmap-selfheal:agent-failed' "$T/alerts.txt" 2>/de
     "тревоги: $(tr '\n' '|' 2>/dev/null < "$T/alerts.txt" || echo нет), метка: $([ -e "$T/hb/devmap-selfheal" ] && echo есть || echo нет)"
 verdict "$(grep -q -- '--resolve' "$T/alerts.txt" 2>/dev/null && echo 0 || echo 1)" \
     "сосед: упавший прогон тревогу не снимает" "тревоги: $(tr '\n' '|' 2>/dev/null < "$T/alerts.txt")"
+# БОЛЬНОЙ СЛУЧАЙ 13.11.2026: чужой git держал index.lock, `git add` упал кодом 128
+# под set -e — демон вышел без метки жизни и без строки в журнал, heartbeat-watch
+# объявил его мёртвым на сутки. Отказ add — тот же отказ коммита: метка и код 1.
+new_stand
+map_text test wip 1 1 0 > "$T/model-map.yaml"
+touch "$T/repo/.git/index.lock"
+out_lock=$(run_daemon "$T")
+verdict "$([ -e "$T/hb/devmap-selfheal" ] && [ "$(cat "$T/rc")" = 1 ] && echo 1 || echo 0)" \
+    "БОЛЬНОЙ: занятый index.lock при git add — метка жизни и код 1, не 128" \
+    "метка: $([ -e "$T/hb/devmap-selfheal" ] && echo есть || echo нет), rc=$(cat "$T/rc")"
+verdict "$(printf '%s' "$out_lock" | grep -q 'НЕ прошёл' && echo 1 || echo 0)" \
+    "БОЛЬНОЙ: отказ add назван в журнале демона"
+
 new_stand
 stub_alert_task
 map_text test wip 1 1 0 > "$T/model-map.yaml"

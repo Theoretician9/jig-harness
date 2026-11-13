@@ -2621,6 +2621,8 @@ def case_d60() -> None:
 # confirmations.jsonl (ts с поясом, text в нижнем регистре, message_id, kind).
 # Ложный git в bin/ стенда пишет каждый зов в метку и передаёт настоящему: так судится
 # «git не зван» (чистая установка), а пара доказывает, что метка видит зов.
+# Согласие дверь берёт у НОСИТЕЛЯ слова (owner_word.носитель), не у LOG_DIR окружения:
+# дверь идёт раннером CARRIER_RUNNER, который в её процессе ставит Носитель стенда.
 
 SEED = "harness/ОПИСЬ.md"
 SEED_TEXT = "# ОПИСЬ прежней версии харнеса\n"
@@ -2732,10 +2734,31 @@ def git_calls(s: Stand) -> list:
     return raw.decode("utf-8", "replace").splitlines() if raw else []
 
 
-def seed_run(s: Stand, root=None, **env) -> Result:
+# Раннер двери: судья слова получает носитель стенда подменой owner_word.носитель в процессе
+# двери. lib — рядом с дверью: тот же модуль owner_word, что импортирует layout_history двери.
+CARRIER_RUNNER = r"""
+import json, pathlib, runpy, sys
+spec = json.loads(sys.argv[1])
+sys.path.insert(0, spec["lib"])
+import owner_word
+carrier = owner_word.Носитель(папка=pathlib.Path(spec["папка"]), uid=None, паспорт={},
+                              граница=pathlib.Path(spec["граница"]), окно_мин=60,
+                              срок_кнопки_мин=15, ручки={})
+owner_word.носитель = lambda: carrier
+sys.argv = spec["argv"]
+runpy.run_path(spec["argv"][0], run_name="__main__")
+"""
+
+
+def seed_run(s: Stand, root=None, carrier: Path | None = None, **env) -> Result:
+    """Дверь с --package-root; carrier — папка носителя слова (по умолчанию LOG_DIR стенда)."""
     target = s.pkg if root is None else root
-    return s.run(args=(PACKAGE_ROOT_ARG, str(target)),
-                 LOG_DIR=getattr(s, "log_dir", s.t / "журналы"), **env)
+    log_dir = getattr(s, "log_dir", s.t / "журналы")
+    s.write_plan()
+    spec = {"lib": str(DOOR.parent / "lib"), "папка": str(carrier or log_dir), "граница": str(s.t),
+            "argv": [str(DOOR), *s.door_args(), PACKAGE_ROOT_ARG, str(target)]}
+    return execute([sys.executable, "-c", CARRIER_RUNNER, json.dumps(spec, ensure_ascii=False)],
+                   s.env(LOG_DIR=log_dir, **env))
 
 
 def owner_time(minutes_ago: int) -> str:
@@ -3084,6 +3107,35 @@ def case_ds11() -> None:
                     f'список затравки: ["{SEED}"]' in r.out.splitlines(), r.brief())
 
 
+def case_ds12() -> None:
+    """Слово — у носителя, а не в LOG_DIR двери: вопрос и «да, убрать» в LOG_DIR стенда,
+    носитель слова — другой каталог стенда с пустым журналом согласий → «да, убрать» после
+    него нет, файл на месте. Пара — тот же стенд, носитель = LOG_DIR → снято (как DS3).
+    Зелен на поломке? «дверь читает согласие из config.log_dir()» — нет: первая половина
+    сняла бы файл; «носитель не читается вовсе» — нет: пара обязана снять."""
+    with Stand() as s:
+        seed_stand(s, {SEED: SEED_TEXT})
+        put_seed(s)
+        before = file_id(s.proj / SEED)
+        ask(s, [SEED])
+        agree(s)
+        other = s.t / "носитель"
+        other.mkdir()
+        (other / CONSENTS).write_text("", encoding="utf-8")
+        r = seed_run(s, carrier=other)
+        PROBE.check("DS12", "согласие в LOG_DIR, носитель другой: код 0, ««да, убрать» после него "
+                    "нет», файл на месте", r.rc == 0 and "«да, убрать» после него нет" in r.out
+                    and seed_done(r) == [] and file_id(s.proj / SEED) == before, r.brief())
+    with Stand() as s:
+        seed_stand(s, {SEED: SEED_TEXT})
+        put_seed(s)
+        ask(s, [SEED])
+        agree(s)
+        r = seed_run(s)
+        PROBE.check("DS12", f"пара: носитель = LOG_DIR стенда → «{SEED_DONE}{SEED}», файла нет",
+                    r.rc == 0 and seed_done(r) == [SEED_DONE + SEED]
+                    and not os.path.lexists(s.proj / SEED), r.brief())
+
 # Дверь в отдельном python с потолком памяти: дефект «читать /dev/zero до конца» падает
 # MemoryError за секунды, а не съедает машину (обрыв сессии 24.10, 42 OOM). Пиковую память
 # двери отдаёт RUSAGE_CHILDREN этой обёртки — у неё ровно один ребёнок.
@@ -3242,7 +3294,7 @@ CASES = (case_d1, case_d2, case_d3, case_d4, case_d5, case_d6, case_d7, case_d8,
          case_d42, case_d43, case_d44, case_d45, case_d46, case_d47, case_d48, case_d49,
          case_d50, case_d51, case_d52, case_d53, case_d54, case_d55, case_d56, case_d57,
          case_d58, case_d59, case_d60, case_d61, case_d62, case_ds1, case_ds2, case_ds3,
-         case_ds4, case_ds5, case_ds6, case_ds7, case_ds8, case_ds9, case_ds10, case_ds11)
+         case_ds4, case_ds5, case_ds6, case_ds7, case_ds8, case_ds9, case_ds10, case_ds11, case_ds12)
 
 
 def main() -> int:

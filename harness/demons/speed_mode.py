@@ -18,7 +18,7 @@ launch-plan читают итог, а не пересчитывают: судь�
 нет / оно битое / старше 10 минут («судья скорости не отвечает»).
 Публичные функции для импорта: in_work, ceiling_alive, effective, read_limit.
 
-Двери стенда: SPEED_MODE_DATA, SPEED_PROC_DIR, SPEED_DISK_PATH, WORK_QUEUE_BIN,
+Двери стенда: SPEED_MODE_DATA, SPEED_PROC_DIR, SPEED_AFFINITY (число доступных ядер), SPEED_DISK_PATH, WORK_QUEUE_BIN,
 HARNESS_PANEL_STATE, HARNESS_DEVMAP, HARNESS_LOG_DIR, CLAUDE_PROJECTS_DIR, SPEED_TG_SEND
 (скрипт отправки владельцу; стенд без него не шлёт), SPEED_MSG_WINDOW_MIN (окно сообщений).
 """
@@ -376,6 +376,32 @@ def read_pressure(proc: Path):
     return None
 
 
+def rounded(value):
+    return None if value is None else round(value, 1)
+
+
+def available_cores() -> int:
+    """Ядра, на которых могут работать процессы судьи: cpuset cgroup уже числа строк cpuN."""
+    forced = os.environ.get("SPEED_AFFINITY")
+    return int(forced) if forced else len(os.sched_getaffinity(0))
+
+
+def cpu_shares(prev_cpu, cpu: dict) -> dict:
+    """Доли занятости, ожидания диска и кражи за интервал между снимками; None — интервала нет.
+
+    Занятость — всё, кроме idle и iowait (кража входит): loadavg считает очередь коротких
+    процессов и на живой машине врёт о загрузке в разы."""
+    unknown = {"busy": None, "iowait": None, "steal": None}
+    if not prev_cpu or not all(key in prev_cpu for key in cpu):
+        return unknown
+    delta = {key: cpu[key] - prev_cpu[key] for key in cpu}
+    if delta["всего"] <= 0 or min(delta.values()) < 0:
+        return unknown
+    total = delta["всего"]
+    return {"busy": 100.0 * (total - delta["idle"] - delta["iowait"]) / total,
+            "iowait": 100.0 * delta["iowait"] / total, "steal": 100.0 * delta["steal"] / total}
+
+
 def measure(prev_cpu) -> dict:
     proc = proc_dir()
     try:
@@ -388,20 +414,21 @@ def measure(prev_cpu) -> dict:
     cores = sum(1 for line in stat_lines if line.startswith("cpu") and line[3:4].isdigit())
     if cores < 1:
         raise MeasureError("в stat нет строк cpuN")
-    cpu = {"steal": fields[7], "всего": sum(fields)}
-    steal_pct = 0.0
-    if prev_cpu and cpu["всего"] > prev_cpu.get("всего", 0) and cpu["steal"] >= prev_cpu.get("steal", 0):
-        steal_pct = 100.0 * (cpu["steal"] - prev_cpu["steal"]) / (cpu["всего"] - prev_cpu["всего"])
+    cpu = {"steal": fields[7], "всего": sum(fields), "idle": fields[3], "iowait": fields[4]}
+    shares = cpu_shares(prev_cpu, cpu)
     mem = read_meminfo(proc)
     free_pct = 100.0 * mem["MemAvailable"] / mem["MemTotal"] if mem.get("MemTotal") else None
     swap_pct = (100.0 * (mem["SwapTotal"] - mem["SwapFree"]) / mem["SwapTotal"]
                 if mem.get("SwapTotal") else 0.0)
-    return {"raw": {"load": load5 / cores, "steal": steal_pct, "free": free_pct,
+    available = available_cores()
+    return {"raw": {"load": load5 / cores, **shares, "free": free_pct,
                     "swap": swap_pct, "disk": disk_used_pct()},
-            "state": {"нагрузка_на_ядро": round(load5 / cores, 2), "кража_pct": round(steal_pct, 1),
+            "state": {"нагрузка_на_ядро": round(load5 / cores, 2), "занято_pct": rounded(shares["busy"]),
+                      "ожидание_диска_pct": rounded(shares["iowait"]), "кража_pct": rounded(shares["steal"]),
                       "память_pct": None if free_pct is None else round(free_pct, 1),
                       "своп_pct": round(swap_pct, 1), "давление_cpu_300": read_pressure(proc),
-                      "диск_pct": round(disk_used_pct(), 1), "ядер": cores},
+                      "диск_pct": round(disk_used_pct(), 1), "ядер": cores,
+                      **({"ядер_доступно": available} if available < cores else {})},
             "cpu": cpu}
 
 
@@ -619,12 +646,19 @@ def track(prev_rec, prev_cand, present: bool, cfg: dict, now: float, extra: dict
 
 
 def power_sign(raw: dict, cfg: dict) -> tuple[bool, str]:
-    load_max = conf_float("LOAD_MAX_PER_CPU", 2.0)
-    if raw["load"] > load_max:
-        return True, f"нагрузка {num(raw['load'])}/ядро, порог {fixed(load_max)}"
-    if raw["steal"] > cfg["кража_выше_pct"]:
-        return True, f"кража {num(raw['steal'], 1)} %, порог {cfg['кража_выше_pct']} %"
-    return False, ""
+    """Мощность занята: CPU, ожидание диска или кража выше порога; без интервала — не занята."""
+    limits = (("busy", "занято", conf_float("CPU_BUSY_MAX_PCT", 90)),
+              ("iowait", "ожидание диска", conf_float("CPU_IOWAIT_MAX_PCT", 20)),
+              ("steal", "кража", cfg["кража_выше_pct"]))
+    reasons = [f"{label} {num(raw[key], 1)} %, порог {num(limit, 1)} %"
+               for key, label, limit in limits if raw[key] is not None and raw[key] > limit]
+    return bool(reasons), ", ".join(reasons)
+
+
+def power_quiet(raw: dict, cfg: dict) -> bool:
+    """«Тихо» — занятость известна и ниже порога тишины, признака мощности нет."""
+    return (raw["busy"] is not None and raw["busy"] < conf_float("CPU_BUSY_QUIET_PCT", 75)
+            and not power_sign(raw, cfg)[0])
 
 
 def accident_sign(raw: dict, cfg: dict) -> tuple[bool, str]:
@@ -686,7 +720,8 @@ def decide(prev: dict | None, now: float, data: dict, snap: dict, meas: dict, fa
         immediate("ротация", work_count, "ротация смены, новых задач нет")
 
     limit = limit_pass(prev, now, data, tasks, work_count)
-    if limit["потолок"] is not None and limit["потолок"] < tasks:
+    limit_acts = cfg["лимит_расход"].get("действует", "да") != "нет"  # выключатель данными: считает, но потолок не режет
+    if limit_acts and limit["потолок"] is not None and limit["потолок"] < tasks:
         immediate("лимит_расход", limit["потолок"], "расход лимита подписки")
 
     few = work_count + len(snap["take"])
@@ -732,8 +767,7 @@ def decide(prev: dict | None, now: float, data: dict, snap: dict, meas: dict, fa
     pow_cfg = cfg["мощность"]
     pow_on, pow_why = power_sign(meas["raw"], pow_cfg)
     sign = sign_record((old_power or cand_before.get("мощность") or {}).get("признак"), pow_on, now)
-    quiet_on = meas["raw"]["load"] < pow_cfg["нагрузка_на_ядро_ниже"] and meas["raw"]["steal"] <= pow_cfg["кража_выше_pct"]
-    quiet = sign_record(old_power.get("тихо"), quiet_on, now)
+    quiet = sign_record(old_power.get("тихо"), power_quiet(meas["raw"], pow_cfg), now)
     if acc:
         # Пока авария действует, лестница стоит: подъёмы за её спиной не «отрабатываются».
         lad, rose = {"потолок": 1, "шаг_ts": to_iso(now)}, False
@@ -744,7 +778,7 @@ def decide(prev: dict | None, now: float, data: dict, snap: dict, meas: dict, fa
     if lad["потолок"] is not None:
         block["мощность"] = {"с": old_power.get("с") or to_iso(now), "потолок": lad["потолок"],
                              "шаг_ts": lad["шаг_ts"], "признак": sign, "тихо": quiet, "замер": meas["state"],
-                             "причина": f"{pow_why or 'нагрузка снизилась, жду отпускания'} — потолок {lad['потолок']}"}
+                             "причина": f"{pow_why or 'занятость снизилась, жду отпускания'} — потолок {lad['потолок']}"}
         ceilings["мощность"] = lad["потолок"]
     elif pow_on:
         cand["мощность"] = {"с": sign["с"], "признак": sign, "замер": meas["state"], "причина": pow_why}
@@ -763,12 +797,13 @@ def fill_quota(eff: int, work_count: int, take: list, raw: dict, data: dict) -> 
         return 0, "недобора нет"
     if not take:
         return 0, "готовых задач нет"
-    load, low = raw["load"], data["блокеры"]["мощность"]["нагрузка_на_ядро_ниже"]
-    if load <= low:
-        return min(short, len(take)), f"нагрузка {num(load)}/ядро — добираю весь недобор"
-    if load <= conf_float("LOAD_MAX_PER_CPU", 2.0):
-        return min(short, data["сторож"]["в_зоне_добирать_по"], len(take)), f"добираю по одной — нагрузка {num(load)}/ядро"
-    return 0, f"не добираю — кандидат мощности {num(load)}/ядро"
+    pow_cfg = data["блокеры"]["мощность"]
+    busy = "занятость неизвестна" if raw["busy"] is None else f"занято {num(raw['busy'], 0)} %"
+    if power_sign(raw, pow_cfg)[0]:
+        return 0, f"не добираю — кандидат мощности, {busy}"
+    if power_quiet(raw, pow_cfg):
+        return min(short, len(take)), f"{busy} — добираю весь недобор"
+    return min(short, data["сторож"]["в_зоне_добирать_по"], len(take)), f"добираю по одной — {busy}"
 
 
 # ───────────────────────── сообщения владельцу (7.2) ─────────────────────────
@@ -1083,6 +1118,13 @@ def limit_line(st: dict) -> str:
             f"при {tasks_word(cap)}; снижение для выбранного при p > {num(min(starts), 0)} %")
 
 
+def pinned_lines(st: dict) -> list:
+    gauge = st.get("замер") or {}
+    if "ядер_доступно" not in gauge:
+        return []
+    return [f"привязка к {gauge['ядер_доступно']} из {gauge['ядер']} ядер"]
+
+
 def show(st: dict, data: dict, short: bool) -> list:
     name = data["режимы"][st["выбранный"]]["имя"]
     work = st["в_работе"]
@@ -1094,7 +1136,7 @@ def show(st: dict, data: dict, short: bool) -> list:
         lines.append(f"В работе {len(work)}, {st['добор_почему']}.")
         if (st.get("лимит") or {}).get("точность") not in (None, "отказ"):
             lines.append(limit_line(st))
-        return lines
+        return lines + pinned_lines(st)
     lines += [f"выбранный: {st['выбранный']} ({st['выбранный_задач']})",
               f"эффективный: {st['эффективный']}",
               f"в работе: {len(work)}" + (f" — {' '.join(work)}" if work else ""),
@@ -1105,6 +1147,7 @@ def show(st: dict, data: dict, short: bool) -> list:
     lines += [f"кандидат {n}: {rec['причина']} — жду {wait_minutes(n, rec, data, st)} мин"
               for n, rec in st["кандидаты"].items()]
     lines.append(limit_line(st))
+    lines += pinned_lines(st)
     lines.append(f"зависимостей в карте: {st['зависимостей']}")
     lines += [f"битая зависимость: {line}" for line in st["битые"]]
     return lines
@@ -1142,8 +1185,7 @@ def warden_line(st: dict, last_kick: float, now: float, data: dict, last_over: f
     for name, label in (("мощность", "мощности"), ("авария", "аварии")):
         if name in st["кандидаты"]:
             rec = st["кандидаты"][name]
-            load = (rec.get("замер") or {}).get("нагрузка_на_ядро")
-            return f"молчу\tкандидат {label}: {num(load)}/ядро, жду {wait_minutes(name, rec, data, st)} мин"
+            return f"молчу\tкандидат {label}: {rec['причина']}, жду {wait_minutes(name, rec, data, st)} мин"
         if (block.get(name) or {}).get("признак", {}).get("есть"):
             return f"молчу\tпризнак {label} держится: {block[name]['причина']}"
     if st["добор"] < 1:

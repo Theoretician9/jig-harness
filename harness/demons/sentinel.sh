@@ -395,9 +395,15 @@ if [ -s "$QUEUE" ]; then
         # Ключ «--досыл» говорит двери: это УЖЕ очередь, и при лимите второй
         # записи не делать — иначе каждый круг досыла множил бы строки.
         # Придержанное останется в очереди и уедет после обновления.
-        if [ -n "$msg" ] && [ -x "$PROJECT_DIR/scripts/tg_send.sh" ] \
-           && "$PROJECT_DIR/scripts/tg_send.sh" --досыл "$msg" >/dev/null; then
-            continue
+        if [ -n "$msg" ] && [ -x "$PROJECT_DIR/scripts/tg_send.sh" ]; then
+            rc=0
+            "$PROJECT_DIR/scripts/tg_send.sh" --досыл "$msg" >/dev/null || rc=$?
+            # 0 — доставлено или придержано с досылом; 4 — отказ правил переписки:
+            # повтор дал бы тот же отказ, строку снимаем; прочее — держим в очереди.
+            case "$rc" in
+                0) continue ;;
+                4) say "досыл: отказ правил переписки, строка снята: $msg"; continue ;;
+            esac
         fi
         printf '%s\n' "$line" >> "$REST"
     done < "$QUEUE"

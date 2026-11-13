@@ -72,7 +72,8 @@ BEFORE="${W3_BEFORE_DIR:-$ROOT/.tasks/hr.watchers-report-must-create-model-task/
 LIVE_MAP="$ROOT/dev-map.yaml"
 LIVE_SHA=$(sha1sum "$LIVE_MAP" 2>/dev/null | cut -d' ' -f1)
 
-T=$(mktemp -d -t proba-watchers-wave3-XXXXXX)
+# Короткий префикс: путь сокета tmux не длиннее 107 знаков, длинный каталог ломает уборку окна.
+T=$(mktemp -d -t w3-XXXXXX)
 cleanup() {
     local d
     for d in "$T"/*/tmux; do
@@ -642,7 +643,7 @@ scenario_session-warden() {
     stand_tmux "$s" kill-server 2>/dev/null
     for _ in $(seq 1 50); do [ -S "$s/tmux/tmux-$(id -u)/default" ] || break; sleep 0.1; done
     for _ in $(seq 1 20); do
-        stand_tmux "$s" new-session -d -s proba-w3 bash 2>/dev/null && break
+        stand_tmux "$s" new-session -d -s proba-w3 bash && break
         sleep 0.2
     done
     stand_tmux "$s" has-session -t proba-w3 2>/dev/null && echo да > "$s/steps/w4.shell" \

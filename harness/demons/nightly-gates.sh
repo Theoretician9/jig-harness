@@ -148,7 +148,16 @@ TGBAD
     proba "БОЛЬНОЙ: отказ отправки назван, а не проглочен" "да" \
           "$(grep -q 'ОТКАЗ отправки' "$T/progon.log" && echo да || echo нет)"
 
-    [ "$ok" = 1 ] && { echo "САМОТЕСТ ПРОЙДЕН: 9 путей, из них 4 больных"; exit 0; }
+    # Ночной прогон идёт без кэша: ложный зелёный из кэша живёт не дольше суток.
+    : > "$T/tg.log"
+    env HEARTBEAT_DIR="$T/hb" LOG_DIR="$T" PROJECT_DIR="$T/proekt" TG_LOG="$T/tg.log" \
+        NIGHTLY_GATES_CMD='echo "кэш-ночью=${GATES_NO_CACHE:-нет}"' \
+        HARNESS_INSTALL_CONF=/dev/null HARNESS_CONF=/dev/null \
+        bash "$(readlink -f "${BASH_SOURCE[0]}")" > "$T/progon.log" 2>&1
+    proba "ночной прогон получает GATES_NO_CACHE=1" "да" \
+          "$(grep -q 'кэш-ночью=1' "$T"/nightly-gates-*.log && echo да || echo нет)"
+
+    [ "$ok" = 1 ] && { echo "САМОТЕСТ ПРОЙДЕН: 10 путей, из них 4 больных"; exit 0; }
     echo "САМОТЕСТ ПРОВАЛЕН"; exit 1
 fi
 
@@ -165,6 +174,8 @@ fi
 ZHURNAL="$LOG_DIR/nightly-gates-$(date +%Y%m%d).log"
 say "полный прогон ворот: $GATES_CMD"
 START_TS=$(date +%s)
+# Раз в сутки полный прогон без запомненного: гасит ложный зелёный кэша дневных прогонов.
+export GATES_NO_CACHE=1
 trap 'report_no_summary $?' EXIT
 timeout -k 60 "${NIGHTLY_GATES_MAX_MIN}m" bash -c "cd '$PROJECT_DIR' && $GATES_CMD" > "$ZHURNAL" 2>&1
 RC=$?
@@ -190,10 +201,34 @@ say "$ITOG за $(( ($(date +%s) - START_TS) / 60 )) мин"
 # red — отдельная тревога, её снимает только прогон без красных.
 alert_task --resolve nightly-gates:broken
 KRASNYH="$(krasnyh_v "$ITOG")"
+SVODKA="$ITOG"
+KARANTIN_IMENA=""
+KARANTIN_STROKA=""
+# Строка суда карантина (scripts/gates-quarantine.py) — тревогу судит она:
+# известные поломки под годной записью владельца не будят, а «ПЛОХО ·» ворота
+# печатают и для них, поэтому имена карантинных вычитаются из вести.
+QUAR="$(grep -E '^=== карантин' "$ZHURNAL" | tail -1)"
+if [ -n "$QUAR" ]; then
+    q_chislo() { printf '%s' "$QUAR" | sed -n "s/.*$1 \([0-9]\+\).*/\1/p"; }
+    NOVYH="$(q_chislo 'новых красных')"; BED="$(q_chislo 'бед карантина')"
+    # Не разобрал строку суда — это не «чисто»: тревога.
+    KRASNYH=$(( ${NOVYH:-1} + ${BED:-0} ))
+    SVODKA="новых красных ${NOVYH:-не разобрал}, бед карантина ${BED:-не разобрал} (всего красных $(q_chislo 'красных всего'))"
+    KARANTIN_STROKA="
+В карантине $(q_chislo 'в карантине')"
+    KARANTIN_IMENA="$(grep -E '^  карантин · .* — красный' "$ZHURNAL" | sed 's/^  карантин · //; s/ — красный.*//')"
+elif [ "$RC" != 0 ] && [ "${KRASNYH:-0}" = 0 ]; then
+    # Ворота кончаются кодом суда карантина; ненулевой код без его строки при
+    # «красных 0» — значит, упал сам суд, и тишина спрятала бы поломку.
+    KRASNYH=1
+    SVODKA="$ITOG, но код ворот $RC и нет строки суда карантина"
+fi
 if [ "${KRASNYH:-0}" -gt 0 ]; then
-    IMENA="$(grep -E '^  ПЛОХО ·' "$ZHURNAL" | sed 's/^  ПЛОХО · //; s/ (код.*//' | paste -sd', ' -)"
-    kanal "Ночной прогон ворот: $ITOG
-Красные: ${IMENA:-не разобрал}
+    IMENA="$(grep -E '^  ПЛОХО ·' "$ZHURNAL" | sed 's/^  ПЛОХО · //; s/ (код.*//' \
+        | awk -v skip="$KARANTIN_IMENA" 'BEGIN { n = split(skip, a, "\n"); for (i = 1; i <= n; i++) s[a[i]] = 1 } !($0 in s)' \
+        | paste -sd', ' -)"
+    kanal "Ночной прогон ворот: $SVODKA
+Красные: ${IMENA:-не разобрал}$KARANTIN_STROKA
 Журнал: $(basename "$ZHURNAL")" --task nightly-gates:red
 else
     say "красных нет — владельца не беспокою"

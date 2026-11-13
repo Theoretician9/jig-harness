@@ -52,3 +52,51 @@
     событие: '{"tool_name":"Write","session_id":"smena-prover","tool_input":{"file_path":"/var/www/project/docs/specs/zhivaya-proverka-sluchaj.md","content":"x"}}'
     ждём_в_решении: шаг «спека» делает ПОМОЩНИК
     журнал: model-guard.jsonl
+
+  # ── Порция B1 (часть 7 плана hr.zhivaya-proverka-vseh-mehanizmov) ──
+  # СТЕНД. Пять хуков ниже пишут в живое: очередь и замок ротации, журналы
+  # роли-помощников, вложенность, rotation, ответы-в-канал, вызовы-агентов.
+  # Прибор передаёт хуку своё окружение, но сам стенда не готовит и окружения
+  # из данных не берёт, поэтому зов — только так (иначе хук тронет живую
+  # очередь смены и журналы, по которым судят работу):
+  #   ST=/var/log/harness/живая-проверка/hr.zhivaya-proverka-vseh-mehanizmov/стенд-хуков
+  #   mkdir -p "$ST/журналы/inbox" "$ST/панель" "$ST/стенограмма/stend-b1-hukov/subagents"
+  #   touch "$ST/журналы/tg_out.jsonl"
+  #   echo стенд > "$ST/журналы/inbox/1794000000.000000000.txt"
+  #   echo '{"помощников": 1}' > "$ST/панель/rotation-waits-helpers.json"
+  #   echo '{"toolUseId": "toolu_stend_b1"}' > "$ST/стенограмма/stend-b1-hukov/subagents/agent-stend.meta.json"
+  #   HARNESS_LOG_DIR="$ST/журналы" HARNESS_PANEL_STATE="$ST/панель" python3 scripts/live-check-hook.py <пути>
+  # Сообщение в inbox и флаг ротации живы по mtime (120 и 30 минут), поэтому
+  # их пишут заново перед каждым зовом. channel_reply_guard молчит без TMUX в
+  # окружении (headless claude -p владельцу не пишет) — зов из окна tmux.
+  # Сессия во всех событиях — stend-b1-hukov: по ней видно, что в живые
+  # журналы стенд не протёк.
+  scripts/hooks/lead_role_guard.py:
+    событие: '{"hook_event_name":"PreToolUse","tool_name":"Write","session_id":"stend-b1-hukov","agent_id":"stend","agent_type":"harness-lead","tool_input":{"file_path":"/var/www/project/docs/zhivaya-proverka-sluchaj.md","content":"x"}}'
+    ждём_в_решении: управляющий файлы не пишет
+    журнал: роли-помощников.jsonl
+  # Номер части #99 — данные: метка называет часть, которой нет в плане
+  # запуска (нарушение 3 идёт раньше 4 и 5). Строгость «жёлтый» — то же слово
+  # приходит в stdout предупреждением, «красный» — в stderr отказом.
+  scripts/hooks/launch_plan_guard.py:
+    событие: '{"hook_event_name":"PreToolUse","tool_name":"Agent","session_id":"stend-b1-hukov","tool_input":{"description":"живая проверка","subagent_type":"harness-worker","model":"opus","prompt":"Часть: hr.zhivaya-proverka-vseh-mehanizmov#99 проба сторожа"}}'
+    ждём_в_решении: метка называет часть, которой нет в плане запуска
+    журнал: вложенность.jsonl
+  scripts/hooks/rotation_queue_guard.py:
+    событие: '{"hook_event_name":"PreToolUse","tool_name":"Agent","session_id":"stend-b1-hukov","tool_input":{"description":"живая проверка","subagent_type":"harness-worker","model":"opus","prompt":"Часть: stend-b1#1 проба очереди"}}'
+    ждём_в_решении: смена ждёт ротации, пока закончат идущие помощники
+    журнал: rotation.jsonl
+  scripts/hooks/channel_reply_guard.py:
+    событие: '{"hook_event_name":"Stop","session_id":"stend-b1-hukov","stop_hook_active":false}'
+    ждём_в_решении: на его последнее сообщение нет доставленного ответа
+    журнал: ответы-в-канал.jsonl
+  scripts/hooks/memory_layer_guard.py:
+    событие: '{"hook_event_name":"PreToolUse","tool_name":"Write","session_id":"stend-b1-hukov","cwd":"/var/www/project","tool_input":{"file_path":"/var/www/project/harness/self/core.json","content":"x"}}'
+    ждём_в_решении: слой 1 памяти
+  # agent_finish_log.py решения ТЕКСТОМ не печатает вовсе: его решение —
+  # только строка agent.finish в вызовы-агентов.jsonl. Слова решения у него
+  # нет, придумывать его нельзя; событие и журнал названы, а судить прирост
+  # журнала без слова прибор не умеет (находка части 7).
+  scripts/hooks/agent_finish_log.py:
+    событие: '{"hook_event_name":"SubagentStop","session_id":"stend-b1-hukov","agent_id":"stend","stop_hook_active":false,"transcript_path":"/var/log/harness/живая-проверка/hr.zhivaya-proverka-vseh-mehanizmov/стенд-хуков/стенограмма/stend-b1-hukov.jsonl"}'
+    журнал: вызовы-агентов.jsonl

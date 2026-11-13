@@ -72,9 +72,14 @@ SOURCE_JSON = find_up("config/process-library.json") or find_up("harness/config/
 SOURCE_YAML = find_up("config/process-library.yaml") or find_up("harness/config/process-library.yaml")
 LIB_MODULE = find_up("scripts/lib/process_library.py")
 DISPATCHER = find_up("scripts/process-dispatcher.py")
+STATE_MODULE = find_up("scripts/lib/process_state.py")
+DEMON_SCRIPT = find_up("scripts/claude-demon.sh")
 SOURCE_MECHANISMS = find_up("config/mechanisms.yaml") or find_up("harness/config/mechanisms.yaml")
 PLAYWRIGHT_PYTHON = os.environ.get("PANEL_PLAYWRIGHT_PYTHON") or "/home/user/.local/share/playwright-venv/bin/python"
-PHONE_MAX_HEIGHT = 3500     # ≈4 экрана 390×844: длиннее — лента, до проверок не долистать
+# 20 видимых строк таблицы расходов (спека hr.zapuskov §4.2) — карточки на телефоне: прежние 3 500 недостижимы.
+# Наибольший замер стенда на живых данных — 6 306 px; порог 6 400 + 10 % запаса = 7 040, решение
+# управляющего по §5 п.8. Выше — снова лента, а не рост числа процессов.
+PHONE_MAX_HEIGHT = 7040
 PHONE_MAX_ROW = 260         # строка «Все процессы» на телефоне: пары «подпись | значение» в одну строку
 BAR_MAX_LINES = 10
 if not (SOURCE_JSON and SOURCE_YAML and LIB_MODULE):
@@ -164,13 +169,22 @@ def build_view(taken, ids):
             "неразмечено": {"cron.service": 3.2, "вне_корзин": 1.1}}
 
 
-# Поддельный systemctl: list-timers — JSON из timers.json, show — key=value из
-# show.json блоками через пустую строку, только запрошенные -p.
+# Поддельный systemctl: list-timers — JSON из timers.json, list-units (--state=failed) —
+# JSON из failed.json, show — key=value из show.json блоками через пустую строку, только
+# запрошенные -p; юнит не из таблицы берёт запись «*», без неё — not-found. Есть fail.txt —
+# любой вызов: его текст в stderr и код 1.
 FAKE_SYSTEMCTL = r'''#!/usr/bin/env python3
 import json, sys
 from pathlib import Path
 here = Path(__file__).resolve().parent
 args = sys.argv[1:]
+if (here / "fail.txt").exists():
+    sys.stderr.write((here / "fail.txt").read_text())
+    sys.exit(1)
+if "list-units" in args:
+    failed = here / "failed.json"
+    print(failed.read_text() if failed.exists() else "[]")
+    sys.exit(0)
 if "list-timers" in args:
     print((here / "timers.json").read_text())
     sys.exit(0)
@@ -190,7 +204,7 @@ if args and args[0] == "show":
         i += 1
     blocks = []
     for unit in units:
-        known = table.get(unit, {"LoadState": "not-found", "ActiveState": "inactive", "UnitFileState": ""})
+        known = table.get(unit, table.get("*", {"LoadState": "not-found", "ActiveState": "inactive", "UnitFileState": ""}))
         names = props or list(known)
         blocks.append("\n".join(f"{p}={known.get(p, '')}" for p in names))
     print("\n\n".join(blocks))
@@ -224,6 +238,10 @@ def write_checks_fixtures(folder: Path, cgroup: Path, check_ids, installed=True,
                                     "CPUQuotaPerSecUSec": "2s", "MemoryHigh": "2147483648",
                                     "MemoryMax": "infinity" if memory_max == "max" else memory_max,
                                     "MemoryCurrent": "1675640832"}
+    # Юниты записей библиотеки, которых нет в таблице, — живые: на стенде выше «ещё N» не больше
+    # горстки не-зелёных строк (§5 п.8), упавшие задаёт сам случай.
+    show["*"] = {"LoadState": "loaded", "ActiveState": "active", "SubState": "running", "Result": "success",
+                 "ExecMainStatus": "0", "UnitFileState": "enabled"}
     if not installed:
         timers, show = [], {}
     (folder / "timers.json").write_text(json.dumps(timers), encoding="utf-8")
@@ -321,6 +339,37 @@ def cell(row, label_start):
     return None, None
 
 
+def window_cpu(row):
+    """Ячейка «ЦП <окно>» — второй столбец ЦП, не «ЦП 10 мин»."""
+    for label, text, raw in row:
+        if label.casefold().startswith("цп") and "10 мин" not in label:
+            return text, raw
+    return None, None
+
+
+def state_values() -> list:
+    """Значения состояния — разбором константы VALUES в process_state.py (пустой список — красный)."""
+    import ast
+    try:
+        tree = ast.parse(STATE_MODULE.read_text(encoding="utf-8")) if STATE_MODULE else None
+    except (OSError, SyntaxError):
+        tree = None
+    for node in tree.body if tree else []:
+        if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "VALUES" for t in node.targets) \
+                and isinstance(node.value, (ast.Tuple, ast.List)):
+            return [e.value for e in node.value.elts if isinstance(e, ast.Constant)]
+    return []
+
+
+def more_details(cost: str):
+    """(видимая часть, скрытая под «ещё N», текст summary) таблицы расходов."""
+    for begin, end, _, inner in top_details(cost):
+        summary = summary_text(inner).strip()
+        if summary.startswith("ещё"):
+            return cost[:begin] + cost[end:], inner, summary
+    return cost, "", ""
+
+
 def media_body(css, match):
     depth, end = 1, match.end()
     while end < len(css) and depth:
@@ -356,6 +405,16 @@ def top_details(fragment: str) -> list:
             if depth == 0:
                 found.append((start.start(), match.end(), start.group(0), fragment[start.end():match.start()]))
     return found
+
+
+def div_end(fragment: str, begin: int) -> int:
+    """Конец элемента <div>, открытого в begin: по счёту вложенных <div> и </div>."""
+    depth = 0
+    for tag in re.finditer(r"<(/?)div\b", fragment[begin:]):
+        depth += -1 if tag.group(1) else 1
+        if depth == 0:
+            return begin + tag.end()
+    return len(fragment)
 
 
 def without_details(fragment: str) -> str:
@@ -507,7 +566,8 @@ with tempfile.TemporaryDirectory(prefix="proba-processy-") as tmp:
         HARNESS_PROCESS_LIBRARY_JSON=str(libdir / "process-library.json"),
         HARNESS_PROCESS_LIBRARY_LOCAL="/nonexistent/harness-probe/process-library.local.json",
         HARNESS_USTROJSTVO=str(libdir / "mechanisms.yaml"),
-        PANEL_CGROUP_CHECKS=str(cgroup), PANEL_SYSTEMCTL=str(systemctl))
+        PANEL_CGROUP_CHECKS=str(cgroup), PANEL_SYSTEMCTL=str(systemctl),
+        PROCESS_STATE_SYSTEMCTL=str(systemctl), PROCESS_STATE_CGROUP=str(root / "state-cgroup"))
     view_path = logs / "process-dispatcher-view.json"
     approx_rec = next(r for r in records if r["id"] == check_ids[0])
     null_rec = next(r for r in records if r["класс"] == "фоновый" and r["id"] not in check_ids)
@@ -667,25 +727,26 @@ with tempfile.TemporaryDirectory(prefix="proba-processy-") as tmp:
     daemon = next(r for r in records if r["запуск"] == "служба")
     check("постоянно" in card_text(lib_cards, daemon["id"]), "запуск «служба» — «постоянно»", daemon["id"])
 
-    # 5. «≈» у оценки, «не измерено» у null.
+    # 5. «≈» у оценки — в ячейке «Токены», «—» с причиной у null (спека hr.zapuskov §4.2, §6 перечень).
     rows = table_rows(parts["cost"])
     approx_row = next((r for r in rows if approx_rec["название"] in r[0][1]), None)
     null_row = next((r for r in rows if null_rec["название"] in r[0][1]), None)
     if approx_row is None:
         bad(f"в таблице расходов нет строки «{approx_rec['название']}» (первая ячейка — название из библиотеки)")
     else:
-        text, raw = cell(approx_row, "доля токенов")
-        check(text is not None and re.search(r"≈\s*11", text) and 'title="оценка' in raw,
-              "доля токенов с точностью «≈» печатается «≈ 11 %» с title «оценка: …» (краснеет: ≈ потерян)",
-              f"ячейка {text!r}")
-        text, _ = cell(approx_row, "ядро-ч")
-        check(text is not None and "≈" not in text, "у точного числа «≈» нет", f"ячейка ядро-ч {text!r}")
+        text, raw = cell(approx_row, "токены")
+        check(text is not None and re.search(r"≈\s*11\s*%", text) and 'title="оценка' in raw,
+              "доля токенов с точностью «≈» — внутри ячейки «Токены <окно>» как «≈ 11 %» с title «оценка: …» "
+              "(краснеет: ≈ потерян или доля в отдельном столбце)", f"ячейка {text!r}")
+        text, _ = window_cpu(approx_row)
+        check(text is not None and "≈" not in text, "у точного числа «≈» нет", f"ячейка «ЦП <окно>» {text!r}")
     if null_row is None:
         bad(f"в таблице расходов нет строки «{null_rec['название']}»")
     else:
-        text, _ = cell(null_row, "ядро-ч")
-        check(text is not None and "не измерено" in text and not re.search(r"(?<![\d,.])0(?![\d,])", text),
-              "null в витрине → «не измерено», а не «0» (краснеет: null печатается нулём)", f"ячейка {text!r}")
+        text, raw = window_cpu(null_row)
+        check(text is not None and text.strip() == "—" and 'title="нет данных' in raw,
+              "null в витрине → «—» с title «нет данных: …», а не «0» и не «не измерено» "
+              "(краснеет: null печатается нулём или старым словом)", f"ячейка {text!r}")
     check(any("Основная сессия Claude" in r[0][1] for r in rows),
           "ярлык claude-session подписан «Основная сессия Claude»", "")
     tds = re.findall(r"<td\b[^>]*>", body)
@@ -701,7 +762,27 @@ with tempfile.TemporaryDirectory(prefix="proba-processy-") as tmp:
     check(code == 200 and week_rec["название"] in plain(blocks(body_w).get("cost", "")),
           "?okno=7d показывает строки окна 7д", f"код {code}")
     code, _, body_n = page("?okno=sejchas")
-    check(code == 200 and "За это окно данных пока нет" in plain(blocks(body_n).get("cost", "")),
+    cost_n = blocks(body_n).get("cost", "")
+    labels_n = sorted(set(re.findall(r'data-label="([^"]*)"', cost_n)))
+    check(code == 200 and approx_rec["название"] in plain(cost_n) and "ЦП 24 ч" in labels_n
+          and "okno=sejchas" not in cost_n,
+          "?okno=sejchas → 200 и окно 24 ч, вкладки «сейчас» нет: 10 минут — столбец таблицы "
+          "(краснеет: старая вкладка «Сейчас»)", f"код {code}, подписи {labels_n[:9]}")
+    # Окно без строк даёт пустая витрина и библиотека без постоянных, плановых и загрузочных записей.
+    mini = root / "mini-library.json"
+    mini.write_text(json.dumps({"процессы": [r for r in records if r["запуск"] in
+                                            ("хук", "команда-сессии", "агент-сессии", "вызов-модели")]},
+                               ensure_ascii=False), encoding="utf-8")
+    empty_view = build_view(NOW - timedelta(minutes=4), view_ids)
+    for window_rows in empty_view["окна"].values():
+        window_rows["строки"] = []
+    view_path.write_text(json.dumps(empty_view, ensure_ascii=False), encoding="utf-8")
+    os.environ["HARNESS_PROCESS_LIBRARY_JSON"] = str(mini)
+    code, _, body_e0 = page()
+    os.environ["HARNESS_PROCESS_LIBRARY_JSON"] = str(libdir / "process-library.json")
+    view_path.write_text(json.dumps(build_view(NOW - timedelta(minutes=4), view_ids), ensure_ascii=False),
+                         encoding="utf-8")
+    check(code == 200 and "За это окно данных пока нет" in plain(blocks(body_e0).get("cost", "")),
           "окно без строк → «За это окно данных пока нет»", f"код {code}")
     code, _, body_x = page("?okno=zzz")
     check(code == 200 and approx_rec["название"] in plain(blocks(body_x).get("cost", "")),
@@ -836,7 +917,8 @@ with tempfile.TemporaryDirectory(prefix="proba-processy-") as tmp:
     name_of = dict(bar_pairs)
     for index, mark in enumerate(marks):
         group, field = mark.group(1), bar_fields[mark.group(1)]
-        text = plain(visible[mark.start():marks[index + 1].start() if index + 1 < len(marks) else len(visible)])
+        begin = visible.rfind("<div", 0, mark.start())
+        text = plain(visible[begin:div_end(visible, begin)])
         rated = sorted((r for r in window_rows if r.get(field)), key=lambda r: -r[field])
         shown = {name for name in name_of.values() if name in text}
         top = {name_of[r["id"]] for r in rated[:len(shown)]}
@@ -853,12 +935,15 @@ with tempfile.TemporaryDirectory(prefix="proba-processy-") as tmp:
             share, total = parse_decimal(line.group(2)), sum(r[field] for r in rest)
             if line.group(3) != "%" or share is None or abs(share - total) > max(0.5, total / 100):
                 problems.append(f"{group}: «≈{line.group(2)} {line.group(3)}» вместо ≈{total:.1f} %")
-    if "<td" in visible:
-        problems.append("строки таблицы видны без нажатия (вне <details>)")
+    visible_rows = table_rows(visible)
+    not_green = sum(1 for r in visible_rows
+                    if any(w in (cell(r, "состояние")[0] or "") for w in ("упал", "пропущен", "не запущен", "неизвестно")))
+    if len(visible_rows) - not_green > 20:
+        problems.append(f"вне <details> {len(visible_rows)} строк таблицы: больше 20 плюс {not_green} не-зелёных")
     check(code == 200 and not problems,
           f"расходы на витрине из {len(window_rows)} строк: в каждой группе полос data-group=cpu|mem|runs|tok "
           f"вне <details> верхние 8…{BAR_MAX_LINES} процессов и «остальные N — ≈X %» с верными N и суммой, "
-          "таблица только в <details> (краснеет: лента полос или хвост без счёта)",
+          "вне <details> таблица не длиннее 20 строк плюс не-зелёные (краснеет: лента полос или хвост без счёта)",
           f"код {code}; " + "; ".join(problems[:5]))
 
     # 12. Высота на телефоне 390×844 в браузере: живая библиотека, витрина полного размера.
@@ -1005,6 +1090,161 @@ with tempfile.TemporaryDirectory(prefix="proba-processy-") as tmp:
             check(not left, "--витрина упала на сборке (запись библиотеки без id) → огрызка "
                   "process-dispatcher-view.json.XXXX в каталоге журналов нет (краснеет: mkstemp до сборки без unlink)",
                   f"осталось {left}")
+
+    # 20. Состояние процесса в таблице расходов (спека hr.zapuskov-none-net-informacii-znachit §4.2–4.3, §6 п.13).
+    values = state_values()
+    check(bool(values), "константа VALUES разобрана из scripts/lib/process_state.py", f"модуль {STATE_MODULE}")
+    by_id = {r["id"]: r for r in records}
+    panel_rec, dispatcher_rec = by_id.get("harness-panel"), by_id.get("harness-dispatcher")
+    if not (panel_rec and dispatcher_rec):
+        bad("БОЛЬНОЙ СЛУЧАЙ: в своей библиотеке нет harness-panel / harness-dispatcher — постоянные службы не проверить")
+    else:
+        show_table = json.loads((root / "show.json").read_text(encoding="utf-8"))
+        show_table["harness-panel.service"] = {"LoadState": "loaded", "ActiveState": "failed", "SubState": "failed",
+                                               "Result": "exit-code", "ExecMainStatus": "1"}
+        show_table["harness-dispatcher.service"] = {"LoadState": "loaded", "ActiveState": "inactive", "SubState": "dead",
+                                                    "Result": "success", "ExecMainStatus": "0"}
+        (root / "show.json").write_text(json.dumps(show_table), encoding="utf-8")
+        (root / "failed.json").write_text(json.dumps([{"unit": "broken.service", "load": "loaded", "active": "failed",
+                                                       "sub": "failed", "description": "проба"}]), encoding="utf-8")
+        busy = [view_row(f"probe-proc-{n}", доля_ёмкости_проц=10.0 + n, ядро_ч=0.1 + n / 100) for n in range(25)]
+        system = [view_row(unit, доля_ёмкости_проц=0.5, ядро_ч=0.01) for unit in ("nginx.service", "snapd.service",
+                                                                                     "broken.service")]
+        view = build_view(NOW - timedelta(minutes=4), view_ids)
+        view["окна"]["24ч"]["строки"] += busy + system + [view_row("harness-dispatcher", доля_ёмкости_проц=0.01,
+                                                                    ядро_ч=0.001)]
+        missed_rec = next((r for r in records if r["запуск"] == "крон" and r.get("статус") == "работает"
+                           and r["класс"] == "фоновый"), None)
+        missed_at = NOW - timedelta(hours=3)
+        view["state_facts"] = {"checked": iso(NOW - timedelta(minutes=4)), "docker": {}, "docker_error": None,
+                               "missed": {missed_rec["id"]: iso(missed_at)} if missed_rec else {},
+                               "log_start": iso(NOW - timedelta(days=2)), "last_run": {}}
+        view_path.write_text(json.dumps(view, ensure_ascii=False), encoding="utf-8")
+        code, _, body_t = page()
+        cost_t = blocks(body_t).get("cost", "")
+        visible, hidden, summary = more_details(cost_t)
+        shown_rows, hidden_rows, all_rows = table_rows(visible), table_rows(hidden), table_rows(cost_t)
+
+        def state_of(row):
+            return cell(row, "состояние")[0] or ""
+
+        def named(rows, name):
+            return next((r for r in rows if r[0][1].strip().startswith(name)), None)
+        first = shown_rows[0] if shown_rows else None
+        check(code == 200 and first is not None and "упал" in state_of(first),
+              "без ?sort первая строка таблицы — «упал» (краснеет: порядок по ЦП прячет упавшее)",
+              f"код {code}, первая строка {first[0][1] if first else None!r}: {state_of(first) if first else ''!r}")
+        row = named(all_rows, panel_rec["название"])
+        check(row is not None and "упал" in state_of(row) and "exit-code" in " ".join(t for _, t, _ in row),
+              "постоянная служба с юнитом failed — метка «упал» и причина (Result, код) в тексте строки",
+              f"строка {row and [t for _, t, _ in row][:3]!r}")
+        row = named(shown_rows, dispatcher_rec["название"])
+        check(row is not None and "не запущен" in state_of(row),
+              "«не запущен» у постоянной при 25 строках с большим ЦП стоит выше «ещё N» (краснеет: хвост прячет stopped)",
+              f"видимых строк {len(shown_rows)}, в видимых: {row is not None}")
+        row = named(shown_rows, missed_rec["название"]) if missed_rec else None
+        said = state_of(row) if row else ""
+        raw_state = cell(row, "состояние")[1] if row else ""
+        missed_clock = f"{missed_at:%H:%M}" if missed_at.date() == NOW.date() else f"{missed_at:%d.%m %H:%M}"
+        why_title = f'title="плановый {missed_clock} не состоялся"'
+        check(row is not None and "пропущен" in said and f"плановый {missed_clock} не состоялся" in said
+              and re.search(r"проверено \d+ мин назад", said) and why_title in raw_state,
+              "крон с missed в витрине — «пропущен · плановый ЧЧ:ММ не состоялся · проверено N мин назад», полный текст "
+              "причины в title (краснеет: нет подписи свежести или причина режется без title на телефоне)",
+              f"крон {missed_rec and missed_rec['id']}: {said!r}")
+        more = re.match(r"ещё\s+(\d+)\s+процесс", summary)
+        check(bool(more) and int(more.group(1)) == len(hidden_rows) and len(shown_rows) >= 20,
+              "сверху ≥ 20 строк, остальное под <details> «ещё N процессов — …», N = скрытым строкам",
+              f"summary {summary!r}, видимых {len(shown_rows)}, скрытых {len(hidden_rows)}")
+        hidden_bad = [r[0][1] for r in hidden_rows if any(w in state_of(r) for w in ("упал", "пропущен", "не запущен"))]
+        check(bool(hidden_rows) and not hidden_bad, "под «ещё N» нет строк «упал / пропущен / не запущен»", f"{hidden_bad[:4]}")
+        tables = "".join(re.findall(r"<table\b.*?</table>", cost_t, re.S))
+        check(bool(tables) and "не измерено" not in plain(tables),
+              "в таблице расходов слова «не измерено» нет (пусто — «—»)", f"раз: {plain(tables).count('не измерено')}")
+        labels_t = set(re.findall(r'data-label="([^"]*)"', tables))
+        check({"Состояние", "Запуски", "ЦП 10 мин", "ЦП 24 ч"} <= labels_t and any(l.startswith("Токены") for l in labels_t),
+              "столбцы: Название · Состояние · Запуски · ЦП 10 мин · ЦП 24 ч · Память · Токены 24 ч (data-label)",
+              f"{sorted(labels_t)}")
+        names_t = [r[0][1].strip() for r in all_rows]
+        rollup = [n for n in names_t if n.startswith("Системные службы сервера (")]
+        check(len(rollup) == 1 and re.match(r"Системные службы сервера \(2\)", rollup[0] or "")
+              and not any(n.startswith(("nginx.service", "snapd.service")) for n in names_t),
+              "nginx.service и snapd.service — одной строкой «Системные службы сервера (2)», отдельных строк нет",
+              f"свёртка {rollup}, строки системных {[n for n in names_t if '.service' in n][:4]}")
+        row = named(all_rows, "broken.service")
+        check(row is not None and "упал" in state_of(row), "упавший системный юнит — отдельной строкой «упал», не в свёртке",
+              f"строка {row and row[0][1]!r}")
+        code, _, body_w7 = page("?okno=7d")
+        labels_7 = set(re.findall(r'data-label="([^"]*)"', blocks(body_w7).get("cost", "")))
+        check(code == 200 and "ЦП 7 сут" in labels_7 and "ЦП 10 мин" in labels_7,
+              "?okno=7d — длинное окно 7 сут вторым столбцом ЦП, «10 мин» на месте", f"код {code}, {sorted(labels_7)[:8]}")
+        try:
+            import state
+            snapshot_states = state.processes().get("состояния")
+        except Exception as error:  # noqa: BLE001
+            snapshot_states = f"{type(error).__name__}: {error}"
+        own = [r["id"] for r in records if r["запуск"] != "хук"]
+        lost = [i for i in own if not isinstance(snapshot_states, dict) or i not in snapshot_states
+                or (snapshot_states[i] or {}).get("value") not in values]
+        check(bool(values) and isinstance(snapshot_states, dict) and not lost,
+              f"state.processes()['состояния']: каждая из {len(own)} записей не-хуков с value из VALUES (§5 п.1)",
+              f"{snapshot_states if not isinstance(snapshot_states, dict) else lost[:5]}")
+        (root / "fail.txt").write_text(f"Failed to connect to bus {TOKEN_FLAG}={SECRET}\n", encoding="utf-8")
+        code, _, body_f2 = page()
+        (root / "fail.txt").unlink()
+        shown_f = blocks(body_f2)
+        check(code == 200 and SECRET not in body_f2 and TOKEN_FLAG not in body_f2 and bool(cards(shown_f.get("lib", "")))
+              and "systemctl" in plain(shown_f.get("cost", "")),
+              "systemctl упал с «--token=…» в stderr → страница 200, причина «systemctl: …» без аргументов, "
+              "маркера нет в HTML, библиотека на месте (краснеет: why выводится дословно)",
+              f"код {code}, маркер в HTML: {SECRET in body_f2}")
+        (root / "failed.json").write_text("[]", encoding="utf-8")
+        write_checks_fixtures(root, cgroup, check_ids)
+
+    # 20а. Идущий запуск (открытый start, rc ещё нет) в «Запусках» — не провал.
+    going = vid._p_last_run({"at": iso(NOW - timedelta(minutes=1)), "rc": None, "outcome": "running", "seconds": None},
+                            NOW.timestamp())
+    check("✗" not in going and "идёт" in going,
+          "идущий запуск в ячейке «Запуски» — «идёт с ЧЧ:ММ», не «✗» (краснеет: rc None подписан провалом)",
+          f"{going!r}")
+
+    # 20б. Момент не сегодня — с датой: «посл. 07:00» двухдневной давности читается как сегодняшний.
+    old_at = NOW - timedelta(days=2)
+    old_run = vid._p_last_run({"at": iso(old_at), "rc": 0, "outcome": "end", "seconds": 5}, NOW.timestamp())
+    today_run = vid._p_last_run({"at": iso(NOW), "rc": 0, "outcome": "end", "seconds": 5}, NOW.timestamp())
+    check(f"посл. {old_at:%d.%m %H:%M}" in old_run and f"посл. {NOW:%H:%M} ✓" in today_run,
+          "«посл. …» не сегодня — «ДД.ММ ЧЧ:ММ», сегодня — «ЧЧ:ММ» (краснеет: дата потеряна или лишняя)",
+          f"{old_run!r} / {today_run!r}")
+
+    # 21. Блок «Служба проверок»: прогон с кодом лимита подписан той же функцией process_state (§4.4, §6 п.14).
+    limit_found = re.search(r"^KOD_LIMITA=(\d+)", DEMON_SCRIPT.read_text(encoding="utf-8"), re.M) if DEMON_SCRIPT else None
+    demon_check = next((i for i in check_ids if ((by_id[i].get("зовёт_модель") or {}).get("через")
+                                                 == "scripts/claude-demon.sh")), None)
+    plain_check = next((i for i in check_ids if i != demon_check and not by_id[i].get("зовёт_модель")), None)
+    if not (limit_found and demon_check and plain_check):
+        bad(f"БОЛЬНОЙ СЛУЧАЙ: нет KOD_LIMITA ({DEMON_SCRIPT}) или проверки-демона/обычной проверки в своей библиотеке")
+    else:
+        limit = int(limit_found.group(1))
+        write_runs(logs, check_ids)
+        moment = NOW - timedelta(minutes=2)
+        extra = [{"v": 1, "ts": iso(moment), "src": "scripts/run-background.sh", "event": "process.end",
+                  "outcome": "error", "data": {"id": pid, "pid": 222, "rc": rc, "с": 8.0, "cpu_с": 1.0}}
+                 for pid, rc in ((demon_check, limit), (plain_check, 1))]
+        with open(logs / "process-runs.jsonl", "a", encoding="utf-8") as runs_log:
+            runs_log.write("".join(json.dumps(e, ensure_ascii=False) + "\n" for e in extra))
+        code, _, body_k = page()
+        checks_k = blocks(body_k).get("checks", "")
+        rows_k = table_rows(checks_k)
+
+        def check_row(pid):
+            name = by_id[pid]["название"]
+            return next((" ".join(t for _, t, _ in r) for r in rows_k if r[0][1].strip().startswith(name)), "")
+        demon_text, plain_text = check_row(demon_check), check_row(plain_check)
+        check(code == 200 and "пропущен: лимит подписки" in demon_text and f"код {limit}" not in plain(checks_k),
+              f"прогон демона модели с rc {limit} (KOD_LIMITA) → «пропущен: лимит подписки», «код {limit}» в блоке нет "
+              "(краснеет: блок подписывает код мимо process_state)", f"код {code}, строка {demon_text[:160]!r}")
+        check("код 1" in plain_text, "прогон обычной проверки с rc 1 → «код 1», как прежде", f"строка {plain_text[:160]!r}")
+        write_runs(logs, check_ids)
 
     # 6. Пустые и битые данные — последними: портят витрину и журнал.
     view_path.unlink()

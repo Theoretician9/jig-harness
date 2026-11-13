@@ -92,6 +92,12 @@ private_journals:
   - {name: запасной-вход, file: запасной-вход.jsonl, why: откуда и исход попыток запасного входа в панель; файл 0600 владельца панели}
 
 journals:
+  account-buttons:
+    file: account-buttons.jsonl
+    writers: [scripts/lib/account_buttons.py]
+    time_field: ts
+    time_kind: tz
+    event_from: "field:event"
   confirmations:
     file: confirmations.jsonl
     writers: [scripts/tg-dispatcher.sh]
@@ -431,6 +437,12 @@ journals:
   "роли-помощников":
     file: "роли-помощников.jsonl"
     writers: [scripts/hooks/lead_role_guard.py]
+    time_field: ts
+    time_kind: tz
+    event_from: "field:event"
+  "merge-queue":
+    file: "merge-queue.jsonl"
+    writers: [scripts/merge-queue.py]
     time_field: ts
     time_kind: tz
     event_from: "field:event"

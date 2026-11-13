@@ -118,6 +118,14 @@ mkdir -p "$POTOK_KAT"
 # по ней узнаёт, чей это вызов модели (транскрипт головной сессии называется id).
 SESSION_ID="$(cat /proc/sys/kernel/random/uuid)"
 DOVODY=(--session-id "$SESSION_ID" "${DOVODY[@]}")
+
+# Агент демона работает из пустого временного каталога: .claude/settings.json проекта
+# у него не грузится. Сторож записи память/ORDERS.md подключается явно, абсолютным
+# путём; признак демона HARNESS_DEMON он читает из окружения.
+export HARNESS_DEMON="$DEMON"
+ORDERS_HOOK_SETTINGS="$(jq -nc --arg c "python3 $PROJECT_DIR/scripts/hooks/orders_write_guard.py" \
+    '{hooks: {PreToolUse: [{matcher: "Write|Edit|NotebookEdit|Bash", hooks: [{type: "command", command: $c, timeout: 5}]}]}}')"
+DOVODY=(--settings "$ORDERS_HOOK_SETTINGS" "${DOVODY[@]}")
 jq -nc --arg d "$DEMON" --arg s "$SESSION_ID" --arg w "$(date -Iseconds)" \
     '{event: "demon.start", "демон": $d, session_id: $s, "когда": $w}' >>"$RASHOD"
 

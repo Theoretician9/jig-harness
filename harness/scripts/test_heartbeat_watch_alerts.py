@@ -16,7 +16,9 @@
        чужой сторож — нет;
   S3 — порог «мёртв» = период × множитель метки (HEARTBEAT_MULT_FILE):
        backup ×1 мёртв через 25 ч, nightly-gates ×2 жив через 25 ч и мёртв
-       через 49 ч, нечитаемый файл множителей — громкий отказ.
+       через 49 ч, нечитаемый файл множителей — громкий отказ;
+  S5 — сводка уходит вложением только при отказе правил двери (код 4),
+       при сбое связи (код 1) — нет.
 
 Стенд — временный каталог: копия демона в раскладке проекта
 (harness/demons + scripts/lib), писатель-заглушка scripts/alert-task.py и
@@ -336,6 +338,39 @@ def case_failing_last_run(tmp: Path) -> None:
     check("S4·сводка: МЁРТВЫХ 2, живых 4", "живых 4, МЁРТВЫХ 2" in out, said)
 
 
+def case_door_codes(tmp: Path) -> None:
+    """S5: вложением сводка уходит только при отказе ПРАВИЛ (код 4), не при сбое связи (1).
+
+    Код 1 двери — канал лёг или вызов кривой: вложение через тот же лёгший канал
+    не уйдёт, а файл-сирота сводки ляжет в журнал. Код 4 — канал исправен, текст
+    не годится: перечень мёртвых уходит документом.
+    """
+    print("— S5: вложение сводки — только при отказе правил (4), при сбое связи (1) — нет —")
+    for code, want_file in ((1, False), (4, True)):
+        stand = tmp / f"s5-{code}"
+        stand.mkdir()
+        tree = build_tree(stand, door_code=code)
+        log_dir, hb = stand / "log", stand / "hb"
+        log_dir.mkdir()
+        hb.mkdir()
+        passport(stand / "install.conf", tree, log_dir, hb)
+        (stand / "harness.conf").write_text('HEARTBEAT_PERIODS="alpha:10"\n', encoding="utf-8")
+        for name in (".install-stamp", "alpha"):
+            (hb / name).touch()
+        env = base_env(stand) | {"HARNESS_INSTALL_CONF": str(stand / "install.conf"),
+                                 "HARNESS_CONF": str(stand / "harness.conf")}
+        rc, out = run(["bash", str(tree / "harness" / "demons" / "heartbeat-watch.sh")], env)
+        door = stand / "door-calls.log"
+        calls = door.read_text(encoding="utf-8").splitlines() if door.is_file() else []
+        said = f"rc={rc}; зовы двери: {[c[:80] for c in calls]}; вывод: {out[-400:]}"
+        check(f"S5·код {code}: условие создано — дверь позвана текстом сводки",
+              bool(calls) and not calls[0].startswith("--file"), said)
+        sent_file = any(c.startswith("--file") for c in calls)
+        check(f"S5·код {code}: вложение {'шлётся' if want_file else 'НЕ шлётся'}",
+              sent_file == want_file, said)
+        check(f"S5·код {code}: недоставка — прогон проваленный (rc≠0)", rc != 0, said)
+
+
 def main() -> int:
     print(f"демон: {DEMON}")
     if not DEMON.is_file():
@@ -345,7 +380,7 @@ def main() -> int:
         os.chmod(tmp, 0o700)
         tmp_path = Path(tmp).resolve()
         for case in (case_selftest_stays_in_stand, case_resolve_names_outside_table,
-                     case_threshold_multiplier, case_failing_last_run):
+                     case_threshold_multiplier, case_failing_last_run, case_door_codes):
             try:
                 case(tmp_path)
             except Exception as exc:  # noqa: BLE001 — упавший стенд — неудача пробы, а не зелёный

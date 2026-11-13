@@ -22,6 +22,12 @@
 #   never-wrapped   — путь в строке ввода разорван переносом с рамкой: kick_stuck;
 #   PANE_CONFIRM=0  — подтверждение выключено (на «never»): один Enter, kick_sent;
 #   capture-pane падает (на «never») — fail-open: один Enter, kick_sent.
+#   stale           — файл уже перенесён в обработано/ к моменту толчка (смена
+#                     прочла его сама, пока толчок ждал очередь нажатий): ни
+#                     одного нажатия, событие delivery.kick_stale с причиной
+#                     «пинок устарел: файл уже прочитан» — пропуск не молчит;
+#   fresh           — парный к stale: тот же пинок диспетчера, файл на месте —
+#                     пинок вставлен, kick_sent.
 #
 # Стенд: свой TMUX_TMPDIR (свой сервер tmux, живой не зовётся), TMUX снята,
 # LOG_DIR и каталог паузы свои. В панели — фальшивая «claude»: python под именем
@@ -121,6 +127,11 @@ run_case() {  # имя случая, режим фальшивки, вид пи�
         export PANE_ENTER_DELAY=0.3 PANE_CONFIRM_DELAY=0.6 PANE_SEND_NOW=0
         for kv in "$@"; do export "${kv?}"; done
         echo "сообщение владельца для пробы подтверждения пинка" > "$LOG_DIR/inbox/$ts.txt"
+        # Смена прочла файл раньше, чем толчок дошёл до двери (11.11.2026 20:49:32).
+        if [ "${STAND_READ_FIRST:-0}" = 1 ]; then
+            mkdir -p "$LOG_DIR/inbox/обработано"
+            mv "$LOG_DIR/inbox/$ts.txt" "$LOG_DIR/inbox/обработано/"
+        fi
         "$REAL_TMUX" new-session -d -s "$name" -x 100 -y 30 \
             "$T/bin/node $T/fakeclaude.py $mode $W/keys $W/accepted $LOG_DIR/inbox/1761999999.000001.txt"
         for i in $(seq 50); do
@@ -150,6 +161,17 @@ except OSError:
 print(",".join(r.get("event", "?") for r in rows) or "нет")
 EVEOF
 )"
+            echo "stale_why=$(python3 - "$LOG_DIR/доставка.jsonl" "$ts" <<'EVEOF'
+import json, sys
+try:
+    rows = [json.loads(l) for l in open(sys.argv[1], encoding="utf-8") if l.strip()]
+except OSError:
+    rows = []
+print(next((r.get("data", {}).get("почему", "") for r in rows
+            if r.get("event") == "delivery.kick_stale"
+            and sys.argv[2] in r.get("data", {}).get("ts_список", "")), "нет"))
+EVEOF
+)"
         } > "$W/result"
         "$REAL_TMUX" kill-session -t "$name" >/dev/null 2>&1
     )
@@ -170,6 +192,8 @@ judge() {  # имя, ждём Enter, ждём событие, ждём прин�
 }
 
 run_case accept accept short
+run_case stale accept dispatcher STAND_READ_FIRST=1
+run_case fresh accept dispatcher
 run_case eat-first eat-first short
 run_case never never short
 run_case echo-dispatcher echo-dispatcher dispatcher
@@ -178,6 +202,17 @@ run_case confirm-off never short PANE_CONFIRM=0
 run_case capture-broken never short "PATH=$T/broken-capture:$PATH"
 
 judge accept 1 delivery.kick_sent 1
+judge fresh 1 delivery.kick_sent 1
+echo "═══ stale"
+if [ -s "$T/stale/result" ]; then
+    case_check "stale: код двери" "0" "$(field stale rc)"
+    case_check "stale: Enter в панель" "0" "$(field stale enters)"
+    case_check "stale: строк принято панелью" "0" "$(field stale accepted)"
+    case_check "stale: событие доставки" "delivery.kick_stale" "$(field stale events)"
+    case_check "stale: причина в журнале" "пинок устарел: файл уже прочитан" "$(field stale stale_why)"
+else
+    case_check "stale: случай отработал" "да" "нет"
+fi
 judge eat-first 2 delivery.kick_sent 1
 judge never 2 delivery.kick_stuck 0
 judge echo-dispatcher 1 delivery.kick_sent 1

@@ -50,16 +50,65 @@ konf_koren() {
 
 konf_zagruzit() {  # $@ — необязательно: ключи сверх объявленных в конфигах
     local koren; koren="$(konf_koren)"
-    local install_conf="${HARNESS_INSTALL_CONF:-${INSTALL_CONF:-$koren/install.conf}}"
-    local harness_conf="${HARNESS_CONF:-$koren/harness.conf}"
+    _konf_chitat okruzhenie "$koren" "${HARNESS_INSTALL_CONF:-${INSTALL_CONF:-$koren/install.conf}}" \
+        "${HARNESS_CONF:-$koren/harness.conf}" "$@"
+}
+
+# Режим ДВЕРИ: дверь (скрипт, что пускает необратимое по слову владельца) не берёт конфиг из
+# окружения. Окружение назвало бы ей чужой паспорт, а конфиг bash исполняет как код: чужой
+# harness.conf определил бы python3(), отвечающий «согласие есть» (АР-3, дыра б).
+# Корень паспорта — /etc/harness, иначе ~/.harness агента; HARNESS_HOME, HARNESS_CONF,
+# HARNESS_INSTALL_CONF и INSTALL_CONF не читаются. Единственная явная дверь — стенд пробы:
+# HARNESS_DOOR_STAND_HOME называет каталог его паспорта, и дверь верит ей, только если сама
+# (readlink -f вызывающего файла) лежит вне PROJECT_DIR паспорта машины, то есть это копия в
+# стенде, а не настоящее дерево.
+konf_dveri_puti() {  # $1 = файл двери; ставит INSTALL_CONF, HARNESS_INSTALL_CONF, HARNESS_CONF
+    local door koren=/etc/harness proekt
+    door="$(readlink -f "$1")"
+    [ -d /etc/harness ] || koren="${HOME:-/root}/.harness"
+    if [ -n "${HARNESS_DOOR_STAND_HOME:-}" ]; then
+        proekt=$(sed -n "s/^[[:space:]]*PROJECT_DIR=[\"']\{0,1\}\([^\"'#]*\).*/\1/p" \
+                 "$koren/install.conf" 2>/dev/null | tail -1)
+        if [ -z "$proekt" ] || [[ "$door/" != "${proekt%/}/"* ]]; then koren="$HARNESS_DOOR_STAND_HOME"; fi
+    fi
+    KONF_DVERI_KOREN="$koren"
+    INSTALL_CONF="$koren/install.conf"; HARNESS_INSTALL_CONF="$INSTALL_CONF"; HARNESS_CONF="$koren/harness.conf"
+}
+
+# Ключи двери — ТОЛЬКО из паспорта: окружение не перекрывает ни один. После законного «Да»
+# дверь иначе исполнила бы чужой DB_ADMIN_EXEC и положила дамп и след в чужие каталоги.
+# Поэтому каждый ключ, который дверь берёт умолчанием `X="${X:-…}"`, передаётся аргументом —
+# загрузчик снимает его до чтения файла (проба носителя слова судит это разбором).
+konf_zagruzit_dveri() {  # $@ — как у konf_zagruzit; дверь — вызывающий файл
+    konf_dveri_puti "${BASH_SOURCE[1]}"
+    _konf_chitat dveri "$KONF_DVERI_KOREN" "$INSTALL_CONF" "$HARNESS_CONF" "$@"
+}
+
+# $1 = режим (okruzhenie — окружение старше файла; dveri — окружение не читается вовсе),
+# $2 = корень, $3 = install.conf, $4 = harness.conf, дальше — ключи сверх объявленных.
+_konf_chitat() {
+    local rezhim="$1" koren="$2" install_conf="$3" harness_conf="$4"
+    shift 4
 
     local key val saved=()
     for key in $(printf '%s\n' "$@"; sed -n 's/^[[:space:]]*\([A-Z][A-Z0-9_]*\)=.*/\1/p' \
                  "$install_conf" "$harness_conf" 2>/dev/null | sort -u); do
+        if [ "$rezhim" = dveri ]; then
+            # Дверь исполняет необратимое по слову владельца: ключ из окружения она не берёт.
+            unset "$key"
+            continue
+        fi
         val="${!key-}"
         # Пустое значение окружения значит «не задано» — берём из конфига.
         [ -n "$val" ] && saved+=("$key=$val")
     done
+    # Места по умолчанию тоже могут прийти окружением и пережить `: "${X:=…}"`.
+    # Сроки согласия (CONSENT_*) — настройка судьи двери: ключа может не быть в паспорте машины,
+    # и тогда окружение продлило бы «Да», поэтому они снимаются по имени, а не по файлу.
+    if [ "$rezhim" = dveri ]; then
+        # shellcheck disable=SC2046
+        unset LOG_DIR STATE_DIR HEARTBEAT_DIR PANEL_STATE_DIR SECRETS_DIR $(compgen -v CONSENT_)
+    fi
 
     # shellcheck disable=SC1090
     [ -r "$install_conf" ] && source "$install_conf"
@@ -207,6 +256,13 @@ konf_selftest() {
     case_check "отсутствующего ключа нет и в ответе — пусто, а не мусор" "" \
           "$(HARNESS_INSTALL_CONF="$T/i.conf" HARNESS_CONF="$T/h.conf" \
              bash -c 'source "$1"; konf_iz_fajla NO_SUCH_KEY' _ "$lib")"
+    # БОЛЬНОЙ СЛУЧАЙ АР-4: режим двери — окружение не доживает до двери, ключ только из паспорта.
+    printf 'DB_ADMIN_EXEC="из-паспорта"\n' >> "$T/h.conf"
+    case_check "БОЛЬНОЙ СЛУЧАЙ АР-4: DB_ADMIN_EXEC окружением в режиме двери не доживает" "из-паспорта|пусто|$T/дверь/log" \
+          "$(HARNESS_DOOR_STAND_HOME="$T/дверь" DB_ADMIN_EXEC=подлог EXTRA_KEY=подлог LOG_DIR=подлог \
+             bash -c 'mkdir -p "$2"; cp "$3" "$2/install.conf"; cp "$4" "$2/harness.conf"; source "$1"
+                      konf_zagruzit_dveri EXTRA_KEY; printf "%s|%s|%s" "$DB_ADMIN_EXEC" "${EXTRA_KEY:-пусто}" "${LOG_DIR:-пусто}"' \
+             _ "$lib" "$T/дверь" "$T/i.conf" "$T/h.conf")"
     case_check "конфигов нет вовсе — загрузчик не роняет скрипт под set -e" "цел" \
           "$(HARNESS_INSTALL_CONF=/нет/такого HARNESS_CONF=/нет/такого \
              bash -c 'set -euo pipefail; source "$1"; konf_zagruzit && echo цел' _ "$lib")"

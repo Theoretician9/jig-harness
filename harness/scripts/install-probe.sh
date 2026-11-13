@@ -9,7 +9,8 @@
 # нём шаг про панель. Текст не доказывает, что установка проходит.
 #
 # Что делает: поднимает контейнер из образа чистой машины (данные —
-# INSTALL_PROBE_IMAGE), монтирует пакет только для чтения, кладёт ЗАПОЛНЕННЫЙ
+# INSTALL_PROBE_IMAGE), монтирует публичную сборку пакета (build-public.py) —
+# в ней есть манифест слоя 1, как у человека, — только для чтения, кладёт ЗАПОЛНЕННЫЙ
 # install.conf с подставными значениями (установщик не задаёт вопросов, когда
 # паспорт заполнен), прогоняет USTANOVIT.sh и проверяет ИТОГ: пользователь,
 # паспорт, юнит, расписание, раскладка. Контейнер и его тома убираются трапом.
@@ -347,14 +348,28 @@ KOREN_STENDA="/var/www/proba"
 KONT_LOG="$LOG_DIR/проба-установки.контейнер.$(date +%F_%H%M).log"
 # Трап ДО запуска и на INT TERM EXIT: docker run умеет создать контейнер и
 # отказать на старте, а EXIT-трап не исполняется при Ctrl-C.
+SBORKA=
 trap 'docker logs "$KONT" > "$KONT_LOG" 2>&1 || true;
-      docker rm -fv "$KONT" >/dev/null 2>&1 || true' INT TERM EXIT
+      docker rm -fv "$KONT" >/dev/null 2>&1 || true;
+      [ -z "$SBORKA" ] || rm -rf "$SBORKA"' INT TERM EXIT
 
 ubrat_musor "$KONT"
 
+# Человек ставит из ПУБЛИЧНОЙ СБОРКИ: манифест слоя 1 (harness/self/MANIFEST.sha256)
+# кладёт в неё только build-public.py, в сыром пакете его нет, и раскладка с Д-18
+# умирала бы на «нет манифеста». Сборщик берётся рядом с этим скриптом: корень
+# проекта у стенда может быть без scripts/. Паспорт передаётся явно, как в publish.sh: иначе
+# сборщик читает боевой install.conf, а не паспорт этой машины.
+SBORKA=$(mktemp -d "${TMPDIR:-/tmp}/harness-run-install-probe-build-XXXXXX")
+if ! ITOG_SBORKI=$(python3 "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/build-public.py" \
+        --пакет "$PAKET" --куда "$SBORKA" --паспорт "$(konf_koren)/install.conf" 2>&1); then
+    skazat "ОТКАЗ: публичная сборка не прошла: $ITOG_SBORKI"
+    exit 1
+fi
+
 skazat "поднимаю чистую машину: образ $OBRAZ, контейнер $KONT"
 ZAPUSK=$(docker run -d --name "$KONT" --privileged --cgroupns=host \
-    -v "$PAKET:/mnt/paket:ro" -v /sys/fs/cgroup:/sys/fs/cgroup:rw \
+    -v "$SBORKA:/mnt/paket:ro" -v /sys/fs/cgroup:/sys/fs/cgroup:rw \
     -e DEBIAN_FRONTEND=noninteractive "$OBRAZ" /sbin/init 2>&1) && RC=0 || RC=$?
 if [ "$RC" != 0 ]; then
     skazat "ОТКАЗ: контейнер не поднялся: $ZAPUSK"

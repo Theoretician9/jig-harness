@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S python3 -I
 """Дверь укладки: единственное место, где файл пакета ложится в проект.
 
 Нет копии — нет перезаписи. Дверь идёт двумя ходами:
@@ -667,7 +667,7 @@ def seed_consent(candidates: dict, selftest: bool):
         return {}, []
     if isinstance(question, layout_history.Unreadable):
         return {}, unreadable_consent(question.reason)
-    consent = layout_history.consent_after(log_dir, question)
+    consent = layout_history.consent_after(question)
     if isinstance(consent, layout_history.Unreadable):
         return {}, unreadable_consent(consent.reason)
     if consent is None:

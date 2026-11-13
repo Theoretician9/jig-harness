@@ -423,6 +423,8 @@
     класс: A2
   "scripts/install-probe.sh":
     класс: D
+  "scripts/test_install_probe_built_tree.py":
+    класс: D
   "scripts/invariant-coverage.py":
     класс: C1
   "scripts/language-level.py":
@@ -1020,6 +1022,8 @@
     причина: "пишет profiles.json и state.json: меняет аккаунт следующей смены"
   "scripts/lib/accounts.py":
     класс: C2
+  "scripts/lib/account_key.sh":
+    класс: C2
   "scripts/test_switch_account.sh":
     класс: D
   "scripts/test_live_key.sh":
@@ -1233,3 +1237,30 @@
     причина: "пишет слой человека instance.yaml и просит у владельца кнопку"
   "scripts/check-memory-weeding.py":
     класс: C1
+  "scripts/test_gates_run_dir_reach.sh":
+    класс: D
+  "scripts/test_button_press_wakes_shift.py":
+    класс: D
+  "scripts/lib/process_state.py":
+    класс: C2
+  "scripts/test_process_state.py":
+    класс: D
+  "scripts/test_owner_word_carrier.py":
+    класс: D
+  "scripts/post-commit-heal-index.sh":
+    класс: C2
+    почему: "хук git, но не судья: ничего не отказывает, а после коммита личным индексом сбрасывает пути коммита в общем индексе к HEAD"
+  "scripts/test_post_commit_heal_index.sh":
+    класс: D
+  "scripts/merge-queue.py":
+    класс: C2
+    почему: "очередь слияния: вливает ветку помощника в master и догоняет пакет; коды отказа — края, а не цель (не судья)"
+  "scripts/commit-friction.py":
+    класс: C2
+    почему: "считает попытки pre-commit на коммит, падения сверки и следы замков по журналам — прибор"
+  "scripts/test_merge_queue.py":
+    класс: D
+  "scripts/test_commit_friction.py":
+    класс: D
+  "scripts/test_compare_package_deferred.py":
+    класс: D

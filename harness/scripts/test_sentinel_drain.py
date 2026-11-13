@@ -22,6 +22,7 @@ Last line: `sentinel drain: случаев N, падений F`.
 """
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -138,11 +139,46 @@ def section_broken_writer(tmp: Path) -> None:
           "донос тревог: код 3" in said)
 
 
+# Door of the stand: the code depends on the text, every call is logged.
+STUB_DOOR = """#!/usr/bin/env bash
+printf '%s\\n' "$*" >> "$(dirname "$0")/door-calls.log"
+case "$*" in
+    *ПРАВИЛА*) exit 4 ;;
+    *СВЯЗЬ*)   exit 1 ;;
+esac
+exit 0
+"""
+
+
+def section_resend_codes(tmp: Path) -> None:
+    print("── досыл §3б: отказ правил (4) снимает строку с причиной, сбой связи (1) держит ──")
+    st = SentinelStand(tmp / "resend")
+    door = st.project / "scripts" / "tg_send.sh"
+    door.write_text(STUB_DOOR, encoding="utf-8")
+    door.chmod(0o755)
+    queue = st.log / "панель-недоставленное.jsonl"
+    rows = {"rules": "весть ПРАВИЛА стенда", "link": "весть СВЯЗЬ стенда", "ok": "весть стенда"}
+    queue.write_text("".join(json.dumps({"текст": t}, ensure_ascii=False) + "\n"
+                             for t in rows.values()), encoding="utf-8")
+    got = st.sentinel()
+    calls = (st.project / "scripts" / "door-calls.log")
+    called = calls.read_text(encoding="utf-8") if calls.exists() else ""
+    check("стенд: досыл позвал дверь по каждой строке очереди", True,
+          all(t in called for t in rows.values()))
+    left = queue.read_text(encoding="utf-8") if queue.exists() else ""
+    check("сбой связи (1): строка осталась в очереди", True, rows["link"] in left)
+    check("доставлено (0): строка снята", False, rows["ok"] in left)
+    check("отказ правил (4): строка снята — вечный досыл не жжёт канал", False, rows["rules"] in left)
+    said = got["out"] + got["log"]
+    check("отказ правил (4): причина и текст названы в журнале sentinel", True,
+          "правил" in said and rows["rules"] in said)
+
+
 def main() -> int:
     live_before = alerts.sha1(alerts.LIVE_MAP)
     check(f"sentinel на месте: {SENTINEL.name}", True, SENTINEL.is_file())
     with tempfile.TemporaryDirectory(prefix="sentinel-drain-probe-") as tmp:
-        for section in (section_drain, section_broken_writer):
+        for section in (section_drain, section_broken_writer, section_resend_codes):
             try:
                 section(Path(tmp))
             except Exception as error:  # a crashed section is a failure, not a silence

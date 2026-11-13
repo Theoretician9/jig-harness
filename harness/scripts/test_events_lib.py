@@ -145,12 +145,25 @@ class Stand:
         return [json.loads(x) for x in p.read_text(encoding="utf-8").splitlines() if x.strip()]
 
 
+def map_cards(n: int) -> list[str]:
+    """Первые n карточек НАСТОЯЩЕЙ карты. Имена не вписаны в пробу: расчистка
+    карты уносит карточки в архив, и вписанное имя валило стенд."""
+    text = (ROOT / "dev-map.yaml").read_text(encoding="utf-8")
+    ids = re.findall(r"- id: (hr\.[a-z0-9.-]+)\n\s+status: ", text)[:n]
+    if len(ids) < n:
+        raise SystemExit(f"проба: в dev-map.yaml карточек hr.* меньше {n} — стенд карты не собрать")
+    return ids
+
+
+WIP_CARDS = map_cards(2)
+
+
 def make_devmap(path: Path, wip: int) -> None:
     """Копия НАСТОЯЩЕЙ карты (данные репозитория, не журнал) с заданным числом
     карточек wip: форма карты — её, а не выдуманная пробой."""
     text = (ROOT / "dev-map.yaml").read_text(encoding="utf-8")
     text = re.sub(r"(\n\s+status: )wip\b", r"\1test", text)
-    ids = ["hr.harness-detailed-logging", "hr.prepare-human-decision-items"][:wip]
+    ids = WIP_CARDS[:wip]
     for card in ids:
         pat = re.compile(r"(- id: " + re.escape(card) + r"\n\s+status: )\w+")
         text, n = pat.subn(r"\1wip", text, count=1)
@@ -243,6 +256,8 @@ SAMPLES = [
     ("log", 'вложенность.jsonl', {"v": 1, "ts": "2026-11-04T09:22:31+05:00", "src": "scripts/hooks/launch_plan_guard.py", "event": "nesting.decision", "outcome": "skipped", "task": "hr.sample", "task_from": "map", "session": "s-sample"}, '2026-11-04T04:22:31+00:00'),
     ("log", 'ответы-в-канал.jsonl', {"v": 1, "ts": "2026-11-04T00:14:53+05:00", "src": "scripts/hooks/channel_reply_guard.py", "event": "channel_reply.block", "outcome": "refused", "task": "hr.sample", "task_from": "map", "session": "s-sample"}, '2026-11-03T19:14:53+00:00'),
     ("log", 'роли-помощников.jsonl', {"v": 1, "ts": "2026-11-04T09:26:18+05:00", "src": "scripts/hooks/lead_role_guard.py", "event": "role.decision", "outcome": "ok", "task": "hr.sample", "task_from": "map", "session": "s-sample"}, '2026-11-04T04:26:18+00:00'),
+    ("log", 'merge-queue.jsonl', {"v": 1, "ts": "2026-11-13T04:04:22+05:00", "src": "scripts/merge-queue.py", "event": "mq.слито", "outcome": "ok", "task": "hr.sample", "task_from": "arg", "session": None}, '2026-11-12T23:04:22+00:00'),
+    ("log", 'account-buttons.jsonl', {"v": 1, "ts": "2026-11-13T11:10:49+05:00", "src": "scripts/lib/account_buttons.py", "event": "account.menu", "outcome": "ok", "task": "hr.sample", "task_from": "arg", "session": None, "data": {"nonce": "RanfbmYrhajlIy6rvP8qEA", "message_id": 13015, "имена": ["acc-a", "login"]}}, '2026-11-13T06:10:49+00:00'),
     ("log", 'режим-скорости.jsonl', {"v": 1, "ts": "2026-11-05T13:20:06+05:00", "at": "2026-11-05T13:20:03+05:00", "src": "harness/demons/speed_mode.py", "event": "blocker.on", "outcome": "ok", "task": "hr.sample", "task_from": "map", "session": None, "data": {"блокер": "sample", "порог": 1}}, '2026-11-05T08:20:03+00:00'),
     ("log", 'тревоги-ждут.jsonl', {"ts": "2026-11-01T09:01:12.345678+05:00", "key": "sample:broken", "title": "образец", "line": "harness", "watcher": "sample"}, '2026-11-01T04:01:12+00:00'),
     ("log", 'доставка.jsonl', {"v": 1, "ts": "2026-10-28T13:43:12+05:00", "src": "scripts/tg-dispatcher.sh", "event": "delivery.received", "outcome": "ok", "data": {"update_id": "1", "ts": "1793176992.643578412"}}, '2026-10-28T08:43:12+00:00'),
@@ -614,7 +629,7 @@ def case_current_task(base: Path) -> None:
     st = Stand(base, "task1", wip=1)
     rc, res, err = run_child(emit_body(src=SRC, event="probe.x", outcome="ok", journal="t"), st.env())
     e = json.loads(st.lines("t")[-1]) if st.lines("t") else {}
-    check("одна wip → task из карты, task_from=map", ("hr.harness-detailed-logging", "map"),
+    check("одна wip → task из карты, task_from=map", (WIP_CARDS[0], "map"),
           (e.get("task"), e.get("task_from")))
     rc, res, err = run_child(emit_body(src=SRC, event="probe.x", outcome="ok", journal="t"),
                              st.env(HARNESS_TASK="hr.env-task"))

@@ -7,9 +7,12 @@
 перепись истории. Открывает только «Да» кнопкой: конверт consent.yes в consent-buttons.jsonl
 на вид и предмет двери, с парным consent.sent (nonce и message_id), как пишет consent_buttons.judge.
 
-Стенд свой на каждый случай (temp-каталог): HARNESS_OWNER_WORD_STEND=1, свой LOG_DIR,
-harness.conf (DEPLOY_CONSENT_STANDING=0, *_NEEDS_OWNER=1), install.conf (AUTONOMY=semi),
-свои git-репо и голые удалённые (file://), заглушки docker, СУБД, gates.sh, tg_send.sh.
+Стенд свой на каждый случай (temp-каталог): свой LOG_DIR, harness.conf
+(DEPLOY_CONSENT_STANDING=0, *_NEEDS_OWNER=1), install.conf (AUTONOMY=semi), свои git-репо и
+голые удалённые (file://), заглушки docker, СУБД, gates.sh, tg_send.sh. Судье стенд приходит
+только НОСИТЕЛЕМ: ворота-обёртка, сторож, protected-delete и ask-consent зовутся раннерами пробы,
+которые подменяют owner_word.носитель в процессе двери, а owner_word.ЗАПРОС_КНОПКИ — обёрткой
+ask-consent с тем же носителем (окружение судья не слушает).
 Выкат и публикация — стенд test_consent_doors.py (m9): проект стенда со ссылками на настоящие
 скрипты, deploy_guard.py проекта — обёртка над настоящим без «занятости машины»; «открыто»
 мерится строкой за воротами (заглушка check-secrets.sh у выката, «замок 2 · …» у публикации),
@@ -45,6 +48,7 @@ sys.dont_write_bytecode = True
 SCRIPTS = Path(__file__).resolve().parent
 LIB = SCRIPTS / "lib"
 sys.path.insert(0, str(LIB))
+import config  # noqa: E402
 import owner_word  # noqa: E402
 import patterns  # noqa: E402
 
@@ -59,6 +63,9 @@ ASK = SCRIPTS / "ask-consent.py"
 PUBLISH = SCRIPTS / "publish.sh"
 DROP_DB = SCRIPTS / "drop-database.sh"
 DEPLOY_SH = SCRIPTS / "deploy.sh"
+# Bash-двери зовутся только копиями в проекте стенда: конфиг они берут своей дверью (АР-3),
+# паспорт стенда для копии вне PROJECT_DIR машины называет HARNESS_DOOR_STAND_HOME.
+BASH_DOORS = {p.name: p for p in (DEPLOY_SH, PUBLISH, DROP_DB)}
 
 OWNER = 777000
 TTL_MIN = 15
@@ -139,11 +146,47 @@ def write(path: Path, text: str, mode: int | None = None) -> Path:
     return path
 
 
+# Носитель стенда в процессе двери: дверь зовёт судью без носителя, судья берёт owner_word.носитель.
+# Конфиги стенда читаются при запуске двери — случаи переписывают их между зовами. Просьба кнопки
+# двери — ОТДЕЛЬНЫЙ процесс ask-consent (owner_word.ЗАПРОС_КНОПКИ): носитель туда не доходит,
+# поэтому ЗАПРОС_КНОПКИ подменён обёрткой стенда, которая ставит тот же носитель в своём процессе.
+SET_CARRIER = """
+def set_carrier(word, spec):
+    import config, json, pathlib
+    spec = json.loads(spec)
+    knobs = config.из_файла(spec["ручки"])
+    carrier = word.Носитель(папка=pathlib.Path(spec["папка"]), uid=None, паспорт=config.из_файла(spec["паспорт"]),
+                            граница=pathlib.Path(spec["граница"]),
+                            окно_мин=int(knobs.get("CONFIRM_MAX_AGE_MIN") or 60),
+                            срок_кнопки_мин=int(knobs.get("CONSENT_BUTTON_TTL_MIN") or 15), ручки=knobs)
+    word.носитель = lambda: carrier
+    word.ЗАПРОС_КНОПКИ = pathlib.Path(spec["обёртка"])
+"""
+# Дверь целиком (сторож, protected-delete): runpy после подмены носителя.
+DOOR_RUNNER = SET_CARRIER + """import json, runpy, sys
+sys.path.insert(0, json.loads(sys.argv[1])["lib"])
+import owner_word
+set_carrier(owner_word, sys.argv[1])
+sys.argv = sys.argv[2:]
+runpy.run_path(sys.argv[0], run_name="__main__")
+"""
+# Обёртка ask-consent стенда: зовётся вместо него (argv — его доводы), носитель — carrier.json рядом.
+ASK_WRAPPER = SET_CARRIER + """import json, pathlib, runpy, sys
+spec = (pathlib.Path(__file__).resolve().parent / "carrier.json").read_text(encoding="utf-8")
+lib = json.loads(spec)["lib"]
+sys.path.insert(0, lib)
+import owner_word
+set_carrier(owner_word, spec)
+ask = str(pathlib.Path(lib).parent / "ask-consent.py")
+sys.argv = [ask, *sys.argv[1:]]
+runpy.run_path(ask, run_name="__main__")
+"""
 # deploy_guard.py проекта стенда: настоящие ворота без «двух смен» и занятости машины —
-# это состояние машины, а не предмет пробы.
-GATE_WRAPPER = """import os, sys
+# это состояние машины, а не предмет пробы. Носитель — carrier.json корня стенда.
+GATE_WRAPPER = SET_CARRIER + """import os, pathlib, sys
 sys.path.insert(0, os.environ["PROBA_REAL_SCRIPTS"])
 import deploy_guard as g
+set_carrier(g.слово_вл, (pathlib.Path(__file__).resolve().parents[2] / "carrier.json").read_text(encoding="utf-8"))
 g.две_смены = lambda: None
 g.лок_файлы = lambda: []
 g.долгие_процессы = lambda: []
@@ -294,7 +337,7 @@ class Stand:
         """Проект стенда: ссылки на настоящие скрипты; ворота согласия — обёртка; прочее заглушено."""
         scripts = self.proj / "scripts"
         scripts.mkdir(parents=True)
-        own = {"deploy_guard.py", "gates.sh", "tg_send.sh", "deploy.sh", "check-secrets.sh"}
+        own = {"deploy_guard.py", "gates.sh", "tg_send.sh", "check-secrets.sh", *BASH_DOORS}
         for f in SCRIPTS.iterdir():
             if f.name not in own and not f.name.startswith("."):
                 (scripts / f.name).symlink_to(f)
@@ -304,8 +347,10 @@ class Stand:
         write(scripts / "gates.sh", f'#!/bin/sh\necho "gates $*" >> "{self.root}/gates-called"\nexit 0\n', 0o755)
         write(scripts / "tg_send.sh", f'#!/bin/sh\necho "$*" >> "{self.root}/tg-sent"\n', 0o755)
         write(scripts / "check-secrets.sh", f'#!/bin/sh\necho "{PAST_GATE}"\nexit 1\n', 0o755)
-        # deploy.sh — копия, а не ссылка: свой каталог он берёт по readlink -f.
-        shutil.copy2(DEPLOY_SH, scripts / "deploy.sh")
+        # Bash-двери — копии, а не ссылки: свой каталог и паспорт (АР-3) дверь берёт по
+        # readlink -f; настоящий файл пошёл бы на паспорт машины и её tg_send.sh.
+        for door in BASH_DOORS.values():
+            shutil.copy2(door, scripts / door.name)
         write(self.proj / "README.md", "проект стенда\n")
         git("init", "-q", "-b", "master", cwd=self.proj)
         commit_all(self.proj, "проект стенда")
@@ -316,12 +361,19 @@ class Stand:
             f'PROJECT_NAME="{FORBIDDEN}"\nTG_CHAT_ID="{OWNER}"\nSECRETS_DIR="{self.secrets}"\n'
             f'BACKUP_DIR="{self.backups}"\nSTARTER_DIR="{self.pkg}"\n'))
         self.harness_conf = write(self.root / "harness.conf", self.harness_text())
+        self.carrier = json.dumps({"lib": str(LIB), "папка": str(self.log), "граница": str(self.root),
+                                   "паспорт": str(self.install_conf), "ручки": str(self.harness_conf),
+                                   "обёртка": str(self.root / "ask-carrier.py")},
+                                  ensure_ascii=False)
+        write(self.root / "carrier.json", self.carrier)
+        write(self.root / "ask-carrier.py", ASK_WRAPPER)
+        # Окружение — для своих каталогов и ключей ДВЕРЕЙ; судье стенд даёт носитель.
         self.env = {k: v for k, v in os.environ.items() if not FOREIGN_ENV.match(k)}
         self.env.update(GIT_ENV, HOME=str(self.root / "home"), PATH=f"{self.bin}:{os.environ.get('PATH', '')}",
                         HARNESS_HOME=str(self.root), HARNESS_INSTALL_CONF=str(self.install_conf),
+                        HARNESS_DOOR_STAND_HOME=str(self.root),
                         HARNESS_CONF=str(self.harness_conf), HARNESS_LOG_DIR=str(self.log), LOG_DIR=str(self.log),
-                        HARNESS_OWNER_WORD_STEND="1", HARNESS_TASK="-", CONSENT_BUTTON_TTL_MIN=str(TTL_MIN),
-                        CONFIRM_MAX_AGE_MIN="60", SECRETS_DIR=str(self.secrets), BACKUP_DIR=str(self.backups),
+                        HARNESS_TASK="-", SECRETS_DIR=str(self.secrets), BACKUP_DIR=str(self.backups),
                         PROJECT_DIR=str(self.proj), STARTER_DIR=str(self.pkg), PUBLIC_REMOTE="jig",
                         PUBLIC_BRANCH="master", PUBLIC_BUILD_DIR=str(self.build),
                         PUBLIC_COMMIT_NAME="proba-harness", PUBLIC_COMMIT_EMAIL="proba@harness.local",
@@ -446,8 +498,13 @@ class Stand:
         payload = {"tool_name": "Bash", "tool_input": {"command": command}, "session_id": "proba-button-only"}
         if agent_id:
             payload["agent_id"] = agent_id
-        argv = ["python3", "-c", HOOK_BOOM, str(GUARD_HOOK)] if boom else ["python3", str(GUARD_HOOK)]
+        argv = (["python3", "-c", HOOK_BOOM, str(GUARD_HOOK)] if boom
+                else ["python3", "-c", DOOR_RUNNER, self.carrier, str(GUARD_HOOK)])
         return self.run(argv, stdin=json.dumps(payload, ensure_ascii=False), timeout=timeout)
+
+    def door(self, path: Path, *args: str) -> tuple[int | None, str, float]:
+        """Дверь (или ask-consent) раннером с носителем стенда."""
+        return self.run(["python3", "-c", DOOR_RUNNER, self.carrier, str(path), *args])
 
     def gate(self, *args: str) -> tuple[int | None, str, float]:
         return self.run(["python3", str(self.proj / "scripts" / "deploy_guard.py"), *args])
@@ -505,7 +562,7 @@ class PublishDoor(Door):
     sick, revoke = "публикуй к вечеру", "стоп, не публикуй"
 
     def call(self, st):
-        _rc, out, _ = st.run(["bash", str(PUBLISH)])
+        _rc, out, _ = st.run(["bash", str(st.proj / "scripts" / PUBLISH.name)])
         return LOCK2 in out, out
 
     def subject(self, st):
@@ -535,11 +592,11 @@ class ProtectedDeleteDoor(Door):
     sick, revoke = "удаляй к вечеру", "стоп, не удаляй этот файл"
 
     def question(self, st):
-        rc, out, _ = st.run(["python3", str(PROTECTED_DELETE), str(st.target), "--спросить"])
+        rc, out, _ = st.door(PROTECTED_DELETE, str(st.target), "--спросить")
         return False, out
 
     def call(self, st):
-        rc, out, _ = st.run(["python3", str(PROTECTED_DELETE), str(st.target)])
+        rc, out, _ = st.door(PROTECTED_DELETE, str(st.target))
         return rc == 0, out
 
     def subject(self, st):
@@ -573,7 +630,7 @@ class DropDoor(Door):
 
     def call(self, st):
         before = st.db_calls.read_text(encoding="utf-8") if st.db_calls.exists() else ""
-        _rc, out, _ = st.run(["bash", str(DROP_DB), DB])
+        _rc, out, _ = st.run(["bash", str(st.proj / "scripts" / DROP_DB.name), DB])
         after = st.db_calls.read_text(encoding="utf-8") if st.db_calls.exists() else ""
         return "pg_dump" in after[len(before):], out
 
@@ -589,7 +646,7 @@ class RewriteDoor(Door):
     sick, revoke = "перепиши историю jig к вечеру", "стоп, отмени перепись истории"
 
     def call(self, st):
-        rc, out, _ = st.run(["bash", str(PUBLISH), "--переписать-историю", str(st.copy), "--бэкап", str(st.bundle)])
+        rc, out, _ = st.run(["bash", str(st.proj / "scripts" / PUBLISH.name), "--переписать-историю", str(st.copy), "--бэкап", str(st.bundle)])
         return rc == 0 and "отправлено одной атомарной отправкой" in out, out
 
     def subject(self, st):
@@ -790,8 +847,8 @@ def probe_no_spend_no_ask(yard: Yard) -> None:
 def probe_ask_subject(yard: Yard) -> None:
     print("— 12) просьба: предмет двери сверяется с пересчётом (M3)")
     st = yard.stand()
-    rc, out, _ = st.run(["python3", str(ASK), "--вид", "выкат", "--предмет-двери", st.deploy_subject(st.prod_old),
-                         "--почему", "проба"])
+    rc, out, _ = st.door(ASK, "--вид", "выкат", "--предмет-двери", st.deploy_subject(st.prod_old),
+                         "--почему", "проба")
     verdict("12) --предмет-двери ≠ пересчёт → код 2 «предмет двери», запроса нет",
             rc == 2 and "предмет двери" in out and not st.requests("выкат"),
             f"rc {rc}, запросов {len(st.requests('выкат'))}", short(out))
@@ -873,13 +930,13 @@ def probe_helper_asks(yard: Yard) -> None:
     rc, out, _ = st.hook(f"python3 {DEPLOY_GUARD} --действие deploy --только-согласие --не-тратить", agent_id=helper)
     verdict("22) контроль: помощник, deploy_guard.py без --просить → хук пропустил", rc == 0, f"rc {rc}", short(out))
     rc, out, _ = st.hook(f"python3 {PROTECTED_DELETE} {st.target} --сухо --спросить", agent_id=helper)
-    _rc, out2, _ = st.run(["python3", str(PROTECTED_DELETE), str(st.target), "--сухо", "--спросить"])
+    _rc, out2, _ = st.door(PROTECTED_DELETE, str(st.target), "--сухо", "--спросить")
     got = st.requests("удаление")
     # Хук сухой прогон помощнику пропускает (он безвреден), поэтому держит сама дверь: --сухо сильнее --спросить.
     verdict("22) protected-delete --сухо --спросить вне хука → запроса нет", not got,
             f"запросов {len(got)} (хук помощнику: rc {rc})", short(out2))
     st = yard.stand()
-    st.run(["python3", str(PROTECTED_DELETE), str(st.target), "--спросить"])
+    st.door(PROTECTED_DELETE, str(st.target), "--спросить")
     got = st.requests("удаление")
     verdict("22) контроль: protected-delete --спросить без --сухо → ровно 1 запрос", len(got) == 1,
             f"запросов {len(got)}")
@@ -906,7 +963,7 @@ def probe_parallel_ask(yard: Yard) -> None:
     results: list = []
 
     def ask() -> None:
-        results.append(st.run(["python3", str(ASK), "--вид", "выкат", "--почему", "проба"]))
+        results.append(st.door(ASK, "--вид", "выкат", "--почему", "проба"))
 
     threads = [threading.Thread(target=ask) for _ in range(2)]
     for th in threads:
@@ -1032,6 +1089,16 @@ def consent_kinds() -> tuple:
     return ()
 
 
+def judge_param_index(func: str, param: str) -> int | None:
+    """Место довода в сигнатуре судьи: проба сверяет вызовы с ТЕКУЩИМ интерфейсом owner_word."""
+    tree = ast.parse((LIB / "owner_word.py").read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == func:
+            names = [a.arg for a in node.args.args]
+            return names.index(param) if param in names else None
+    return None
+
+
 def name_of(node: ast.AST) -> str | None:
     if isinstance(node, ast.Name):
         return node.id
@@ -1047,6 +1114,7 @@ def probe_one_judge() -> None:
     kinds = set(consent_kinds()) - {"спека", "слой-человека"}
     verdict("AST) таблица вид → файл = owner_word.ВИДЫ_СОГЛАСИЯ без обратимых", bool(kinds) and kinds == set(JUDGE_FILES),
             f"ВИДЫ_СОГЛАСИЯ−обратимые = {sorted(kinds)}, таблица = {sorted(JUDGE_FILES)}")
+    sign_at = judge_param_index("разрешение", "признак")
     for path in sorted({p for files in JUDGE_FILES.values() for p in files}):
         tree = ast.parse(path.read_text(encoding="utf-8"))
         names = set()
@@ -1058,8 +1126,9 @@ def probe_one_judge() -> None:
             if found:
                 names.add(found)
             if isinstance(node, ast.Call) and name_of(node.func) == "разрешение":
-                sign = node.args[2] if len(node.args) > 2 else next(
-                    (k.value for k in node.keywords if k.arg not in ("окно_мин", "каталог_логов")), None)
+                sign = next((k.value for k in node.keywords if k.arg == "признак"), None)
+                if sign is None and sign_at is not None and len(node.args) > sign_at:
+                    sign = node.args[sign_at]
                 if name_of(sign) not in REVERSIBLE:
                     bad_calls.append(node.lineno)
         doors = sorted(k for k, files in JUDGE_FILES.items() if path in files)
@@ -1080,10 +1149,11 @@ def probe_one_judge() -> None:
 
 
 def live_requests() -> tuple[int, float] | None:
-    base = owner_word.боевой_каталог_логов()
-    if base is None:
+    # Каталог — из паспорта машины напрямую, не у судьи под пробой: подменённый судья не спрячет след.
+    value = (config.из_файла(f"{config.корень_машины()}/install.conf").get("LOG_DIR") or "").strip()
+    if not value:
         return None
-    journal = base / "consent-requests.jsonl"
+    journal = Path(value) / "consent-requests.jsonl"
     try:
         return len(journal.read_text(encoding="utf-8").splitlines()), journal.stat().st_mtime
     except FileNotFoundError:

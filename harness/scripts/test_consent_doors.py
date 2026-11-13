@@ -7,9 +7,11 @@
 ревью-спеки.md Н-1..Н-15 и решения журнала (предмет публикации — 7 полей, погашение выката —
 журнал выкатов deploy-releases.jsonl).
 
-Стенд свой на каждый случай: временные репо (file://), свой LOG_DIR, свои HARNESS_CONF
+Стенд свой на каждый случай: временные репо (file://), свой LOG_DIR, свои harness.conf
 (DEPLOY_NEEDS_OWNER=1, PUBLISH_NEEDS_OWNER=1, DEPLOY_CONSENT_STANDING=0, PUBLIC_* на стенд) и
-HARNESS_INSTALL_CONF (AUTONOMY=semi), HARNESS_OWNER_WORD_STEND=1. Механизмы берутся РЯДОМ с
+install.conf (AUTONOMY=semi). Судье они приходят НОСИТЕЛЕМ: раннеры пробы подменяют
+owner_word.носитель в процессе двери и ask-consent, а owner_word.ЗАПРОС_КНОПКИ — обёрткой
+ask-consent с тем же носителем (окружение судья не слушает). Механизмы берутся РЯДОМ с
 пробой (её каталог scripts/): мутация ставится в копию дерева, и из копии зовётся сама проба.
 Нажатия — записями журнала кнопок стенда или полным путём ask-consent → unsent → sent →
 judge с подставным callback. Ворота зовутся процессом; «две смены» и занятость машины сняты
@@ -41,6 +43,7 @@ SCRIPTS = Path(__file__).resolve().parent
 LIB = SCRIPTS / "lib"
 sys.path.insert(0, str(LIB))
 from selftest_cases import Cases  # noqa: E402
+import consent_buttons as BUTTONS_LIB  # noqa: E402
 
 ASK = SCRIPTS / "ask-consent.py"
 BUTTONS = LIB / "consent_buttons.py"
@@ -102,15 +105,51 @@ def short(out: str) -> str:
     return out.replace("\n", " | ")[:300]
 
 
+# Носитель стенда в процессе двери: дверь зовёт судью без носителя, судья берёт owner_word.носитель.
+# Конфиги стенда читаются при запуске двери — случаи дописывают их между зовами. Просьба кнопки
+# двери — ОТДЕЛЬНЫЙ процесс ask-consent (owner_word.ЗАПРОС_КНОПКИ): носитель туда не доходит,
+# поэтому ЗАПРОС_КНОПКИ подменён обёрткой стенда, которая ставит тот же носитель в своём процессе.
+SET_CARRIER = """
+def set_carrier(word, spec):
+    import config, json, pathlib
+    spec = json.loads(spec)
+    knobs = config.из_файла(spec["ручки"])
+    carrier = word.Носитель(папка=pathlib.Path(spec["папка"]), uid=None, паспорт=config.из_файла(spec["паспорт"]),
+                            граница=pathlib.Path(spec["граница"]),
+                            окно_мин=int(knobs.get("CONFIRM_MAX_AGE_MIN") or 60),
+                            срок_кнопки_мин=int(knobs.get("CONSENT_BUTTON_TTL_MIN") or 15), ручки=knobs)
+    word.носитель = lambda: carrier
+    word.ЗАПРОС_КНОПКИ = pathlib.Path(spec["обёртка"])
+"""
 # Ворота процессом; «две смены» и занятость — состояние машины, на стенде их нет.
-RUNNER = """import sys
+RUNNER = SET_CARRIER + """import sys
 sys.path.insert(0, sys.argv[1])
 import deploy_guard as g
+set_carrier(g.слово_вл, sys.argv[2])
 g.две_смены = lambda: None
 g.лок_файлы = lambda: []
 g.долгие_процессы = lambda: []
-sys.argv = ["deploy_guard.py", *sys.argv[2:]]
+sys.argv = ["deploy_guard.py", *sys.argv[3:]]
 sys.exit(g.main())
+"""
+# Дверь целиком (spec_approval --состояние): runpy после подмены носителя.
+DOOR_RUNNER = SET_CARRIER + """import runpy, sys
+sys.path.insert(0, sys.argv[1])
+import owner_word
+set_carrier(owner_word, sys.argv[2])
+sys.argv = sys.argv[3:]
+runpy.run_path(sys.argv[0], run_name="__main__")
+"""
+# Обёртка ask-consent стенда: зовётся вместо него (argv — его доводы), носитель — файл рядом.
+ASK_WRAPPER = SET_CARRIER + """import json, pathlib, runpy, sys
+spec = (pathlib.Path(__file__).parent / "ask-carrier.json").read_text(encoding="utf-8")
+lib = json.loads(spec)["lib"]
+sys.path.insert(0, lib)
+import owner_word
+set_carrier(owner_word, spec)
+ask = str(pathlib.Path(lib).parent / "ask-consent.py")
+sys.argv = [ask, *sys.argv[1:]]
+runpy.run_path(ask, run_name="__main__")
 """
 
 
@@ -144,11 +183,17 @@ class Stand:
             f"CONFIRM_MAX_AGE_MIN=60\nCONSENT_BUTTON_TTL_MIN={TTL_MIN}\nSERVICE_LOCKS_SUBDIR=services\n"
             f'PRODUCT_REPO="{self.prod}"\nPUBLIC_BUILD_DIR="{self.build}"\nPUBLIC_REMOTE="origin"\n'
             f'PUBLIC_BRANCH="master"\nSTARTER_DIR="{self.pkg}"\n', encoding="utf-8")
+        # Окружение — для своих журналов, секретов и ключей ДВЕРЕЙ; судье стенд даёт носитель.
         self.env = dict(os.environ, **GIT_ENV, HARNESS_HOME=str(root),
-                        HARNESS_INSTALL_CONF=str(root / "install.conf"),
+                        HARNESS_INSTALL_CONF=str(root / "install.conf"), HARNESS_DOOR_STAND_HOME=str(root),
                         HARNESS_CONF=str(root / "harness.conf"), LOG_DIR=str(self.log),
-                        HARNESS_LOG_DIR=str(self.log), HARNESS_OWNER_WORD_STEND="1",
-                        CONSENT_BUTTON_TTL_MIN=str(TTL_MIN), SECRETS_DIR=str(self.secrets))
+                        HARNESS_LOG_DIR=str(self.log), SECRETS_DIR=str(self.secrets))
+        self.carrier = json.dumps({"папка": str(self.log), "граница": str(root),
+                                   "паспорт": str(root / "install.conf"), "ручки": str(root / "harness.conf"),
+                                   "lib": str(LIB), "обёртка": str(root / "ask-carrier.py")},
+                                  ensure_ascii=False)
+        (root / "ask-carrier.json").write_text(self.carrier, encoding="utf-8")
+        (root / "ask-carrier.py").write_text(ASK_WRAPPER, encoding="utf-8")
         for key in ("PRODUCT_REPO", "PUBLIC_BUILD_DIR", "PUBLIC_REMOTE", "PUBLIC_BRANCH", "STARTER_DIR",
                     "HARNESS_STARTER", "PROJECT_DIR"):
             self.env.pop(key, None)
@@ -231,7 +276,7 @@ class Stand:
 
     def gate(self, action: str, *extra: str, only_consent: bool = True) -> tuple[int | None, str]:
         flags = ["--только-согласие"] if only_consent else []
-        return self.run(["python3", "-c", RUNNER, str(SCRIPTS), "--действие", action, *flags, *extra])
+        return self.run(["python3", "-c", RUNNER, str(SCRIPTS), self.carrier, "--действие", action, *flags, *extra])
 
     def gate_deploy(self, *extra: str, only_consent: bool = True) -> tuple[int | None, str]:
         return self.gate("deploy", *extra, only_consent=only_consent)
@@ -240,7 +285,7 @@ class Stand:
         return self.gate("публикация", "--публикация", str(self.pkg), *extra)
 
     def ask(self, *args: str) -> tuple[int | None, str, str | None]:
-        rc, out = self.run(["python3", str(ASK), *args])
+        rc, out = self.run(["python3", "-c", DOOR_RUNNER, str(LIB), self.carrier, str(ASK), *args])
         lines = [line for line in out.splitlines() if line.strip()]
         nonce = next((line.strip() for line in lines if len(line.strip()) == 22
                       and all(c.isalnum() or c in "-_" for c in line.strip())), None)
@@ -384,8 +429,20 @@ def probe_texts(yard: Yard) -> None:
           (True, True, True, True, True),
           (pkg_head[:7] in text, str(s.public) in text, "ветка master" in text, f"сейчас там {tip[:7]}" in text,
            "С прошлой публикации 1 коммит" in text))
-    check(f"2б) публикация: ≤ 700 знаков, «60 мин», без «неотправленн» (длина {len(text)})", (True, True, False),
-          (0 < len(text) <= 700, "60 мин" in text, "неотправленн" in text))
+    import owner_word
+    # Текст строит диспетчер без носителя: срок публикации — из конфига МАШИНЫ (ключ), не цифра в пробе.
+    срок_текста = f"Кнопка действует {BUTTONS_LIB.ttl_phrase(owner_word.срок_кнопки_мин('публикация'))}"
+    check(f"2б) публикация: ≤ 700 знаков, срок кнопки из конфига ({срок_текста}), без «неотправленн» (длина {len(text)})",
+          (True, True, False),
+          (0 < len(text) <= 700, срок_текста in text, "неотправленн" in text))
+    ключ = owner_word.КЛЮЧ_СРОКА_ВИДА["публикация"]
+    носитель = lambda ручки: owner_word.Носитель(папка=s.log, uid=None, паспорт={}, граница=s.log, окно_мин=60,
+                                                  срок_кнопки_мин=15, ручки=ручки)
+    check("2б) срок кнопки публикации берётся из ключа конфига, нет ключа — запасной 60; удаление ключом не задето",
+          (1440, 60, 15),
+          (owner_word.срок_кнопки_мин("публикация", носитель({ключ: "1440"})),
+           owner_word.срок_кнопки_мин("публикация", носитель({})),
+           owner_word.срок_кнопки_мин("удаление", носитель({ключ: "1440"}))))
 
     s = yard.stand(publish=True)
     commit(s.build, "чужой коммит в сборке")
@@ -678,6 +735,27 @@ raise RuntimeError("ворота упали")
 """
 
 
+def door_project(project: Path) -> Path:
+    """Проект стенда для publish.sh: дверь — КОПИЯ файлом, свои заглушки стенда, прочее ссылками.
+
+    Скрипты дверь зовёт рядом с собой (readlink -f, АР-2), конфиг берёт своей дверью (АР-3):
+    настоящий publish.sh позвал бы настоящие ворота и tg_send.sh и взял бы паспорт машины.
+    Копия вне PROJECT_DIR машины верит HARNESS_DOOR_STAND_HOME (паспорт стенда)."""
+    scripts = project / "scripts"
+    for entry in SCRIPTS.iterdir():
+        target = scripts / entry.name
+        if target.exists() or entry.name.startswith("."):
+            continue
+        if entry.name == "publish.sh":
+            shutil.copy2(entry, target)
+        elif entry.name == "tg_send.sh":
+            target.write_text(f'#!/bin/sh\necho "$*" >> "{project.parent}/tg-sent"\n', encoding="utf-8")
+            target.chmod(0o755)
+        else:
+            target.symlink_to(entry)
+    return scripts / "publish.sh"
+
+
 def probe_lock(yard: Yard) -> None:
     print("— 6. publish.sh: замок 2 судит код возврата ворот (hr.publish-judges-gate-by-text)")
     s = yard.stand(publish=True)
@@ -685,6 +763,7 @@ def probe_lock(yard: Yard) -> None:
     (project / "scripts").mkdir(parents=True, exist_ok=True)
     (project / "scripts" / "gates.sh").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     (project / "scripts" / "deploy_guard.py").write_text(STUB_GUARD, encoding="utf-8")
+    door = door_project(project)
     with open(s.root / "harness.conf", "a", encoding="utf-8") as fh:
         fh.write('PUBLIC_COMMIT_EMAIL="proba@stand.invalid"\nPUBLIC_COMMIT_NAME="proba"\n')
     argv_log = s.root / "guard-argv.txt"
@@ -693,7 +772,7 @@ def probe_lock(yard: Yard) -> None:
                         ("rc0", "rc 0")):
         env = dict(s.env, PROJECT_DIR=str(project), STARTER_DIR=str(s.pkg),
                    PROBA_GUARD_MODE=mode, PROBA_GUARD_ARGV=str(argv_log))
-        rc, out = s.run(["bash", str(PUBLISH), "--проверка"], env=env, timeout=120)
+        rc, out = s.run(["bash", str(door), "--проверка"], env=env, timeout=120)
         passed = "замок 2 · согласие владельца на публикацию есть" in out
         if mode == "rc0":
             check(f"6г) охранный: ворота {label} → замок 2 пройден [{short(out)}]", True, passed)
@@ -775,7 +854,10 @@ def probe_before_push(yard: Yard) -> None:
     print("— 7. publish.sh опубликовать_сборку: пакет сдвинут после замка — не отправлено")
 
     def run(s: Stand, extra: dict) -> tuple[int | None, str, int]:
-        env = dict(s.env, PROJECT_DIR=str(mirror_project(s)), PROBA_REAL_CLEAN=str(SCRIPTS / LATE_NAME),
+        mirror = mirror_project(s)
+        # Функция зовёт скрипты от места двери ($SCRIPTS_REAL, АР-2): место — зеркало с обёрткой.
+        env = dict(s.env, PROJECT_DIR=str(mirror), SCRIPTS_REAL=str(mirror / "scripts"),
+                   PROBA_REAL_CLEAN=str(SCRIPTS / LATE_NAME),
                    PROBA_LATE_COUNT=str(s.root / f"clean-calls-{time.time_ns()}"),
                    PACKAGE_DIR=str(s.pkg), PUBLIC_BUILD_DIR=str(s.build),
                    PUBLIC_REMOTE="origin", PUBLIC_BRANCH="master", PUBLIC_COMMIT_NAME="proba",
@@ -895,9 +977,14 @@ class SpecStand:
         when = time.time() - ago_s
         os.utime(path, (when, when))
 
+    def ask(self, *args: str) -> tuple[int | None, str]:
+        """ask-consent копии дерева раннером с носителем стенда."""
+        return self.s.run(["python3", "-c", DOOR_RUNNER, str(self.tree / "scripts" / "lib"), self.s.carrier,
+                           str(self.tree / "scripts" / ASK.name), *args], env=self.env)
+
     def state(self) -> tuple[int | None, str]:
-        return self.s.run(["python3", str(self.tree / "scripts" / SPEC_APPROVAL.name), "--состояние", TASK],
-                          env=self.env)
+        return self.s.run(["python3", "-c", DOOR_RUNNER, str(self.tree / "scripts" / "lib"), self.s.carrier,
+                           str(self.tree / "scripts" / SPEC_APPROVAL.name), "--состояние", TASK], env=self.env)
 
     def records(self) -> list[dict]:
         try:
@@ -909,8 +996,7 @@ class SpecStand:
 def probe_spec(yard: Yard) -> None:
     print("— 9. одобрение спеки кнопкой (spec_approval)")
     st = SpecStand(yard)
-    rc, out = st.s.run(["python3", str(st.tree / "scripts" / ASK.name), "--вид", "спека", "--предмет", TASK,
-                        "--почему", "Проба двери спеки"], env=st.env)
+    rc, out = st.ask("--вид", "спека", "--предмет", TASK, "--почему", "Проба двери спеки")
     got = st.s.requests()
     check(f"9а0) запрос --вид спека --предмет <id> → rc 0, цель «<id> <sha256>» [{short(out)}]",
           (0, st.subject()), (rc, got[-1].get("цель") if got else None))
@@ -920,8 +1006,7 @@ def probe_spec(yard: Yard) -> None:
     check(f"9а0) текст: id, 8 знаков хэша, «24 ч» [{short(text)}]", (True, True, True),
           (TASK in text, st.subject().split(" ")[1][:8] in text, "24 ч" in text))
     st.spec.unlink()
-    rc, out = st.s.run(["python3", str(st.tree / "scripts" / ASK.name), "--вид", "спека", "--предмет", TASK,
-                        "--почему", "проба"], env=st.env)
+    rc, out = st.ask("--вид", "спека", "--предмет", TASK, "--почему", "проба")
     check(f"9а0) нет файла спеки → rc 2 [{short(out)}]", 2, rc)
 
     st = SpecStand(yard)
@@ -988,13 +1073,14 @@ def probe_spec(yard: Yard) -> None:
               str(answer).startswith(want))
 
     st = SpecStand(yard, stub_ask=True)
-    runner = ("import sys; sys.path.insert(0, sys.argv[1]); import spec_approval as s; "
-              "sys.exit(s.запросить_кнопку(sys.argv[2], 'Проба', sys.argv[3]))")
+    runner = SET_CARRIER + ("import sys; sys.path.insert(0, sys.argv[1]); import spec_approval as s; "
+                            "set_carrier(s.owner_word, sys.argv[4]); "
+                            "sys.exit(s.запросить_кнопку(sys.argv[2], 'Проба', sys.argv[3]))")
     digest = st.subject().split(" ")[1]
-    rc, out = st.s.run(["python3", "-c", runner, str(st.tree / "scripts"), TASK, "f" * 64], env=st.env)
+    rc, out = st.s.run(["python3", "-c", runner, str(st.tree / "scripts"), TASK, "f" * 64, st.s.carrier], env=st.env)
     called = st.argv.exists()
     check(f"9з) Н-15: хэш снимка ≠ хэш диска → rc 1, ask-consent не звался [{short(out)}]", (1, False), (rc, called))
-    rc, out = st.s.run(["python3", "-c", runner, str(st.tree / "scripts"), TASK, digest], env=st.env)
+    rc, out = st.s.run(["python3", "-c", runner, str(st.tree / "scripts"), TASK, digest, st.s.carrier], env=st.env)
     calls = st.argv.read_text(encoding="utf-8") if st.argv.exists() else ""
     check(f"9з2) хэш снимка = диска → rc 0, ask-consent --вид спека --предмет <id> [{short(calls)}]", (0, True),
           (rc, f"--вид спека --предмет {TASK}" in calls))
@@ -1021,7 +1107,7 @@ def probe_guard(yard: Yard) -> None:
 # пишут сдвиг в файл часов, обёртка deploy_guard.py стенда прибавляет его к time.time и
 # datetime.now процесса настоящих ворот (механизм — рядом с пробой). Сдвиг — ход времени,
 # а не правка записи: починка, запомнившая момент запуска, видит то же, что увидела бы вживую.
-CLOCK_GUARD = """import datetime, os, sys, time
+CLOCK_GUARD = SET_CARRIER + """import datetime, os, sys, time
 def shift():
     try:
         return float(open(os.environ["PROBA_CLOCK"], encoding="utf-8").read().strip() or 0)
@@ -1037,6 +1123,7 @@ class Shifted(Real):
 datetime.datetime = Shifted
 sys.path.insert(0, os.environ["PROBA_REAL_SCRIPTS"])
 import deploy_guard as g
+set_carrier(g.слово_вл, open(os.path.join(os.path.dirname(__file__), "carrier.json"), encoding="utf-8").read())
 g.две_смены = lambda: None
 g.лок_файлы = lambda: []
 g.долгие_процессы = lambda: []
@@ -1047,8 +1134,8 @@ sys.exit(g.main())
 WINDOW_GATES = """#!/bin/bash
 echo ворота >> "$PROBA_GATES_RAN"
 [ -n "${PROBA_GATES_SHIFT:-}" ] && printf '%s\\n' "$PROBA_GATES_SHIFT" > "$PROBA_CLOCK"
-[ -n "${PROBA_GATES_APPEND:-}" ] && cat "$PROBA_GATES_APPEND" >> "$LOG_DIR/consent-buttons.jsonl"
-[ -n "${PROBA_GATES_SAY:-}" ] && cat "$PROBA_GATES_SAY" >> "$LOG_DIR/inbox.jsonl"
+[ -n "${PROBA_GATES_APPEND:-}" ] && cat "$PROBA_GATES_APPEND" >> "$PROBA_LOG_DIR/consent-buttons.jsonl"
+[ -n "${PROBA_GATES_SAY:-}" ] && cat "$PROBA_GATES_SAY" >> "$PROBA_LOG_DIR/inbox.jsonl"
 exit "${PROBA_GATES_RC:-0}"
 """
 LOCK2_PASSED = "замок 2 · согласие владельца на публикацию есть"
@@ -1060,16 +1147,20 @@ def window_stand(yard: Yard) -> tuple[Stand, dict]:
     (project / "scripts").mkdir(parents=True, exist_ok=True)
     (project / "scripts" / "gates.sh").write_text(WINDOW_GATES, encoding="utf-8")
     (project / "scripts" / "deploy_guard.py").write_text(CLOCK_GUARD, encoding="utf-8")
+    (project / "scripts" / "carrier.json").write_text(s.carrier, encoding="utf-8")
+    door_project(project)
     with open(s.root / "harness.conf", "a", encoding="utf-8") as fh:
         fh.write('PUBLIC_COMMIT_EMAIL="proba@stand.invalid"\nPUBLIC_COMMIT_NAME="proba"\n')
     env = dict(s.env, PROJECT_DIR=str(project), STARTER_DIR=str(s.pkg), PROBA_REAL_SCRIPTS=str(SCRIPTS),
-               PROBA_CLOCK=str(s.root / "часы"), PROBA_GATES_RAN=str(s.root / "ворота-запускались"))
+               PROBA_CLOCK=str(s.root / "часы"), PROBA_GATES_RAN=str(s.root / "ворота-запускались"),
+               # LOG_DIR дверь берёт паспортом и детям не отдаёт (АР-4): журнал стенда — своим ключом.
+               PROBA_LOG_DIR=str(s.log))
     return s, env
 
 
 def window_publish(s: Stand, env: dict, check_only: bool, **gates: str) -> tuple[int | None, str, bool, bool]:
     """→ (код publish.sh, вывод, замок 2 пройден, ворота запускались)."""
-    rc, out = s.run(["bash", str(PUBLISH), *(["--проверка"] if check_only else [])],
+    rc, out = s.run(["bash", str(s.root / "project" / "scripts" / "publish.sh"), *(["--проверка"] if check_only else [])],
                     env=dict(env, **gates), timeout=180)
     return rc, out, LOCK2_PASSED in out, Path(env["PROBA_GATES_RAN"]).exists()
 

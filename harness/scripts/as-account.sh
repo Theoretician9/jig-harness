@@ -16,24 +16,10 @@ source "$HERE/lib/config.sh" 2>/dev/null && konf_zagruzit 2>/dev/null
 
 MARK="${LOG_DIR:-/tmp}/as-account.весть"
 
-verdict="$(python3 "$HERE/lib/accounts.py" --файл-ключа-запуска 2>/dev/null)"
-rc=$?
-trouble=""
-if [ "$rc" = 0 ] && [ "$verdict" = login ]; then
-    :
-elif [ "$rc" = 0 ] && [ -n "$verdict" ] && [ -r "$verdict" ]; then
-    CLAUDE_CODE_OAUTH_TOKEN="$(<"$verdict")"
-    # Края срезаются, как у двери (accounts.ключ — strip): иначе «ключ\r» из
-    # CRLF-файла уйдёт в окружение, хотя живой вызов судил ключ без него.
-    CLAUDE_CODE_OAUTH_TOKEN="${CLAUDE_CODE_OAUTH_TOKEN#"${CLAUDE_CODE_OAUTH_TOKEN%%[![:space:]]*}"}"
-    CLAUDE_CODE_OAUTH_TOKEN="${CLAUDE_CODE_OAUTH_TOKEN%"${CLAUDE_CODE_OAUTH_TOKEN##*[![:space:]]}"}"
-    export CLAUDE_CODE_OAUTH_TOKEN
-    [ -n "$CLAUDE_CODE_OAUTH_TOKEN" ] || unset CLAUDE_CODE_OAUTH_TOKEN
-elif [ "$rc" = 3 ]; then
-    trouble="$verdict"
-else
-    trouble="ОТКАЗ разбор запуска не удался (код $rc)"
-fi
+# shellcheck disable=SC1091
+source "$HERE/lib/account_key.sh"
+account_key_export
+trouble="$ACCOUNT_KEY_TROUBLE"
 
 # Весть одна на беду: та же причина подряд — молчим (respawn-петля не шумит);
 # удачный подъём снимает метку, и новая беда снова громкая.

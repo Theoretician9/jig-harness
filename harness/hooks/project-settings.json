@@ -39,6 +39,11 @@
             "type": "command",
             "command": "python3 $CLAUDE_PROJECT_DIR/scripts/hooks/lead_role_guard.py",
             "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "python3 $CLAUDE_PROJECT_DIR/scripts/hooks/orders_write_guard.py",
+            "timeout": 5
           }
         ]
       },
@@ -80,6 +85,11 @@
           {
             "type": "command",
             "command": "python3 $CLAUDE_PROJECT_DIR/scripts/hooks/memory_layer_guard.py",
+            "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "python3 $CLAUDE_PROJECT_DIR/scripts/hooks/orders_write_guard.py",
             "timeout": 5
           }
         ]
@@ -180,7 +190,7 @@
         ]
       },
       {
-        "matcher": "Skill",
+        "matcher": "Skill|Read",
         "hooks": [
           {
             "type": "command",

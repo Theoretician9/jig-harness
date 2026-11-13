@@ -36,6 +36,8 @@ REZHIM="обычный"   # «всё» ставится ниже, у флага 
 # гигабайты неделями. Все пробы ворот наследуют этот каталог с известным префиксом.
 RUN_TMP=$(mktemp -d -t harness-run-XXXXXX)
 export TMPDIR="$RUN_TMP"
+# mktemp даёт 0700: пользователь панели иначе не дойдёт до файлов прогона, а пробы событий зовут копии от него.
+chmod 711 "$RUN_TMP"
 trap 'rm -rf "$RUN_TMP"' EXIT
 
 # Обёртка проверки и счётчики зелёных/красных/жёлтых — scripts/lib/gates_check.sh.
@@ -98,6 +100,11 @@ if [ "${1:-}" = "--только" ]; then
     echo "--- выборка: $ONLY_CHECKS ---"
 fi
 
+# Второй прогон того же состояния дерева присоединяется к первому и выходит здесь.
+# Общий предел прогона: у --всё свой, он дольше обычного.
+[ "${1:-}" = "--всё" ] && GATES_RUN_TIMEOUT_SEC="${GATES_RUN_TIMEOUT_ALL_SEC:-72000}"
+gates_join_or_lead "$@"
+
 echo "=== ворота харнеса: $(date '+%d.%m %H:%M') ==="
 
 # Быстрый прогон режима хакатон: состав — данные (gates-hackathon.yaml), а не
@@ -124,6 +131,7 @@ for item in checks:
         проверка "$NAME" bash -c "$CMD"
     done < "$HK_LIST"
     rm -f "$HK_LIST"
+    gates_wait_all
     echo "=== итог: зелёных $GREEN, красных $RED ==="
     printf '{"ts":"%s","режим":"%s","зелёных":%s,"красных":%s}\n' \
         "$(date -Is)" "$REZHIM" "$GREEN" "$RED" >> "$ITOG_LOG" 2>/dev/null || true
@@ -166,6 +174,7 @@ done
 проверка "история раскладки" python3 scripts/test_layout_history.py
 проверка "замок раскладки" python3 scripts/test_layout_lock.py
 проверка "заметки выпуска" python3 scripts/test_release_notes.py
+проверка "карантин ворот" python3 scripts/test_gates_quarantine.py
 # Только этот самотест судит plan_absent, info/exclude, коммит пакета и связку
 # «дверь ↔ раскладчик»; раскладчик живёт в пакете, а не в проекте.
 проверка "самотест раскладчика" bash -c 'bash "$(python3 -c "import sys; sys.path.insert(0, \"scripts/lib\"); import config; print(config.katalog_paketa())")/harness/razlozhit-harnes.sh" --selftest'
@@ -192,6 +201,7 @@ done
 проверка "шаблоны юнитов установщика" bash scripts/test_installer_units.sh
 проверка "пути установщика на обновлении" bash scripts/test_installer_paths.sh
 проверка "хук копит провалы" bash scripts/test_precommit_accumulates.sh
+проверка "общий индекс после личного коммита" bash scripts/test_post_commit_heal_index.sh
 проверка "контейнеры в отчёте старта" bash scripts/test_session_state_containers.sh
 проверка "первая задача: путь продукта" bash scripts/test_first_task_product_path.sh
 проверка "известный отказ хоста" bash scripts/test_session_known_failed.sh
@@ -210,6 +220,7 @@ done
 проверка "личность: сборка"           python3 scripts/test_self_prompt.py
 проверка "личность: носитель claude-run" bash scripts/test_claude_run.sh
 проверка "аккаунт: переключение смены" bash scripts/test_switch_account.sh
+проверка "аккаунт: смена из Telegram" bash scripts/test_switch_account_bot.sh
 проверка "личность: карточки помощников" python3 scripts/test_agent_cards.py
 проверка "личность: печать эталона"   bash scripts/test_self_seal.sh
 проверка "личность: слой человека"    python3 scripts/test_self_set.py
@@ -261,6 +272,9 @@ done
 проверка "приёмка-самотест" python3 scripts/acceptance.py --selftest
 # Ускорение мутаций не смеет превратить «нечем проверить» в «всё поймано».
 проверка "ускорение мутаций" python3 scripts/test_mutation_speed.py
+проверка "очередь слияния" python3 scripts/test_merge_queue.py
+проверка "трение коммита" python3 scripts/test_commit_friction.py
+проверка "сверка с пакетом: отложенное" python3 scripts/test_compare_package_deferred.py
 # Оболочка ночному агенту закрыта не списком инструментов, а режимом прав:
 # живая проба 11.09.2026 показала, что --allowedTools настройки проекта
 # перекрывают. Гейт следит, чтобы флаг стоял в КАЖДОМ вызове агента.
@@ -610,6 +624,7 @@ done
 проверка "секреты под маской" python3 scripts/test_security_secrets_masked.py
 проверка "скорость: судья" python3 scripts/test_speed_mode.py
 проверка "скорость: сторож" bash scripts/test_warden_speed.sh
+проверка "сеть серверов: суд и дверь" python3 scripts/test_evolution_net.py
 
 # Самотесты живут врозь от гейтов: они долгие, и на каждом коммите не нужны.
 # Список явный — искать «кто понимает --selftest» грепом значило бы решать
@@ -666,6 +681,11 @@ if [ "${1:-}" = "--всё" ]; then
     # двух минут: поднимает свой контейнер, ставит харнес, судит по следам.
     проверка "установка с нуля" bash scripts/install-probe.sh
     проверка "установка-проба-самотест" bash scripts/install-probe.sh --selftest
+    # Пул и кэш ворот: проба гонит свои стенды (около 40 с), полные ворота не трогает.
+    проверка "ворота параллельно и с кэшем" python3 scripts/test_gates_parallel_cache.py
+    проверка "ворота: пределы и вложенность" python3 scripts/test_gates_bounds.py
+    # Ставит из публичной сборки (в ней манифест слоя 1), а не из сырого пакета.
+    проверка "установка ставит из сборки" python3 scripts/test_install_probe_built_tree.py
     # Живая проверка дозора позднего выхода: поднимает свою tmux-сессию,
     # убивает её и смотрит, поднял ли дозор преемника. Лежала среди демонов и
     # не запускалась никем (ревизия 10.09.2026).
@@ -754,6 +774,7 @@ if [ "${1:-}" = "--всё" ]; then
     проверка "рестарт при помощниках" python3 scripts/hooks/test_guard_bash_restart_helpers.py
     проверка "окно перезагрузки" bash scripts/test_server_restart_window.sh
     проверка "ротация ждёт помощников" bash scripts/test_warden_rotation_waits_helpers.sh
+    проверка "принудительный выход отвечает на диалог" bash scripts/test_warden_forced_exit_confirm.sh
     проверка "сервер поднялся"  python3 scripts/test_boot_check.py
     проверка "страж после перезагрузки" python3 scripts/test_sentinel_after_restart.py
     проверка "журналы реестра"  bash scripts/test_check_registry_logs.sh
@@ -772,9 +793,12 @@ if [ "${1:-}" = "--всё" ]; then
     проверка "служба проверок"  python3 scripts/test_checks_service.py
     проверка "согласие кнопкой" python3 scripts/test_consent_button_only.py
     проверка "двери согласия"   python3 scripts/test_consent_doors.py
+    проверка "слово владельца: носитель" python3 scripts/test_owner_word_carrier.py
     проверка "признаки просьбы" python3 scripts/test_consent_ask_signs.py
     проверка "полосы очереди"   python3 scripts/test_work_queue_lanes.py
+    проверка "пачки очереди"    python3 scripts/test_work_queue_batches.py
     проверка "страница процессов" python3 harness/panel/test_processes_page.py
+    проверка "состояние процессов" python3 scripts/test_process_state.py
     проверка "сводка сторожа меток" python3 scripts/test_heartbeat_held_line.py
     проверка "след вне репозитория" python3 scripts/test_live_check_trace_outside_repo.py
     проверка "карта: три исхода" python3 scripts/test_map_from_message_three_outcomes.py
@@ -786,6 +810,7 @@ if [ "${1:-}" = "--всё" ]; then
     проверка "порт после смены" bash scripts/test_shift_leftover_port.sh
     проверка "пинок сторожа"    bash scripts/test_warden_kick.sh
     проверка "начало сторожа"   bash scripts/test_warden_pane_flag.sh
+    проверка "кнопка будит смену" python3 scripts/test_button_press_wakes_shift.py
     for f in scripts/work-queue.py scripts/compare-with-package.py \
                 scripts/download_attachment.py scripts/orders.py \
                 scripts/check-cyrillic-in-names.py \
@@ -802,9 +827,24 @@ if [ "${1:-}" = "--всё" ]; then
     done
 fi
 
+gates_wait_all
 YELLOW_TAIL=""
 [ "$YELLOW" -gt 0 ] && YELLOW_TAIL=", жёлтых $YELLOW (обкатка)"
 echo "=== итог: зелёных $GREEN, красных $RED$YELLOW_TAIL ==="
+# Суд карантина (scripts/gates-quarantine.py): красные известных поломок под
+# годной записью не краснят ворота, красны только новые и беды карантина.
+# Нет файла или пуст список — суд молчит и отдаёт RED, как до карантина.
+QUAR_OUT=$(python3 "$ROOT/scripts/gates-quarantine.py" \
+    --карантин "$ROOT/harness/config/gates-quarantine.yaml" --карта "$ROOT/dev-map.yaml" \
+    --журнал "${GATES_TIMING_DIR:-$LOG_DIR}/gates-timing.jsonl" --прогон "$GATES_RUN" --красных "$RED")
+QUAR_RC=$?
+[ -n "$QUAR_OUT" ] && printf '%s\n' "$QUAR_OUT"
+QUAR_NEW=$RED; QUAR_HELD=0
+QUAR_LINE=$(printf '%s\n' "$QUAR_OUT" | grep '^=== карантин' | tail -1)
+if [ -n "$QUAR_LINE" ]; then
+    QUAR_NEW=$(printf '%s' "$QUAR_LINE" | sed -n 's/.*новых красных \([0-9]\+\).*/\1/p')
+    QUAR_HELD=$(printf '%s' "$QUAR_LINE" | sed -n 's/.*в карантине \([0-9]\+\),.*/\1/p')
+fi
 # Итог — строкой в журнал: витрина панели показывает владельцу, когда ворота
 # гонялись в последний раз и чем кончились. Без этой строки она честно говорит
 # «нет данных», но владелец так и не видит состояния проверок (находка I6
@@ -815,7 +855,7 @@ echo "=== итог: зелёных $GREEN, красных $RED$YELLOW_TAIL ==="
 # след есть, а сказать по нему нечего).
 # Выборка — свой режим: её «красных 0» не годится за итог полного прогона.
 [ -n "$ONLY_CHECKS" ] && REZHIM="выборка"
-printf '{"ts":"%s","режим":"%s","зелёных":%s,"красных":%s}\n' \
-    "$(date -Is)" "$REZHIM" "$GREEN" "$RED" \
+printf '{"ts":"%s","режим":"%s","зелёных":%s,"красных":%s,"новых":%s,"в_карантине":%s}\n' \
+    "$(date -Is)" "$REZHIM" "$GREEN" "$RED" "${QUAR_NEW:-$RED}" "${QUAR_HELD:-0}" \
     >> "$ITOG_LOG" 2>/dev/null || true
-exit "$RED"
+exit "$QUAR_RC"

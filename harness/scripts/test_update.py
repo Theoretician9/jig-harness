@@ -243,6 +243,31 @@ for stub_name in ("crontab", "sudo", "systemctl", "curl"):
     (STAND / "bin" / stub_name).write_text(STUB, encoding="utf-8")
     (STAND / "bin" / stub_name).chmod(0o755)
 
+# Носитель слова стенда. Судья согласия «да, убрать» читает слово у owner_word.носитель(),
+# а не у LOG_DIR окружения: у машины это её журналы. Раскладчик зовёт дверь голым
+# `python3 …/scripts/layout-door.py`, поэтому python3 стенда первым в PATH пускает ИМЕННО
+# дверь раннером, который в её процессе ставит Носитель с папкой журналов стенда; прочие
+# зовы python3 идут к настоящему без подмены.
+CARRIER_RUNNER = STAND / "carrier-runner.py"
+CARRIER_RUNNER.write_text(f'''import pathlib, runpy, sys
+door = pathlib.Path(sys.argv[1])
+sys.path.insert(0, str(door.resolve().parent / "lib"))
+import owner_word
+carrier = owner_word.Носитель(папка=pathlib.Path({str(журналы)!r}), uid=None, паспорт={{}},
+                              граница=pathlib.Path({str(STAND)!r}), окно_мин=60,
+                              срок_кнопки_мин=15, ручки={{}})
+owner_word.носитель = lambda: carrier
+sys.argv = sys.argv[1:]
+runpy.run_path(str(door), run_name="__main__")
+''', encoding="utf-8")
+(STAND / "bin" / "python3").write_text(f"""#!/bin/bash
+case "$1" in
+  */scripts/layout-door.py) exec '{sys.executable}' '{CARRIER_RUNNER}' "$@" ;;
+esac
+exec '{sys.executable}' "$@"
+""", encoding="utf-8")
+(STAND / "bin" / "python3").chmod(0o755)
+
 # Ключи паспорта и конфига стенда в окружении — ПУСТЫЕ (пустое = «не задано»,
 # файл стенда старше): PROJECT_DIR или LOG_DIR живого значения из окружения зова
 # увели бы настоящий раскладчик и замки в живое.
@@ -3416,7 +3441,8 @@ try:
     #   * Носитель вопроса — <LOG_DIR>/раскладка-спрошено.jsonl, строка {"ts", "пути",
     #     "вопрос"}; ts берётся ДО отправки, строка пишется только при коде 0. Тот же набор
     #     путей моложе 7 суток не спрашивается, другой набор — новый вопрос.
-    #   * Согласие — <LOG_DIR>/confirmations.jsonl: «да, убрать» с message_id после вопроса.
+    #   * Согласие — confirmations.jsonl в папке НОСИТЕЛЯ слова: «да, убрать» с message_id
+    #     после вопроса. Носитель стенда (python3 стенда → раннер двери) — те же журналы.
     #   * Текст после снятия (§5): «Убрал по истории пакета N файл: <пути> — он в архиве
     #     копий.» по «снят» с пометкой «# по истории пакета: <путь>»; «Убрал K файл
     #     прежней версии» — по прочим «снят» (решение (в)).

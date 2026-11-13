@@ -38,6 +38,7 @@
   - "проба-sroki-"
   - "agent-finish-log-"
   - "heartbeat-alerts-"
+  - "nrp-stand-"
   - "heartbeat-held-"
   - "proba-kvitanciya-"
   - "proba-statusa-"
@@ -97,7 +98,8 @@
   - "proba-g3-"
   - "proba-precommit-snapshot-"
   - "proba-watchers-wave2-"
-  - "proba-watchers-wave3-"
+  # Проба волны 3 сторожей: короткое имя ради пути сокета tmux (scripts/test_watchers_wave3.sh).
+  - "w3-"
   - "proba-deploy-product-"
   - "proba-check-secrets-"
   - "check-secrets-scan-"
@@ -112,6 +114,17 @@
   - "sap-f2-cmc-"
   - "sap-f2-layout-"
   - "sap-proba-"
+  # Проба суда карантина ворот (hr.quarantine-red-checks).
+  - "gates-quarantine-probe-"
+# Стенды по префиксу харнеса: семья имён, а не один создатель (заказ владельца 07.11:
+# «если тмп само не убирается, значит надо улучшить механизм»). Срок — ключ
+# TMP_SWEEP_STALE_H в harness.conf (умолчание 24 ч), живость — те же держатели, что у
+# отходов. «Подкаталог/префикс» судит только записи с префиксом внутри подкаталога,
+# {uid} — хозяин хода: claude-<uid>/ остаётся под защитой целиком.
+"стенды_харнеса":
+  - "proba-"
+  - "live-check-probe-"
+  - "claude-{uid}/evo-"
 # Чужое и живое: уборщик этих имён не судит вовсе.
 "защищено":
   - "claude-"
@@ -199,18 +212,23 @@
   - "map-outcome-three-"
   - "model-guard-proba-"
   - "not-work-"
-  - "proba-delivery-marks-"
-  - "proba-delivery-trace-"
-  - "proba-hackathon-menu-"
-  - "proba-maska-sekreta-"
-  - "proba-pauza-kopit-"
-  - "proba-secrets-masked-"
-  - "proba-sekret-"
-  - "proba-sendnow-"
-  - "proba-stall-"
-  - "proba-vhod-"
-  - "proba-zametki-"
-  - "proba-zavis-"
+  # proba-* без своей записи — под «стенды_харнеса» (срок TMP_SWEEP_STALE_H).
+  # Создатели 07–13.11 без записи (T-R краснел, прятался за сиротой wave3): пока
+  # «неизвестное», срок — решение смены.
+  - ".mq-"
+  - "dvor-"
+  - "evolution-net-"
+  - "evolution-net-edits-"
+  - "evolution-net-probe-"
+  - "gates-bounds-"
+  - "gates-bounds-snap-"
+  - "gates-pcc-"
+  - "gates-run-dir-reach-"
+  - "orders-guard-"
+  - "pl-judge-"
+  - "ssu-probe-"
+  - "stend-log-"
+  - "test-work-queue-batches-"
   - "probe-cov-"
   - "rotation-queue-"
   - "same-second-content-"

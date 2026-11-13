@@ -142,5 +142,26 @@ case_check "старый снимок убран и из git worktree list" \
     "$([ ! -e "$SNAPS/old" ] && ! git -C "$T/live" worktree list | grep -q '/old '; echo $?)"
 case_check "свежий каталог (идущий прогон) не тронут" "$([ -d "$SNAPS/fresh" ]; echo $?)"
 
+echo "── 7. --убрать без прогона: старые убраны, самый свежий оставлен, даже если стар"
+rm -rf "$SNAPS/fresh"
+git -C "$T/live" worktree add -q --detach "$SNAPS/old-a" HEAD
+git -C "$T/live" worktree add -q --detach "$SNAPS/old-b" HEAD
+touch -d '5 days ago' "$SNAPS/old-a"
+touch -d '3 days ago' "$SNAPS/old-b"
+OUT="$(bash "$T/live/scripts/gates-snapshot.sh" --убрать 2>&1)"; RC=$?
+case_check "старший снимок убран, из git worktree list тоже (код $RC)" \
+    "$([ "$RC" = 0 ] && [ ! -e "$SNAPS/old-a" ] && ! git -C "$T/live" worktree list | grep -q '/old-a '; echo $?)"
+case_check "самый свежий снимок оставлен, хоть и старше 2 суток" "$([ -d "$SNAPS/old-b" ]; echo $?)"
+case_check "итог называет число и МБ: «снимки ворот: убрано 1, … МБ» ($OUT)" \
+    "$(grep -qE '^снимки ворот: убрано 1, [0-9]+ МБ' <<< "$OUT"; echo $?)"
+
+echo "── 8. --убрать: симлинк в каталоге снимков не проходится — цель за ним цела"
+# «$d/» глоба разворачивает симлинк, и rm -rf -- "ссылка/" вычистил бы цель.
+mkdir -p "$K/outside/sub" && echo данные > "$K/outside/sub/f"
+touch -d '4 days ago' "$K/outside"
+ln -s "$K/outside" "$SNAPS/link-c"
+OUT="$(bash "$T/live/scripts/gates-snapshot.sh" --убрать 2>&1)"; RC=$?
+case_check "цель симлинка цела ($OUT)" "$([ "$RC" = 0 ] && [ -f "$K/outside/sub/f" ]; echo $?)"
+
 echo "ИТОГ: путей $total, неудач $fails"
 [ "$fails" = 0 ]

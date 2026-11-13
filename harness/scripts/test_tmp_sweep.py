@@ -1190,8 +1190,15 @@ def case_tr_registry():
     assert not any(UNKNOWN.startswith(p) for p in waste), f"{UNKNOWN} попал в реестр"
     protected = cfg.get("защищено") or []
     not_waste = cfg.get("не_отходы") or []
+    stands = cfg.get("стенды_харнеса") or []
+    assert stands, "нет стенды_харнеса — семьи proba-/live-check-probe-/evo- уборка не видит"
+    bad_stands = [s for s in stands if not s.endswith("-")]
+    assert not bad_stands, f"префиксы стендов без дефиса ловят чужое: {bad_stands}"
+    top_stands = tuple(s for s in stands if "/" not in s)
+    covered = [p for p in not_waste if p.startswith(top_stands)]
+    assert not covered, f"не_отходы под префиксом стендов — уборка их всё равно возьмёт: {covered}"
     unregistered = [f"{p} ({creators[p][0]})" for p in sorted(creators)
-                    if not p.startswith((*waste, *protected)) and p not in not_waste]
+                    if not p.startswith((*waste, *protected, *top_stands)) and p not in not_waste]
     assert not unregistered, f"создатель есть, записи в реестре нет: {unregistered}"
     stale = [p for p in not_waste if p not in creators]
     assert not stale, f"в не_отходы префиксы без создателя: {stale}"
@@ -1652,6 +1659,131 @@ def case_m5_left_not_counted():
     assert report.deleted == 0, f"недоудалённое посчитано удалённым: Report.deleted={report.deleted}"
 
 
+
+# ───────── стенды по префиксу харнеса (hr.esli-tmp-samo-ne-ubiraetsya) ─────────
+# Семья имён, а не один создатель: proba-*, live-check-probe-*, claude-<uid>/evo-*.
+# Срок — ключ harness.conf, живость — те же держатели, что у отходов.
+STAND = "proba-"
+NESTED_DIR = f"claude-{os.getuid()}"
+NESTED = "evo-"
+STAND_KEY = "TMP_SWEEP_STALE_H"
+
+
+def stand_cfg(hours: float = 24) -> dict:
+    cfg = copy.deepcopy(mod().load_cfg())
+    cfg["сроки_ч"].update({"стенды_ночь": hours, "стенды_давление": hours})
+    return cfg
+
+
+def case_st_a_old_stand_removed_and_counted():
+    """(а) Старый стенд с префиксом харнеса без держателей — удалён, и сверху, и
+    в claude-<uid>/; итог хода называет префикс, число записей и МБ."""
+    _, root, journal = stand_root()
+    top = make_tree(root / f"{STAND}стенд-а", size=1 << 20)
+    (root / NESTED_DIR).mkdir()
+    nested = make_tree(root / NESTED_DIR / f"{NESTED}стенд-а")
+    report, out = run_sweep(root, journal=journal, cfg=stand_cfg(), now=time.time() + 2 * DAY)
+    for entry in (top, nested):
+        assert not os.path.lexists(entry), f"старый стенд {entry} не удалён"
+    assert (root / NESTED_DIR).is_dir(), "сам claude-<uid>/ удалён — ход вышел за префикс"
+    line = next((s for s in out.splitlines() if s.startswith("tmp: убрано по префиксам")), "")
+    assert f"{STAND} 1 зап." in line and f"{NESTED_DIR}/{NESTED} 1 зап." in line, \
+        f"итог хода не называет убранное по префиксам: «{line}»"
+    assert re.search(rf"{re.escape(STAND)} 1 зап\. 2(\.\d+)? МБ", line), \
+        f"итог не называет МБ стенда (2 МБ): «{line}»"
+
+
+def case_st_b_fresh_stand_kept():
+    """(б) Стенд моложе срока — «оставить», дерево цело, журнал его не знает."""
+    _, root, journal = stand_root()
+    entry = make_tree(root / f"{STAND}стенд-б")
+    before = tree_hash(entry)
+    report, _ = run_sweep(root, journal=journal, cfg=stand_cfg(24), now=time.time() + 23 * HOUR)
+    decision = report.decisions.get(entry.name)
+    assert decision is not None and decision.action == "оставить", \
+        f"стенд моложе 24 ч: решение {decision}, ждал «оставить»"
+    expect_intact(entry, before)
+    expect_untouched(journal, entry.name)
+
+
+def case_st_c_held_stand_kept():
+    """(в) Старый стенд, но процесс держит его cwd или открытый файл — отказ, цел."""
+    _, root, journal = stand_root()
+    by_cwd = make_tree(root / f"{STAND}стенд-cwd")
+    spawn(["sleep", "600"], cwd=str(by_cwd / "вложенный"))
+    (root / NESTED_DIR).mkdir()
+    by_fd = make_tree(root / NESTED_DIR / f"{NESTED}стенд-fd")
+    proc = spawn([sys.executable, "-c", FD_HOLDER])
+    proc.stdin.write(f"{by_fd / 'файл-0.bin'}\n")
+    proc.stdin.flush()
+    wait_word(proc)
+    before = {e: tree_hash(e) for e in (by_cwd, by_fd)}
+    run_sweep(root, journal=journal, cfg=stand_cfg(), now=time.time() + 2 * DAY)
+    rows = journal_rows(journal)
+    for entry in (by_cwd, by_fd):
+        expect_intact(entry, before[entry])
+        expect_refusal(rows, entry.name, "держит процесс")
+
+
+def case_st_d_no_prefix_untouched():
+    """(г) Старые записи без префикса харнеса — не тронуты: сверху и в claude-<uid>/."""
+    _, root, journal = stand_root()
+    (root / NESTED_DIR).mkdir()
+    entries = [make_tree(root / "проект-данные-г"), make_tree(root / "probe-г"),
+               make_tree(root / NESTED_DIR / "сессия-г"), make_tree(root / NESTED_DIR / "evo")]
+    before = {e: tree_hash(e) for e in entries}
+    report, _ = run_sweep(root, journal=journal, cfg=stand_cfg(1), now=time.time() + 365 * DAY)
+    for entry in entries:
+        expect_intact(entry, before[entry])
+        moved = [a for a in actions_for(journal_rows(journal), entry.name)
+                 if a == "удалено" or a.startswith("в карантин")]
+        assert not moved, f"{entry} без префикса тронут: {moved}"
+    pair = make_tree(root / f"{STAND}пара-г")
+    run_sweep(root, journal=journal, cfg=stand_cfg(1), now=time.time() + 365 * DAY)
+    assert not os.path.lexists(pair), "стенд-пара не удалён — ход не шёл"
+
+
+def case_st_e_symlink_not_followed():
+    """(д) Симлинк с префиксом наружу — удалён как ссылка, цель цела; claude-<uid>
+    симлинком наружу — внутрь не пройден, evo-* за ним целы."""
+    _, root, journal = stand_root()
+    outside = new_stand()
+    target = make_tree(outside / "цель")
+    hidden = make_tree(outside / f"{NESTED}за-ссылкой")
+    before = tree_hash(outside)
+    (root / f"{STAND}ссылка-д").symlink_to(target)
+    (root / NESTED_DIR).symlink_to(outside)
+    run_sweep(root, journal=journal, cfg=stand_cfg(1), now=time.time() + 365 * DAY)
+    expect_intact(outside, before)
+    assert os.path.lexists(hidden), "evo-* за симлинком claude-<uid> тронут"
+
+
+def case_st_f_term_from_conf():
+    """(е) Срок стендов — ключ TMP_SWEEP_STALE_H из harness.conf: при 5 ч стенд
+    возраста 6 ч удалён; без ключа (умолчание 24 ч) тот же стенд цел."""
+    stand = new_stand()
+    results = {}
+    for label, body in (("ключ 5", f'{STAND_KEY}="5"\n'), ("без ключа", "")):
+        conf = stand / f"harness-{len(results)}.conf"
+        conf.write_text(body, encoding="utf-8")
+        old = {k: os.environ.get(k) for k in ("HARNESS_CONF", STAND_KEY)}
+        os.environ["HARNESS_CONF"] = str(conf)
+        os.environ.pop(STAND_KEY, None)
+        try:
+            cfg = mod().load_cfg()
+        finally:
+            for k, v in old.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+        _, root, journal = stand_root()
+        entry = make_tree(root / f"{STAND}срок-е")
+        run_sweep(root, journal=journal, cfg=cfg, now=time.time() + 6 * HOUR)
+        results[label] = (cfg["сроки_ч"].get("стенды_ночь"), os.path.lexists(entry))
+    assert results["ключ 5"] == (5, False), f"ключ 5 ч не применён: {results}"
+    assert results["без ключа"] == (24, True), f"умолчание не 24 ч: {results}"
+
 CASES = [
     ("T1", case_t1_twenty_dead_waste),
     ("T2", case_t2_cli_root_substitution),
@@ -1703,6 +1835,12 @@ CASES = [
     ("m1-exe-mmap", case_m1_exe_and_mmap_holders),
     ("m3-возврат-словами", case_m3_restore_refusal_in_words),
     ("m5-осталось", case_m5_left_not_counted),
+    ("СТ-а-старый-убран", case_st_a_old_stand_removed_and_counted),
+    ("СТ-б-свежий", case_st_b_fresh_stand_kept),
+    ("СТ-в-держит", case_st_c_held_stand_kept),
+    ("СТ-г-без-префикса", case_st_d_no_prefix_untouched),
+    ("СТ-д-симлинк", case_st_e_symlink_not_followed),
+    ("СТ-е-ключ-срока", case_st_f_term_from_conf),
 ]
 
 

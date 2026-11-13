@@ -34,6 +34,7 @@ LIVE_NOTE = " (живая машина; коммит ни при чём — вн
 LIVE_SOURCES = ("crontab", "systemd")
 HOOK_PATH = re.compile(r"\$\{?CLAUDE_PROJECT_DIR\}?\"?/([^\s\"']+)")
 UNIT_SUFFIXES = (".service", ".timer")
+STATE_SOURCES = ("systemd", "docker", "cgroup")
 
 
 def config_dir(root: Path):
@@ -117,6 +118,16 @@ def conf_value(cfg: Path, key: str) -> str:
     return match.group(1).strip() if match else ""
 
 
+def state_source_flaw(source, all_units: set):
+    """(вид нарушения, ключ) у поля «состояние_из» или None: ровно один из systemd/docker/cgroup и значение непусто;
+    юнит из systemd обязан быть среди юнит-файлов (контейнер и cgroup судья не спрашивает: docker в воротах может молчать)."""
+    if not isinstance(source, dict) or len(source) != 1 or next(iter(source)) not in STATE_SOURCES \
+            or not next(iter(source.values())):
+        return "кривая запись", "состояние_из"
+    missing = [u for u in source.get("systemd") or [] if u not in all_units]
+    return ("мёртвая запись", missing[0]) if missing else None
+
+
 def judge(root: Path, cron_lines: list, unit_lines: list, project_dir: str) -> tuple:
     cfg = config_dir(root)
     records = json.loads((cfg / "process-library.json").read_text(encoding="utf-8"))["процессы"]
@@ -176,6 +187,7 @@ def judge(root: Path, cron_lines: list, unit_lines: list, project_dir: str) -> t
         for rel in sorted(claude_hooks):
             if rel not in owned_files:
                 violation("без записи", ".claude/settings.json", rel)
+    all_units = {u.split()[0] for u in unit_lines if u.strip()}
     units = {u.split()[0] for u in unit_lines if u.strip().startswith("harness-") and u.split()[0].endswith(UNIT_SUFFIXES)}
     claimed = {u for r in records for u in r.get("юниты", [])}
     for rec in records:
@@ -205,6 +217,9 @@ def judge(root: Path, cron_lines: list, unit_lines: list, project_dir: str) -> t
             for unit in rec["юниты"]:
                 if unit not in units:
                     violation("мёртвая запись", rec["id"], unit)
+        flaw = state_source_flaw(rec["состояние_из"], all_units) if "состояние_из" in rec else None
+        if flaw:
+            violation(flaw[0], rec["id"], flaw[1])
         if rec.get("запуск") == "хук" and not hook_files.intersection(rec.get("файлы", [])):
             violation("мёртвая запись", rec["id"], ".claude/settings.json")
         # «если_задан»: строка крона ставится только при заполненном ключе — без него её отсутствие законно.
@@ -230,7 +245,7 @@ def main() -> int:
         print(f"check-process-library: под {root} нет process-library.json", file=sys.stderr)
         return 2
     cron = read_lines(args.crontab, ["crontab", "-l"])
-    units = read_lines(args.units, ["systemctl", "list-unit-files", "harness*", "--no-legend", "--no-pager"])
+    units = read_lines(args.units, ["systemctl", "list-unit-files", "--no-legend", "--no-pager"])
     missing = [name for name, lines in (("crontab", cron), ("systemctl", units)) if lines is None]
     if missing:
         for name in missing:

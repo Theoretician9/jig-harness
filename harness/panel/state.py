@@ -24,6 +24,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import settings                                       # noqa: E402
+import process_state                                  # noqa: E402
 
 КОРЕНЬ = Path(__file__).resolve().parent.parent.parent
 
@@ -676,7 +677,7 @@ BACKGROUND_KEY = "BACKGROUND_PROCESSES"
 CHECKS_SLICE_DIR = "/sys/fs/cgroup/harness.slice/harness-checks.slice"
 VIEW_FILE = "process-dispatcher-view.json"
 CHECKS_RUNS_SHOWN = 5
-RUNS_TAIL_BYTES = 2_000_000
+RUNS_TAIL_BYTES = process_state.RUNS_TAIL_BYTES
 
 
 def _process_library_module():
@@ -727,18 +728,6 @@ def _words(value) -> str:
     return " ".join(str(value or "").split())
 
 
-def _process_state(record: dict, exempt: bool, key: str) -> str:
-    """идёт · погашен · вне · снят · иное: что выключатель делает с этой записью сейчас."""
-    status = record.get("статус", "")
-    if status.startswith("снят"):
-        return "снят"
-    if status != "работает":
-        return "иное"
-    if record["класс"] != "фоновый" or record["запуск"] == "служба-проверок":
-        return "вне"
-    return "идёт" if exempt or key == "on" else "погашен"
-
-
 def _process_card(record: dict, schedule: dict, exemptions: dict, mechanisms: dict, key: str, words) -> dict:
     mechanism = next((mechanisms[путь] for путь in [*(record.get("механизмы") or []), *(record.get("файлы") or [])]
                       if путь in mechanisms), {})
@@ -746,7 +735,7 @@ def _process_card(record: dict, schedule: dict, exemptions: dict, mechanisms: di
     return {
         "id": record["id"], "название": record["название"], "класс": record["класс"],
         "запуск": record["запуск"], "статус": record.get("статус", ""),
-        "состояние": _process_state(record, exempt, key),
+        "состояние": process_state.switch_state(record, exempt, key),
         "исключение": exemptions.get(record["id"]),
         "расписание": words((schedule.get(record["id"]) or {}).get("расписание"), record["запуск"]),
         "что_делает": _words(record.get("зачем") or mechanism.get("роль")),
@@ -754,6 +743,7 @@ def _process_card(record: dict, schedule: dict, exemptions: dict, mechanisms: di
         "когда": _words(mechanism.get("когда")), "без_него": _words(mechanism.get("без_него")),
         "файлы": list(record.get("файлы") or []),
         "замер": (record.get("доля_нагрузки") or {}).get("замер"),
+        "зовёт_модель": record.get("зовёт_модель"),
     }
 
 
@@ -897,11 +887,26 @@ def _checks_service() -> dict:
     return {"срез": _checks_slice(show["harness-checks.slice"]), "таймеры": rows}
 
 
+def _process_states(library: dict, view: dict) -> dict:
+    """Состояние каждого процесса по живым фактам; медленные (docker, пропуски) — из витрины диспетчера."""
+    module = _process_library_module()
+    records = module.registry()["процессы"]
+    exempt = {card["id"] for card in library["записи"] if card["исключение"] is not None}
+    shown = {row["id"] for window in (view.get("окна") or {}).values() for row in window.get("строки") or []}
+    outside = sorted(shown - {record["id"] for record in records})
+    now = time.time()
+    facts = process_state.gather(records, module.load().get("процессы") or {}, _лог(), view.get("state_facts"), now,
+                                 library["ключ"], exempt, outside)
+    return process_state.resolve(records, facts, now)
+
+
 def processes() -> dict:
     """Раздел «Процессы»: библиотека, диспетчер (из витрины), служба проверок.
     У каждого блока своё «нет данных» — сбой одного остальные не трогает."""
     library = _section(_process_library)
-    return {"библиотека": library, "диспетчер": _section(_dispatcher_view), "проверки": _section(_checks_service),
+    view = _section(_dispatcher_view)
+    return {"библиотека": library, "диспетчер": view, "проверки": _section(_checks_service),
+            "состояния": _section(lambda: _process_states(library, view)),
             "названия": {c["id"]: c["название"] for c in library.get("записи", [])},
             "ядер": os.cpu_count(), "снято": time.time()}
 

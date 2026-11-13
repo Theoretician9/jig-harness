@@ -23,6 +23,15 @@
 # Признак «источник»: "хук" отличает машинную запись от строки, написанной
 # моделью руками. Гейты пайплайна считают ТОЛЬКО машинные.
 #
+# Второй вход — Read. У harness-worker инструмента Skill нет намеренно (в старте
+# помощника нет списка скилов), а гейт безопасности check-pipeline.py
+# (_seal_debts) ждёт машинную запись security-check именно от того помощника,
+# что запечатал бумагу, и связывает их по agent_id. Skill кладёт в контекст ровно
+# текст SKILL.md; полное чтение этого файла — то же событие, поэтому Read
+# помощником .claude/skills/<имя>/SKILL.md без offset и limit пишется как вызов
+# скила с признаком «способ»: «чтение». Read идёт на КАЖДОЕ чтение файла, потому
+# чужой Read выходит дешёвой проверкой строки нагрузки до разбора карты и python.
+#
 # Хук не вправе мешать работе: любая своя беда — молча в hook_failures.log и
 # выход нулём. Сторож пайплайна, роняющий ход из-за собственного журнала,
 # хуже отсутствующего.
@@ -87,18 +96,43 @@ PYEOF
 запись() {  # $1 = JSON полезной нагрузки → строка журнала либо пусто
     local pair
     pair="$(задача_сейчас)"
-    TASK_ID="${pair%%	*}" TASK_FROM="${pair##*	}" python3 -c '
+    PROJECT_DIR="${PROJECT_DIR:-}" TASK_ID="${pair%%	*}" TASK_FROM="${pair##*	}" python3 -c '
 import json, os, sys, datetime
 try:
     полезное = json.load(sys.stdin)
 except Exception:
     sys.exit(3)                      # не разобрали — молча мимо
-if полезное.get("tool_name") != "Skill":
+import re
+вход = полезное.get("tool_input") or {}
+ответ = полезное.get("tool_response") or {}
+способ = {}
+if полезное.get("tool_name") == "Read":
+    # Только полное чтение SKILL.md помощником, и только удавшееся.
+    найдено = re.search(r"(?:^|/)\.claude/skills/([^/]+)/SKILL\.md$", вход.get("file_path") or "")
+    if (not найдено or "offset" in вход or "limit" in вход
+            or not полезное.get("agent_id")
+            or not isinstance(ответ.get("file"), dict)):
+        sys.exit(4)
+    скил = найдено.group(1)
+    # Без привязки к проекту подложный /tmp/x/.claude/skills/security-check/SKILL.md
+    # открывал дверь гейта безопасности. .claude/skills/<имя> — symlink в
+    # harness/skills, поэтому сравнение по realpath; последнее условие закрывает
+    # symlink скила наружу проекта.
+    корень = os.path.realpath(os.environ["PROJECT_DIR"]) if os.environ.get("PROJECT_DIR") else ""
+    путь_проекта = False
+    if корень:
+        путь = os.path.realpath(вход["file_path"])
+        эталон = os.path.realpath(os.path.join(корень, ".claude", "skills", скил, "SKILL.md"))
+        путь_проекта = путь == эталон and os.path.isfile(путь) and путь.startswith(корень + "/")
+    if not путь_проекта:
+        sys.exit(4)
+    способ = {"способ": "чтение"}
+elif полезное.get("tool_name") == "Skill":
+    скил = вход.get("skill") or ""
+else:
     sys.exit(4)                      # чужой инструмент — не наше дело
-скил = (полезное.get("tool_input") or {}).get("skill") or ""
 if not скил:
     sys.exit(5)                      # вызов без имени скила записывать нечего
-ответ = полезное.get("tool_response") or {}
 print(json.dumps({
     "ts": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     "skill": скил,
@@ -109,6 +143,7 @@ print(json.dumps({
     "успех": bool(ответ.get("success", True)),
     "сессия": полезное.get("session_id") or "",
     "агент": полезное.get("agent_id") or "",
+    **способ,
 }, ensure_ascii=False))
 ' <<< "$1"
 }
@@ -264,6 +299,29 @@ if [ "${1:-}" = "--selftest" ]; then
     else
         echo "  ПЛОХО вызов без имени скила попал в журнал"; ok=0
     fi
+    # Чтение SKILL.md помощником — вызов скила; чужое чтение и частичное — нет.
+    # Стенд: проект с .claude/skills/security-check → symlink на harness/skills.
+    RDP=$(mktemp -d)
+    mkdir -p "$RDP/.claude/skills" "$RDP/harness/skills/security-check"
+    printf 'x\n' > "$RDP/harness/skills/security-check/SKILL.md"
+    ln -s ../../harness/skills/security-check "$RDP/.claude/skills/security-check"
+    RD='{"tool_name":"Read","tool_input":{"file_path":"'"$RDP"'/.claude/skills/security-check/SKILL.md"},"tool_response":{"type":"text","file":{"content":"x"}},"agent_id":"a1"}'
+    LINE=$(PROJECT_DIR="$RDP" HARNESS_TASK="hr.проба" запись "$RD")
+    LINE2=$(PROJECT_DIR="$RDP" HARNESS_TASK="hr.проба" запись "${RD/\"tool_input\":\{/\"tool_input\":\{\"limit\":5,}")
+    # Запись судит сама, без раннего выхода: главная сессия не пишется и здесь.
+    LINE3=$(PROJECT_DIR="$RDP" HARNESS_TASK="hr.проба" запись "${RD/,\"agent_id\":\"a1\"/}")
+    # Чужой проект: тот же вид пути вне PROJECT_DIR двери не открывает.
+    LINE4=$(PROJECT_DIR="$RDP/harness" HARNESS_TASK="hr.проба" запись "$RD")
+    # Проект не известен — не с чем сверить путь: двери нет.
+    LINE5=$(PROJECT_DIR="" HARNESS_TASK="hr.проба" запись "$RD")
+    if printf '%s' "$LINE" | grep -q '"способ": "чтение"' \
+       && printf '%s' "$LINE" | grep -q '"skill": "security-check"' \
+       && [ -z "$LINE2" ] && [ -z "$LINE3" ] && [ -z "$LINE4" ] && [ -z "$LINE5" ]; then
+        echo "  ок    Read SKILL.md помощником пишется как скил, частичный, главной сессии, чужого и пустого проекта — нет"
+    else
+        echo "  ПЛОХО Read: «$LINE» / частичный «$LINE2» / главной сессии «$LINE3» / чужой проект «$LINE4» / пустой проект «$LINE5»"; ok=0
+    fi
+    rm -rf "$RDP"
     # Недоступный журнал: хук обязан выйти нулём (иначе оболочка увидит отказ).
     LOG_DIR=/заведомо/нет/такого bash "$0" < /dev/null >/dev/null 2>&1
     if [ "$?" = 0 ]; then
@@ -350,11 +408,22 @@ if [ "${1:-}" = "--selftest" ]; then
     done
     rm -rf "$TMPD3"
     rm -rf "$TMPD"
-    [ "$ok" = 1 ] && { echo "САМОТЕСТ ПРОЙДЕН: 16 путей, первым — больной случай"; exit 0; }
+    [ "$ok" = 1 ] && { echo "САМОТЕСТ ПРОЙДЕН: 17 путей, первым — больной случай"; exit 0; }
     echo "САМОТЕСТ ПРОВАЛЕН"; exit 1
 fi
 
 PAYLOAD=$(cat) || беда "нагрузку со stdin прочитать не удалось"
+# Дешёвый ранний выход: Read — на каждое чтение файла, а разбор карты стоит
+# секунды. Дальше идут только вызов Skill и Read помощником, у которого именно
+# file_path кончается на /SKILL.md: голое «SKILL.md» встречается и в тексте
+# прочитанного файла, а кавычки внутри текста экранированы, и [^"] за ключ не
+# выйдет. Точный суд — в python записи.
+READ_SKILL_PATH='"file_path": ?"[^"]*/SKILL\.md"'
+READ_BY_HELPER='"agent_id": ?"[^"]'
+case "$PAYLOAD" in
+    *'"tool_name":"Skill"'*|*'"tool_name": "Skill"'*) ;;
+    *) [[ $PAYLOAD =~ $READ_SKILL_PATH && $PAYLOAD =~ $READ_BY_HELPER ]] || exit 0 ;;
+esac
 LINE=$(запись "$PAYLOAD") || exit 0   # коды 3/4/5 — законные «не наше дело»
 [ -n "$LINE" ] || exit 0
 mkdir -p "$(dirname "$SKILLS_LOG_PATH")" 2>/dev/null || беда "каталог журнала не создать"

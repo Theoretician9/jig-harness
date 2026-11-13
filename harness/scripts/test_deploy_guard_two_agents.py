@@ -13,8 +13,11 @@ MainPID (AGENT_MAINPID), свой юнит, заглушки tmux/systemctl пе
 может, и ошибка в коде не дотянется сигналом ни до кого живого.
 Подсчёт ворота обязаны делать ЖИВЬЁМ: признак сторожа two-agents.state может
 устареть, поэтому случай «устаревший признак при одном агенте» — свой.
+Ручки согласия стенда приходят к судье носителем: ворота зовёт раннер пробы,
+который подменяет owner_word.носитель в процессе ворот (окружение судья не слушает).
 """
 import getpass
+import json
 import os
 import pathlib
 import subprocess
@@ -130,6 +133,21 @@ def make_stubs(bindir: pathlib.Path) -> None:
         p.chmod(0o755)
 
 
+# Раннер двери: судья получает носитель стенда подменой owner_word.носитель в процессе двери.
+CARRIER_RUNNER = r"""
+import json, pathlib, runpy, sys
+spec = json.loads(sys.argv[1])
+sys.path.insert(0, spec["lib"])
+import owner_word
+carrier = owner_word.Носитель(папка=pathlib.Path(spec["папка"]), uid=None, паспорт=spec["паспорт"],
+                              граница=pathlib.Path(spec["граница"]), окно_мин=spec["окно_мин"],
+                              срок_кнопки_мин=spec["срок_кнопки_мин"], ручки=spec["ручки"])
+owner_word.носитель = lambda: carrier
+sys.argv = spec["argv"]
+runpy.run_path(spec["argv"][0], run_name="__main__")
+"""
+
+
 def stand_conf(yard: pathlib.Path) -> pathlib.Path:
     """Живой harness.conf плюс выключенное согласие последними строками: иначе
     ответ ворот зависит от ручки согласия машины, а не от правила двух смен."""
@@ -159,11 +177,16 @@ def ask_guard(procs: list, force: bool, state: str | None = None) -> tuple[int, 
                    AGENT_UNIT="harness-agent-probe", AGENT_USER=getpass.getuser(),
                    FAKE_TMUX_PID=str(UNIT_TMUX), STUB_LOG_DIR=str(yard / "stublog"),
                    HARNESS_LOG_DIR=str(yard / "log"), LOG_DIR=str(yard / "log"),
-                   HARNESS_CONF=str(stand_conf(yard)),
-                   # Без ключа стенда ворота судят согласие по /etc/harness машины:
-                   # там нет стоящего согласия — и проба красна от дерева продукта.
-                   HARNESS_OWNER_WORD_STEND="1")
-        argv = [sys.executable, str(GUARD)] + (["--силой"] if force else [])
+                   HARNESS_CONF=str(stand_conf(yard)))
+        # Без носителя стенда ворота судят согласие по /etc/harness машины: там своё
+        # стоящее согласие — и ответ зависел бы от машины, а не от правила двух смен.
+        sys.path.insert(0, str(ROOT / "scripts" / "lib"))
+        import config as conf
+        carrier = {"lib": str(ROOT / "scripts" / "lib"), "папка": str(yard / "log"), "граница": str(yard),
+                   "паспорт": {"AUTONOMY": "semi", "LOG_DIR": str(yard / "log")}, "окно_мин": 60,
+                   "срок_кнопки_мин": None, "ручки": conf.из_файла(env["HARNESS_CONF"]),
+                   "argv": [str(GUARD)] + (["--силой"] if force else [])}
+        argv = [sys.executable, "-c", CARRIER_RUNNER, json.dumps(carrier, ensure_ascii=False)]
         done = subprocess.run(argv, capture_output=True, text=True, env=env,
                               check=False, timeout=120)
         stubs = "".join(p.read_text() for p in sorted((yard / "stublog").glob("*.log")))

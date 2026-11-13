@@ -29,7 +29,9 @@
 """
 from __future__ import annotations
 
+import datetime as dt
 import hashlib
+import json
 import os
 import pathlib
 import re
@@ -37,6 +39,8 @@ import subprocess
 import sys
 import tempfile
 import time
+
+import importlib.util
 
 import yaml
 
@@ -50,6 +54,29 @@ import yaml
 
 хорошо = 0
 плохо = 0
+
+
+def _судья_следа():
+    """Функция `_есть_шапка` САМОГО судьи (scripts/build-live-check-list.py):
+    гейт `--данные` признаёт след только по ней, и копия её логики в пробе
+    разошлась бы с судьёй молча."""
+    путь = КОРЕНЬ / "scripts" / "build-live-check-list.py"
+    спека = importlib.util.spec_from_file_location("судья_живой_проверки", путь)
+    модуль = importlib.util.module_from_spec(спека)
+    спека.loader.exec_module(модуль)
+    return модуль._есть_шапка
+
+
+ЕСТЬ_ШАПКА = _судья_следа()
+
+
+def след_признан_судьёй(ветка: str, след: pathlib.Path) -> None:
+    """След ветки «ок», записанный при «--записать», проходит судью следа:
+    иначе запись прибора гейт `--данные` числит «без доказательства»."""
+    текст = след.read_text(encoding="utf-8") if след.is_file() else ""
+    случай(f"след ветки «{ветка}» признан судьёй (_есть_шапка)",
+           bool(текст) and ЕСТЬ_ШАПКА(текст),
+           f"след {след}, есть {след.is_file()}, начало {текст[:160]!r}")
 
 
 def случай(имя: str, условие: bool, пояснение: str = "") -> None:
@@ -91,6 +118,11 @@ def прогон(путь: pathlib.Path, *доводы: str,
         # Данные о демонах — СВОИ у стенда: боевой файл юнитов называл бы
         # стенду чужое «как пишет журнал», и проба судила бы производство.
         "HARNESS_LIVE_CHECK_UNITS": str(путь / "юниты.yaml"),
+        # Журналы событий и их реестр — тоже СВОИ: в боевом process-load.jsonl
+        # лежат свежие run.end диспетчера, и случай «событий нет» позеленел бы
+        # от производства.
+        "HARNESS_LOG_DIR": str(путь / "журналы"),
+        "HARNESS_JOURNALS": str(путь / "journals.yaml"),
     })
     # Своё СТАРШЕ общего: случаю про молчуна нужен свой корень с механизмом,
     # а общая раскладка ставила боевой — и прибор звал боевой файл.
@@ -112,6 +144,44 @@ def пишет(путь: pathlib.Path, механизм: str, как: str) -> No
     данные = данные or {}
     данные.setdefault("как_пишет_журнал", {})[механизм] = как
     файл.write_text(yaml.safe_dump(данные, allow_unicode=True), encoding="utf-8")
+
+
+def события(путь: pathlib.Path, механизм: str, журнал: str,
+            строки: list[tuple[str, str, int | None, float]]) -> None:
+    """Журнал событий стенда в формате events.run и его запись в реестре.
+
+    `строки`: (src, event, код | None, сколько минут назад). Прибор находит
+    журнал по реестру (`journals.<имя>.writers` содержит механизм), а файл — в
+    HARNESS_LOG_DIR; mtime файла нарочно свежий: судить надо по полю `ts`.
+    """
+    реестр = путь / "journals.yaml"
+    данные = (yaml.safe_load(реестр.read_text(encoding="utf-8")) if реестр.is_file() else None) or {}
+    данные.setdefault("journals", {})[журнал] = {
+        "file": f"{журнал}.jsonl", "writers": [механизм], "time_field": "ts",
+        "time_kind": "tz", "event_from": "field:event"}
+    реестр.write_text(yaml.safe_dump(данные, allow_unicode=True), encoding="utf-8")
+    ряды = []
+    for src, событие, код, минут_назад in строки:
+        ts = (dt.datetime.now().astimezone() - dt.timedelta(minutes=минут_назад)
+              ).isoformat(timespec="seconds")
+        ряд = {"v": 1, "ts": ts, "src": src, "event": событие,
+               "outcome": "ok" if код in (0, None) else "error", "task": None,
+               "task_from": "none", "session": None,
+               "data": {"имя": pathlib.Path(src).stem} | ({} if код is None else
+                                                         {"код": код, "секунд": 3})}
+        ряды.append(json.dumps(ряд, ensure_ascii=False))
+    (путь / "журналы" / f"{журнал}.jsonl").write_text("\n".join(ряды) + "\n",
+                                                     encoding="utf-8")
+
+
+def строка_вердикта(вывод: str, механизм: str) -> str:
+    """Строка вердикта прибора о механизме («  ок    <механизм>: …»)."""
+    return next((с for с in вывод.splitlines()
+                 if с.lstrip().startswith(("ок ", "ПЛОХО ")) and f"{механизм}:" in с), "")
+
+
+def дата_минут_назад(минут: float) -> str:
+    return time.strftime("%Y-%m-%d", time.localtime(time.time() - минут * 60))
 
 
 def расписание_двора(путь: pathlib.Path, период: str = "*/10 * * * *",
@@ -189,6 +259,7 @@ def main() -> int:
     случай("след написан прибором и несёт хвост журнала",
            след.is_file() and "обошёл 5 задач" in след.read_text(),
            str(след))
+    след_признан_судьёй("кроновый журнал", след)
 
     # ── Период из расписания: суточный демон молчит сутки законно ────────
     д = двор("", {"ночной.log": ("2026-10-17 03:00:01  уборка: снесено 3\n", 600)})
@@ -226,6 +297,8 @@ def main() -> int:
     случай("цитата — из СВОЕГО журнала демона",
            "лимита нет, работа идёт" in (запись.get("увидели") or ""),
            str(запись.get("увидели")))
+    след_признан_судьёй("свой журнал при пустом кроновом",
+                        д / "следы" / "harness-demons-ежеминутный.sh.log")
 
     # Оба журнала пусты — отказ остаётся отказом: иначе ветка «свой журнал»
     # превратила бы молчание в доказательство.
@@ -266,6 +339,8 @@ def main() -> int:
     запись = (состояние.get("проверено") or {}).get("harness/demons/событийный.sh") or {}
     случай("и сказано вслух, что свежесть доказана МЕТКОЙ",
            "МЕТКОЙ" in (запись.get("живьём") or ""), str(запись.get("живьём")))
+    след_признан_судьёй("по событию + метка",
+                        д / "следы" / "harness-demons-событийный.sh.log")
 
     # Метка тоже стара — отказ: иначе ветка метки превратила бы мёртвого
     # демона в живого.
@@ -432,25 +507,99 @@ def main() -> int:
     # расписания», 6873 и 4969 мин) при метках 0–1 мин. Оба молчат при успехе,
     # а журнал непуст от старых ошибок: у диспетчера — трасса IndexError 07.11,
     # у speed_mode — «Permission denied» и слова обёртки 06.11.
-    дата_давно = time.strftime("%Y-%m-%d", time.localtime(time.time() - четверо_суток * 60))
+    # Решение 16:38: молчащему при успехе жизнь доказывают СОБЫТИЕ run.end с
+    # кодом 0 (его пишет events.run в журнал событий демона) и свежая метка.
+    # Строка его кронового журнала — старая ошибка («IndexError» 07.11,
+    # «Permission denied» 06.11) — доказательством не служит, и в вердикт не
+    # идёт: прибор сказал «ок» и процитировал ошибку (порция A, 16:35).
+    дата_события = дата_минут_назад(1)
     д, среда_д = двор_диспетчера(трасса, четверо_суток, "молчит-при-успехе")
-    код, вывод = прогон(д, "scripts/process-dispatcher.py", среда=среда_д)
-    случай("(а) молчит при успехе, журнал от старой трассы, метка свежа — жив",
+    события(д, "scripts/process-dispatcher.py", "process-load", [
+        ("scripts/process-dispatcher.py", "run.start", None, 1),
+        ("scripts/process-dispatcher.py", "run.end", 0, 1)])
+    код, вывод = прогон(д, "scripts/process-dispatcher.py", "--записать", среда=среда_д)
+    вердикт = строка_вердикта(вывод, "scripts/process-dispatcher.py")
+    случай("(а) молчит при успехе: свежий run.end код 0 + метка — жив, код 0",
            код == 0 and "кроновый прогон доказан" not in вывод,
            f"код {код}, вывод {вывод[:300]!r}")
-    случай("(а) и в вердикте дата последней записи журнала",
-           re.search(rf"последняя запись[^\n]*{дата_давно}", вывод) is not None,
-           f"ждали {дата_давно}, вывод {вывод[:300]!r}")
+    случай("(а) вердикт цитирует СОБЫТИЕ run.end и его дату",
+           "run.end" in вердикт and дата_события in вердикт,
+           f"ждали run.end и {дата_события}, вердикт {вердикт!r}")
+    случай("(а) старая трасса журнала цитатой не стала",
+           "IndexError" not in вывод and "Traceback" not in вывод, вывод[:300])
+    запись = ((yaml.safe_load((д / "состояние.yaml").read_text()) or {})
+              .get("проверено") or {}).get("scripts/process-dispatcher.py") or {}
+    увидели = запись.get("увидели") or ""
+    случай("(а) «увидели» записи — событие run.end, а не строка журнала",
+           "run.end" in увидели and "IndexError" not in увидели, repr(увидели))
+    след = д / "следы" / "scripts-process-dispatcher.py.log"
+    случай("(а) «увидели» — подстрока следа (гейт сверяет запись со следом)",
+           bool(увидели) and след.is_file() and увидели in след.read_text(),
+           f"след {след}, есть {след.is_file()}")
+    след_признан_судьёй("молчит при успехе: run.end", след)
 
     отказы_sh = ("/bin/sh: 1: /путь/harness/demons/speed_mode.py: Permission denied\n"
                  * 2) + обёртка
     д, среда_д = двор_скорости(четверо_суток, "молчит-при-успехе", отказы_sh)
+    события(д, "harness/demons/speed_mode.py", "режим-скорости", [
+        ("harness/demons/speed_mode.py", "run.start", None, 2),
+        ("harness/demons/speed_mode.py", "run.end", 0, 1)])
     код, вывод = прогон(д, "harness/demons/speed_mode.py", среда=среда_д)
-    случай("(а) молчит при успехе, старые ошибки и слова обёртки, метка свежа — жив",
-           код == 0 and re.search(rf"последняя запись[^\n]*{дата_давно}", вывод) is not None,
-           f"код {код}, вывод {вывод[:300]!r}")
-    случай("(а) слова обёртки и тут цитатой не стали",
-           "BACKGROUND_PROCESSES=off" not in вывод, вывод[:300])
+    вердикт = строка_вердикта(вывод, "harness/demons/speed_mode.py")
+    случай("(а) speed_mode: старые ошибки и слова обёртки, свежий run.end код 0 — жив",
+           код == 0 and "run.end" in вердикт and дата_события in вердикт,
+           f"код {код}, вердикт {вердикт!r}")
+    случай("(а) ни «Permission denied», ни слова обёртки цитатой не стали",
+           "Permission denied" not in вывод and "BACKGROUND_PROCESSES=off" not in вывод,
+           вывод[:300])
+    случай("(а) сухой прогон по событию run.end не пишет следа (Р3)",
+           not any((д / "следы").iterdir()),
+           f"следы: {[ф.name for ф in (д / 'следы').iterdir()]}")
+
+    # (б) Метка свежа, а события run.end с кодом 0 нет: метка — половина
+    # доказательства, событие — вторая. Чужой run.end в том же журнале (другой
+    # src) и свой run.start доказательством не служат.
+    д, среда_д = двор_диспетчера(трасса, четверо_суток, "молчит-при-успехе")
+    события(д, "scripts/process-dispatcher.py", "process-load", [
+        ("scripts/process-dispatcher.py", "run.start", None, 1),
+        ("scripts/чужой-демон.py", "run.end", 0, 1)])
+    код, вывод = прогон(д, "scripts/process-dispatcher.py", среда=среда_д)
+    случай("БОЛЬНОЙ СЛУЧАЙ (б): метка свежа, своего run.end нет (только чужой) — не «ок»",
+           код == 1 and "run.end" in вывод, f"код {код}, вывод {вывод[:300]!r}")
+
+    д, среда_д = двор_диспетчера(трасса, четверо_суток, "молчит-при-успехе")
+    события(д, "scripts/process-dispatcher.py", "process-load", [
+        ("scripts/process-dispatcher.py", "run.end", 1, 2),
+        ("scripts/process-dispatcher.py", "run.end", 1, 1)])
+    код, вывод = прогон(д, "scripts/process-dispatcher.py", среда=среда_д)
+    случай("БОЛЬНОЙ СЛУЧАЙ (б): метка свежа, все run.end с кодом 1 — не «ок»",
+           код == 1 and "run.end" in вывод, f"код {код}, вывод {вывод[:300]!r}")
+
+    # Журнала событий нет вовсе (в реестре стенда демон не записан писателем):
+    # «не нашли» — не «ок».
+    д, среда_д = двор_диспетчера(трасса, четверо_суток, "молчит-при-успехе")
+    код, вывод = прогон(д, "scripts/process-dispatcher.py", среда=среда_д)
+    случай("БОЛЬНОЙ СЛУЧАЙ (б): журнала событий демона нет — не «ок»",
+           код == 1 and "run.end" in вывод, f"код {код}, вывод {вывод[:300]!r}")
+
+    # (в) run.end код 0 есть, но СТАРШЕ потолка (speed_mode */2 → 6 мин),
+    # а mtime файла свежий: судить надо по полю ts события, не по файлу.
+    д, среда_д = двор_скорости(четверо_суток, "молчит-при-успехе", отказы_sh)
+    события(д, "harness/demons/speed_mode.py", "режим-скорости", [
+        ("harness/demons/speed_mode.py", "run.end", 0, 60)])
+    код, вывод = прогон(д, "harness/demons/speed_mode.py", среда=среда_д)
+    случай("БОЛЬНОЙ СЛУЧАЙ (в): run.end код 0 старше потолка, метка свежа — не «ок»",
+           код == 1 and "run.end" in вывод, f"код {код}, вывод {вывод[:300]!r}")
+
+    # (ж) Судит ПОСЛЕДНИЙ свой run.end (решение оркестратора 11.11): прошлый
+    # прогон с кодом 0 в пределах потолка не отменяет падения последнего.
+    д, среда_д = двор_диспетчера(трасса, четверо_суток, "молчит-при-успехе")
+    события(д, "scripts/process-dispatcher.py", "process-load", [
+        ("scripts/process-dispatcher.py", "run.end", 0, 2),
+        ("scripts/process-dispatcher.py", "run.end", 1, 1)])
+    код, вывод = прогон(д, "scripts/process-dispatcher.py", среда=среда_д)
+    случай("БОЛЬНОЙ СЛУЧАЙ (ж): последний run.end код 1, предыдущий в потолке код 0 — не «ок»",
+           код == 1 and "упал" in вывод, f"код {код}, вывод {вывод[:300]!r}")
 
     д, среда_д = двор_диспетчера(трасса, четверо_суток, "каждый-прогон")
     код, вывод = прогон(д, "scripts/process-dispatcher.py", среда=среда_д)
@@ -488,6 +637,15 @@ def main() -> int:
     случай("БОЛЬНОЙ СЛУЧАЙ: молчит при успехе, а метка стара — отказ",
            код == 1, f"код {код}, вывод {вывод[:300]!r}")
 
+    # Свежий run.end код 0 метку не заменяет: оба условия обязательны.
+    д, среда_д = двор_диспетчера(трасса, четверо_суток, "молчит-при-успехе")
+    os.utime(д / "метки" / "process-dispatcher", (старо, старо))
+    события(д, "scripts/process-dispatcher.py", "process-load", [
+        ("scripts/process-dispatcher.py", "run.end", 0, 1)])
+    код, вывод = прогон(д, "scripts/process-dispatcher.py", среда=среда_д)
+    случай("БОЛЬНОЙ СЛУЧАЙ: свежий run.end код 0, а метка стара — отказ",
+           код == 1 and "метк" in вывод, f"код {код}, вывод {вывод[:300]!r}")
+
     # Молчащий при успехе пишет только неуспех: СВЕЖАЯ трасса — падает сейчас.
     д, среда_д = двор_диспетчера(трасса, 1, "молчит-при-успехе")
     код, вывод = прогон(д, "scripts/process-dispatcher.py", среда=среда_д)
@@ -503,8 +661,11 @@ def main() -> int:
         "юниты:\n  harness/demons/сторож.sh: проба-юнит.service\n", encoding="utf-8")
 
     def системные(состояние: str, журнал: str) -> dict:
+        # Доводы зова пишутся в файл: случаи разовой службы судят, ЧТО спросил
+        # прибор у systemd (Result, ExecMainStatus), а не только что услышал.
         (д / "systemctl").write_text(
-            "#!/bin/sh\n" + "".join(f"echo '{с}'\n" for с in состояние.splitlines()),
+            f"#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{д / 'systemctl.calls'}'\n"
+            + "".join(f"echo '{с}'\n" for с in состояние.splitlines()),
             encoding="utf-8")
         (д / "journalctl").write_text(
             "#!/bin/sh\n" + "".join(f"echo '{с}'\n" for с in журнал.splitlines()),
@@ -568,7 +729,9 @@ def main() -> int:
     (д / "юниты.yaml").write_text(
         "юниты:\n  harness/demons/сторож.sh:\n    юнит: проба-юнит.service\n"
         "    потолок_минут: 15\n", encoding="utf-8")
-    среда = системные("ActiveState=inactive\nActiveEnterTimestamp=",
+    # Result=success — заглушка отвечает, как systemd о прогоне без беды: без
+    # поля прибор судить исход не вправе (случай (з)).
+    среда = системные("ActiveState=inactive\nActiveEnterTimestamp=\nResult=success",
                       "Oct 17 21:47:07 стенд сторож.sh[1]: присмотр отработал, бед нет")
     среда["HARNESS_LIVE_CHECK_HEARTBEAT"] = str(д / "метки")
     метка = д / "метки" / "сторож"
@@ -589,6 +752,68 @@ def main() -> int:
     метка.unlink()
     код, вывод = прогон(д, "harness/demons/сторож.sh", среда=среда)
     случай("БОЛЬНОЙ СЛУЧАЙ: метки нет вовсе — прогона не было", код == 1, вывод[:160])
+
+    # ── РАЗОВАЯ служба: исход ПОСЛЕДНЕГО прогона — у systemd ─────────────
+    # Улика 11.11.2026 (порция A, 16:35): nightly-mutations получил «ок» по
+    # метке 9285 мин < 11520, а юнит Result=exit-code, ExecMainStatus=1 (упал
+    # 10.11 19:51), и цитатой стала строка sudo pam_unix — не службы. Решение
+    # 16:38: прибор спрашивает `systemctl show -p Result -p ExecMainStatus`,
+    # Result≠success — «последний прогон упал» с кодом; строки sudo/pam_unix
+    # из журнала юнита цитатой не принимаются.
+    метка.write_text("", encoding="utf-8")
+    свежо = time.time() - 3 * 60
+    os.utime(метка, (свежо, свежо))
+    строка_службы = "Nov 10 19:51:07 стенд nightly-mutations.sh[812]: ночь: мутаций 40, поймано 40"
+    строки_sudo = (
+        "Nov 10 19:51:01 стенд sudo[811]:    agent : PWD=/var/www ; USER=root ; "
+        "COMMAND=/usr/bin/systemctl start harness-nightly-mutations.service\n"
+        "Nov 10 19:51:01 стенд sudo[811]: pam_unix(sudo:session): session opened "
+        "for user root(uid=0) by agent(uid=1004)\n"
+        "Nov 10 19:51:02 стенд sudo[811]: pam_unix(sudo:session): session closed for user root")
+
+    def разовая(result: str, статус: str, журнал: str) -> tuple[int, str, str]:
+        (д / "systemctl.calls").unlink(missing_ok=True)
+        среда = системные("ActiveState=inactive\nActiveEnterTimestamp=\n"
+                          f"Result={result}\nExecMainStatus={статус}", журнал)
+        среда["HARNESS_LIVE_CHECK_HEARTBEAT"] = str(д / "метки")
+        код, вывод = прогон(д, "harness/demons/сторож.sh", среда=среда)
+        звали = (д / "systemctl.calls").read_text() if (д / "systemctl.calls").is_file() else ""
+        return код, вывод, звали
+
+    код, вывод, звали = разовая("exit-code", "1", строка_службы)
+    случай("БОЛЬНОЙ СЛУЧАЙ (г): Result=exit-code при свежей метке — не «ок»",
+           код == 1, f"код {код}, вывод {вывод[:300]!r}")
+    случай("(г) и сказано «последний прогон упал» с ExecMainStatus=1",
+           "последний прогон упал" in вывод and "ExecMainStatus=1" in вывод,
+           вывод[:300])
+    случай("(г) прибор спросил у systemd Result и ExecMainStatus",
+           any(re.search(r"\bshow\b", з) and "Result" in з and "ExecMainStatus" in з
+               for з in звали.splitlines()), f"зовы systemctl: {звали!r}")
+
+    код, вывод, _ = разовая("success", "0", строки_sudo)
+    случай("БОЛЬНОЙ СЛУЧАЙ (д): Result=success, в журнале юнита лишь sudo/pam_unix — не «ок»",
+           код == 1, f"код {код}, вывод {вывод[:300]!r}")
+    случай("(д) строки sudo/pam_unix цитатой не стали",
+           "session opened" not in вывод and "session closed" not in вывод
+           and "COMMAND=" not in вывод, вывод[:300])
+
+    # Строка службы — ПЕРЕД строками sudo, как в жизни (сессия sudo
+    # закрывается после): «последняя строка журнала» здесь — чужая.
+    код, вывод, _ = разовая("success", "0", строка_службы + "\n" + строки_sudo)
+    случай("(е) Result=success, строка службы и после неё sudo — «ок», цитата службы",
+           код == 0 and "мутаций 40, поймано 40" in вывод
+           and "session" not in строка_вердикта(вывод, "harness/demons/сторож.sh"),
+           f"код {код}, вывод {вывод[:300]!r}")
+
+    # (з) systemd не назвал Result: исход последнего прогона неизвестен, а
+    # «не знаем» — не «ок». Отсутствие поля успехом не считается.
+    (д / "systemctl.calls").unlink(missing_ok=True)
+    среда = системные("ActiveState=inactive\nActiveEnterTimestamp=\nExecMainStatus=0",
+                      строка_службы)
+    среда["HARNESS_LIVE_CHECK_HEARTBEAT"] = str(д / "метки")
+    код, вывод = прогон(д, "harness/demons/сторож.sh", среда=среда)
+    случай("БОЛЬНОЙ СЛУЧАЙ (з): systemctl show без поля Result при свежей метке — не «ок»",
+           код == 1 and "Result" in вывод, f"код {код}, вывод {вывод[:300]!r}")
 
     # ПОМОЩНИК: его зовёт не расписание и не systemd, а другой механизм.
     (д / "юниты.yaml").write_text(

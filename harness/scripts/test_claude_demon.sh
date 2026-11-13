@@ -226,19 +226,44 @@ cat > "$STAND/bin/claude" <<'CLAUDE3'
 #!/usr/bin/env bash
 printf 'зван\n' >> "$STAND_ZOV"
 printf '%s\n' "$@" > "$SLED_ARG"
+printf '%s\n' "${HARNESS_DEMON-<нет>}" > "$SLED_ENV"
 cat "$CLAUDE_SCENARIJ"
 exit "${CLAUDE_KOD:-0}"
 CLAUDE3
 chmod +x "$STAND/bin/claude"
-export SLED_ARG="$STAND/аргументы.txt"
+export SLED_ARG="$STAND/аргументы.txt" SLED_ENV="$STAND/окружение.txt"
 export CLAUDE_SCENARIJ="$STAND/ответ.txt" CLAUDE_KOD=0
 rm -f "$LOG_DIR/лимит-демонов.состояние" "$LOG_DIR/отказ-демонов.состояние" "$LOG_DIR/отказ-демонов.сказано"
 : > "$SBORKA_SLED"; : > "$SLED_ARG"
-bash "$OBERTKA" проба-носителя -p "задание" >/dev/null 2>&1; KOD=$?
+env -u HARNESS_DEMON bash "$OBERTKA" проба-носителя -p "задание" >/dev/null 2>&1; KOD=$?
 case_check "через носитель: код модели 0 отдан" 0 "$KOD"
 case_check "носитель собрал личность класса «демон»" "демон" "$(tr '\n' ' ' < "$SBORKA_SLED" | sed 's/ $//')"
 case_check "модель получила файл личности (--append-system-prompt-file)" "да" \
      "$(grep -qx -- '--append-system-prompt-file' "$SLED_ARG" && echo да || echo нет)"
+
+# Агент демона работает из пустого каталога, .claude/settings.json проекта у него не
+# грузится: сторож записи память/ORDERS.md держится только этими двумя звеньями
+# обёртки (hr.orders-weed-legal-and-guarded). Без них демон снова перепишет файл.
+case_check "модели передан --settings со сторожем ORDERS.md на Write/Edit/Bash, путь — живой файл" "да" \
+     "$(python3 - "$SLED_ARG" <<'PY'
+import json, os, sys
+args = open(sys.argv[1], encoding="utf-8").read().split("\n")
+ok = False
+for i, a in enumerate(args[:-1]):
+    if a != "--settings":
+        continue
+    for entry in json.loads(args[i + 1]).get("hooks", {}).get("PreToolUse", []):
+        tools = set(entry.get("matcher", "").split("|"))
+        for h in entry.get("hooks", []):
+            path = h.get("command", "").split()[-1]
+            if (path.endswith("/scripts/hooks/orders_write_guard.py") and os.path.isfile(path)
+                    and {"Write", "Edit", "Bash"} <= tools):
+                ok = True
+print("да" if ok else "нет")
+PY
+)"
+case_check "модель видит HARNESS_DEMON = имя демона (по нему сторож узнаёт демона)" "проба-носителя" \
+     "$(cat "$SLED_ENV")"
 
 # БОЛЬНОЙ СЛУЧАЙ Н-2 контракта hr.standards-and-policy: на коде 79 stdout
 # пуст, и судья лимита уходит в «поток оборван» — владелец получил бы

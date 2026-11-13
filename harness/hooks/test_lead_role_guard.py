@@ -121,6 +121,19 @@ with tempfile.TemporaryDirectory() as tmp:
           code(call(LEAD, "Agent", subagent_type="general-purpose", model="sonnet", prompt="p")))
     check("без типа — отказ", 2, code(call(LEAD, "Agent", model="sonnet", prompt="p")))
 
+    # hr.per-helper-code-copies, Т6 (спека §3, Р-3): очередь слияния и счётчик трения
+    # управляющему разрешены ДАННЫМИ helper-roles.yaml → скрипты; ручной merge — нет.
+    # Поломка, что оставила бы зелёной: разрешить git merge/rebase целиком — ловят отказы ниже.
+    print("управляющий: очередь слияния")
+    for cmd in ["python3 scripts/merge-queue.py worktree-agent-x",
+                "python3 scripts/merge-queue.py worktree-agent-x --json",
+                "python3 scripts/merge-queue.py --убрать",
+                "python3 scripts/commit-friction.py --дней 3 --json"]:
+        check(f"можно: {cmd}", 0, code(bash(LEAD, cmd)))
+    for cmd in ["git merge worktree-agent-x", "git merge --ff-only worktree-agent-x",
+                "git rebase master", "git -C /var/www/project merge worktree-agent-x"]:
+        check(f"отказ: {cmd}", 2, code(bash(LEAD, cmd)))
+
     print("исполнитель")
     check("Agent — отказ", 2, code(call(WORK, "Agent", subagent_type=WORK, model="sonnet")))
     check("Task — отказ", 2, code(call(WORK, "Task", subagent_type="Explore")))

@@ -57,7 +57,13 @@ LIVE_EVENTS = Path("/var/log/harness/.events")
 # малый объём на машине с большими журналами иначе не воспроизвести.
 LIVE_SRC = Path(os.environ.get("EVENTS_PROBE_LIVE_SRC", "/var/log/harness"))
 MIN_LIVE_MB = 20
-TASK = "hr.harness-detailed-logging"
+# Карточка берётся из НАСТОЯЩЕЙ карты, не вписана: расчистка уносит карточки в
+# архив, и вписанное имя валило стенд.
+_cards = re.findall(r"- id: (hr\.[a-z0-9.-]+)\n\s+status: ",
+                    (ROOT / "dev-map.yaml").read_text(encoding="utf-8"))
+if not _cards:
+    raise SystemExit("проба: в dev-map.yaml нет карточек hr.* — стенд карты не собрать")
+TASK = _cards[0]
 ACK_REASON = "разобрано пробой"
 BUDGET = {"status": 150, "task": 400, "journals": 300, "lost": 200}
 SRC_GUARD = "scripts/hooks/guard_bash.py"
