@@ -1764,7 +1764,8 @@ def status_line_cases():
     shutil.copy2(SOURCE / "scripts" / "hackathon.py", project / "scripts")
     shutil.copy2(path, project / "dev-map.yaml")
     done = subprocess.run(["bash", "-c", 'project_dir="$1"\n' + "\n".join(shell[start:end + 1]),
-                           "_", str(project)], capture_output=True, text=True, timeout=60)
+                           "_", str(project)], capture_output=True, text=True, timeout=60,
+                          env={**os.environ, "SHIFT_SELF_MARK": str(WORK / "shift.mark")})
     cases.check("session_state.sh: блок оглядки печатает строку режима по карте проекта",
                 [f"хакатон: до {future}; уровней хакатон 2"], done.stdout.splitlines())
 

@@ -112,8 +112,8 @@ CARDS = [{'id': 'hr.delete-door-covers-only-data-dirs',
                      '~/.ssh/github_app, /home/user/other-project, журналы, архивы продукта. Нужно '
                      'расширить охрану на ключи и чужие проекты (И-1, 15.10: other-project трогать нельзя) '
                      'и писать след. Замер: удаление /var/www/app-архивы 27.10 прошло без двери.',
-          'источник': 'ревью спеки hr.prepare-human-decision-items 27.10 '
-                      '(.tasks/hr.prepare-human-decision-items/spec-REVIEW.md)',
+          'источник': 'ревью спеки hr.stand-decision-items 27.10 '
+                      '(.tasks/hr.stand-x/spec-REVIEW.md)',
           'глубина': {'уровень': 'обычная', 'характер': 'починка', 'кем': 'смена'}},
          {'id': 'hr.consent-judge-addressed-answers',
           'status': 'plan',
@@ -123,7 +123,7 @@ CARDS = [{'id': 'hr.delete-door-covers-only-data-dirs',
                      'их за согласие на выкат. Нужен вид «адресовано» (ответ принадлежит последнему '
                      'записанному вопросу), deploy_guard его не засчитывает; закрывает дыру вопроса о '
                      'затравке и вопроса о стеке.',
-          'источник': 'разбор спек 24.10 (.tasks/hr.stack-freshness-monitor/spec.md, ревью выкатов)',
+          'источник': 'разбор спек 24.10 (.tasks/hr.stand-x/spec.md, ревью выкатов)',
           'глубина': {'уровень': 'крупная', 'характер': 'разработка', 'кем': 'смена'}},
          {'id': 'hr.panel-ne-ubiraet-prosrochennye-tokeny',
           'status': 'plan',
@@ -138,7 +138,7 @@ CARDS = [{'id': 'hr.delete-door-covers-only-data-dirs',
                       'панель, выданных 806 часов назад при сроке жизни 10 минут; имя файла и ЕСТЬ '
                       'токен, поэтому обычный ls печатает ключи',
           'глубина': {'уровень': 'обычная', 'характер': 'разработка', 'кем': 'смена'}},
-         {'id': 'hr.owner-messages-delivery-chaos',
+         {'id': 'hr.stand-delivery-delay',
           'status': 'plan',
           'title': 'Сообщения владельца: то отправляются, то копятся, то дублируются',
           'summary': '03.11 владелец видит в CLI пачку своих сообщений, дошедших до агента с задержкой '
@@ -147,7 +147,7 @@ CARDS = [{'id': 'hr.delete-door-covers-only-data-dirs',
                      'назвать причину числом; носитель в коде.',
           'источник': 'владелец 03.11 03:22, телеграм',
           'глубина': {'уровень': 'обычная', 'характер': 'исследование', 'кем': 'смена'}},
-         {'id': 'hr.agent-session-vanished-0211',
+         {'id': 'hr.stand-session-vanished',
           'status': 'plan',
           'title': 'Сессия агента исчезла в 02:00 03.11: причина не установлена',
           'summary': 'Сторож в 02:00:14 нашёл tmux-сессию agent отсутствующей (в 02:00:07 живая, '
@@ -207,7 +207,7 @@ CARDS = [{'id': 'hr.delete-door-covers-only-data-dirs',
                         {'label': 'Владелец 13.09: «в работе причём много же задач могут быть, в '
                                   'работе э',
                          'done': False}]},
-         {'id': 'hr.keep-task-map-clean',
+         {'id': 'hr.stand-map-clean',
           'status': 'plan',
           'title': 'Системно решить, чтобы карта не засорялась: уже сделанное, дубли и прочий мусор',
           'summary': 'Владелец 2026-10-18 в канал: «Надо системно решить чтобы эта карта не '
@@ -226,7 +226,7 @@ CARDS = [{'id': 'hr.delete-door-covers-only-data-dirs',
                          'done': True},
                         {'label': 'Коммит 27e77ed12b: правка памяти с панели (разбор задач)',
                          'done': True}]},
-         {'id': 'hr.hackathon-mode',
+         {'id': 'hr.stand-fast-mode',
           'status': 'plan',
           'title': 'Режим «хакатон»: задача делается быстро и работает, но не продакшн',
           'summary': 'Предложение docs/specs/2026-10-28-режим-хакатон.md, ждёт слова владельца. Замер '
@@ -241,7 +241,7 @@ CARDS = [{'id': 'hr.delete-door-covers-only-data-dirs',
                        'hr.hackathon-mode-quick-gates',
                        'hr.hackathon-mode-one-helper',
                        'hr.hackathon-mode-debt-and-mark',
-                       'hr.hackathon-mode-measure'],
+                       'hr.stand-fast-mode-measure'],
           'глубина': {'уровень': 'обычная', 'характер': 'исследование', 'кем': 'смена'},
           'checklist': [{'label': 'Коммит eb541d83a2: хакатон, круг правок 3', 'done': True},
                         {'label': 'Коммит d89014d716: хакатон, проверка сообщения коммита не читает '
@@ -259,7 +259,7 @@ CARDS = [{'id': 'hr.delete-door-covers-only-data-dirs',
                       '(законные — только --dry-run и --по-давлению), поэтому задачи про уборку не '
                       'могут быть закрыты машинной приёмкой',
           'глубина': {'уровень': 'обычная', 'характер': 'разработка', 'кем': 'смена'}},
-         {'id': 'hr.kartochki-iz-soobshchenij-musor',
+         {'id': 'hr.stand-kartochki-musor',
           'status': 'plan',
           'title': 'Механизм задач из канала плодит карточки-пустышки из любых слов владельца',
           'summary': 'В карте 10 карточек с кириллическими id вида pr.доделать-всё, '
@@ -271,7 +271,7 @@ CARDS = [{'id': 'hr.delete-door-covers-only-data-dirs',
           'источник': 'ревизия 12.10: 10 карточек заведены кодом из сообщений владельца, проверять в '
                       'них нечего',
           'глубина': {'уровень': 'мелкая', 'характер': 'разработка', 'кем': 'смена'}},
-         {'id': 'hr.shrink-blocks-to-fit',
+         {'id': 'hr.stand-shrink-blocks',
           'status': 'plan',
           'title': 'может вообще уменьшить блоки чтобы все влезли',
           'summary': 'Владелец 2026-10-19 в канал: «Надо на мобиле этот блок сделать удобнее, может '
@@ -282,7 +282,7 @@ CARDS = [{'id': 'hr.delete-door-covers-only-data-dirs',
           'источник': 'inbox:1792403902.175650281',
           'глубина': {'уровень': 'обычная', 'характер': 'разработка', 'кем': 'автомат'},
           'checklist': [{'label': 'Коммит 530989733f: три правки мобильной вёрстки', 'done': True}]},
-         {'id': 'hr.daemons-consolidate-29-to-18',
+         {'id': 'hr.stand-daemons-merge',
           'status': 'plan',
           'title': 'Слить демонов с 29 до 18: 6 строк живости в один тик, 3 памяти в два',
           'summary': 'По замеру О7 демоны запускаются 38 тыс. раз в неделю, часть запусков пустые '
@@ -292,7 +292,7 @@ CARDS = [{'id': 'hr.delete-door-covers-only-data-dirs',
           'источник': 'источник: замер О7 .tasks/hr.ocenka-obshchaya/замер.md — 38 тыс. запусков в '
                       'неделю, пустые product-health/task-closer/stack-watch --догнать/build-board',
           'глубина': {'уровень': 'крупная', 'характер': 'разработка', 'кем': 'смена'}},
-         {'id': 'hr.predikat-d-ne-sprashivaet-stoit-li-mutaciya',
+         {'id': 'hr.stand-predicate-trap',
           'status': 'plan',
           'title': 'Предикат класса D не спрашивает, стоит ли мутация в коде',
           'summary': 'Ревью безопасности 17.10 (F-sec-08): предикат судит, что мутация НАЗВАНА, а не '
@@ -308,9 +308,9 @@ CARDS = [{'id': 'hr.delete-door-covers-only-data-dirs',
                      'актуальность и так далее Всей карты». Карточка заведена КОДОМ '
                      '(scripts/map-from-message.py) в момент приёма сообщения — не вниманием сессии. '
                      'Разбор модели: задач 1, указаний 0, вопросов 0. Разобрать замысел и уточнить '
-                     'объём — при взятии задачи в работу. Дубль hr.keep-task-map-clean, слито 03.11.',
+                     'объём — при взятии задачи в работу. Дубль hr.stand-map-clean, слито 03.11.',
           'источник': 'inbox:1793650737.443883959',
-          'дубль_из': 'hr.keep-task-map-clean',
+          'дубль_из': 'hr.stand-map-clean',
           'глубина': {'уровень': 'обычная', 'характер': 'разработка', 'кем': 'автомат'}},
          {'id': 't.wip-report-sverka',
           'status': 'wip',
@@ -323,7 +323,7 @@ CARDS = [{'id': 'hr.delete-door-covers-only-data-dirs',
           'checklist': [{'label': 'Коммит 5c6f6a44fd: сверка отчёта о двенадцати дефектах с другого '
                                   'серве',
                          'done': True}]},
-         {'id': 'hr.soobshcheniya-o-limite-v-poryadok',
+         {'id': 'hr.stand-limit-messages',
           'status': 'plan',
           'title': 'Сообщения о лимите подписки привести в порядок',
           'summary': 'Из разбора 28.09 закрыто работой hr.vot-etot-kosyak-nado-reshit (17.10): первое '
@@ -335,7 +335,7 @@ CARDS = [{'id': 'hr.delete-door-covers-only-data-dirs',
           'источник': 'inbox:1790612614.835080334 — его правка 28.09 21:56',
           'blocked': 'его слово 28.09: «но это не сейчас точно, сейчас поднимай среду, а потом '
                      'приступай к спеке по cms» — делается в свободное время, а не в очередь',
-          'слито_из': ['hr.привести-эти-сообщения-в-порядок'],
+          'слито_из': ['hr.стенд-слитая-карточка'],
           'глубина': {'уровень': 'обычная', 'характер': 'починка', 'кем': 'смена'},
           'checklist': [{'label': 'Коммит e1f6edc278: правка памяти с панели', 'done': True},
                         {'label': 'Разбор записей о лимите завершён', 'done': True}]}]
@@ -344,23 +344,23 @@ EXPECTED = {
     "hr.delete-door-covers-only-data-dirs": 1,       # защита удаления
     "hr.consent-judge-addressed-answers": 1,         # согласие на выкат
     "hr.panel-ne-ubiraet-prosrochennye-tokeny": 1,   # имя файла = ключ
-    "hr.owner-messages-delivery-chaos": 2,           # задержка сообщений
-    "hr.agent-session-vanished-0211": 2,             # пропавшая сессия
+    "hr.stand-delivery-delay": 2,           # задержка сообщений
+    "hr.stand-session-vanished": 2,             # пропавшая сессия
     "hr.alert-heartbeat-watch-dead-beta": 2,         # красная тревога
     "hr.status-report-nested-format": 3,             # просил сам
     "hr.systematic-safe-disk-cleanup": 3,            # диск; ловушка «удаляй»
     "hr.track-systematically": 3,                    # ловушка «токены ценные»
-    "hr.keep-task-map-clean": 3,                     # выжившая, слито_из
-    "hr.hackathon-mode": 3,                          # зонтик (дочерние)
+    "hr.stand-map-clean": 3,                     # выжившая, слито_из
+    "hr.stand-fast-mode": 3,                          # зонтик (дочерние)
     "hr.uborka-diska-bez-samotesta": 4,              # диск; ловушка «ключ»
-    "hr.kartochki-iz-soobshchenij-musor": 4,         # ловушки «сообщений», «портят»
-    "hr.shrink-blocks-to-fit": 5,                    # мелочь интерфейса
-    "hr.daemons-consolidate-29-to-18": 5,            # оптимизация
-    "hr.predikat-d-ne-sprashivaet-stoit-li-mutaciya": 5,  # ловушка «безопасности»
+    "hr.stand-kartochki-musor": 4,         # ловушки «сообщений», «портят»
+    "hr.stand-shrink-blocks": 5,                    # мелочь интерфейса
+    "hr.stand-daemons-merge": 5,            # оптимизация
+    "hr.stand-predicate-trap": 5,  # ловушка «безопасности»
     "hr.weed-duplicate-stale-map-items": 5,          # дубль_из — не поднимается
 }
 WIP = "t.wip-report-sverka"                          # «сейчас делаем», синтетическая
-BLOCKED = "hr.soobshcheniya-o-limite-v-poryadok"     # блокер, свободных пунктов нет
+BLOCKED = "hr.stand-limit-messages"     # блокер, свободных пунктов нет
 BY_ID = {c["id"]: c for c in CARDS}
 
 # Мелочь интерфейса со словом «безопасность» — такой реальной карточки в карте
@@ -430,9 +430,9 @@ for м in order:
         check(want in м["почему"], f"{м['id']}: «почему» называет {want}",
               f"{м['id']}: «почему» = {м['почему']!r}, нет «{want}»")
 dup = "hr.weed-duplicate-stale-map-items"
-check(dup in ids and ids.index(dup) > ids.index("hr.keep-task-map-clean"),
+check(dup in ids and ids.index(dup) > ids.index("hr.stand-map-clean"),
       "дубль стоит ниже карточки, в которую слит",
-      f"дубль {dup} не ниже выжившей hr.keep-task-map-clean: порядок {ids}")
+      f"дубль {dup} не ниже выжившей hr.stand-map-clean: порядок {ids}")
 
 # ── 3. свежесть разводит карточки ОДНОГО класса ───────────────────────────
 print("── свежесть внутри класса ──")
@@ -443,7 +443,7 @@ check(both == [fresh, old], "класс 3: свежее сообщение (03.1
 
 # ── 4. слово владельца сильнее разницы классов ────────────────────────────
 print("── слово владельца ──")
-small = BY_ID["hr.shrink-blocks-to-fit"]
+small = BY_ID["hr.stand-shrink-blocks"]
 word_id = small["источник"].split(":", 1)[1]
 top = [м["id"] for м in places(stand(BY_ID["hr.delete-door-covers-only-data-dirs"], small),
                                attention={word_id: "в первую очередь"})]

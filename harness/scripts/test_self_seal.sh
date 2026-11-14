@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Пробы печати эталона слоя 1 (спека hr.standards-and-policy §5.4, В-1, В-4 — варианты (а)).
+# Пробы печати эталона слоя 1 (спека §5.4, В-1, В-4 — варианты (а)).
 #
 # self-seal — root-скрипт с NOPASSWD: любой его довод, кроме каталога выкладки, —
 # запись root куда угодно. Поэтому пробы держат прежде всего ОТКАЗЫ: каждый
@@ -21,7 +21,8 @@
 #     <пакет>/harness/self/MANIFEST.sha256 и печатает строку
 #     «меняются личность/стандарты: <файлы>», если слой 1 разошёлся с прошлым.
 #   update.py: _разложить_пакет() после раскладки зовёт
-#     sudo -n /usr/local/lib/harness/self-seal <пакет>; отказ sudo — молча.
+#     sudo -n /usr/local/lib/harness/self-seal <пакет>; отказ sudo — в выводе
+#     молча, но ровно один сигнал писателю тревог (дверь HARNESS_ALERT_TASK).
 #   USTANOVIT.sh пакета: правило NOPASSWD на self-seal в записать_sudoers и
 #     установка self-seal root 0755.
 #
@@ -29,7 +30,8 @@
 #   SELF_SEAL_SH   испытуемый self-seal (по умолчанию — self-seal.sh рядом с пробой)
 # Механизмы ищутся РЯДОМ с пробой: из копии дерева зовётся сама проба.
 # sudo не зовётся: в update.py он подставной через PATH; живые /etc и
-# /usr/local не трогаются.
+# /usr/local не трогаются. Писатель тревог — тоже стенда: без двери отказ
+# подставного sudo заводил живую карточку update:self-seal-refused.
 #
 #   bash scripts/test_self_seal.sh
 # Код возврата: 0 — все случаи прошли, 1 — есть упавший.
@@ -310,7 +312,12 @@ echo "sudo: a password is required" >&2
 exit 1
 SUDO
 chmod +x "$UPD/bin/sudo"
-# Раскладчик, пересборка и доустановка подставные: зовётся только та половина
+cat > "$UPD/bin/alert" <<'ALERT'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$UPD_ALERTS"
+ALERT
+chmod +x "$UPD/bin/alert"
+# Раскладчик, пересборки и доустановка подставные: зовётся только та половина
 # _разложить_пакет, что решает про печать. sudo по абсолютному пути тоже уходит
 # в подставной — живой sudo из пробы не зовётся никогда.
 cat > "$UPD/driver.py" <<'DRIVER'
@@ -353,6 +360,8 @@ def run(*args, **kwargs):
 subprocess.run = run
 module._run_layout = fake_layout
 module._save_seed_view = lambda *a, **k: None
+# Живая пересборка переписала бы .claude/agents дерева, где идёт проба, по живому эталону.
+module._пересобрать_карточки = lambda: note("карточки") or False
 module.пересобрать_производные = lambda *a, **k: []
 try:
     result = repr(module._разложить_пакет())
@@ -361,23 +370,27 @@ except Exception as error:  # noqa: BLE001
 note("итог " + result)
 DRIVER
 
-update_run() { # $1=код подставного sudo → след в $UPD/trace, вывод в $UPD/out
-    : > "$UPD/trace"
+update_run() { # $1=код подставного sudo → след в $UPD/trace, сигналы в $UPD/alerts, вывод в $UPD/out
+    : > "$UPD/trace"; : > "$UPD/alerts"
     PATH="$UPD/bin:$PATH" HARNESS_STARTER="$UPD_PKG" HARNESS_LOG_DIR="$UPD/log" HARNESS_TG_SEND="" \
+        HARNESS_ALERT_TASK="$UPD/bin/alert" UPD_ALERTS="$UPD/alerts" \
         UPD_TRACE="$UPD/trace" FAKE_SUDO_RC="$1" \
         python3 "$UPD/driver.py" "$HERE/update.py" "$UPD/trace" "$UPD/bin/sudo" > "$UPD/out" 2>&1
 }
-EXPECTED_TRACE="раскладка|sudo -n /usr/local/lib/harness/self-seal $UPD_PKG|итог (True, [])"
+EXPECTED_TRACE="раскладка|sudo -n /usr/local/lib/harness/self-seal $UPD_PKG|карточки|итог (True, [])"
 
 update_run 1
 case_check "нет права: раскладка, затем sudo -n self-seal <пакет>, update.py не падает" \
     "$EXPECTED_TRACE" "$(paste -sd'|' "$UPD/trace")"
 case_check "нет права: update.py молчит об этом" "молчит" \
     "$(grep -qiE 'sudo|self-seal|password|эталон' "$UPD/out" && head -c 200 "$UPD/out" || echo молчит)"
+case_check "нет права: ровно один сигнал, и он в писатель тревог стенда" "1|update:self-seal-refused" \
+    "$(grep -c '' "$UPD/alerts")|$(grep -o 'update:self-seal-refused' "$UPD/alerts" | head -1)"
 
 update_run 0
 case_check "право есть: тот же вызов, итог раскладки (True, [])" \
     "$EXPECTED_TRACE" "$(paste -sd'|' "$UPD/trace")"
+case_check "право есть: сигналов нет" 0 "$(grep -c '' "$UPD/alerts")"
 
 echo "── USTANOVIT.sh: право NOPASSWD на self-seal через записать_sudoers ──"
 if [ -f "$INSTALLER" ]; then

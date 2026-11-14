@@ -181,14 +181,14 @@ cat > "$T/bin/claude" <<'SH'
 printf 'args=%s|token=%s\n' "$*" "${CLAUDE_CODE_OAUTH_TOKEN:-нет}"
 SH
 chmod +x "$T/bin/claude"
-# Подставной носитель на месте настоящего (hr.standards-and-policy §4.4, пути
+# Подставной носитель на месте настоящего (§4.4, пути
 # 1 и 2): смена обязана подниматься через claude-run.sh, иначе встаёт без
 # личности. Голый claude в PATH остаётся — по нему видно, что обёртки не было.
 cat > "$SM/scripts/claude-run.sh" <<'SH'
 #!/usr/bin/env bash
 printf 'носитель: %s|token=%s\n' "$*" "${CLAUDE_CODE_OAUTH_TOKEN:-нет}"
 SH
-# Обёртка аккаунта стоит перед носителем (hr.switch-account): подставная только передаёт управление.
+# Обёртка аккаунта стоит перед носителем: подставная только передаёт управление.
 printf '#!/usr/bin/env bash\nexec "$@"\n' > "$SM/scripts/as-account.sh"
 CARRIER_CMD="bash $SM/scripts/claude-run.sh --класс оркестратор"
 WRAPPED_CMD="bash $SM/scripts/as-account.sh $CARRIER_CMD"

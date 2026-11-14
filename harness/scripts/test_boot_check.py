@@ -655,6 +655,13 @@ def section_busy_real_data(tmp: Path, port: int) -> None:
         rc, word = busy()
         check("ночные ворота nightly-gates.sh и их gates.sh --всё — «свободна», код 0",
               (0, "свободна"), (rc, word))
+        fakes.stop()
+
+        # Недельный прогон мутаций держит: обрыв теряет неделю замера, а не прогон.
+        fakes.bash("/project/harness/demons/nightly-mutations.sh")
+        rc, word = busy()
+        check("идёт недельный прогон nightly-mutations.sh — «занята», код 1",
+              (1, True), (rc, word.startswith("занята:")))
     finally:
         fakes.stop()
 

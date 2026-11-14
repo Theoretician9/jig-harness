@@ -46,6 +46,7 @@
     python3 scripts/acceptance.py --применить  # + записать исходы в карту
     python3 scripts/acceptance.py --selftest
     python3 scripts/acceptance.py --мутации-задачи <id>  # шаг «мутации»: бумага .tasks/<id>/мутации.log
+    python3 scripts/acceptance.py --мутации-задачи <id1>,<id2>  # пачка: один заход в срез
     python3 scripts/acceptance.py --кандидаты  # «сделано, но не заявлено»: только список
 Код возврата: 0 — прогон состоялся, 1 — есть провалы.
 """
@@ -565,16 +566,38 @@ QUEUE_BUSY_RC = 75
 def мутации_задачи(ид: str, корень: Path, прибор: list[str], narrow: bool = True) -> int | None:
     """Прогнать мутации механизмов задачи в её бумагу. Дыр N; None — механизмов
     нет или история не прочитана (бумага тогда не пишется)."""
-    mechanisms = механизмы_задачи(ид, корень)
+    return мутации_пачки([ид], корень, прибор, narrow)[ид]
+
+
+def _batch_lines(ids: list[str], корень: Path, файл: str) -> str | None:
+    """Строки механизма для прогона пачки: объединение строк её задач. None — хоть
+    одна задача сузить не даёт, механизм гонится целиком."""
+    lines: set[int] = set()
+    for ид in ids:
+        own = task_changed_lines(ид, корень, файл)
+        if own is None:
+            return None
+        lines |= {int(n) for n in own.split(",")}
+    return ",".join(map(str, sorted(lines)))
+
+
+def мутации_пачки(ids: list[str], корень: Path, прибор: list[str],
+                  narrow: bool = True) -> dict[str, int | None]:
+    """Мутации пачки задач: общий механизм гонится ОДИН раз (по строкам всех её
+    задач), бумага каждой задачи — только её механизмы. {id: дыр | None}."""
+    по_задаче = {ид: механизмы_задачи(ид, корень) for ид in ids}
     head = _git_lines(корень, "rev-parse", "HEAD")
-    if not mechanisms or not head:
-        return None
-    покраснели = дыр = 0
-    куски = []
-    for файл in mechanisms:
+    if not head:
+        return dict.fromkeys(ids)
+    чьи: dict[str, list[str]] = {}
+    for ид, mechanisms in по_задаче.items():
+        for файл in mechanisms or ():
+            чьи.setdefault(файл, []).append(ид)
+    прогоны = {}
+    for файл, owners in чьи.items():
         # Шаг задачи гоняет мутации ИЗМЕНЁННЫХ задачей строк; полный набор — ночью.
         env = dict(os.environ)
-        lines = task_changed_lines(ид, корень, файл) if narrow else None
+        lines = _batch_lines(owners, корень, файл) if narrow else None
         if lines:
             env["MUT_ONLY_LINES"] = lines
         else:
@@ -586,17 +609,24 @@ def мутации_задачи(ид: str, корень: Path, прибор: lis
         вывод = ответ.stdout + ответ.stderr
         итог = ИТОГ_ПРИБОРА.findall(вывод)
         # Прибор без итога ничего не доказал — это дыра, а не тишина.
-        к, д = (int(итог[-1][0]), int(итог[-1][1])) if итог else (0, 1)
-        покраснели += к
-        дыр += д
-        куски.append(f"--- {файл}\n{вывод}")
+        прогоны[файл] = (вывод, *((int(итог[-1][0]), int(итог[-1][1])) if итог else (0, 1)))
         for line in вывод.splitlines():
             if "правка без мутаций" in line:
                 print(line.strip())
+    return {ид: (_write_paper(ид, корень, head[0], {м: прогоны[м] for м in mechanisms})
+                 if mechanisms else None)
+            for ид, mechanisms in по_задаче.items()}
+
+
+def _write_paper(ид: str, корень: Path, head: str, прогоны: dict) -> int:
+    """Бумага задачи из прогонов её механизмов; отдаёт дыр."""
+    покраснели = sum(к for _, к, _ in прогоны.values())
+    дыр = sum(д for _, _, д in прогоны.values())
+    куски = [f"--- {файл}\n{вывод}" for файл, (вывод, _, _) in прогоны.items()]
     итог = f"=== мутации задачи {ид}: покраснели {покраснели}, дыр {дыр} ==="
     журнал = журнал_мутаций(корень, ид)
     журнал.parent.mkdir(parents=True, exist_ok=True)
-    журнал.write_text("\n".join([f"коммит {head[0]}"] + куски + [итог]) + "\n", encoding="utf-8")
+    журнал.write_text("\n".join([f"коммит {head}"] + куски + [итог]) + "\n", encoding="utf-8")
     return дыр
 
 
@@ -633,22 +663,31 @@ def _mutation_probe() -> list[str]:
     return shlex.split(os.environ.get("HARNESS_MUTATION_PROBE") or "") or ПРИБОР_МУТАЦИЙ
 
 
-def _task_mutations(ид: str) -> int:
-    """Шаг «мутации» задачи: бумага .tasks/<id>/мутации.log. Код 0 — дыр 0, 1 — дыры,
-    2 — история не прочитана. Тревог не заводит: дыру чинит тот же исполнитель."""
-    if механизмы_задачи(ид, КОРЕНЬ) is None:
+def _task_mutations(ids: list[str]) -> int:
+    """Шаг «мутации» пачки задач: бумага .tasks/<id>/мутации.log каждой. Код 0 — дыр 0,
+    1 — дыры, 2 — история не прочитана. Тревог не заводит: дыру чинит тот же исполнитель."""
+    unread = [ид for ид in ids if механизмы_задачи(ид, КОРЕНЬ) is None]
+    for ид in unread:
         print(f"мутации задачи {ид}: история не прочитана (git молчит)")
+    if unread:
         return 2
     try:
-        дыр = мутации_задачи(ид, КОРЕНЬ, _mutation_probe())
+        итог = мутации_пачки(ids, КОРЕНЬ, _mutation_probe())
     except QueueBusy as busy:
-        print(f"мутации задачи {ид}: не прогнано: очередь среза занята — {busy}")
+        print(f"мутации задач {','.join(ids)}: не прогнано: очередь среза занята — {busy}")
         return QUEUE_BUSY_RC
-    if дыр is None:
-        print(f"мутации задачи {ид}: механизмов с записями нет — шаг пуст")
-        return 0
-    print(f"мутации задачи {ид}: дыр {дыр}, бумага {журнал_мутаций(КОРЕНЬ, ид)}")
-    return 1 if дыр else 0
+    for ид, дыр in итог.items():
+        if дыр is None:
+            print(f"мутации задачи {ид}: механизмов с записями нет — шаг пуст")
+        else:
+            print(f"мутации задачи {ид}: дыр {дыр}, бумага {журнал_мутаций(КОРЕНЬ, ид)}")
+    return 1 if any(итог.values()) else 0
+
+
+def _batch_ids() -> list[str]:
+    """id пачки из довода --мутации-задачи: через запятую, без повторов."""
+    довод = sys.argv[sys.argv.index("--мутации-задачи") + 1]
+    return list(dict.fromkeys(и for и in довод.split(",") if и))
 
 
 def _ночные_мутации() -> int:
@@ -2068,7 +2107,7 @@ def main() -> int:
     if "--мутации-задачи" in sys.argv and not os.environ.get("HARNESS_IN_CHECKS_SLICE"):
         # Под потолок среза идёт только настоящий прогон мутаций: пустой набор
         # (нет механизмов, git молчит) дёшев и очередь не занимает.
-        if механизмы_задачи(sys.argv[sys.argv.index("--мутации-задачи") + 1], КОРЕНЬ) != []:
+        if any(механизмы_задачи(ид, КОРЕНЬ) != [] for ид in _batch_ids()):
             door = str(Path(__file__).resolve().parent / "run-in-checks-slice.sh")
             os.execv("/bin/bash", ["/bin/bash", door, sys.executable, str(Path(__file__).resolve()), *sys.argv[1:]])
     if "--selftest" in sys.argv:
@@ -2083,7 +2122,7 @@ def main() -> int:
     if "--мутации-долга" in sys.argv:
         return _ночные_мутации()
     if "--мутации-задачи" in sys.argv:
-        return _task_mutations(sys.argv[sys.argv.index("--мутации-задачи") + 1])
+        return _task_mutations(_batch_ids())
     if "--кандидаты" in sys.argv:
         # «Сделано, но не заявлено»: только список, статус не меняется (И-4).
         return _print_closing_candidates()

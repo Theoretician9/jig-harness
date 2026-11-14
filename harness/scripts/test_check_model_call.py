@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Проба гейта check-model-call.py: модель зовут только через носитель.
 
-Спека hr.standards-and-policy §3.1, §4.5. Гейт держал одно правило — `claude -p`
+Спека §3.1, §4.5. Гейт держал одно правило — `claude -p`
 в .sh без --strict-mcp-config. Второе правило: вызов модели МИМО
 scripts/claude-run.sh — красный в .sh (словом команды, полным путём, после
 exec/timeout/env, через npx), в .py (список с первым элементом «claude» или

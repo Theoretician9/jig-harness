@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Пробы носителя scripts/claude-run.sh (спека hr.standards-and-policy §4.3).
+# Пробы носителя scripts/claude-run.sh (спека §4.3).
 #
 # Носитель — единственное место, где код зовёт claude как модель: он собирает
 # личность класса сборщиком и отдаёт файл в --append-system-prompt-file. Беда,

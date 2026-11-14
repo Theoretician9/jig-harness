@@ -279,8 +279,83 @@ def записи_живой_проверки(сборка: Path) -> list:
     return []
 
 
-def проверить(сборка: Path, пары: list) -> list:
+class ОтказКарты(Exception):
+    """Карта проекта не прочитана: id карточек неизвестны, судить нечем."""
+
+
+def _id_карточек(путь: Path) -> set:
+    """Все `id` с точкой из YAML карты (слои и линии без точки — не карточки)."""
+    найдены = set()
+
+    def обойти(узел) -> None:
+        if isinstance(узел, dict):
+            if isinstance(узел.get("id"), str) and "." in узел["id"]:
+                найдены.add(узел["id"])
+            вложенные = list(узел.values())
+        elif isinstance(узел, list):
+            вложенные = узел
+        else:
+            return
+        for вложенный in вложенные:
+            обойти(вложенный)
+
+    обойти(yaml.safe_load(путь.read_text(encoding="utf-8")))
+    return найдены
+
+
+def карточки_проекта(сборка: Path, пакет: Path, проект: Path) -> set:
+    """id карточек ЭТОГО проекта: текущая карта, минус id заготовки карты.
+
+    Архив карты не судится: он втрое больше карты и тянул бы в замок тысячи
+    давно закрытых id; архив — отдельной карточкой. Заготовку карты
+    (hr.accept, …) несёт сама сборка — её id у каждой копии свои собственные.
+    Нет карты или она не читается — ОТКАЗ, а не пустое множество: пустое
+    множество судило бы «чисто» ([[unreadable-source-turns-check-green]]).
+    """
+    карта = проект / "dev-map.yaml"
+    try:
+        ид = _id_карточек(карта)
+        for заготовка in (сборка / "harness" / "dev-map.yaml", пакет / "harness" / "dev-map.yaml"):
+            if заготовка.is_file():
+                ид -= _id_карточек(заготовка)
+                break
+    except (OSError, yaml.YAMLError) as отказ:
+        raise ОтказКарты(f"карта проекта не прочитана ({отказ})") from отказ
+    if not ид:
+        raise ОтказКарты(f"в {карта} нет ни одной карточки")
+    return ид
+
+
+def образец_карточек(карточки: set) -> re.Pattern:
+    """id карточки целым словом: id длиннее карточного (которого в карте нет) — не наш."""
+    return re.compile(r"(?<![\w.-])(?:" + "|".join(
+        re.escape(и) for и in sorted(карточки, key=len, reverse=True)) + r")(?![\w-])")
+
+
+def найти_карточки_в_дереве(сборка: Path, карточки: set) -> list:
+    """Строки дерева с id карточки проекта; комментарий — тоже находка.
+
+    Ссылка «спека hr.X» ведёт в .tasks/hr.X/, которого в сборке нет: у копии
+    она мертва, а настоящая связь кода с задачей — трейлер Dev-Map в git log.
+    """
+    образец = образец_карточек(карточки)
+    находки = []
+    for файл in sorted(сборка.rglob("*")):
+        if not файл.is_file() or ".git" in файл.parts or файл.suffix.lower() in ДВОИЧНЫЕ:
+            continue
+        try:
+            текст = файл.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        for номер, строка in enumerate(текст.splitlines(), 1):
+            for ид in dict.fromkeys(образец.findall(строка)):
+                находки.append(f"{файл.relative_to(сборка)}:{номер}: карточка={ид}")
+    return находки
+
+
+def проверить(сборка: Path, пары: list, карточки: frozenset = frozenset()) -> list:
     return (найти_в_дереве(сборка, пары) + записи_живой_проверки(сборка)
+            + (найти_карточки_в_дереве(сборка, карточки) if карточки else [])
             + найти_в_истории(сборка, пары))
 
 
@@ -314,7 +389,12 @@ def main() -> int:
     проект = Path(довод("--проект") or паспорт.get("PROJECT_DIR") or str(КОРЕНЬ))
     пары = образцы(паспорт, пакет, проект)
     try:
-        находки = проверить(сборка, пары)
+        карточки = карточки_проекта(сборка, пакет, проект)
+    except ОтказКарты as отказ:
+        print(f"[чистота] {отказ} — судить нечем", file=sys.stderr)
+        return 2
+    try:
+        находки = проверить(сборка, пары, frozenset(карточки))
     except ОтказGit as отказ:
         # Молчание git не имеет права выглядеть чистотой: «судить нечем» —
         # это код 2, его же читает publish.sh как отказ публикации.
@@ -439,6 +519,10 @@ def самотест() -> int:
         проект.mkdir()
         subprocess.run(["git", "-C", str(проект), "init", "-q", "-b", "master"], check=True)
         (проект / "ф").write_text("x\n", encoding="utf-8")
+        # Карта нужна замку карточек: без неё гейт отвечает кодом 2.
+        (проект / "dev-map.yaml").write_text(
+            "version: 1\nlines:\n  - id: harness\n    directions:\n"
+            "      - id: hr.stend-samotesta\n        status: wip\n", encoding="utf-8")
         subprocess.run(["git", "-C", str(проект), "add", "-A"], check=True)
         subprocess.run(["git", "-C", str(проект), "-c", "user.name=t",
                         "-c", "user.email=хозяин@подставной.рф", "commit", "-qm", "п"], check=True)

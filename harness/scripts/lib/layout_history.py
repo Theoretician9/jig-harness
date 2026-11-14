@@ -29,11 +29,14 @@ SEED_VIEW_LOG = "раскладка-затравка.json"
 CONSENT_LOG = "confirmations.jsonl"
 CONSENT_MAX_AGE_DAYS = 7
 
-# --branches --tags, а не --all: --all тянет refs/remotes/* и stash, чьи файлы
-# раскладчик в проект не клал. -z и core.quotepath=off: путь приходит дословно,
-# без кавычек и восьмеричных escape для кириллицы. --no-abbrev: сверка идёт по
-# полному blob. --no-renames: переименование иначе скрыло бы старый путь.
-LOG_ARGS = ("-c", "core.quotepath=off", "log", "--branches", "--tags", "--no-renames",
+# HEAD и теги, а не --branches/--all: история пакета — то, что достижимо из
+# коммита, на котором стоит пакет, и из релизных тегов. Ветка «страховка»
+# (`update.py --сбросить-свои` кладёт в неё свои коммиты копии) недостижима
+# из HEAD, и её файлы не становятся «нашими»; --all тянет ещё refs/remotes/* и
+# stash. -z и core.quotepath=off: путь приходит дословно, без кавычек и
+# восьмеричных escape для кириллицы. --no-abbrev: сверка идёт по полному blob.
+# --no-renames: переименование иначе скрыло бы старый путь.
+LOG_ARGS = ("-c", "core.quotepath=off", "log", "HEAD", "--tags", "--no-renames",
             "--raw", "--no-abbrev", "-z", "--format=%x01%H")
 
 # \b слеп к кириллице, поэтому границы слова берутся классом букв.
@@ -111,6 +114,14 @@ def _git(package_root, *args):
     return subprocess.run(["git", "-C", str(package_root), *args], capture_output=True)
 
 
+# Своё копии: коммиты локальных веток, которых нет ни в HEAD, ни в тегах, ни в remote-ветках
+# (после `update.py --сбросить-свои` они лежат в ветке-страховке). Имя ветки не судится.
+# HEAD не берётся: на мастерской источника он держит незапушенное, и тогда не снялось бы
+# ничего удалённое.
+OWN_ARGS = ("-c", "core.quotepath=off", "log", "--branches", "--not", "HEAD", "--tags",
+            "--remotes", "--no-renames", "--name-only", "-z", "--format=")
+
+
 def _parse_log(raw: bytes, rules: Rules) -> History:
     """Один проход вперёд: коммиты разделены \\x01, поля внутри — \\0, пары «мета, путь»."""
     history = History()
@@ -148,6 +159,22 @@ def read_history(package_root, rules: Rules):
     history = _parse_log(proc.stdout, rules)
     history.shallow = shallow.stdout.strip() == b"true"
     return history
+
+
+def own_paths(package_root, rules: Rules):
+    """Пути проекта, которых касались свои коммиты копии; NoHistory — git не ответил."""
+    if str(package_root) == "-":
+        return NoHistory("пакет без истории")
+    try:
+        proc = _git(package_root, *OWN_ARGS)
+    except OSError as error:
+        return NoHistory(error.strerror or str(error))
+    if proc.returncode != 0:
+        lines = proc.stderr.decode("utf-8", "replace").strip().splitlines()
+        return NoHistory(lines[0] if lines else f"git код {proc.returncode}")
+    found = (project_path(raw.decode("utf-8", "surrogateescape"), rules)
+             for raw in proc.stdout.split(b"\0") if raw)
+    return {path for path in found if path}
 
 
 def ours(history: History, rel: str, blob: str):

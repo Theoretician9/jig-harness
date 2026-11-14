@@ -89,7 +89,7 @@ MIN = 60
 HOUR = 3600
 CPUS = 4
 BASE = int(time.time()) // MIN * MIN
-# Пороги мощности по доле CPU за интервал замера (hr.speed-uses-whole-server): ключи harness.conf
+# Пороги мощности по доле CPU за интервал замера: ключи harness.conf
 # стенда. Кража — по-прежнему «мощность.кража_выше_pct» данных (15).
 CPU_BUSY_MAX = 90
 CPU_BUSY_QUIET = 75
@@ -637,7 +637,7 @@ def steal_sign():
         check("кража 10 мин — шаг вниз П = 5", power_ceiling(st) == 5, power_ceiling(st))
 
 
-# ── мощность по доле CPU, а не по loadavg (hr.speed-uses-whole-server) ─────────
+# ── мощность по доле CPU, а не по loadavg ─────────
 # Слово владельца 12.11: «использовать сервер целиком». Замер: loadavg 17,6 на 8 ядрах при CPU
 # занят 58 % — очередь коротких процессов, не загрузка. Мощность судится долей занятого CPU
 # (всё, кроме idle и iowait) за интервал между двумя чтениями /proc/stat, плюс iowait и steal

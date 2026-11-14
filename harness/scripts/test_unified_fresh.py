@@ -26,15 +26,21 @@ OUT_NAME = "ХАРНЕС-ОДНИМ-ФАЙЛОМ.md"
 
 
 def unified_dir() -> Path:
-    """В пакете UNIFIED — в корне пакета, в проекте — в корне проекта (его кладёт раскладка)."""
+    """Главы, которые судятся: рядом с пробой, иначе в каталоге пакета.
+
+    Проба в пакете лежит в harness/scripts — главы в корне пакета; в проекте —
+    в scripts/, и главы берутся у пакета по конфигу. Пакет копии — публичная
+    сборка: там главы перенесены в sluzhebnoe/UNIFIED (public-build.yaml,
+    «перенести»), и без этой ветки проба на копии отвечала «судить нечего».
+    """
     if os.environ.get("UNIFIED_DIR"):
         return Path(os.environ["UNIFIED_DIR"])
-    beside = HERE.parent.parent / "UNIFIED"
-    if (beside / "BUILD.py").is_file():
-        return beside
     sys.path.insert(0, str(HERE / "lib"))
     import config
-    return config.katalog_paketa() / "UNIFIED"
+    roots = (HERE.parent.parent, config.katalog_paketa())
+    places = [place for root in roots
+              for place in (root / "UNIFIED", root / "sluzhebnoe" / "UNIFIED")]
+    return next((place for place in places if (place / "BUILD.py").is_file()), places[-1])
 
 
 def main() -> int:

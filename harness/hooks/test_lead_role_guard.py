@@ -30,6 +30,11 @@ HERE = Path(__file__).resolve().parent
 GUARD = Path(os.environ.get("HARNESS_LEAD_ROLE_GUARD") or HERE / "lead_role_guard.py")
 ROLES = HERE.parent.parent / "harness" / "config" / "helper-roles.yaml"
 JOURNAL = "роли-помощников.jsonl"
+# Каталог журналов установки — у общего загрузчика, как у сторожа: зашитый
+# /var/log/harness краснил пробу на копии с другим LOG_DIR (стенд 14.11.2026).
+sys.path.insert(0, str(HERE.parent / "lib"))
+import config  # noqa: E402
+LOGS = config.log_dir().rstrip("/")
 
 checked = failed = 0
 
@@ -96,8 +101,8 @@ with tempfile.TemporaryDirectory() as tmp:
                 "git -C /tmp/x show HEAD",
                 f"echo решение >> {J}",
                 f"cat >> {J} <<'EOF'\nrm -rf x; touch y && git push\nEOF",
-                "setsid nohup bash scripts/gates-snapshot.sh > /var/log/harness/g.log 2>&1 < /dev/null &",
-                "tail -3 /var/log/harness/g.log; date"]:
+                f"setsid nohup bash scripts/gates-snapshot.sh > {LOGS}/g.log 2>&1 < /dev/null &",
+                f"tail -3 {LOGS}/g.log; date"]:
         check(f"можно: {cmd.splitlines()[0][:50]}", 0, code(bash(LEAD, cmd)))
     for cmd in ["git commit -m x", "git push origin master", "rm -rf /tmp/x", "ls; rm x",
                 "echo hi > file.txt", f"echo hi > {J}.bak", "sed -i s/a/b/ f", "python3 -c 'print(1)'",
@@ -121,7 +126,7 @@ with tempfile.TemporaryDirectory() as tmp:
           code(call(LEAD, "Agent", subagent_type="general-purpose", model="sonnet", prompt="p")))
     check("без типа — отказ", 2, code(call(LEAD, "Agent", model="sonnet", prompt="p")))
 
-    # hr.per-helper-code-copies, Т6 (спека §3, Р-3): очередь слияния и счётчик трения
+    # Т6 (спека §3, Р-3): очередь слияния и счётчик трения
     # управляющему разрешены ДАННЫМИ helper-roles.yaml → скрипты; ручной merge — нет.
     # Поломка, что оставила бы зелёной: разрешить git merge/rebase целиком — ловят отказы ниже.
     print("управляющий: очередь слияния")

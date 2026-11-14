@@ -5,7 +5,8 @@
 (harness/config/process-library.json и .yaml) и поля «механизмы» с mechanisms.yaml:
   источник без записи   -> «без записи»      (демон, хук, строка крона, юнит, расписание);
   запись без источника  -> «мёртвая запись»  (нет расписания, нет файла, нет юнита);
-  механизм не в реестре -> «нет механизма».
+  механизм не в реестре -> «нет механизма»;
+  команда задания крона без бита исполнения -> «не исполняется».
 Запись со статусом «снят …» судья не трогает: её файлов и расписания уже нет.
 
 Применение:
@@ -19,6 +20,7 @@
 """
 import argparse
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -26,6 +28,9 @@ import sys
 from pathlib import Path
 
 import yaml
+
+sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
+import config  # noqa: E402
 
 # Слово командной строки либо разделитель команд: пути судятся по словам, а не по подстроке.
 CRON_TOKEN = re.compile(r"[;&|]+|[^\s;&|]+")
@@ -112,10 +117,11 @@ def git_hook_files(project: Path) -> set:
     return found
 
 
-def conf_value(cfg: Path, key: str) -> str:
-    match = re.search(rf'(?m)^{re.escape(key)}=["\']?([^"\'\n#]*)', (cfg / "harness.conf").read_text(encoding="utf-8")) \
-        if (cfg / "harness.conf").is_file() else None
-    return match.group(1).strip() if match else ""
+def live_conf() -> dict:
+    """Живой harness.conf — тот, по которому доустановка решает, ставить ли задание
+    с «если_задан». Образец в harness/config пуст по замыслу: судья по нему молча
+    оправдывал задание без строки крона, когда ключ задан вживую (14.11.2026)."""
+    return config.из_файла(config.путь_harness_conf())
 
 
 def state_source_flaw(source, all_units: set):
@@ -141,6 +147,7 @@ def judge(root: Path, cron_lines: list, unit_lines: list, project_dir: str) -> t
     ids = set(by_id)
     owned_files = {f for r in records for f in r.get("файлы", [])}
     bad = []
+    conf = live_conf()
 
     def violation(kind, source, key):
         bad.append(f"НАРУШЕНИЕ {kind}: {source} :: {key}" + (LIVE_NOTE if source in LIVE_SOURCES else ""))
@@ -224,9 +231,14 @@ def judge(root: Path, cron_lines: list, unit_lines: list, project_dir: str) -> t
             violation("мёртвая запись", rec["id"], ".claude/settings.json")
         # «если_задан»: строка крона ставится только при заполненном ключе — без него её отсутствие законно.
         gate_key = (schedule.get(rec["id"]) or {}).get("если_задан")
-        off_by_conf = bool(gate_key) and not conf_value(cfg, gate_key)
+        off_by_conf = bool(gate_key) and not conf.get(gate_key)
         if rec.get("запуск") == "крон" and not off_by_conf and not live_cron.intersection({rec["id"], *rec.get("файлы", [])}):
             violation("мёртвая запись", rec["id"], "crontab")
+        # Крон зовёт команду напрямую: без бита исполнения строка стоит, а каждый тик — Permission denied.
+        command = str((schedule.get(rec["id"]) or {}).get("команда", "")).split()[:1]
+        if rec.get("запуск") == "крон" and command and (root / command[0]).is_file() \
+                and not os.access(root / command[0], os.X_OK):
+            violation("не исполняется", rec["id"], command[0])
         for mech in rec.get("механизмы", []):
             if mech not in mechanisms:
                 violation("нет механизма", rec["id"], mech)

@@ -26,6 +26,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import accounts  # noqa: E402
+import config  # noqa: E402
 import events  # noqa: E402
 
 JOURNAL = "account-buttons.jsonl"
@@ -36,6 +37,7 @@ LOGIN = "login"
 LOGIN_LABEL = "Вход /login"
 MENU_TTL_MIN = 10
 NO_ACCOUNTS_TEXT = "Аккаунтов не подключено"
+MENU_HEADER = "Автопереход при лимите: включён"
 
 
 def now() -> dt.datetime:
@@ -92,18 +94,32 @@ def label_of(name: str) -> str:
     return str((profile or {}).get("подпись") or name) if name != LOGIN else LOGIN_LABEL
 
 
+def owner_hhmm(unix: int) -> str:
+    return config.час_владельца(unix)
+
+
+def limit_note(limits: dict, name: str) -> str:
+    """Пометка кнопки аккаунта, у которого сброс лимита ещё впереди; иначе пусто."""
+    reset = (limits.get(name) or {}).get("сброс")
+    if not isinstance(reset, int) or reset <= dt.datetime.now().timestamp():
+        return ""
+    return f" — в лимите до {owner_hhmm(reset)}, нажатие откажет"
+
+
 def menu() -> dict:
     profiles = accounts.профили()
     if not profiles:
         return {"nonce": "", "text": NO_ACCOUNTS_TEXT, "reply_markup": "", "names": ""}
-    current = (accounts.состояние() or {}).get("идёт")
+    state = accounts.состояние() or {}
+    current = state.get("идёт")
+    limits = state.get("лимиты") or {}
     nonce = secrets.token_urlsafe(16)
     names = [str(p["имя"]) for p in profiles] + [LOGIN]
     rows = []
     for name in names:
-        label = label_of(name) + (" — сейчас" if name == current else "")
+        label = label_of(name) + (" — сейчас" if name == current else "") + limit_note(limits, name)
         rows.append([{"text": label, "callback_data": f"a:{nonce}:{name}"}])
-    return {"nonce": nonce, "text": "Аккаунты. Нажми тот, на который перейти:",
+    return {"nonce": nonce, "text": MENU_HEADER + "\nАккаунты. Нажми тот, на который перейти:",
             "reply_markup": json.dumps({"inline_keyboard": rows}, ensure_ascii=False),
             "names": ",".join(names)}
 

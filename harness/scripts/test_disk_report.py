@@ -201,6 +201,11 @@ def make_stand() -> Path:
                "import sys\n"
                f"with open({str(stand / 'calls.log')!r}, 'a', encoding='utf-8') as log:\n"
                f"    log.write('tmp-sweep\\t{SWEEP_STUB_MARK} вызван ' + ' '.join(sys.argv[1:]) + '\\n')\n")
+    # Шаг 10в зовёт gates-snapshot.sh --убрать: без заглушки пошёл бы настоящий скрипт.
+    write_exec(stand / "project/scripts/gates-snapshot.sh",
+               "#!/bin/bash\n"
+               f"printf 'gates-snapshot\\t%s\\n' \"$*\" >> '{stand}/calls.log'\n"
+               "echo 'снимки ворот: убрано 2, 5 МБ; осталось 1 (самый свежий — всегда)'\n")
     for name in STUB_NAMES + DELETE_STUBS:
         body = STUB_BODY.get(name, "exit 0")
         write_exec(stand / "bin" / name,
@@ -257,6 +262,7 @@ def stand_env(stand: Path) -> dict:
         "LOG_DIR": f"{stand}/log",
         "HEARTBEAT_DIR": f"{stand}/heartbeat",
         "TMP_SWEEP_SCRIPT": f"{stand}/project/scripts/tmp-sweep.py",
+        "GATES_SNAPSHOT_SCRIPT": f"{stand}/project/scripts/gates-snapshot.sh",
     }
 
 
@@ -751,6 +757,25 @@ def case_a14(stand: Path) -> None:
     PROBE.check("A14", "TMP_SWEEP_ENABLED=0: код 0, заглушка не звана", seen["0"] == (0, 0), (seen, sweeps))
 
 
+def case_a15(stand: Path) -> None:
+    """Шаг 10в: снимки ворот убираются тем же выключателем, что /tmp, и не в сухом ходе."""
+    (stand / "pct").write_text("50")
+    seen = {}
+    for enabled, args in (("1", ()), ("1", ("--dry-run",)), ("0", ())):
+        set_conf(stand, REPEAT_H, f"TMP_SWEEP_ENABLED={enabled}\n")
+        before = count_calls(stand, "gates-snapshot")
+        run = cleanup(stand, *args)
+        seen[(enabled, args)] = (run.rc, count_calls(stand, "gates-snapshot") - before,
+                                 "10в. снимки ворот: убрано 2, 5 МБ" in run.out)
+    snaps = [a for n, a, *_ in calls(stand) if n == "gates-snapshot"]
+    PROBE.check("A15", "TMP_SWEEP_ENABLED=1: заглушка снимков звана 1 раз с «--убрать», итог в выводе",
+                seen[("1", ())] == (0, 1, True) and snaps[:1] == ["--убрать"], (seen, snaps))
+    PROBE.check("A15", "сухой ход: снимки ворот не убираются", seen[("1", ("--dry-run",))][:2] == (0, 0),
+                seen)
+    PROBE.check("A15", "TMP_SWEEP_ENABLED=0: снимки ворот не убираются", seen[("0", ())][:2] == (0, 0),
+                seen)
+
+
 CASES = (
     ("A1", "таблица §7.7 — одна весть на пересечение", case_a1),
     ("A2", "граница роста +3 п.п.", case_a2),
@@ -766,6 +791,7 @@ CASES = (
     ("A12", "отказ канала откладывает весть", case_a12),
     ("A13", "лимит придержал весть — не повтор", case_a13),
     ("A14", "шаг 10 уборки /tmp по выключателю", case_a14),
+    ("A15", "шаг 10в снимков ворот по выключателю", case_a15),
 )
 
 

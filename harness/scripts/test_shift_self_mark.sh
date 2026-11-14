@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Проба доставки сигнала «смена поднята без личности» (hr.standards-and-policy,
-# спека §6.2 «при старте смены», контракт Н-5).
+# Проба доставки сигнала «смена поднята без личности»
+# (спека §6.2 «при старте смены», контракт Н-5).
 #
 # Хук SessionStart (scripts/hooks/session_state.sh) идёт под claude, а боевой
 # scripts/alert-task.py отказывает зовам из-под claude (called_from_session):

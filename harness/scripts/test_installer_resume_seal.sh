@@ -27,9 +27,10 @@ bad() { total=$((total + 1)); echo "FAIL: $1"; fail=$((fail + 1)); }
 t=$(mktemp -d "${TMPDIR:-/tmp}/harness-run-XXXXXX"); trap 'rm -rf "$t"' EXIT
 
 # Пакет стенда: копия установщика рядом с настоящими harness/ и UNIFIED/.
+# В публичной сборке главы лежат в sluzhebnoe/UNIFIED (public-build.yaml, «перенести»).
 mkdir -p "$t/pkg" "$t/stamps" "$t/etc"
 ln -s "$here" "$t/pkg/harness"
-for u in "$here/../UNIFIED" "$here/../../UNIFIED"; do
+for u in "$here/../UNIFIED" "$here/../sluzhebnoe/UNIFIED" "$here/../../UNIFIED"; do
   [ -d "$u" ] && { ln -s "$(cd "$u" && pwd)" "$t/pkg/UNIFIED"; break; }
 done
 [ -e "$t/pkg/UNIFIED" ] || { echo "FAIL: UNIFIED рядом с пакетом не найден — стенд не собрать"; exit 1; }

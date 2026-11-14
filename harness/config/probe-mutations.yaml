@@ -341,6 +341,10 @@
     - s@    известные = {имя for имя, _ in все}@    известные = set(имена)@
     - s@        лёгкие = \[имя for имя, _ in круг if имя not in тяжёлые\]@        лёгкие = [имя for имя, _ in круг]@
     - s@^ОТКАЗ = 2$@ОТКАЗ = 1@
+    - 's@^    if как_обычно == -9:$@    if False:@'
+    - s@ThreadPoolExecutor(max_workers=max(1, задач))@ThreadPoolExecutor(max_workers=1)@
+    - 's@пачки, одни = _пачки(круг, группы or {})@пачки, одни = _пачки(круг, {})@'
+    - s@^            неизмерено.append(имя)$@            pass@
     мутация_случай:
     - «--только» не сужает круг — выборка из чужого имени гонит полный круг
     - выборка возвращает все проверки ворот — больная попадает в круг здоровой
@@ -352,6 +356,10 @@
     - неизвестные имена не отличаются от известных — чужое имя молча выпало
     - выборка из одних тяжёлых не отвергнута — «чисто» при нуле прогнанных
     - отказ выборки отвечает кодом 1 — не отличить от находки
+    - прогон «как обычно» не дождались, а подменённые всё равно гоняются — -9 == -9 сходит за «чисто»
+    - пул из одного при HOST_INDEPENDENCE_JOBS — проверки снова идут по одной, прибор не укладывается в предел
+    - группы gates-serial.yaml не читаются — стенды раскладчика идут разом
+    - неизмеренная проверка выпадает из счёта — молча числится чистой
   scripts/test_live_check_sh.sh:
     механизм: scripts/live-check.sh
     доказательство: bash scripts/test_live_check_sh.sh
@@ -1119,7 +1127,7 @@
 
 # ── Доля помощника 4 (17.10.2026): 12 проб, 34 мутации, прогон «покраснели как
 # надо 35, дыр 0» после снятия строки чёрного списка (находка
-# hr.proba-pisatelya-klyucha-ne-sudit-chernyj-spisok).
+# «проба писателя ключа не судит чёрный список»).
   harness/panel/test_settings.py:
     механизм: harness/panel/settings.py
     доказательство: python3 harness/panel/test_settings.py
@@ -1675,7 +1683,8 @@
     - 's/^    if share > limit:$/    if share >= limit:/'
     - 's/^        return None, REASON_NO_KEY$/        return math.inf, None/'
     - 's/^    if _matches(path, FORBIDDEN_NOT_LISTED):$/    if False:/'
-    - 's@^    "harness/config/live-check-state.yaml",$@@'
+    - 's@^    "harness/config/live-check-state.yaml", "harness/config/gates-quarantine.yaml",$@    "harness/config/gates-quarantine.yaml",@'
+    - 's@^    "harness/config/live-check-state.yaml", "harness/config/gates-quarantine.yaml",$@    "harness/config/live-check-state.yaml",@'
     - 's/^    return 2 if _matches(path, FORBIDDEN_LISTED) else 0$/    return 1 if _matches(path, FORBIDDEN_LISTED) else 0/'
     - 's/^            verdict.deferred\[path\] = REASON_NO_SOURCE$/            verdict.deferred[path] = REASON_NO_SOURCE; continue/'
     - 's/^            verdict.deferred\[path\] = why$/            verdict.deferred[path] = why; verdict.new_body.pop(path, None)/'
@@ -1707,6 +1716,7 @@
     - 'ключ порога не задан читается «снимать всё» — кандидаты не отложены «ключ не задан» (M7, критерий 3)'
     - 'запретный ярус 1 снят — живые настройки и метки возможностей судятся как лишнее (M8)'
     - 'live-check-state.yaml убран из запретного — ляжет в опись и станет «снял бы» (M11, M12, критерий 2)'
+    - 'gates-quarantine.yaml убран из запретного — карантин копии ляжет в опись и станет «снял бы» (M11)'
     - 'ярус 2 переведён в ярус 1 — хуки и settings.json «опись испорчена» и выпадают из тела (M8)'
     - 'строки группы без источника выпадают из тела — сирота на выкате Ф-в (M4, критерий 3)'
     - 'строки, отложенные порогом, выпадают из тела — сирота на выкате Ф-в (M6, критерий 3)'
@@ -1739,8 +1749,9 @@
     мутация:
     - 's/"--raw", "--no-abbrev", "-z", "--format=%x01%H")/"--raw", "--no-abbrev", "--format=%x01%H")/'
     - 's/"--no-abbrev", "-z"/"--abbrev", "-z"/'
-    - 's/"log", "--branches", "--tags",/"log", "--all",/'
-    - 's/"--branches", "--tags",/"--branches",/'
+    - 's/"log", "HEAD", "--tags",/"log", "--all",/'
+    - 's/"HEAD", "--tags",/"HEAD",/'
+    - 's/"log", "HEAD", "--tags",/"log", "--branches", "--tags",/'
     - 's/^    if blob == EMPTY_BLOB:$/    if False:/'
     - 's/^    return blob in known$/    return True/'
     - 's/and (best is None or len(key) > len(best\[0\])):/and best is None:/'
@@ -1785,8 +1796,9 @@
     мутация_случай:
     - 'снят -z из LOG_ARGS — путь с пробелом и «ё» приходит не дословно, пары «мета, путь» рвутся (H1)'
     - '--abbrev вместо --no-abbrev — blob истории короткий, сверка с 40-знаковым blob диска не сходится (H1)'
-    - '--all вместо --branches --tags — blob из refs/remotes и stash читается «нашим» (H1 пара)'
+    - '--all вместо HEAD --tags — blob из refs/remotes, stash и ветки «страховка» читается «нашим» (H1)'
     - '--tags снят — blob коммита только под тегом не найден (H1)'
+    - '--branches вместо HEAD — файлы ветки «страховка» (свои коммиты копии) читаются историей пакета (H1, H17)'
     - 'правило пустого blob снято — пустой файл с пустым blob в истории читается «нашим» (H2)'
     - '«наш» по известному пути без сверки blob — правка владельца в 1 байт снимается (H5, И-1)'
     - 'первый совпавший ключ вместо самого длинного — project-settings.json и harness/scripts/ уходят по «harness/» (H3)'
@@ -1888,7 +1900,7 @@
 
 # ── Доля помощника 3 (17.10.2026): 10 проб, 29 мутаций, прогон «покраснели как
 # надо 28, дыр 1» — та дыра флейк чистой копии пробы диспетчера
-# (hr.fleyk-proby-vhoda-bez-otkaza), а не мутация без красного.
+# (флейк пробы входа без отказа), а не мутация без красного.
   harness/panel/test_server.py:
     механизм: harness/panel/server.py
     доказательство: python3 harness/panel/test_server.py
@@ -2627,9 +2639,9 @@
     - 's/^    facts.live_socket = any(inside(p) for p in holders.sockets)$/    facts.live_socket = False/'
     - 's/^            if len(parts) == 8 and parts\[7\].startswith(b"\/"):$/            if False:/'
     - 's/^            facts.socket_node = True$/            pass/'
-    - 's/^            if not is_waste(name, self.cfg):$/            if False:/'
-    - 's/^                        elif named\[item\] == "отходы":$/                        else:/'
-    - 's/^        return Decision("отходы", "похоже на данные", "карантин")$/        return Decision("отходы", "похоже на данные", "удалить")/'
+    - 's/^                report.decisions\[name\] = UNKNOWN$/                self.judge(name, "отходы", report, dry_run, chosen)/'
+    - 's/^                        elif named\[item\] in ("отходы", "стенды"):$/                        else:/'
+    - 's/^        return Decision(klass, "похоже на данные", "карантин")$/        return Decision(klass, "похоже на данные", "удалить")/'
     - 's/^            facts.data_like |= node.endswith(data_suffixes)$/            pass/'
     - 's/^    if os.path.lexists(dst):$/    if False:/'
     - 's/^        return f"отказ: перенос не удался ({exc.strerror})"$/        raise/'
@@ -2642,8 +2654,8 @@
     - 's/^        if mode == "ночь" and not dry_run:$/        if not dry_run:/'
     - 's/^        if (st.st_mode & 0o700) != 0o700 and st.st_uid == expected_uid:$/        if False:/'
     - 's/^        if (st.st_mode & 0o700) != 0o700 and st.st_uid == expected_uid:$/        if (st.st_mode \& 0o700) != 0o700:/'
-    - 's/^            elif decision.action in ("удалить", "карантин") and not dry_run:$/            elif decision.action in ("удалить", "карантин"):/'
-    - 's/^                if not dry_run:$/                if True:/'
+    - 's/^        elif decision.action in ("удалить", "карантин") and not dry_run:$/        elif decision.action in ("удалить", "карантин"):/'
+    - 's/^            if not dry_run:$/            if True:/'
     - 's/^    found = get_holders()$/    found = get_holders(); found = Holders(set(), [], []) if isinstance(found, NoRight) else found/'
     - 's/^        sys.stdout = open(os.devnull, "w")$/        raise/'
     - 's/os.O_APPEND | os.O_CREAT, 0o600)/os.O_APPEND | os.O_CREAT, 0o644)/'
@@ -2656,6 +2668,14 @@
     - 's/^    if destructive and not sweep_enabled():$/    if False:/'
     - 's/^    destructive = ("--ночь" in flags or "--давление" in flags) and "--dry-run" not in flags$/    destructive = "--ночь" in flags and "--dry-run" not in flags/'
     - 's/^            if left:$/            report.deleted += 1\n            if left:/'
+    # Стенды по префиксу харнеса (уборка /tmp): префикс, вложенный подкаталог, живость, срок, итог.
+    - 's/^            elif name.startswith(self.stands_top):$/            elif True:/'
+    - 's/^            return sorted(n for n in os.listdir(fd) if n.startswith(prefix))$/            return sorted(os.listdir(fd))/'
+    - 's/^    reason = first_refusal(facts)$/    reason = None if klass == "стенды" else first_refusal(facts)/'
+    - 's/^    if value > 0:$/    if False:/'
+    - 's/^        if not stat.S_ISDIR(st.st_mode) or st.st_uid/        if st.st_uid/;s/^        fd = os.open(sub, DIR_FLAGS, dir_fd=self.root_fd)$/        fd = os.open(sub, os.O_RDONLY | os.O_DIRECTORY, dir_fd=self.root_fd)/'
+    - 's/^                report.count_removed(matched_prefix(name, self.prefixes), facts.size_unique_mb)$/                pass/'
+    - 's/^            nested.append((sub, prefix))$/            pass/'
     мутация_случай:
     - 'подмена корня TMP_SWEEP_ROOT не отказана — CLI идёт дальше отказа (T2)'
     - 'корень судится stat, а не lstat — симлинк на /tmp принят боевым корнем (T2e)'
@@ -2706,6 +2726,13 @@
     - 'выключатель TMP_SWEEP_ENABLED не судится самим скриптом (M1-выключатель)'
     - '--давление не судится выключателем (M1-выключатель)'
     - 'недоудалённая запись («осталось узлов») считается удалённой (m5-осталось)'
+    - 'стенд судится без префикса — запись вне семьи имён убрана (СТ-г)'
+    - 'в claude-<uid>/ судится всё, не только evo- (СТ-г)'
+    - 'живой держатель не спасает стенд (СТ-в)'
+    - 'срок стендов не берётся из TMP_SWEEP_STALE_H (СТ-е)'
+    - 'подкаталог-симлинк проходится — стенд за ссылкой судится (СТ-д)'
+    - 'убранное не считается в итоге «по префиксам» (СТ-а)'
+    - 'вложенный стенд claude-<uid>/evo- не судится вовсе (СТ-а)'
   scripts/./test_tmp_sweep.py:
     # Данные уборки /tmp: защищённые имена, «похоже на данные», срок карантина.
     механизм: harness/config/tmp-sweep.yaml
@@ -2767,12 +2794,19 @@
     - 's/^                say "оповещение НЕ доставлено — весть отложена до следующего прогона"$/                python3 "$REPORT" --отправлено --занято "$NOW_PCT"; say "оповещение НЕ доставлено — весть отложена до следующего прогона"/'
     - 's/^        3:молчу\*)     say "\${first#молчу: }" ;;$/        3:молчу*)     say "${first#молчу: }"; tg_send "$DECISION" ;;/'
     - 's/^if \[ "\$TMP_SWEEP_ENABLED" = 1 \]; then$/if true; then/'
+    # Шаг 10в — снимки ворот (уборка /tmp).
+    - 's/^    if \[ "$DRY_RUN" != 1 \]; then$/    if true; then/'
+    - 's/^    if \[ "$DRY_RUN" != 1 \]; then$/    if false; then/'
+    - 's@^        say "10в. $SNAP_OUT"$@        true@'
     мутация_случай:
     - 'перевзвод почасового прогона после раннего выхода — метка не снята (A6)'
     - 'say без || true — вывод в /dev/full роняет уборку (A11)'
     - 'недоставленная весть пишет метку — не повторяется (A12)'
     - '«молчу» шлёт весть снова — второй прогон и придержанная лимитом весть удваиваются (A10, A13)'
     - 'выключатель TMP_SWEEP_ENABLED не судится — шаг 10 идёт при 0 (A14)'
+    - 'сухой ход убирает снимки ворот (A15)'
+    - 'снимки ворот не убираются при TMP_SWEEP_ENABLED=1 (A15)'
+    - 'итог шага 10в не печатается (A15)'
   scripts/test_warden_subagent_work.sh:
     # Работа помощников (hr.false-stall-alarm-while-subagents-work), судья --работа:
     # мутации M1–M17 контракта, по механизму на ключ; доказаны 25.10.2026 по одной.
@@ -3320,7 +3354,7 @@
     - 'пустой отбор не называется — «0 из 0» зелёный'
     - 'метка пустого отбора не судится — отказа с кодом 2 нет'
   scripts/mutation-probe.sh:
-    # Самотест прибора (hr.mutation-probe-copies-both-roots): корни копии — всех записей, до отбора.
+    # Самотест прибора (копия несёт оба корня): корни копии — всех записей, до отбора.
     # Копия прибора судит себя сама: самотест копирует ${BASH_SOURCE[0]} в стенд.
     # Прибор зовёт доказательство на глубине 1, а --selftest на глубине ≥1 —
     # отказ кодом 2 (hr.mutation-probe-recursion). Самотест копии — глубина 0 и
@@ -3369,7 +3403,7 @@
     - 'D8 отказ пишет боевой мутации.log: «глубина 2/3» — журнал стенда записан'
     - 'R1 пустой отбор самотеста без стендовых таблиц: «самотест тронул боевые данные» (таблицы chmod 000)'
   scripts/test_stack_freshness.py:
-    # Свежесть стека Ф1 (hr.stack-freshness-monitor): замер, источники, печать. Механизм находится рядом с пробой.
+    # Свежесть стека Ф1: замер, источники, печать. Механизм находится рядом с пробой.
     механизм: scripts/stack_freshness.py
     доказательство: python3 scripts/test_stack_freshness.py
     подмена: из-копии
@@ -4181,6 +4215,21 @@
     - 's@^STEPS_NOT_NARROWED = ("безопасность", "мутации")@STEPS_NOT_NARROWED = ("безопасность",)@'
     мутация_случай:
     - '11 характер «починка», уровень «обычная» по цене — шаг остаётся'
+  scripts/test_mutations_step.py#пачка:
+    # Мутации пачкой: один заход в срез, общий механизм — один прогон, бумага каждой задачи своя (слово владельца 13.11).
+    механизм: scripts/acceptance.py
+    доказательство: python3 scripts/test_mutations_step.py
+    подмена: HARNESS_ACCEPTANCE
+    мутация:
+    - 's@^    for файл, owners in чьи.items():$@    for файл, owners in [(ф, [и]) for ф, ов in чьи.items() for и in ов]:@'
+    - 's@{м: прогоны\[м\] for м in mechanisms}@прогоны@'
+    - 's@^        if any(механизмы_задачи(ид, КОРЕНЬ) != \[\] for ид in _batch_ids()):$@        if механизмы_задачи(sys.argv[sys.argv.index("--мутации-задачи") + 1], КОРЕНЬ) != []:@'
+    - 's@^        lines |= {int(n) for n in own.split(",")}$@        lines = {int(n) for n in own.split(",")}@'
+    мутация_случай:
+    - '18 пачка: общий механизм прогнан один раз, всего прогонов 2'
+    - '20 пачка: бумага у каждой своя — a только механизм, b оба, c без бумаги'
+    - '17 пачка a,b,c: один заход в срез, код 0'
+    - '19 пачка: прогон общего механизма покрывает строки обеих задач'
   scripts/test_map_writers_library.py:
     # Гейт писателей карты: библиотека, которой путь карты передают (К-9, Р-14).
     механизм: scripts/check-map-writers.py
@@ -4422,9 +4471,11 @@
     мутация:
     - 's@^    - почему$@    - зачем-то-другое@'
     - 's@^  дата_из: \[tested_at, when.tested, when.done, принято_когда\]$@  дата_из: [принято_когда, tested_at, when.tested, when.done]@'
+    - 's@^отставание_суток: 1$@отставание_суток: 0@'
     мутация_случай:
     - '«почему панель пустая» (только маркер «почему») → напоминание'
     - 'when.done в прошлом, принято_когда в текущем — считается в ПРОШЛОМ: закрыто 1'
+    - 'последние сутки ещё дописываются: эффективность не «хуже» — сравниваются закрытые окна'
   scripts/hooks/../test_alert_task.py:
     # guard_bash.py: правило ALERT_TASK_WRITE (R1-01, второй носитель).
     механизм: scripts/hooks/guard_bash.py
@@ -4878,11 +4929,14 @@
     - 's@^    if listed.returncode != 0:$@    if False:@'
     - 's@^        if probe not in covered and not any($@        if probe in covered and not any(@'
     - 's@^        if not str(reason or "").strip():$@        if False:@'
-    - 's@^        if not any(probe_coverage.under_exception(p, key) for p in probes):$@        if False:@'
+    - 's@^        if not dir_absent(key, files) and not any($@        if False and not any(@'
     - 's@^    return 1 if problems or not probes else 0$@    return 1 if problems else 0@'
     - 's@^        if not carrier.exists():$@        if False:@'
     - 's@^                  or fnmatch.fnmatchcase(os.path.basename(f), "test_\*.sh"))$@                  or False)@'
-    - 's@"ls-files", "--cached", "--others",$@"ls-files", "--cached",@'
+    - 's@^         "--others", "--exclude-standard"], capture_output=True, text=True)$@         "--exclude-standard"], capture_output=True, text=True)@'
+    - 's@^    return key.endswith("/") and not any(f.startswith(key) for f in files)$@    return True@'
+    - 's@^    return key.endswith("/") and not any(f.startswith(key) for f in files)$@    return False@'
+    - 's@"-c", "core.quotepath=off", @@'
     мутация_случай:
     - 'дерево не читается git: отказ с путём'
     - 'покрытая проба краснится, непокрытая нет'
@@ -4892,6 +4946,9 @@
     - 'носителя нет — не отказ'
     - 'пробы .sh не судятся'
     - 'новая проба вне git не судится'
+    - 'каталог исключения есть, проб в нём нет — исключение не судится (сборка без каталога слепит прибор)'
+    - 'исключение каталога, которого в дереве нет, — красное (сборка и копия без .tasks/)'
+    - 'нелатинское имя в каталоге исключения приходит байтами — каталог считается пустым'
   scripts/./test_check_probe_mutations.py:
     # Общая библиотека покрытия: ключ с «./» — второе написание той же пробы; из копии корня scripts/ зовётся проба, носитель рядом с ней берёт мутированную библиотеку.
     механизм: scripts/lib/probe_coverage.py
@@ -5729,6 +5786,11 @@
     - 's@echo "судит живое: $names"@true@'
     - 's@BASE="${GATES_SNAPSHOT_DIR:-$HOME/gates-snapshots}"@BASE="$HOME/gates-snapshots"@'
     - 's@    /tmp/\*)@    /nowhere/*)@'
+    # --убрать без прогона (уборка /tmp): свежий остаётся, симлинк не проходится, итог.
+    - 's@^    prune_old "$ROOT" "$BASE"$@    true@'
+    - 's@^        \[ "$d" = "$newest" \] && continue$@        true@'
+    - 's@^        \[ -L "${d%/}" \] && continue$@        true@'
+    - 's@PRUNED_N=$((PRUNED_N + 1))@PRUNED_N=$((PRUNED_N + 0))@'
     мутация_случай:
     - 'снимок не видит секрета живого индекса'
     - 'отказ кодом 2 с причиной'
@@ -5737,6 +5799,10 @@
     - 'журнал прогона печатает «судит живое'
     - 'снимок лежал в каталоге из ключа'
     - 'под /tmp — отказ кодом 2'
+    - '--убрать ничего не убирает — старший снимок остался (7)'
+    - 'самый свежий снимок убран, хоть он последний (7)'
+    - 'симлинк в каталоге снимков пройден — цель вычищена (8)'
+    - 'итог не называет число убранного (7)'
   scripts/test_precheck.py:
     механизм: scripts/precheck.py
     доказательство: python3 scripts/test_precheck.py
@@ -5820,7 +5886,7 @@
     - 'обёртка setsid/nohup не снимается — можно: setsid nohup bash scripts/gates-snapshot.sh'
     - 'конвейер не режется на команды — отказ: ls | xargs rm'
   scripts/test_hackathon.py:
-    # hr.hackathon-mode: проба судит hackathon.py и ветку хакатона check-pipeline.py;
+    # Режим хакатона: проба судит hackathon.py и ветку хакатона check-pipeline.py;
     # механизм у ключа один, поэтому check-pipeline.py — под ключом «scripts/./…».
     механизм: scripts/hackathon.py
     доказательство: python3 scripts/test_hackathon.py
@@ -5898,6 +5964,8 @@
     - 's/^        code = run_checks(price, wip_id in ids)$/        code = run_checks(price, True)/'
     - 's/^    if _map_absent():$/    if False:/'
     - 's/^    if not ids and not hackathon.active():$/    if False:/'
+    - 's/^        for path in touched:$/        for path in touched[:1]:/'
+    - 's|^    if touched:$|    touched = [p for p in touched if not p.startswith("scripts/lib/")]\n    if touched:|'
     мутация_случай:
     - 'гейт пропускает хакатон после срока — гейт: хакатон после срока — код 1'
     - 'хакатон задел сторожа и прошёл — гейт: хакатон задел guard_bash.py — код 1'
@@ -5915,6 +5983,8 @@
     - 'n-8: суд на чужом коммите шагами хакатона — БОЛЬНОЙ СЛУЧАЙ n-8 (со spec:, срок жив): код и вывод как у двойника'
     - 'N-8: commit-msg читает карту до проверки режима — нет карты = отказ — БОЛЬНОЙ СЛУЧАЙ N-8 (1): репозиторий без карты'
     - 'N-8: без трейлера при пустом сроке карта читается — БОЛЬНОЙ СЛУЧАЙ N-8 (6): битая карта в индексе, срок пуст'
+    - 'отказ печатает только первый путь — N-1 гейт: все N файлов суда одним коммитом — код 1, отказ хакатона называет КАЖДЫЙ файл своей строкой'
+    - 'отказ пропускает scripts/lib — N-1 гейт: scripts/lib/account_buttons.py (класс входа) — код 1, отказ хакатона называет файл'
   scripts/././test_hackathon.py:
     механизм: harness/config/hackathon-forbidden.yaml
     доказательство: python3 scripts/././test_hackathon.py
@@ -5929,8 +5999,6 @@
     подмена: из-копии
     мутация:
     - 's/^  хакатон: \[спека, ревью_спеки, контракт, план, тесты, ревью_кода\]$/  хакатон: [тесты, ревью_кода]/'
-    - 's/^        for path in touched:$/        for path in touched[:1]:/'
-    - 's|^    if touched:$|    touched = [p for p in touched if not p.startswith("scripts/lib/")]\n    if touched:|'
     мутация_случай:
     - 'шаги хакатона [тесты, ревью_кода] — M-1 pipeline.yaml: шаги.хакатон = полный облегчённый список'
   scripts/././././test_hackathon.py:
@@ -5948,8 +6016,6 @@
     подмена: из-копии
     мутация:
     # В --devmap-only «; true» держит set -e; в pre-commit (devmap_check … || fail)
-    - 'отказ печатает только первый путь — N-1 гейт: все N файлов суда одним коммитом — код 1, отказ хакатона называет КАЖДЫЙ файл своей строкой'
-    - 'отказ пропускает scripts/lib — N-1 гейт: scripts/lib/account_buttons.py (класс входа) — код 1, отказ хакатона называет файл'
     # errexit выключен — «; true» и «|| true» ловит только случай 9.
     - 's/^    python3 .*\/hackathon.py" --проверить-карту "$1"$/    :/'
     - 's/УРОВНИ = {"мелкая", "обычная", "крупная", "хакатон"}/УРОВНИ = {"мелкая", "обычная", "крупная"}/'
@@ -6008,7 +6074,7 @@
     - 'закрытая карточка метит — хакатон в «done», id в тексте — без метки'
     - 'метка теряется молча — в stderr tg_send строка «метка хакатона потеряна»'
   scripts/test_security_secrets_masked.py:
-    # hr.hackathon-mode: rule_secrets в режиме задачи сверяет находку check-secrets.sh по (путь, номер).
+    # Режим хакатона: rule_secrets в режиме задачи сверяет находку check-secrets.sh по (путь, номер).
     механизм: scripts/check-security.py
     доказательство: python3 scripts/test_security_secrets_masked.py
     подмена: из-копии
@@ -6303,7 +6369,7 @@
     мутация_случай:
     - 'О14: панель node — агент на месте, весть'
   scripts/test_pre_commit_snapshot.sh:
-    # hr.memory-edits-not-reaching-code: гейты судят снимок индекса (pc1 pc2 pc3 pc4).
+    # Правки памяти до кода: гейты судят снимок индекса (pc1 pc2 pc3 pc4).
     механизм: scripts/pre-commit-gate.sh
     доказательство: bash scripts/test_pre_commit_snapshot.sh
     подмена: PRE_COMMIT_GATE_UNDER_TEST
@@ -6340,7 +6406,7 @@
     мутация_случай:
     - 'класс 1 выше 2 выше 3 выше 4 выше 5: все пары'
     - 'hr.weed-duplicate-stale-map-items: класс 5'
-    - 'hr.shrink-blocks-to-fit: класс 5'
+    - 'карточка ужатия блоков: класс 5'
   scripts/test_sentinel_resolve.py:
     # hr.stale-alerts-fix: обычный круг гасит залипшую start-red только по зелёной проверке (se1 se2).
     механизм: harness/demons/sentinel.sh
@@ -6614,7 +6680,7 @@
     - 's@        if plan.get("состояние") == "мелкая":@        if False:@'
     - 's@ if float(door\["до"\]) >= now() else ""@ if True else ""@'
     - 's@    if kind == LEAD_TYPE and plan.get("роль") != LEAD_TYPE:@    if False:@'
-    # HELPER_WORKTREE=1 — исполнитель в своём дереве (hr.per-helper-code-copies, 13.11): 8 из 8.
+    # HELPER_WORKTREE=1 — исполнитель в своём дереве (13.11): 8 из 8.
     - 's@    if worktree_mode():@    if False:@'
     - 's@    return value == "1"@    return value != "0"@'
     - 's@if kind == WORKER_TYPE and not isolated:@if False:@'
@@ -7117,7 +7183,7 @@
     доказательство: python3 scripts/test_speed_mode.py
     подмена: SPEED_MODE_BIN
     мутация:
-    # Мощность по доле CPU за интервал /proc/stat (hr.speed-uses-whole-server): пороги занятости и
+    # Мощность по доле CPU за интервал /proc/stat: пороги занятости и
     # тишины с краями, iowait, ветка «интервала нет» (None) в замере и в «тихо».
     - 's@raw\["busy"\] < conf_float("CPU_BUSY_QUIET_PCT", 75)@raw["busy"] < conf_float("CPU_BUSY_MAX_PCT", 90)@'
     - 's@raw\["busy"\] < conf_float("CPU_BUSY_QUIET_PCT", 75)@raw["busy"] <= conf_float("CPU_BUSY_QUIET_PCT", 75)@'
@@ -8109,7 +8175,10 @@
     - 's@violation("мёртвая запись", rec\["id"\], ".claude/settings.json")@pass@'
     - 's@violation("мёртвая запись", rec\["id"\], "crontab")@pass@'
     - 's@LIVE_SOURCES = ("crontab", "systemd")@LIVE_SOURCES = ()@'
-    - 's@off_by_conf = bool(gate_key) and not conf_value(cfg, gate_key)@off_by_conf = True@'
+    - 's@off_by_conf = bool(gate_key) and not conf.get(gate_key)@off_by_conf = True@'
+    - 's@    return config.из_файла(config.путь_harness_conf())@    return {}@'
+    - 's@and not os.access(root / command\[0\], os.X_OK):@and False:@'
+    - 's@violation("не исполняется", rec\["id"\], command\[0\])@pass@'
     - 's@violation("без записи", "process-library.yaml", ident)@pass@'
     - 's@    return 1 if bad else 0@    return 0@'
     мутация_случай:
@@ -8124,6 +8193,9 @@
     - '19 строка крона убрана, запись жива → «мёртвая запись»'
     - '21 нарушение по живой машине так и называется'
     - '19 если_задан не гасит мёртвую запись при заполненном ключе'
+    - '19а если_задан судится по живому harness.conf, а не по образцу'
+    - '19б команда крона без +x судится «не исполняется» (условие)'
+    - '19б команда крона без +x судится «не исполняется» (нарушение)'
     - '9 расписание process-library.yaml без записи JSON'
     - 'код 1 при нарушениях'
   scripts/./test_process_library_gate.py:
@@ -8146,7 +8218,7 @@
     мутация:
     - 's@^        lines += range(start, start + count) if count else \[n for n in (start, start + 1) if n > 0\]$@        lines += range(start, start + count) if count else []@'
     - 's@^    diff_lines = _git_lines(корень, "diff", "-U0", f"{commits\[0\]}^", "--", файл)$@    diff_lines = _git_lines(корень, "diff", "-U0", f"{commits[0]}", "--", файл)@'
-    - 's@^        lines = task_changed_lines(ид, корень, файл) if narrow else None$@        lines = task_changed_lines(ид, корень, файл) if True else None@'
+    - 's@^        lines = _batch_lines(owners, корень, файл) if narrow else None$@        lines = _batch_lines(owners, корень, файл) if True else None@'
     - 's@^            env\["MUT_ONLY_LINES"\] = lines$@            pass@'
     - 's@^        if ответ.returncode == QUEUE_BUSY_RC:$@        if False:@'
     - 's@^            if "правка без мутаций" in line:$@            if False:@'
@@ -8179,9 +8251,73 @@
     доказательство: python3 scripts/test_checks_slice_door.py
     подмена: из-копии
     мутация:
-    - 's@^        if механизмы_задачи(sys.argv\[sys.argv.index("--мутации-задачи") + 1\], КОРЕНЬ) != \[\]:$@        if False:@'
+    - 's@^        if any(механизмы_задачи(ид, КОРЕНЬ) != \[\] for ид in _batch_ids()):$@        if False:@'
     мутация_случай:
     - 'самоперезапуск через дверь снят — мутации задачи идут мимо потолка среза'
+  scripts/test_checks_slice_door.py#пачка:
+    # Сторож пачки в двери среза: второй заход мутаций задач — отказ 75 с законным путём (слово владельца 13.11).
+    механизм: scripts/run-in-checks-slice.sh
+    доказательство: python3 scripts/test_checks_slice_door.py
+    подмена: из-копии
+    мутация:
+    - 's@^    if ! flock -n 7; then$@    if false; then@'
+    - 's@^        exit "$BUSY_RC"$@        return 0@'
+    - 's@^        echo "  Законный путь.*$@        :@'
+    - 's| 7>&-$||'
+    мутация_случай:
+    - 'пачка: второй заход мутаций задачи при живом первом — отказ 75, обёртка не звана'
+    - 'пачка: второй заход мутаций задачи при живом первом — отказ 75, обёртка не звана'
+    - 'пачка: отказ называет законный путь — свои id в пачку через запятую'
+    - 'пачка: фоновый потомок захода не держит замок пачки после двери'
+  scripts/test_release_priority.py#судья:
+    # Судья приоритета релиза: незакрытая карточка с «релиз: {версия, до}» держит срез (слово владельца 14.11).
+    механизм: scripts/lib/release_priority.py
+    доказательство: python3 scripts/test_release_priority.py
+    подмена: из-копии
+    мутация:
+    - 's@^        if not mark or card.get("status") in CLOSED:$@        if not mark:@'
+    - 's@^        elif now < until:$@        elif True:@'
+    - 's@ids <= {r\[0\]@ids >= {r[0]@'
+    - 's@except (OSError, ValueError, yaml.YAMLError)@except (OSError, yaml.YAMLError)@'
+    - 's@getattr(yaml, "CSafeLoader", yaml.SafeLoader)@yaml.SafeLoader@'
+    - 's@mark\["до"\].isoformat() if@str(mark["до"]) if@'
+    - 's@^            warn(f"у пометки@            (f"у пометки@'
+    мутация_случай:
+    - 'релизная карточка в test — релиз не держит, проход'
+    - 'срок «до» прошёл — релиз не держит, проход'
+    - 'релиз идёт: пачка с чужой задачей — отказ 75 (релизный id не проводит чужой)'
+    - 'судья: карта в битой кодировке — сам отвечает 0 и «ВНИМАНИЕ» про карту, без трассировки'
+    - 'быстрый разбор: карта разобрана CSafeLoader и только им'
+    - '«до» без кавычек: в событии до= полное ISO-время'
+    - 'пометка без «до» не действует (проход) и судья предупреждает'
+  scripts/test_release_priority.py#дверь:
+    # Дверь среза при живом релизе: чужой прогон — отказ 75 с событием; сбой судьи — проход с «ВНИМАНИЕ».
+    механизм: scripts/run-in-checks-slice.sh
+    доказательство: python3 scripts/test_release_priority.py
+    подмена: из-копии
+    мутация:
+    - 's|^release_guard "$@"$|:|'
+    - 's@^    if \[ "$rc" != "$BUSY_RC" \]; then$@    if [ "$rc" = 0 ]; then@'
+    - 's@\[ -n "$ids" \] || { \[ "${HARNESS_TASK:--}" = - \] || ids="$HARNESS_TASK"; }@:@'
+    - 's@^    event checks.slice.release-yield refused@    : checks.slice.release-yield refused@'
+    мутация_случай:
+    - 'релиз идёт: мутации чужой задачи — отказ 75, обёртка не звана'
+    - 'судья упал: дверь пропускает (обёртка 1 раз) с «ВНИМАНИЕ», не 75'
+    - 'законная дверь: HARNESS_TASK релизной задачи — проход'
+    - 'отказ записан событием checks.slice.release-yield'
+  scripts/test_release_priority.py#ночные:
+    # Ночные мутации при живом релизе ждут его конца в счёт своего срока.
+    механизм: harness/demons/nightly-mutations.sh
+    доказательство: python3 scripts/test_release_priority.py
+    подмена: из-копии
+    мутация:
+    - 's@; \[ $? = 75 \]; do@; false; do@'
+    - 's@^    sleep "$RELEASE_POLL_S"$@    break@'
+    - 's@^    say "ждёт релиза@    : "ждёт релиза@'
+    мутация_случай:
+    - 'ночные при живом релизе: прибор НЕ запущен до конца срока'
+    - 'ночные: прибор запущен не раньше «до» (ждал релиза)'
+    - 'ночные при живом релизе: журнал говорит «ждёт релиза» и версию'
   scripts/gates.sh#ускорение-мутаций:
     механизм: scripts/gates.sh
     доказательство: grep -q test_mutation_speed.py scripts/gates.sh
@@ -8200,7 +8336,7 @@
     - 'вызов пробы принудительного выхода снят с общих ворот — ворота зелёные без неё'
   scripts/test_map_from_message_three_outcomes.py:
     # map-from-message.py: короткий ответ и цитата «как у гейта» отсекаются кодом
-    # (hr.map-from-message-quote-not-task). 11 мутаций доказаны красными на копии 06.11.
+    # (цитата — не задача). 11 мутаций доказаны красными на копии 06.11.
     механизм: scripts/map-from-message.py
     доказательство: python3 scripts/test_map_from_message_three_outcomes.py
     подмена: MAP_FROM_MESSAGE_PY
@@ -8378,7 +8514,7 @@
     мутация_случай:
     - 'похожее имя гасится как известный отказ'
     - 'известный отказ не назван вовсе'
-# ── hr.standards-and-policy: пробы носителя личности (Ч2, Ч4, Ч6, Ч9) ──
+# ── Стандарты и личность: пробы носителя личности (Ч2, Ч4, Ч6, Ч9) ──
   # self-prompt.py: коды 0/3/1, метка, потолки, кэша нет, файл целый при параллельных сборках.
   scripts/test_self_prompt.py:
     механизм: scripts/self-prompt.py
@@ -8392,7 +8528,7 @@
     мутация_случай:
     - 'оркестратор: без эталона — файл с меткой'
     - 'правка источника меняет метку'
-  # Ч14 hr.standards-and-policy: scripts/test_live_key.sh
+  # Ч14 стандартов: scripts/test_live_key.sh
   scripts/test_live_key.sh:
     механизм: harness/demons/session-warden.sh
     доказательство: bash scripts/test_live_key.sh
@@ -8419,7 +8555,7 @@
     - 'запуск дважды за обход (О1, О4 красные)'
     - 'запуск при равном ключе: сверка с .state выкинута (О3, О5 красные)'
     - 'фоновая проба наследует fd 8 — лок сторожа занят, пока она идёт (Л2 красный)'
-  # Ч14 hr.standards-and-policy: scripts/test_session_carrier.sh
+  # Ч14 стандартов: scripts/test_session_carrier.sh
   scripts/test_session_carrier.sh:
     механизм: scripts/hooks/session_state.sh
     доказательство: bash scripts/test_session_carrier.sh
@@ -8452,7 +8588,17 @@
     - 'в норме прежняя отметка не снимается (Т1, Т8, Т9, Т12 красные)'
     - 'дверь SHIFT_SELF_MARK не читается (Т14 красный)'
     - 'claude -p снимает отметку как порядок (Т10, Т11 красные)'
-  # Ч14 hr.standards-and-policy: scripts/test_shift_self_mark.sh
+  # Смена без личности: Т15 — проба, зовущая хук, без двери
+  # SHIFT_SELF_MARK пишет отметку в боевой $LOG_DIR (ложная тревога 13.11).
+  scripts/test_session_carrier.sh#shift-door:
+    механизм: scripts/test_session_state_containers.sh
+    доказательство: bash scripts/test_session_carrier.sh
+    подмена: из-копии
+    мутация:
+    - 's@ SHIFT_SELF_MARK="\$STAND/shift.mark"@@'
+    мутация_случай:
+    - 'проба контейнеров зовёт хук без двери SHIFT_SELF_MARK (Т15 красный: «test_session_state_containers.sh»)'
+  # Ч14 стандартов: scripts/test_shift_self_mark.sh
   scripts/test_shift_self_mark.sh:
     механизм: harness/demons/session-warden.sh
     доказательство: bash scripts/test_shift_self_mark.sh
@@ -8484,7 +8630,7 @@
     - 'путь отметки зашит, дверь SHIFT_SELF_MARK не читается (Д1 красный)'
     - 'отказ --resolve не держит память: файл отправленного стёрт, тревога не снята и не повторится'
     - 'код писателя глушится: alert_task_rc отдаёт 0 при отказе alert-task.py'
-  # Ч14 hr.standards-and-policy: scripts/test_self_prompt_live.sh
+  # Ч14 стандартов: scripts/test_self_prompt_live.sh
   scripts/test_self_prompt_live.sh:
     механизм: scripts/self-prompt-live.sh
     доказательство: bash scripts/test_self_prompt_live.sh --подставной
@@ -8563,6 +8709,373 @@
     мутация_случай:
     - 'П-13 запуск=alpha, ключа в окружении нет → claude несёт sha ключа alpha'
     - 'П-13 ключ уже в окружении (смена через as-account) → не подменяется'
+  # account-switch.py, этап 1в: автопереход при лимите, итог без отката на «судить нечем»,
+  # «застрял», гонка с выбором владельца. Мутации — по столбцу «поломка» спеки §1в.10.
+  scripts/test_switch_account.sh#account_switch:
+    механизм: scripts/account-switch.py
+    доказательство: bash scripts/test_switch_account.sh
+    подмена: из-копии
+    мутация:
+    # А-2: выбор по порядку списка, а не по рангу (allowed раньше allowed_warning, ниже утилизация)
+    - 's@^    return min(принятые, key=_ранг, default=None), новые, статусы, неясно$@    return (принятые[0] if принятые else None), новые, статусы, неясно@'
+    # А-2: лишняя весть при начале автоперехода
+    - 's@^    print(цель)$@    print(цель); весть("перешёл")@'
+    # А-3: решение без живого вызова — текущий allowed всё равно уходит в переход
+    - 's@^    if д\["статус"\] != "rejected":$@    if False:@'
+    # А-4: кандидаты с будущим сбросом снова вызываются (качели)
+    - 's@^        if имя in исключить or int((известные.get(имя) or {}).get("сброс") or 0) > time.time():$@        if имя in исключить:@'
+    # А-4: вторая весть «все в лимите», хотя метка уже стояла
+    - 's@^    if поставлена == 0:$@    if поставлена <= 1:@'
+    # А-5: предел считает и удачные автопереходы
+    - 's@ and r.get("исход") in НЕУДАЧНЫЕ_ИСХОДЫ@@'
+    # А-5: вход в чужую организацию — кандидат вне набора принят
+    - 's@^    if д\["орг"\] not in ожидаемые or д\["орг"\] != проф.get("орг"):$@    if False:@'
+    # А-5: весть «остановил автопереход» на каждой попытке окна
+    - 's@^        if _минут_с(s.get("предел_сказан"), нет=float("inf")) >= ОКНО_НЕУДАЧ_МИН:$@        if True:@'
+    # А-6: --хочу верит ключу в лимите (Ф-39)
+    - 's@^        if д\["статус"\] == "rejected":$@        if False:@'
+    # А-6: _живой_ключ отвергает ключ в лимите и при подключении профиля (ревью В-14)
+    - 's@^    return ключ, д\["орг"\], д, ""$@    return ("", "", д, "в лимите") if д["статус"] == "rejected" else (ключ, д["орг"], д, "")@'
+    # А-10: откат при коде 2 «судить нечем»
+    - 's@^        return _ещё_проверка(переключение, текст, арг.после_ротации)$@        return _вернуть_прежний(переключение, текст)@'
+    # А-10: вторая ротация — после ротации без процесса --ждёт снова 0
+    - 's@^    if ключ is None and пер.get("ротирован_в"):$@    if False:@'
+    # А-10: «застрял» оставляет запуск на непроверенной цели
+    - 's@^        s\["запуск"\] = s.get("идёт") or s.get("запуск", "")$@        pass@'
+    # А-10: пауза входит в срок «застрял»
+    - 's@^    if not пауза and _минут_с@    if _минут_с@'
+    # А-11: выбор владельца затирает попытку авто без строки «вытеснен»
+    - 's@^        if прежнее.get("авто"):  # выбор владельца старше автоперехода$@        if False:@'
+    # А-11: --авто перебивает идущее ручное переключение
+    - 's@^    if not пер.get("авто") or пер.get("откат") or сухо:$@    if пер.get("откат") or сухо:@'
+    # А-12: запуск остаётся на провалившейся цели, когда в лимите все
+    - 's@^            s\["запуск"\] = имя or s.get("идёт") or s.get("запуск", "")$@            pass@'
+    # А-13: «перешёл» на аккаунт, который сам в лимите
+    - 's@^        if д.get("статус") != "rejected":$@        if True:@'
+    # А-13: цель в пути стала rejected — повторный сигнал её не меняет
+    - 's@^    if д.get("статус") != "rejected":$@    if True:@'
+    # А-13: провал не по лимиту записан в лимиты (вечный лимит после сбоя ключа)
+    - 's@^        return _итог_не_перешёл(стат, переключение, {}, \[\*пропуск, цель\], "не перешёл")$@        return _итог_не_перешёл(стат, переключение, {цель: {"сброс": int(time.time()) + 3600, "окно": "", "когда": _сейчас()}}, пропуск, "не перешёл")@'
+    # А-15: весть «перешёл» придержана меткой лимита (весть двери без --несмотря-на-лимит)
+    - 's@"bash", отправка, "--несмотря-на-лимит", текст@"bash", отправка, текст@'
+    # А-15: метка лимита не снимается после перехода
+    - 's@^        _снять_метку()  # до вести@        pass  # до вести@'
+    # А-15: весть не называет остановленных помощников
+    - 's@ if остановлено > 0 else текст@ if False else текст@'
+    # А-17: пауза не останавливает автопереход
+    - 's@^    if _на_паузе():$@    if False:@'
+    # А-17: --сухо пишет state и зовёт сторожа
+    - 's@^        return _показать_выбор(префикс, выбор, известные, неясно)$@        _показать_выбор(префикс, выбор, известные, неясно)@'
+    # А-17: пустой статус у текущего принят за rejected (не 2)
+    - 's@^    имя, д, причина = _текущий(от, стат, сторож)$@    имя, д, причина = _текущий(от, стат, сторож); д = {**д, "статус": д.get("статус") or "rejected"}@'
+    # А-17: кандидат без заголовков лимита записан в лимиты
+    - 's@{"rejected": "лимит", "allowed": "ок", "allowed_warning": "ок"}.get(д\["статус"\], "неясно")@{"allowed": "ок", "allowed_warning": "ок"}.get(д["статус"], "лимит")@'
+    # В-2: все в лимите без часа сброса → 4 (тишина: limit-watch молчит, вести нет)
+    - 's@^    if имя is None and not идёт:  # метка без часа@&\n        return 4  #@'
+    # В-2: все в лимите без часа сброса — лимиты со сбросом 0 записаны (state меняется)
+    - 's@^    if имя is None and not идёт:  # метка без часа@    if False:  # метка без часа@'
+    # В-3: ветка «судить нечем» не пишет провал и не снимает переход
+    - 's@^        _записать_лимиты(начало, новые, правка, идёт)$@        _записать_лимиты(начало, новые, None, False)@'
+    # В-4: --несмотря-на-лимит только у вести «перешёл» (как до ревью)
+    - 's@"bash", отправка, "--несмотря-на-лимит", текст@"bash", отправка, *(["--несмотря-на-лимит"] if "ерешёл" in текст else []), текст@'
+    # М-5: «сказать ли» по state, прочтённому до записи, а не под замком
+    - 's@^        if _минут_с(s.get("предел_сказан")@        if _минут_с(стат.get("предел_сказан")@'
+    мутация_случай:
+    - 'А-2 B allowed_warning 99 %, C allowed 55 % → 0, цель gamma, авто, сторож раз «--account-switch», вестей 0'
+    - 'А-2 B allowed_warning 99 %, C allowed 55 % → 0, цель gamma, авто, сторож раз «--account-switch», вестей 0'
+    - 'А-3 allowed → 1, state байт в байт, сторож не зван, вестей 0, одна строка журнала двери «авто/1»'
+    - 'А-4 повтор: 4, кандидаты с будущим сбросом без вызова API, вестей 0'
+    - 'А-4 повтор: 4, кандидаты с будущим сбросом без вызова API, вестей 0'
+    - 'А-5 три удачных за 6 ч и три неудачных старше 6 ч → переход идёт (0)'
+    - 'А-5 кандидат вне LOGIN_EXPECTED_ORG и свободный /login не выбираются → 4, запуск alpha, /login не зван'
+    - 'А-5 вторая попытка в том же окне → 6, вестей 0'
+    - 'А-6 --хочу beta (rejected) → отказ, state байт в байт, весть одна «сам в лимите до HH:MM»'
+    - 'А-6 --профиль-добавить на ключе в лимите → 0, «принят, сейчас в лимите до HH:MM»'
+    - 'А-10 ручной переход, процесса нет: --итог → 2, без отката: запуск beta, проверок 1, сторож не зван, вестей 0'
+    - 'А-10 --итог --после-ротации, процесса нет → 2, ротирован_в записан, три --ждёт → 4 без сторожа'
+    - 'А-10 ручной переход старше 60 мин → --ждёт 1, снято «застрял», запуск=идёт (alpha), весть одна'
+    - 'А-10 пауза 70 мин посреди перехода → не снято, срок_с сдвинут на сейчас'
+    - 'А-11 авто записало gamma, затем --хочу beta → вытесняет: ручное beta, обе попытки в переключениях'
+    - 'А-11 ручное переключение идёт → --авто 5, ручное не тронуто, сторож не зван'
+    - 'А-12 процесс не на beta, кандидатов нет → запуск=gamma (ближайший сброс), переключение снято, метка limit, весть одна'
+    - 'А-13 --итог: процесс на beta, доступ(beta) rejected → не «перешёл»: лимиты[beta], выбор gamma'
+    - 'А-13 цель beta стала rejected → повторный сигнал: 0, куда=gamma, запуск=gamma, лимиты[beta], строка «цель в лимите»'
+    - 'А-13 провал не по лимиту (процесс не на beta) → beta в пропуск, не в лимиты; новая цель gamma'
+    - 'А-15 --итог 0: в tg_out одна «перешёл», придержанных нет, метка снята'
+    - 'А-15 --итог 0: в tg_out одна «перешёл», придержанных нет, метка снята'
+    - 'А-15 весть называет остановленных помощников: «помощников остановлено: 2»'
+    - 'А-17 пауза → 2, state байт в байт, сторож не зван, вестей 0'
+    - 'А-17 --сухо → код как без него, кандидат gamma назван; state, сторож, журнал, канал не тронуты'
+    - 'А-17 у текущего ответ без заголовков → 2 (пустой статус ≠ rejected), state байт в байт'
+    - 'А-17 кандидат beta без заголовков лимита → пропущен, в лимиты не записан; цель gamma'
+    - 'В-2 без заголовка reset у всех → 2, state байт в байт, метки нет, вестей 0, сторож не зван'
+    - 'В-2 без заголовка reset у всех → 2, state байт в байт, метки нет, вестей 0, сторож не зван'
+    - 'В-3 провал записан: строка «не перешёл», beta в пропуск или переход снят'
+    - 'В-4 «не подтверждён» (3-я проверка, процесса нет) при метке → в tg_out, не придержано'
+    - 'М-5 оба в пределе (коды 5/6), в tg_out ровно одна весть «остановил автопереход»'
+  # check-login-expiry.py доступ(): состояние лимита ключа — только из заголовков ответа (спека §1в.10 А-1).
+  scripts/test_switch_account.sh#login_expiry:
+    механизм: scripts/check-login-expiry.py
+    доказательство: bash scripts/test_switch_account.sh
+    подмена: из-копии
+    мутация:
+    # статус по коду ответа: allowed_warning неотличим от allowed
+    - 's@"код": код, "статус": шапка("status"),@"код": код, "статус": "allowed" if код == 200 else шапка("status"),@'
+    # 429 без заголовка статуса даёт rejected по коду
+    - 's@"код": код, "статус": шапка("status"),@"код": код, "статус": шапка("status") or ("rejected" if код == 429 else ""),@'
+    # утилизации потеряны
+    - 's@"ут5": _число(шапка("5h-utilization"), float),@"ут5": None,@'
+    # час сброса потерян
+    - 's@"сброс": _число(шапка("reset"), int),@"сброс": 0,@'
+    мутация_случай:
+    - 'А-1 200+allowed_warning → утилизации 5h/7d (не «allowed» по коду)'
+    - 'А-1 429 без заголовка статуса → статус пуст, а не rejected по коду'
+    - 'А-1 200+allowed_warning → утилизации 5h/7d (не «allowed» по коду)'
+    - 'А-1 429+rejected → код, статус, окно и сброс из заголовков'
+  # limit-watch.sh: автопереход до метки и до пинка в час сброса (спека §1в.2, А-7).
+  scripts/test_switch_account_limit.sh#limit_watch:
+    механизм: harness/demons/limit-watch.sh
+    доказательство: bash scripts/test_switch_account_limit.sh
+    подмена: из-копии
+    мутация:
+    # дверь зовётся и без заведённых аккаунтов
+    - 's@^    \[ -f "\${HARNESS_ACCOUNT_DIR:-\${STATE_DIR:-}/account}/profiles.json" \] || return 0$@    :@'
+    # дверь зовётся не от смены
+    - 's@--авто --от смена 2>&1@--авто --от демоны 2>\&1@'
+    # код 0 не глушит метку и весть — весть вдобавок
+    - 's@^    0|5|1) say "авто: метки и вести о лимите нет@    5|1) say "авто: метки и вести о лимите нет@'
+    # сбой двери (2) глушит весть о лимите
+    - 's@^    0|5|1) say "авто: метки и вести о лимите нет@    0|5|1|2) say "авто: метки и вести о лимите нет@'
+    # коды 4/6: limit-watch ставит свою метку и весть поверх двери
+    - 's@^    4|6)   say "авто: метку и весть сделала дверь@    9)   say "авто: метку и весть сделала дверь@'
+    # час сброса: код 0 не отменяет пинок
+    - 's@^                0|4|5|6)$@                4|5|6)@'
+    # час сброса: код 1 (текущий свободен) отменяет пинок
+    - 's@^                0|4|5|6)$@                0|1|4|5|6)@'
+    # М-7: вердикт двери не читается — дверь звана каждый обход
+    - 's@^    read -r kogda kod sbros <"\$VERDIKT_FILE" 2>/dev/null || return 1$@    return 1@'
+    # М-7: вердикт двери не пишется
+    - 's@^        1|4) zapomnit_verdikt "\$AUTO_RC" ;;$@        9) zapomnit_verdikt "$AUTO_RC" ;;@'
+    # М-7: новый 429 не снимает вердикт кода 1
+    - 's@^               >/dev/null 2>&1 && return 1$@               >/dev/null 2>\&1 \&\& return 0@'
+    # М-7: вердикт кода 4 держит и после часа сброса
+    - 's@^        4) \[ "\${sbros:-0}" -gt "\$(date +%s)" \] ;;$@        4) true ;;@'
+    мутация_случай:
+    - 'А-7 без profiles.json: у живой двери не звана, прежний путь (метка limit, весть)'
+    - 'А-7 код 0: дверь позвана «--авто --от смена» ровно раз'
+    - 'А-7 код 0: метки нет, вестей 0, выход 0'
+    - 'А-7 код 2: прежний путь — метка limit, одна весть «Упёрся в лимит»'
+    - 'А-7 код 4: метку и весть сделала дверь — limit-watch молчит, своей метки нет, выход 0'
+    - 'час сброса, код 0: дверь позвана, пинка нет, отметка пинка = сброс'
+    - 'час сброса, код 1 (текущий освободился): дверь, затем прежний пинок'
+    - 'М-7 код 1, тот же старый 429: первый обход зовёт дверь, второй — нет'
+    - 'М-7 код 1: вердикт записан в $LOG_DIR/лимит-подписки.авто'
+    - 'М-7 код 1: новый 429 новее вердикта → дверь звана снова'
+    - 'М-7 код 4, сброс вердикта прошёл, метки нет → основной путь зовёт дверь'
+  # claude-demon.sh: автопереход демонов при 429 под замком и один повтор (спека §1в.5, А-8).
+  scripts/test_switch_account_limit.sh#claude_demon:
+    механизм: scripts/claude-demon.sh
+    доказательство: bash scripts/test_switch_account_limit.sh
+    подмена: из-копии
+    мутация:
+    # дверь зовётся и без заведённых аккаунтов
+    - 's@^    \[ -f "\${HARNESS_ACCOUNT_DIR:-\${STATE_DIR:-}/account}/profiles.json" \] || return 0$@    :@'
+    # дверь зовётся не от демонов
+    - 's@--авто --от демоны 2>&1@--авто --от смена 2>\&1@'
+    # демоны хором: дверь без лока
+    - 's@^    flock 8$@    :@'
+    # повтор модели под локом: второй демон ждёт весь вызов
+    - 's@^    flock -u 8$@    :@'
+    # повтор с тем же id сессии
+    - 's@^    SESSION_ID="\$(cat /proc/sys/kernel/random/uuid)"$@    SESSION_ID="${SESSION_ID:-$(cat /proc/sys/kernel/random/uuid)}"@'
+    # код 0 без повтора
+    - 's@^        0|5)$@        5)@'
+    # два ответа демону: отказ печатается до повтора
+    - 's@^            vyzov_modeli$@            pechat_otveta; vyzov_modeli@'
+    # повтор снова 77 — весть демона вдобавок к двери
+    - 's@^                exit "\$KOD_LIMITA"$@                :@'
+    # коды 4/6: прежняя ветка с вестью демона
+    - 's@^        4|6)$@        9)@'
+    мутация_случай:
+    - 'А-8 без profiles.json: у живой двери не звана, прежняя ветка (77, весть)'
+    - 'А-8 код 0: дверь позвана «--авто --от демоны» ровно раз'
+    - 'А-8 код 0: дверь позвана под локом лимит-демонов.lock'
+    - 'А-8 код 0: повтор вне лока'
+    - 'А-8 код 0: в demon-spend.jsonl два demon.start с разными session_id'
+    - 'А-8 код 0: повтор на beta, код 0'
+    - 'А-8 код 0: демону ОДИН ответ — ответ B, отказа в выводе нет'
+    - 'А-8 повтор 77: вести демона нет, строка в claude-demon.log'
+    - 'А-8 код 4: дверь позвана, повтора нет, выход 77, вести демона нет'
+  # limit_mark.py: метка «все в лимите», переход по ключу снимает старую метку, длинное окно (А-12, А-16).
+  scripts/test_switch_account_limit.sh#limit_mark:
+    механизм: scripts/limit_mark.py
+    доказательство: bash scripts/test_switch_account_limit.sh
+    подмена: из-копии
+    мутация:
+    # устаревание по 360 мин от постановки, а не от сброса
+    - 's@^    опора = max(когда, сброс)$@    опора = когда@'
+    # снять() молчит о метке с будущим сбросом
+    - 's@^    if простой >= УСТАРЕЛА_МИН and not сброс_держит:$@    if простой >= УСТАРЕЛА_МИН:@'
+    # переход по ключу не считается сменой входа
+    - 's@^    if последний_переход() > момент:$@    if False:@'
+    # строка перехода с любым исходом считается успехом
+    - 's@строка.get("исход") != "ок"@False@'
+    # limit с прошедшим сбросом не заменяется — новой вести нет
+    - 's@ and not _вытеснить_истёкшую():$@ and True:@'
+    # снять_молча отвечает «метки не было», когда она стояла
+    - 's@^    return стояла$@    return False@'
+    # М-6: метка с прошедшим сбросом снимается не атомарно (снял → поставил)
+    - 's@ and not _вытеснить_истёкшую():$@ and not (файл().unlink(missing_ok=True) or True):@'
+    # М-6: унесённая НОВАЯ метка соседа не возвращается на место
+    - 's@^        os.replace(унесена, цель)$@        унесена.unlink()@'
+    мутация_случай:
+    - 'А-16 сброс через 11 ч, возраст 7 ч → лимит_держится = да'
+    - 'А-16 снять(): сброс впереди, возраст 7 ч → весть не пуста'
+    - 'вход_после: «ок» новее метки → True'
+    - 'вход_после: исход не «ок» → False (у живого разбора)'
+    - 'все_в_лимите: limit с прошедшим сбросом заменяется → 0, новый сброс'
+    - 'снять_молча: True, метки и пинка нет, ничего не напечатано'
+    - 'М-6 метка limit со сбросом в прошлом, два процесса разом → коды «0 1», метка limit с новым сбросом'
+    - 'М-6 метка limit со сбросом в прошлом, два процесса разом → коды «0 1», метка limit с новым сбросом'
+  # limit-in-log.py: сигналы старше перехода отброшены, помощник со 429 стоит в лимите (А-14).
+  scripts/test_switch_account_limit.sh#limit_in_log:
+    механизм: scripts/limit-in-log.py
+    доказательство: bash scripts/test_switch_account_limit.sh
+    подмена: из-копии
+    мутация:
+    # довод --после не отбрасывает старые сигналы
+    - 's@^    сигналы = \[с for с in сигналы if с\[0\] > после\]$@    pass@'
+    # --метка не берёт момент последнего перехода
+    - 's@^        после = max(после, метка.последний_переход())$@        pass@'
+    # открытый tool_use не держит помощника
+    - 's@ and вызовы <= итоги$@@'
+    # судится любой 429 в транскрипте, а не последняя запись
+    - 's@^    последняя = записи\[-1\]$@    последняя = next((з for з in записи if з.get("apiErrorStatus") == 429), записи[-1])@'
+    мутация_случай:
+    - '--после новее отказа → старый 429 отброшен: код 1, «0»'
+    - '--метка: переход «ок» новее отказа → лимит не держится (код 1)'
+    - 'А-14 открытый tool_use и последний 429 → держит, не стоит (1, у живого разбора)'
+    - 'А-14 после отказа есть ответ → не стоит (1, у живого разбора)'
+  # account_buttons.py: меню помечает аккаунт в лимите, первая строка — автопереход (А-18).
+  scripts/test_switch_account_bot.sh#account_buttons:
+    механизм: scripts/lib/account_buttons.py
+    доказательство: bash scripts/test_switch_account_bot.sh
+    подмена: из-копии
+    мутация:
+    # пометка не снимается после сброса
+    - 's@^    if not isinstance(reset, int) or reset <= dt.datetime.now().timestamp():$@    if not isinstance(reset, int):@'
+    # пометки «в лимите до» нет
+    - 's@^    return f" — в лимите до {owner_hhmm(reset)}, нажатие откажет"$@    return ""@'
+    # первой строки об автопереходе нет
+    - 's@"text": MENU_HEADER + @"text": @'
+    мутация_случай:
+    - 'А-18 меню: сброс прошёл минуту назад → пометки нет, идущий — «сейчас»'
+    - 'А-18 меню: beta в лимите со сбросом через 3 ч → «Бета — в лимите до HH:MM, нажатие откажет»'
+    - 'А-18 меню: первая строка текста «Автопереход при лимите: включён»'
+  # tg-dispatcher.sh: меню бота сверяется при старте фоном, вывод двери — в account-switch.out (Б-8).
+  scripts/test_switch_account_bot.sh#dispatcher_menu:
+    механизм: scripts/tg-dispatcher.sh
+    доказательство: bash scripts/test_switch_account_bot.sh
+    подмена: из-копии
+    мутация:
+    # сверка не судит меню — ставит всегда
+    - 's@--проверить >/dev/null 2>&1; then echo "меню бота сверено"@--проверить >/dev/null 2>\&1 \&\& false; then echo "меню бота сверено"@'
+    # сверка не ставит никогда
+    - 's@--проверить >/dev/null 2>&1; then echo "меню бота сверено"@--проверить >/dev/null 2>\&1 || true; then echo "меню бота сверено"@'
+    # сверка держит канал: первый getUpdates ждёт ответа Telegram
+    - 's@^    >> "\$DISPATCH_LOG" 2>&1 < /dev/null & )$@    >> "$DISPATCH_LOG" 2>\&1 < /dev/null )@'
+    # вывод двери снова в account-switch.log
+    - 's@>> "\$LOG_DIR/account-switch.out" 2>&1@>> "$LOG_DIR/account-switch.log" 2>\&1@'
+    мутация_случай:
+    - 'Б-8 меню совпадает с данными → сверка спросила, setMyCommands нет'
+    - 'Б-8 меню без account → ровно один setMyCommands, и в нём account'
+    - 'Б-8 getMyCommands отвечает через 15 с → первый getUpdates ушёл раньше ответа сверки'
+    - 'Б-8 вывод --хочу диспетчер пишет в account-switch.out, account-switch.log нет'
+  # session-warden.sh: ротация смены в лимите, ответ --ждёт, помощники в лимите, суточная сверка меню (1в-С).
+  scripts/test_switch_account_bot.sh#warden_account:
+    механизм: harness/demons/session-warden.sh
+    доказательство: bash scripts/test_switch_account_bot.sh
+    подмена: из-копии
+    мутация:
+    # ветки «аккаунт в лимите» нет — ротация по лимиту без передачи запрещена
+    - 's@^    if \[ "\$account" = 1 \]; then$@    if false; then@'
+    # ветка ослабила правило 18.10: принуждение пускает и без смены аккаунта
+    - 's@^    if \[ "\$account" = 1 \]; then$@    if [ "$forced" = 1 ]; then@'
+    # --ждёт 4 ведёт ко второй ротации
+    - 's@^        3|4) printf@        3) printf@'
+    # --ждёт 0 не ротирует
+    - 's@^        0) printf ''ротировать@        9) printf ''ротировать@'
+    # стоящие в лимите не вычитаются
+    - 's@ running > stood ? running - stood : 0 @ running @'
+    # стоящие вычитаются и без смены аккаунта
+    - 's@^    if \[ "\$account" != 1 \] || ! \[\[@    if ! [[@'
+    # суточная сверка — только при отсутствии отметки
+    - 's@^    \[ "\${1:-}" != "\${2:-}" \]$@    [ -z "${1:-}" ]@'
+    # суточная сверка — на каждом обходе
+    - 's@^    \[ "\${1:-}" != "\${2:-}" \]$@    true@'
+    # путь транскрипта помощника не тот — ни один не прочтён
+    - 's@"\${tr%\.jsonl}/subagents/agent-\$id\.jsonl"@"${tr}/subagents/agent-$id.jsonl"@'
+    # число считается и без смены аккаунта
+    - 's@^    \[ "\${ACCOUNT_ROTATION:-0}" = 1 \] || { echo 0; return 0; }$@    :@'
+    # «зависший» считается вместе с «помощник»
+    - 's@\$1 == "помощник" { print \$2 }@$1 ~ /^(помощник|зависший)$/ { print $2 }@'
+    # код limit-in-log не судится — считаются все
+    - 's@>/dev/null 2>&1 && n=\$(( n + 1 ))@>/dev/null 2>\&1; n=$(( n + 1 ))@'
+    # умолчание отката свежей смены — прежние 0 мин
+    - 's@^        if \[ "\${ACCOUNT_ROLLBACK_FRESH_MIN:-15}" -gt 0 \]; then$@        if [ "${ACCOUNT_ROLLBACK_FRESH_MIN:-0}" -gt 0 ]; then@'
+    # В-1: весть_о_ротации_нужна всегда 0 — сторож шлёт весть и при смене аккаунта
+    - 's@^    \[ "\${1:-0}" != 1 \]$@    true@'
+    мутация_случай:
+    - 'А-9 аккаунт в лимите (5-й довод 1), лимит по транскрипту, принуждение → да без передачи'
+    - 'А-9 лимит + принуждение с причиной, но аккаунт не в лимите → нет (правило 18.10)'
+    - 'А-10 выбор_по_ждёт 4 (после ротации судить нечем) → итог, второй ротации нет'
+    - 'А-10 выбор_по_ждёт 0 → ротировать'
+    - 'А-14 помощники_для_ротации: идут 2, стоят в лимите 1, аккаунт → 1; идут 1, стоит 1 → 0'
+    - 'А-14 без смены аккаунта стоящие в лимите держат все: идут 2, стоит 1 → 2'
+    - 'Б-8 сверять_меню_сегодня: отметка вчерашняя → 0 (новые сутки)'
+    - 'Б-8 сверять_меню_сегодня: отметка сегодняшняя → 1 (уже сверяли)'
+    - 'А-14 helpers_stood_in_limit: aaa (429) стоит, bbb (tool_use) держит, ccc зависший не в счёт → ACCOUNT_STOPPED_HELPERS 1'
+    - 'А-14 helpers_stood_in_limit без смены аккаунта (ACCOUNT_ROTATION=0) → 0'
+    - 'А-14 helpers_stood_in_limit: aaa (429) стоит, bbb (tool_use) держит, ccc зависший не в счёт → ACCOUNT_STOPPED_HELPERS 1'
+    - 'А-14 helpers_stood_in_limit: aaa (429) стоит, bbb (tool_use) держит, ccc зависший не в счёт → ACCOUNT_STOPPED_HELPERS 1'
+    - 'В1 умолчание ACCOUNT_ROLLBACK_FRESH_MIN в стороже — 15 во всех местах'
+    - 'В-1 весть_о_ротации_нужна 1 (смена аккаунта) → 1, сторож молчит, говорит только --итог'
+  # session-warden.sh: весть «проверка приёма провалена» — молчит только при автопереходе (М-в, ревью #13).
+  scripts/test_switch_account_bot.sh#warden_handoff:
+    механизм: harness/demons/session-warden.sh
+    доказательство: bash scripts/test_switch_account_bot.sh
+    подмена: из-копии
+    мутация:
+    # молчит при любой смене аккаунта, и при ручном выборе владельца тоже
+    - 's@^    \[ "\${1:-0}" = 1 \] && \[ -n "\${2:-}" \] && return 1$@    [ "${1:-0}" = 1 ] \&\& return 1@'
+    # шлёт и при автопереходе: причина не судится
+    - 's@^    \[ "\${1:-0}" = 1 \] && \[ -n "\${2:-}" \] && return 1$@    :@'
+    # весть в rotate_full снова под решением о вести ротации
+    - 's@весть_о_битой_передаче_нужна "\$ACCOUNT_ROTATION" "\${ACCOUNT_WHY:-}"; then@весть_о_ротации_нужна "$ACCOUNT_ROTATION"; then@'
+    мутация_случай:
+    - 'М-в весть_о_битой_передаче_нужна 1 «» (ручной выбор владельца) → 0, весть о битой передаче идёт'
+    - 'М-в весть_о_битой_передаче_нужна 1 «автопереход: …» (лимит) → 1, молчит'
+    - 'М-в rotate_full: весть «проверка приёма провалена» стоит под весть_о_битой_передаче_нужна'
+  # lib/config.py: час_владельца — битый OWNER_TZ (ValueError у ZoneInfo) не роняет меню и вести (М-а, ревью #13).
+  scripts/test_switch_account_bot.sh#config_owner_hour:
+    механизм: scripts/lib/config.py
+    доказательство: bash scripts/test_switch_account_bot.sh
+    подмена: из-копии
+    мутация:
+    # ловится только неизвестный пояс, имя-путь роняет вызывающего
+    - 's@^    except (ZoneInfoNotFoundError, ValueError):$@    except ZoneInfoNotFoundError:@'
+    мутация_случай:
+    - 'М-а час_владельца: OWNER_TZ «../etc» и «Europe/../x» (ValueError у ZoneInfo) → не падает, час пояса машины'
+  # account-switch.py: разбудить_сторожа не пускает вывод сторожа в stdout двери (М-г, ревью #13).
+  scripts/test_switch_account.sh#account_wake:
+    механизм: scripts/account-switch.py
+    доказательство: bash scripts/test_switch_account.sh
+    подмена: из-копии
+    мутация:
+    # вывод сторожа дописывается к имени цели
+    - 's@\["bash", путь_сторожа(), "--account-switch"\], stdout=subprocess.DEVNULL, check=False@["bash", путь_сторожа(), "--account-switch"], check=False@'
+    мутация_случай:
+    - 'М-г авто застрял → --ждёт 0, сторож разбужен, stdout двери — только «gamma» (вывод сторожа не в цели)'
   # check-login-expiry.py: код 79 носителя — мягкий вердикт, не «ДОСТУП НЕ РАБОТАЕТ».
   scripts/test_login_expiry_exit79.py:
     механизм: scripts/check-login-expiry.py
@@ -8632,7 +9145,7 @@
     - 'довод — симлинк на выкладку — отказ'
     - 'изменённый файл (последний в манифесте) — отказ, частичной копии нет'
     - 'подмена после сверки: цель ссылки осталась 0600'
-  # Слои памяти (hr.standards-and-policy Ч12): мутации прогнаны на копиях через двери, каждая красна своим случаем.
+  # Слои памяти (Ч12 стандартов): мутации прогнаны на копиях через двери, каждая красна своим случаем.
   scripts/hooks/test_memory_layer_guard.py:
     механизм: scripts/hooks/memory_layer_guard.py
     доказательство: python3 scripts/hooks/test_memory_layer_guard.py
@@ -8706,7 +9219,7 @@
     - 'TEMP DIR ВОРОТ: каталог ворот без префикса harness-run- — голые mktemp мимо него'
     - 'TEMP DIR ВОРОТ: TMPDIR пробам не передан — голые mktemp мимо harness-run-'
     - 'TEMP DIR ВОРОТ: каталог ворот не убран после самотеста — осталось 1'
-  # hr.defekty-harnesa-dlya-stroitelya-obnovlenie Г3: ключи образца доезжают до живого конфига.
+  # Г3 (дефекты обновления): ключи образца доезжают до живого конфига.
   scripts/test_install_new.py#g3:
     механизм: scripts/install-new.py
     доказательство: python3 scripts/test_install_new.py
@@ -8715,7 +9228,7 @@
     - 's@ if к not in стоят\]$@ if True]@'
     мутация_случай:
     - 'Г3: новый ключ дописан с комментарием, значение владельца цело, лишний назван, повтор пуст'
-  # hr.defekty-harnesa-dlya-stroitelya-obnovlenie Г10: панель, выведенная туннелем cloudflared.
+  # Г10 (дефекты обновления): панель, выведенная туннелем cloudflared.
   scripts/test_panel_boundary.py#tunnel:
     механизм: scripts/check-panel-boundary.py
     доказательство: python3 scripts/test_panel_boundary.py
@@ -8728,7 +9241,7 @@
     - 'ТУННЕЛЬ без nginx: рубеж не требуется — rc'
     - 'ТУННЕЛЬ выключен (PANEL_TUNNEL=0): адрес — не туннель, нужен nginx — rc'
     - 'ТУННЕЛЬ: похожий чужой домен за туннель не засчитан — rc'
-  # hr.defekty-harnesa-dlya-stroitelya-obnovlenie Г1: предел расшифровки от памяти машины.
+  # Г1 (дефекты обновления): предел расшифровки от памяти машины.
   scripts/test_voice_worker.sh#limit:
     механизм: scripts/voice-worker.sh
     доказательство: bash scripts/test_voice_worker.sh --случай код
@@ -8739,7 +9252,7 @@
     мутация_случай:
     - 'предел: память 2 ГБ — доля ниже пола, берётся пол 2 500 000'
     - 'предел: память 32 ГБ — доля выше потолка, берётся потолок 6 000 000'
-  # hr.defekty-harnesa-dlya-stroitelya-obnovlenie: случаи боевого объёма при малых журналах не судятся.
+  # Дефекты обновления: случаи боевого объёма при малых журналах не судятся.
   # Мутация ставится в саму пробу; пустой источник журналов задаётся её дверью.
   scripts/test_events_cli.py#volume:
     механизм: scripts/test_events_cli.py
@@ -8749,7 +9262,85 @@
     - 's@^    if mb < MIN_LIVE_MB:$@    if mb > MIN_LIVE_MB:@'
     мутация_случай:
     - 'копия не меньше 20 МБ (иначе это не боевой объём) — судится на пустом источнике'
-  # ЧП#3 hr.standards-and-policy (K56): строки, изменённые задачей, без единой мутации.
+  # Живые настройки при раскладке: не правленный файл заменяется, правленному
+  # дописываются верхние ключи, записи установки не пишутся никогда (И-1).
+  scripts/test_live_settings.py:
+    механизм: scripts/lib/live_settings.py
+    доказательство: python3 scripts/test_live_settings.py
+    подмена: из-копии
+    мутация:
+    - 's@^    if not records and blob_of(live_bytes) in known_blobs:$@    if blob_of(live_bytes) in known_blobs:@'
+    - 's@^        while index > 0 and lines\[index - 1\].startswith("#"):$@        while False:@'
+    - 's@^    nested = nested_missing(package_data, live_data)$@    nested = []@'
+    мутация_случай:
+    - '(г) записи установки не заменяются даже равные прошлому пакету'
+    - '(2) правка владельца цела, верхний ключ дописан с комментарием, повтор пуст'
+    - '(3) вложенный шаги.хакатон назван, не дописан'
+  # Замок сборки: id карточек текущей карты проекта не едут в публичное дерево.
+  scripts/test_public_clean_map_ids.py:
+    механизм: scripts/check-public-clean.py
+    доказательство: python3 scripts/test_public_clean_map_ids.py
+    подмена: из-копии
+    мутация:
+    - 's@^            + (найти_карточки_в_дереве(сборка, карточки) if карточки else \[\])$@            + []@'
+    - 's@^                ид -= _id_карточек(заготовка)$@                pass@'
+    - 's@ + r")(?!\[\\w-\])")$@ + r")")@'
+    - 's@^        raise ОтказКарты(f"карта проекта не прочитана ({отказ})") from отказ$@        return set()@'
+    мутация_случай:
+    - 'id карты в данных — отказ, код 1'
+    - 'чистая сборка (только id заготовки карты) — код 0'
+    - 'длиннее id карты (нет в карте) — не находка, код 0'
+    - 'карты проекта нет — код 2 (судить нечем)'
+  # Карантин ворот — данные установки: сборка кладёт пустую заготовку.
+  scripts/test_quarantine_install_data.py:
+    механизм: harness/config/public-build.yaml
+    доказательство: python3 scripts/test_quarantine_install_data.py
+    подмена: из-копии
+    мутация:
+    - 's@^  harness/config/gates-quarantine.yaml: harness/шаблоны-задач/gates-quarantine-заготовка.yaml$@@'
+    мутация_случай:
+    - 'К1 «заменить_шаблоном» в public-build.yaml подменяет harness/config/gates-quarantine.yaml'
+  # Свой карантин копии цел: сверка с пакетом заменяет только прошлую пакетную версию.
+  scripts/./test_quarantine_install_data.py:
+    механизм: scripts/lib/live_settings.py
+    доказательство: python3 scripts/./test_quarantine_install_data.py
+    подмена: из-копии
+    мутация:
+    - 's@^    if not records and blob_of(live_bytes) in known_blobs:$@    if not records:@'
+    мутация_случай:
+    - 'К4 свой карантин копии цел побайтно'
+  # Неполный клон пакета раскрывается до сверки «есть новое».
+  scripts/test_update_shallow_history.py:
+    механизм: scripts/update.py
+    доказательство: python3 scripts/test_update_shallow_history.py
+    подмена: из-копии
+    мутация:
+    - 's@^    return ("--unshallow",) if _неполный_клон(каталог) else ()$@    return ()@'
+    - 's@^    return ("--unshallow",) if _неполный_клон(каталог) else ()$@    return ("--unshallow",)@'
+    мутация_случай:
+    - 'U2 «есть новое» на раскрытом пакете'
+    - 'U3 полный клон — без беды, «есть новое»'
+  # Г1: расшифровка идёт под действующим пределом (доля памяти между полом и потолком), не под полом.
+  scripts/./test_voice_worker.sh#effective:
+    механизм: scripts/voice-worker.sh
+    доказательство: bash scripts/./test_voice_worker.sh --случай диспетчер
+    подмена: из-копии
+    мутация:
+    - 's@ _ "\$VOICE_VM_EFFECTIVE_KB" \\$@ _ "$VOICE_VM_LIMIT_KB" \\@'
+    мутация_случай:
+    - '(б) расшифровка идёт под пределом памяти из harness.conf (RLIMIT_AS)'
+  # Г9: вердикт населения первой строкой, справка после него.
+  scripts/check-who-calls.py:
+    механизм: scripts/check-who-calls.py
+    доказательство: python3 scripts/check-who-calls.py --selftest
+    подмена: '-'
+    мутация:
+    - 's@^    if справка:$@    if False:@'
+    - 's@^        print(f"\[население\] БЕЗ ВЫЗЫВАЮЩЕГО@        print(*справка); print(f"[население] БЕЗ ВЫЗЫВАЮЩЕГО@'
+    мутация_случай:
+    - 'справка названа после вердикта (красный)'
+    - 'вердикт первой строкой (красный)'
+  # ЧП#3 стандартов (K56): строки, изменённые задачей, без единой мутации.
   # Таблицы по виду судит виды-10 пробы кнопок: ключи == ВИДЫ_СОГЛАСИЯ во всех трёх файлах.
   scripts/./././././././././test_consent_buttons.py:
     механизм: scripts/lib/consent_buttons.py
@@ -8768,7 +9359,7 @@
     - 's@^                 "слой-человека")$@                 )@'
     мутация_случай:
     - 'в10б) owner_word.py: таблица по виду есть, ключи == ВИДЫ_СОГЛАСИЯ'
-    - 'в10а) owner_word.ВИДЫ_СОГЛАСИЯ — восемь видов (спека §5: + «снос-базы», «перепись»; hr.standards-and-policy: + «слой-человека»)'
+    - 'в10а) owner_word.ВИДЫ_СОГЛАСИЯ — восемь видов (спека §5: + «снос-базы», «перепись»; стандарты: + «слой-человека»)'
   scripts/./././././././././././test_consent_buttons.py:
     механизм: scripts/ask-consent.py
     доказательство: python3 scripts/./././././././././././test_consent_buttons.py --случай виды-10
@@ -8854,7 +9445,7 @@
     - 's@^            SELF_PROMPT_LIVE_SH="\$T/self-prompt-live-stub.sh" \\$@            SELF_PROMPT_LIVE_SH="$T/нет-заглушки.sh" \\@'
     мутация_случай:
     - 'проба личности по событию ушла в заглушку стенда, не в живую'
-  # Часть 2 живой проверки (hr.zhivaya-proverka-vseh-mehanizmov, 11.11.2026).
+  # Часть 2 живой проверки всех механизмов (11.11.2026).
   # Манифест слоя 1 пишет build-public.py по СОБРАННОМУ дереву; дверь BUILD_PUBLIC_UNDER_TEST.
   scripts/test_build_public_self_manifest.py:
     механизм: scripts/build-public.py
@@ -9329,7 +9920,7 @@
     - 's@^  konf_zagruzit_dveri PROJECT_DIR LOG_DIR DAEMON_OWNED_PATHS DEVMAP_TRACE_FRESH_MIN$@  konf_zagruzit_dveri PROJECT_DIR LOG_DIR DEVMAP_TRACE_FRESH_MIN@'  # стр. 23: stop-daemon
     мутация_случай:
     - "П-12 АР-4 stop_reminder.sh: 11 ключей подлогом в окружении → после konf_zagruzit_dveri (паспорт стенда без ключей двери) значение файла или умолчание, не окружение"
-# ── hr.zapuskov-none-net-informacii-znachit: состояние процессов (работает / не запущен / упал)
+# ── «Запусков None» — нет информации: состояние процессов (работает / не запущен / упал)
 # вместо «запусков None». Каждая мутация — названная поломка из спеки задачи (§4–§6).
   scripts/./test_process_state.py:
     механизм: scripts/lib/process_state.py
@@ -9408,7 +9999,7 @@
     - 'ранний выход всегда — общий индекс не вылечен, случай (а)'
     - 'хук печатает — личный коммит не молчит, случай (а)'
     - 'путь-глоб как шаблон — чужой staged ab сброшен, случай (е)'
-  # Очередь слияния веток помощников (hr.per-helper-code-copies, 13.11): 18 из 18.
+  # Очередь слияния веток помощников (13.11): 18 из 18.
   scripts/test_merge_queue.py:
     механизм: scripts/merge-queue.py
     доказательство: python3 scripts/test_merge_queue.py
@@ -9451,7 +10042,7 @@
     - 'н: оборванное mq-* старше часа не снято'
     - 'н: неслитое не считается'
     - 'б/м: master ушёл — не круг заново'
-  # Счётчик трения коммитов (hr.per-helper-code-copies, 13.11): 9 из 9 после усиления пробы.
+  # Счётчик трения коммитов (13.11): 9 из 9 после усиления пробы.
   scripts/test_commit_friction.py:
     механизм: scripts/commit-friction.py
     доказательство: python3 scripts/test_commit_friction.py
@@ -9476,7 +10067,7 @@
     - 'коммиты не только master first-parent'
     - 'очередь и замки не дают данных'
     - 'метка без пояса — не местное время'
-  # Отложенная сверка с пакетом в дереве помощника (hr.per-helper-code-copies, 13.11): 6 из 6.
+  # Отложенная сверка с пакетом в дереве помощника (13.11): 6 из 6.
   scripts/test_compare_package_deferred.py:
     механизм: scripts/compare-with-package.py
     доказательство: python3 scripts/test_compare_package_deferred.py
@@ -9495,7 +10086,7 @@
     - 'журнал за сегодня не обязателен нигде'
     - 'печать «отложена» пропала'
     - 'отложенная сверка не включается'
-  # Суд карантина ворот (hr.quarantine-red-checks): проба зовёт суд рядом с собой.
+  # Суд карантина ворот: проба зовёт суд рядом с собой.
   scripts/test_gates_quarantine.py:
     механизм: scripts/gates-quarantine.py
     доказательство: python3 scripts/test_gates_quarantine.py
@@ -9517,7 +10108,7 @@
     - 's@^    \[ "\$FORCE_ROTATE" = 1 \] && { exit_sent=1; deadline=\${ROTATE_EXIT_WAIT_SEC:-180}; }$@    :@'
     мутация_случай:
     - 'первая клавиша в диалог — не позже 60 с (было ~930)'
-  # ── hr.harness-evolution-network, фаза 1: мутации плана docs/plans/2026-11-12-evolution-net-phase1.md ──
+  # ── Сеть эволюции харнеса, фаза 1: мутации плана docs/plans/2026-11-12-evolution-net-phase1.md ──
   # 17 мутаций плана (Task 0 — 1, Task 2 — 5, Task 3 — 5, Task 4 — 1, Task 5 — 3, Task 6 — 2) и W5 плана
   # (commit-tree без -S). Тексты «до» — по коду 13.11; каждая прогнана прибором на копии.
   # Не внесены как эквивалентные (прогнаны 13.11, проба зелёна на мутанте — дыра была бы вечной):
@@ -9545,6 +10136,16 @@
     - 's@"push", "-q", cfg.url,@"push", "-q", "origin",@'
     - 's@env = {k: os.environ\[k\] for k in ("PATH", "HOME", "LANG", "LC_ALL") if k in os.environ}@env = dict(os.environ)@'
     - 's@for name, outer in (("проект", str(cfg.project)), @for name, outer in (@'
+    - 's@\.get("статус") in CLOSED_STATUSES:@.get("статус") in ():@'
+    - 's@^    if path not in base:$@    if True:@'
+    - 's@\.host for sha in queue)@.ok for sha in queue)@'
+    - 's@^    return b"\\n"\.join(\[b"---", \*front, b"---", parsed\[1\]\])$@    return data@'
+    - 's@^    if first or caught_up:$@    if first:@'
+    - 's@^    names = \[visible(Path(path)\.name)\[:40\] for path in edits\]$@    names = [visible(path)[:40] for path in edits]@'
+    - 's@^        state\["carded"\]\[path\] = sha$@        pass@'
+    - 's@ and p in state\["accepted"\]}$@}@'
+    - 's@^    touch_mark()$@    pass@'
+    - '/^def _read_tick_code/,/^$/s@return refusal.code@return OK@'
     мутация_случай:
     - 'M1 Task 0: умолчание адреса в коде вместо отказа — «K1 пустой EVOLUTION_REMOTE_URL: код 4 без падения»'
     - 'Task 2: == "G" → != "B" — «J2 ключ y вне списка → отказ: U»'
@@ -9561,6 +10162,16 @@
     - 'Task 5 (M26): push по имени origin вместо URL — «D6 pushurl: другой голый не тронут»'
     - 'Task 5 (M27): GIT_* зовущего доходит до git двери — «D7 GIT_DIR=<проект>/.git у зовущего → ссылки проекта прежние»'
     - 'Task 5 (M28): снята проверка каталога против PROJECT_DIR — «D4 EVOLUTION_DIR = PROJECT_DIR → 2»'
+    - 'R41-02 m1 (SK1, ddecd3dd): needs_card не видит закрытых статусов — «SK1 дерево якоря: сделано/дубль → карточек нет», SK2, SK3'
+    - 'R41-02 m2 (C1, 6e519ede): changed_part судит всю запись, а не изменённое — «C1 ответ в чужой записи со следом в неизменённом теле → --якорь 0»'
+    - 'R41-02 m3 (W7b, 6e519ede): host_catchup .host → .ok — «W7b состояние читателя отстаёт от origin/main → код 4, sha нет»'
+    - 'R41-02 m4 (N1, 787f65fa): without_own_name отдаёт запись целиком — «N1» имя сервера в «от:»/«кому:» не след установки'
+    - 'R41-02 m5 (C2, 6e519ede): сохранение только при first, не при caught_up — «C2 --отправить 0, --читать: last_seen = sha ответа»'
+    - 'R41-02 m6 (W6b, 791f2bb2): тема якоря с полным путём вместо имени — «W6b тема якоря = число правок и имена без каталогов»'
+    - 'R41-02 m7 (M7, ddecd3dd): закрытая запись не метится в carded — «M7 хозяин закрыл путь из pending сверх потолка → карточек 0»'
+    - 'R41-03 m8 (C3, 6c06d168): read_tick берёт из pending путь, которого нет в accepted — «C3» --читать код 1 (KeyError в write_cards)'
+    - 'удачный тик не ставит метку пульса — «B4 метка пульса evolution-net»'
+    - 'отказ тика под events.run теряет свой код — «K1 пустой EVOLUTION_REMOTE_URL: код 4», «R8 force-push → код 3»'
   # Правило сторожа «сеть_мимо_двери»: push в клон сети — только дверью evolution-net.py --отправить.
   scripts/hooks/test_guard_bash.py#evolution-net:
     механизм: scripts/hooks/guard_bash.py
@@ -9572,8 +10183,170 @@
     мутация_случай:
     - 'Task 6: снят вызов правила сеть_мимо_двери — «G1 push из клона сети через относительный -C отменён» … G4'
     - 'Task 6: снят разбор cd звена для push — «G2 cd в клон по относительному пути и push отменён»'
+  # Обёртка коммита под замком: замок, сверка, код git, отказ по замку.
+  scripts/test_git_commit_locked.sh:
+    механизм: scripts/git-commit-locked.sh
+    доказательство: bash scripts/test_git_commit_locked.sh
+    подмена: GIT_COMMIT_LOCKED_UNDER_TEST
+    мутация:
+    - 's@^if ! flock -w "\$wait_s" 9; then$@if false; then@'
+    - 's@^\[ "\$rc" -eq 0 \] || exit "\$rc"$@&; exit 0@'
+    - 's@committed=\$(git log -1 --format=%B "\$c" | git stripspace --strip-comments)@committed=$(git log -1 --format=%B "$c")@'
+    - 's%^git commit "\${args\[@\]}" 9>&-$%& || true%'
+    - 's@^    exit 4$@    :@'
+    мутация_случай:
+    - 'м1 без flock — «B подмен через обёртку: ждали 0, вышло 35»'
+    - 'м2 без сверки — «C обёртка выходит с кодом ≠ 0», «C в stderr слово «расхождение»»'
+    - 'м4 сверка без stripspace — «E штатная очистка: обёртка выходит 0: ждали 0, вышло 3»'
+    - 'м5 код git проглочен — «F код обёртки = код голого git (1): ждали 1, вышло 3»'
+    - 'м6 коммит после отказа замка — «L замок занят дольше предела: код 4», «L замок занят: коммита нет»'
+  # Правило сторожа «коммит_мимо_обёртки»: личный индекс или пути — только обёрткой git-commit-locked.sh.
+  scripts/hooks/test_guard_bash.py#commit-wrapper:
+    механизм: scripts/hooks/guard_bash.py
+    доказательство: python3 scripts/hooks/test_guard_bash.py --случай коммит
+    подмена: GUARD_UNDER_TEST
+    мутация:
+    - 's@^    мимо_обёртки = коммит_мимо_обёртки(cmd)$@    мимо_обёртки = None@'
+    мутация_случай:
+    - 'м3 снят вызов правила — «личный индекс и пути мимо обёртки: ждали 2, вышло 0» … «текст отказа называет git-commit-locked.sh» (17 из 27)'
+  # ── Пробы релиза 0.11.1 со стенда копии (14.11.2026) ──
+  # Блок стенда E2 (16 мутаций) восстановлен по журналу его прогона; к нему —
+  # пробы следующей смены: занятость своего пользователя, К-8 отправителей,
+  # ярус 1 прежней описи (M8, D40).
+  # Опись не снимает своё копии: О1/О2 по мутации в каждом из трёх носителей правила.
+  scripts/test_layout_keeps_copy_own.py:
+    механизм: scripts/lib/layout_manifest.py
+    доказательство: python3 scripts/test_layout_keeps_copy_own.py
+    подмена: из-копии
+    мутация:
+    - 's@^    verdict = Verdict()$@    verdict = Verdict(); own = frozenset()@'
+    мутация_случай:
+    - 'своё копии не судится: x.sh снят (О1, О2 «не в строке снятия», «на месте», «опись называет»)'
+  scripts/test_layout_keeps_copy_own.py#history:
+    механизм: scripts/lib/layout_history.py
+    доказательство: python3 scripts/test_layout_keeps_copy_own.py
+    подмена: из-копии
+    мутация:
+    - 's@"log", "--branches", "--not", "HEAD", "--tags",$@"log", "--branches",@'
+    мутация_случай:
+    - 'своё = вся история пакета (О1, О2 «контроль: old.sh снят»)'
+  scripts/test_layout_keeps_copy_own.py#door:
+    механизм: scripts/layout-door.py
+    доказательство: python3 scripts/test_layout_keeps_copy_own.py
+    подмена: из-копии
+    мутация:
+    - 's@            frozenset() if unchecked else own)@            frozenset())@'
+    мутация_случай:
+    - 'дверь не передаёт своё копии суду описи (О1, О2 «не в строке снятия», «на месте»)'
+  # Весть об отказе self-seal называет тот эталон, что читают модели.
+  scripts/test_update_etalon_text.py:
+    механизм: scripts/update.py
+    доказательство: python3 scripts/test_update_etalon_text.py
+    подмена: UPDATE_PY
+    мутация:
+    - 's@f"эталон {_эталон_личности()}\. Напечатать@"эталон /etc/harness/self. Напечатать@'
+    - 's@    return os\.environ\.get("SELF_ETALON_DIR") or конф_модуль@    return конф_модуль@'
+    мутация_случай:
+    - 'путь эталона снова зашит строкой (дверь, корень машины и гейт «корень установки» красные)'
+    - 'дверь SELF_ETALON_DIR не читается (весть называет корень машины)'
+  # Опись гейта отправителей: учтённое и не добавленное, без скрытого .gitignore.
+  scripts/check-owner-senders.py#опись:
+    механизм: scripts/check-owner-senders.py
+    доказательство: python3 scripts/check-owner-senders.py --selftest
+    подмена: '-'
+    мутация:
+    - 's@"ls-files", "--cached", "--others", "--exclude-standard",@"ls-files",@'
+    - 's@"--others", "--exclude-standard",@"--others",@'
+    мутация_случай:
+    - 'опись только из учтённого в git — разложенный незакоммиченный отправитель не назван и с записью судится «нет в гите»'
+    - 'копия, скрытая .gitignore, судится как отправитель'
+  # Т15: судья AST отличает чтение хука как текста от вызова (образцы reader/direct/helper/stored).
+  scripts/test_session_carrier.sh#judge:
+    механизм: scripts/test_session_carrier.sh
+    доказательство: bash scripts/test_session_carrier.sh
+    подмена: '-'
+    мутация:
+    - 's@^        \*\.py) py_calls_hook "\$1" ;;$@@'
+    - 's@^RUNS = re\.compile(r"run|exec|spawn|popen|system|call|check_output|getoutput", re\.I)$@RUNS = re.compile(r"^$")@'
+    - 's@^            runners\.add(name)$@            break@'
+    - 's@^    if not isinstance(cur, ast\.Expr):$@    if False:@'
+    - 's@^HOOK = re\.compile(r"hooks/session_state\\\.sh|@HOOK = re.compile(r"@'
+    мутация_случай:
+    - 'Мг1: питон-пробы не судятся разбором — reader.py «зовёт», Т15 ловит test_agent_start_hints.py'
+    - 'Мг2: вызов не узнаётся вовсе — direct.py и helper.py «не зовут»'
+    - 'Мг3: вызов через свою функцию не узнаётся — helper.py «не зовёт»'
+    - 'Мг4: вызов, сохранённый в переменную, не узнаётся — stored.py «не зовёт»'
+    - 'Мг5: путь hooks/session_state.sh не узнаётся — direct.py «не зовёт»'
+  # Образцы адаптеров журналов: судимые — каждый журнал реестра со временем.
+  scripts/test_events_lib.py#образцы:
+    механизм: scripts/test_events_lib.py
+    доказательство: python3 scripts/test_events_lib.py
+    подмена: '-'
+    мутация:
+    - 's@^        judged\.add((e\.get("dir") or "log", e\.get("file") or f"{name}\.jsonl"))$@        pass@'
+    - 's@^    ("log", .account-switch\.jsonl., .*$@@'
+    мутация_случай:
+    - 'Мд1: судимых журналов ноль — «журналов к суду больше нуля»'
+    - 'Мд2: у журнала account-switch нет образца — «у каждого судимого журнала есть образец»'
+  # Поле времени в реестре журналов — то, что пишет писатель.
+  scripts/test_events_lib.py#journals:
+    механизм: harness/config/journals.yaml
+    доказательство: python3 scripts/test_events_lib.py
+    подмена: из-копии
+    мутация:
+    - 's@^    time_field: когда$@    time_field: ts@'
+    - 's@^    time_field: доставлено$@    time_field: ts@'
+    мутация_случай:
+    - 'Мд3: поле времени уборка-docker не «когда» — «образец log/уборка-docker.jsonl: время»'
+    - 'Мд4: поле времени panel-comments-delivered не «доставлено» — «образец log/panel-comments-delivered.jsonl: время»'
+  # Занятость своего пользователя: свой pid назван среди держателей, отказ — rc 1.
+  # «Чужой uid считается своим» стоит в записи без метки выше.
+  scripts/test_deploy_guard_own_user.py#named:
+    механизм: scripts/deploy_guard.py
+    доказательство: python3 scripts/test_deploy_guard_own_user.py
+    подмена: из-копии
+    мутация:
+    - 's@        занято\.append(f"процесс {p\.name}: {cmdline\[:80\]}@        занято.append(f"работа: {cmdline[:80]}@'
+    - 's@^    return {"можно": False,$@    return {"можно": True,@'
+    мутация_случай:
+    - 'm1: держатель не назван «процесс <pid>:» — своя работа и работа в нашем дереве не опознаны'
+    - 'm2: занятость не отказывает — ворота отвечают rc 0 при своей долгой работе'
+  # К-8: проба считает отправителей описью самого гейта (файлы_кода), а не своей копией команды.
+  scripts/test_alert_task.py#k8:
+    механизм: scripts/test_alert_task.py
+    доказательство: python3 scripts/test_alert_task.py --section senders
+    подмена: '-'
+    мутация:
+    - 's@^    code = \[str(p\.relative_to(root)) for p in module\.файлы_кода(root)\]$@    code = [n for n in subprocess.run(["git", "-C", str(root), "-c", "core.quotepath=false", "ls-files", "scripts", "harness"], capture_output=True, text=True).stdout.splitlines() if n.endswith((".py", ".sh"))]@'
+    мутация_случай:
+    - 'К-8 считает только учтённое в git — неотслеживаемый отправитель: проба 8, гейт 9'
+  # Ярус 1 прежней описи — «из описи вынут, файл не тронут», порча — только не записываемый путь.
+  scripts/test_layout_manifest.py#set-aside:
+    механизм: scripts/lib/layout_manifest.py
+    доказательство: python3 scripts/test_layout_manifest.py
+    подмена: из-копии
+    мутация:
+    - 's@^        elif forbidden_tier(path) == 1:$@        elif False:@'
+    - 's@^            self\.out_of_scope\.add(path)$@            self.broken.add(path)@'
+    - 's@^        if listable(path):$@        if False:@'
+    - 's@из описи вынут (не дело раскладки), файл не тронут: {p}"$@вынут: {p}"@'
+    мутация_случай:
+    - 'M8: ярус 1 не откладывается в сторону — судится как свой путь, не в out_of_scope'
+    - 'M8: ярус 1 снова «опись испорчена» (broken), а не «вынут, файл не тронут»'
+    - 'M8: не записываемый путь (/abs, «..») не «опись испорчена»'
+    - 'M8: строки «из описи вынут (не дело раскладки), файл не тронут: <путь>» нет'
+  scripts/test_layout_door.py#d40:
+    механизм: scripts/lib/layout_manifest.py
+    доказательство: python3 scripts/test_layout_door.py
+    подмена: из-копии
+    мутация:
+    - 's@^            self\.out_of_scope\.add(path)$@            self.broken.add(path)@'
+    - 's@из описи вынут (не дело раскладки), файл не тронут: {p}"$@вынут: {p}"@'
+    мутация_случай:
+    - 'D40: STATE.md из прежней описи — «опись испорчена», а не «вынут, файл не тронут»'
+    - 'D40: строки «из описи вынут (не дело раскладки), файл не тронут: STATE.md» нет'
 без_мутаций:
-  scripts/test_unified_fresh.py: 'мутация на копии невозможна: дверь UNIFIED_DIR — каталог глав, сборщика и выгрузки, а прибор подставляет в дверь путь одного файла; проба отвечает «нет сборщика» и красна на чистой копии. Красная на поломке доказана живьём: пакет 8da1ae2 — «ОТСТАЛА 323599 против 323861» (c266329, hr.release-0-9-3)'
+  scripts/test_unified_fresh.py: 'мутация на копии невозможна: дверь UNIFIED_DIR — каталог глав, сборщика и выгрузки, а прибор подставляет в дверь путь одного файла; проба отвечает «нет сборщика» и красна на чистой копии. Красная на поломке доказана живьём: пакет 8da1ae2 — «ОТСТАЛА 323599 против 323861» (c266329, релиз 0.9.3)'
   scripts/test_layout_selftest_cleanup.py: 'мутация на копии невозможна (проверено прогоном 10.11): раскладчик пакета лежит вне дерева проекта, одинокая копия без соседних файлов пакета падает раньше обрыва по timeout — проба отвечает «обрыва не было (код 1)», чистая копия красна до мутации (hr.alert-disk-cleanup-full-2)'
   .tasks/: 'пробы задач до шага «код»: переезжают в scripts/ вместе с кодом и там получают запись'
   UNIFIED/templates/: 'шаблон книги для чужого проекта: механизма в этом дереве у него нет'

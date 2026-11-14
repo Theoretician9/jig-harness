@@ -57,6 +57,8 @@ unset PROJECT_DIR LOG_DIR STATE_DIR SECRETS_DIR GATES_SNAPSHOT_DIR HARNESS_INSTA
 cp "$WRAPPER" "$T/live/scripts/gates-snapshot.sh"
 cp "$GATES" "$T/live/scripts/gates.sh"
 cp "$HERE/check-secrets.sh" "$T/live/scripts/"
+# Ворота судят карантин своим скриптом: без него итог выборки — rc=2, а не её вердикт.
+cp "$HERE/gates-quarantine.py" "$T/live/scripts/"
 cp -r "$HERE/lib" "$T/live/scripts/lib"
 rm -rf "$T/live/scripts/lib/__pycache__"
 cp "$LIVE_LIST" "$T/live/harness/config/gates-live.yaml"

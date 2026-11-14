@@ -301,7 +301,10 @@ AGENT_USER="$(id -un)"
 PANEL_STATE_DIR="$S/panel"
 EOF
         # Предел памяти стенда отличен от умолчания пакета: заглушка видит, чей он.
-        printf 'TMUX_SESSION="%s"\nSERVICE_LOCKS_SUBDIR="services"\nPANE_TMUX_TIMEOUT="5"\nPANE_ENTER_DELAY="0.1"\nPANE_SEND_NOW="0"\nVOICE_VM_LIMIT_KB="2400000"\nVOICE_VM_MAX_KB="2400000"\n' \
+        # Пол ниже потолка, доля 100%: действующий предел — потолок, и подмена
+        # действующего предела полом ($VOICE_VM_LIMIT_KB) видна; при поле = потолку
+        # она проходила бы молча.
+        printf 'TMUX_SESSION="%s"\nSERVICE_LOCKS_SUBDIR="services"\nPANE_TMUX_TIMEOUT="5"\nPANE_ENTER_DELAY="0.1"\nPANE_SEND_NOW="0"\nVOICE_VM_LIMIT_KB="1500000"\nVOICE_VM_MEM_PERCENT="100"\nVOICE_VM_MAX_KB="2400000"\n' \
             "$STAMP-$name" > "$S/harness.conf"
         mkdir -p "$S/log/locks/services"
         [ -e "$S/pause" ] && {
@@ -384,7 +387,7 @@ except ValueError: print(f"нет метки (толчок {sys.argv[1]}, при
     case_check "БОЛЬНОЙ (б): inbox.jsonl — строка «расшифровка» одна" "1" "$(mk journal "$IJ" 201 расшифровка)"
     case_check "(б) «расшифровал» владельцу — одно" "1" "$(cnt 'расшифровал голосовое' "$S/acks")"
     case_check "(б) пара файлов вложения убрана после подбора" "0" "$(find "$S/log/inbox/вложения" -maxdepth 1 -name '201.*' 2>/dev/null | grep -c .)"
-    # 2400000 КБ — значение harness.conf стенда, не умолчание пакета.
+    # 2400000 КБ — потолок harness.conf стенда (доля 100% памяти машины выше него), не пол и не умолчание пакета.
     case_check "(б) расшифровка идёт под пределом памяти из harness.conf (RLIMIT_AS)" "$((2400000 * 1024))" \
         "$(awk '$1 == "start" {print $6; exit}' "$S/tr-log")"
     d_stop b

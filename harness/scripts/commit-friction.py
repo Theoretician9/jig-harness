@@ -9,7 +9,7 @@ merge-queue.jsonl (итоги очереди; прогон её ворот — �
 в gates.jsonl тоже pre-commit и из прогонов хука вычитается), guard.jsonl и
 pamyat-kommit.log (следы замков git); коммиты — `git log --first-parent master`.
 Код возврата: 0 — ответ дан (в том числе «нет данных»), 2 — неверный вызов.
-Контракт: .tasks/hr.per-helper-code-copies/спека.md §4.5.
+Контракт: спека копий кода помощников §4.5.
 """
 from __future__ import annotations
 

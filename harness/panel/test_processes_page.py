@@ -1091,7 +1091,7 @@ with tempfile.TemporaryDirectory(prefix="proba-processy-") as tmp:
                   "process-dispatcher-view.json.XXXX в каталоге журналов нет (краснеет: mkstemp до сборки без unlink)",
                   f"осталось {left}")
 
-    # 20. Состояние процесса в таблице расходов (спека hr.zapuskov-none-net-informacii-znachit §4.2–4.3, §6 п.13).
+    # 20. Состояние процесса в таблице расходов (спека §4.2–4.3, §6 п.13).
     values = state_values()
     check(bool(values), "константа VALUES разобрана из scripts/lib/process_state.py", f"модуль {STATE_MODULE}")
     by_id = {r["id"]: r for r in records}

@@ -25,7 +25,7 @@ run_hook() {
     (cd "$STAND/proj" && env -u PRODUCT_PATH -u PRODUCT_DIR -u PROJECT_NAME -u PROJECT_DIR \
         PATH="$STAND/bin:/usr/bin:/bin" HARNESS_HOME="$STAND/home" \
         HARNESS_INSTALL_CONF="$STAND/home/install.conf" HARNESS_CONF="$STAND/home/harness.conf" \
-        timeout 60 bash "$HOOK" </dev/null 2>/dev/null | head -20)
+        SHIFT_SELF_MARK="$STAND/shift.mark" timeout 60 bash "$HOOK" </dev/null 2>/dev/null | head -20)
 }
 has() { grep -qF -- "$2" <<<"$1" && echo да || echo нет; }
 

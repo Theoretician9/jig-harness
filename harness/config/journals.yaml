@@ -98,6 +98,12 @@ journals:
     time_field: ts
     time_kind: tz
     event_from: "field:event"
+  account-switch:
+    file: account-switch.jsonl
+    writers: [scripts/account-switch.py]
+    time_field: ts
+    time_kind: tz
+    event_from: "field:event"
   confirmations:
     file: confirmations.jsonl
     writers: [scripts/tg-dispatcher.sh]
@@ -456,7 +462,7 @@ journals:
     file: "уборка-docker.jsonl"
     writers: none
     why: пишет scripts/docker-sweep.py по пути из аргумента --журнал, который передаёт disk-cleanup.sh; путь-параметр обход не видит
-    time_field: ts
+    time_field: когда
     time_kind: tz
     event_from: docker.sweep
   "панель-недоставленное":
@@ -469,7 +475,8 @@ journals:
   panel-comments-delivered:
     file: panel-comments-delivered.jsonl
     writers: [scripts/comments-intake.py]
-    time_field: ts
+    # ts — имя заявки (epoch строкой, ключ повтора); момент доставки — «доставлено».
+    time_field: доставлено
     time_kind: tz
     event_from: panel.comment_delivered
   "тревоги-ждут":

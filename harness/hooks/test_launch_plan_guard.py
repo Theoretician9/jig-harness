@@ -430,8 +430,8 @@ def case_tasks_plan(tmp: Path) -> None:
           (code, (last(s).get("data") or {}).get("отказ")))
 
 
-# ─────────── HELPER_WORKTREE: исполнитель — в своём дереве (hr.per-helper-code-copies, Т2) ───────────
-# Спека .tasks/hr.per-helper-code-copies/спека.md §5, Р-4: isolation_verdict() — первой проверкой
+# ─────────── HELPER_WORKTREE: исполнитель — в своём дереве (Т2) ───────────
+# Спека задачи §5, Р-4: isolation_verdict() — первой проверкой
 # decide, ДО пропуска «без метки»; ключ — установленный harness.conf (HARNESS_CONF), затем
 # ROOT/harness/config/harness.conf; дверь --door этот отказ не открывает.
 ISOLATION_HINT = 'isolation: "worktree"'

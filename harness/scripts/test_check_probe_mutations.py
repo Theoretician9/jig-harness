@@ -381,6 +381,40 @@ def sick_dead_exception():
         yard.close()
 
 
+def healthy_dir_exception_without_dir():
+    """The public build and a fresh copy have no `.tasks/` at all: a directory
+    exception shipped with the data guards nothing there, and that is not a lie."""
+    yard = healthy_yard()
+    try:
+        yard.data(HEALTHY + "без_мутаций:\n"
+                  "  .tasks/: 'пробы задачи до шага кода, переезжают в scripts/'\n")
+        rc, out = yard.run()
+        verdict("здоровый: исключение каталога, которого в дереве нет, — зелёный",
+                rc == 0 and "судимых проб: 3" in out
+                and "ни к чему не относится" not in out,
+                f"rc={rc}, вывод: {out.strip()[-300:]}")
+    finally:
+        yard.close()
+
+
+def sick_dir_exception_dir_without_probes():
+    """The directory is in the tree but holds no probe: the exception is dead."""
+    yard = healthy_yard()
+    try:
+        card = yard.tree / ".tasks" / "t1" / "спека.md"
+        card.parent.mkdir(parents=True)
+        card.write_text("# карточка\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(yard.tree), "add", ".tasks"], check=True)
+        yard.data(HEALTHY + "без_мутаций:\n"
+                  "  .tasks/: 'пробы задачи до шага кода, переезжают в scripts/'\n")
+        rc, out = yard.run()
+        verdict("больной: каталог исключения есть, проб в нём нет — красный",
+                rc == 1 and "исключение ни к чему не относится: .tasks/" in out,
+                f"rc={rc}, вывод: {out.strip()[-300:]}")
+    finally:
+        yard.close()
+
+
 # ── NO WORK MUST NOT LOOK LIKE SUCCESS ──────────────────────────────────────
 
 def sick_empty_set():
@@ -432,7 +466,8 @@ def main():
                healthy_ignored_not_judged,
                door_exception_with_reason_file, door_exception_with_reason_dir,
                door_prefix_needs_slash, sick_exception_without_reason,
-               sick_dead_exception, sick_empty_set, sick_missing_carrier,
+               sick_dead_exception, healthy_dir_exception_without_dir,
+               sick_dir_exception_dir_without_probes, sick_empty_set, sick_missing_carrier,
                sick_tree_not_git):
         try:
             fn()

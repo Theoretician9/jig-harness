@@ -320,6 +320,7 @@ ids_iz_istorii() { # $1=момент ISO (пусто — вся история) 
         # навсегда (ревью кода 12.09.2026, R-2).
         otvet_versii=$(python3 -I "$SCRIPTS_REAL/version.py" --оформить \
                        --пакет "$paket" --сборка "$sborka" \
+                       --проект "$PROJECT_DIR" \
                        --удалённый "$PUBLIC_REMOTE" 2>&1) || {
             say "ОТКАЗ: версия релиза не посчитана — $otvet_versii"; return 1; }
         nomer_versii=$(printf '%s' "$otvet_versii" \

@@ -655,7 +655,7 @@ def judge_lock_not_exclusive(tmp: Path) -> None:
 
 
 def judge_lock_worktree_path(tmp: Path) -> None:
-    """Характеристика Р-2 (hr.per-helper-code-copies, спека §2, Т4): путь в дереве помощника
+    """Характеристика Р-2 (спека §2, Т4): путь в дереве помощника
     `.claude/worktrees/<id>/…` даёт ключ не из FILE_CLAIM_EXCLUSIVE — замка нет, а заявка
     пишется и питает «живость». Зелёная ДО кода: хук не меняется, проба держит, что так и
     останется. Поломка, что оставила бы зелёной: нет — снятие префикса `.claude/worktrees/<id>/`

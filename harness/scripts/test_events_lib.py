@@ -218,8 +218,8 @@ def live_snapshot():
 
 SRC = "scripts/hooks/guard_bash.py"
 
-# Образцы адаптеров (крит. 4, находка В9): по одной строке на журнал с файлом
-# на диске, сняты с БОЕВЫХ файлов 27.10.2026 (последняя строка; оставлены поле
+# Образцы адаптеров (крит. 4, находка В9): по строке на каждый журнал реестра
+# со временем; где файл был, сняты с БОЕВЫХ файлов 27.10.2026 (последняя строка; оставлены поле
 # времени и короткие поля механизма, сессии заменены на «s-sample», длинные и
 # секретоподобные значения выброшены). Ожидаемое время в UTC посчитано при
 # составлении и записано литералом — проба не зовёт для ожидания тот же разбор,
@@ -281,6 +281,19 @@ SAMPLES = [
     ("log", 'evo/summary.jsonl', {"ts": "2026-10-27T14:05:02+05:00", "kind": "hourly"}, '2026-10-27T09:05:02+00:00'),
     ("log", 'rotation.jsonl', {"ts": "2026-10-20T06:00:00Z", "event": "rotate_now", "session": "s-sample"}, '2026-10-20T06:00:00+00:00'),
     ("panel_state", 'панель.jsonl', {"событие": "вход", "ts": "2026-10-24T20:59:35"}, '2026-10-24T15:59:35+00:00'),
+    # Журналы без боевого файла на 27.10: строка — по коду писателя (указан), не выдумка.
+    ("log", 'account-switch.jsonl', {"v": 1, "ts": "2026-11-13T17:07:45+05:00", "src": "scripts/account-switch.py", "event": "account.switch", "outcome": "ok", "task": "hr.sample", "task_from": "map", "session": None, "data": {"вход": "итог", "откуда": "acc-a", "куда": "acc-b", "код": 0}}, '2026-11-13T12:07:45+00:00'),
+    # scripts/deploy.sh → harness_event (формат v1).
+    ("log", 'deploy-releases.jsonl', {"v": 1, "ts": "2026-11-14T10:20:31+05:00", "src": "scripts/deploy.sh", "event": "deploy.release", "outcome": "ok", "task": "-", "task_from": "env", "session": None, "data": {"note": "цель=abc1234 /srv/sample", "тег": "sample"}}, '2026-11-14T05:20:31+00:00'),
+    # scripts/docker-sweep.py journal_row: время — «когда», UTC isoformat.
+    ("log", 'уборка-docker.jsonl', {"когда": "2026-11-14T05:20:31+00:00", "класс": "образ", "идентификатор": "sha256:sample", "мб": 12.5, "правило": "sample", "действие": "удалено"}, '2026-11-14T05:20:31+00:00'),
+    # Два писателя очереди досыла: панель (server.py, ts — epoch) и tg_send.sh (ts — date -Is).
+    ("log", 'панель-недоставленное.jsonl', {"ts": 1794634831.25, "текст": "образец"}, '2026-11-14T05:40:31+00:00'),
+    ("log", 'панель-недоставленное.jsonl', {"ts": "2026-11-14T10:20:31+05:00", "текст": "образец"}, '2026-11-14T05:20:31+00:00'),
+    # scripts/comments-intake.py record: ts — имя заявки (epoch строкой, ключ повтора), момент доставки — «доставлено».
+    ("log", 'panel-comments-delivered.jsonl', {"ts": "1794634831.250000000", "исход": "доставлено", "доставлено": "2026-11-14T10:20:31+05:00"}, '2026-11-14T05:20:31+00:00'),
+    # Писатель — teardown.sh проекта вне дерева харнеса: строка по реестру (поле ts с поясом).
+    ("log", 'env-teardown.jsonl', {"ts": "2026-11-14T10:20:31+05:00", "исход": "снято"}, '2026-11-14T05:20:31+00:00'),
 ]
 
 
@@ -836,9 +849,6 @@ def case_read(base: Path) -> None:
     check("все исходы — из пяти", True, bool(res) and all(r["outcome"] in OUTCOMES for r in res))
 
 
-LIVE_DIRS = {"log": Path("/var/log/harness"), "panel_state": Path("/var/lib/harness/panel-state")}
-
-
 def registry_entries() -> dict:
     """Реестр: `journals:` — имя → запись (`file` относительно `dir`, `dir` ∈
     log|panel_state, `time_kind`, `kind`). Читается как ДАННЫЕ, не механизм."""
@@ -857,18 +867,18 @@ def case_samples(base: Path) -> None:
     except (OSError, ImportError, ValueError) as exc:
         check("реестр journals.yaml читается", "читается", f"{type(exc).__name__}: {exc}")
         return
-    # Судимые журналы реестра: время есть, не образец потока, файл есть на
-    # диске (только stat — боевой файл проба не открывает).
+    # Судимые журналы — КАЖДЫЙ журнал реестра со временем, кроме образцов
+    # потока. Не «чей файл есть на этой машине»: так вердикт зависел от того,
+    # что успело записаться на боевом диске, — новый журнал краснел пробу на
+    # одной машине и молчал на другой.
     judged = set()
     for name, e in reg.items():
         e = e or {}
         if e.get("time_kind") in (None, "none") or e.get("kind") == "sample":
             continue
-        d, f = e.get("dir") or "log", e.get("file") or f"{name}.jsonl"
-        if (LIVE_DIRS.get(d, LIVE_DIRS["log"]) / f).exists():
-            judged.add((d, f))
+        judged.add((e.get("dir") or "log", e.get("file") or f"{name}.jsonl"))
     have = {(d, f) for d, f, _, _ in SAMPLES}
-    print(f"     журналов реестра с файлом и временем: {len(judged)}; образцов: {len(SAMPLES)} на {len(have)} файлов")
+    print(f"     журналов реестра со временем: {len(judged)}; образцов: {len(SAMPLES)} на {len(have)} файлов")
     check("журналов к суду больше нуля (пустой реестр — не зелёный)", True, len(judged) > 0)
     check("у каждого судимого журнала есть образец", [], sorted(f"{d}/{f}" for d, f in judged - have))
     for i, (d, f, line, expected) in enumerate(SAMPLES):

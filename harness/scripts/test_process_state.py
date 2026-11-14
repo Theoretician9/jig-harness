@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Пробы состояния процесса (hr.zapuskov-none-net-informacii-znachit, спека §3, §5, §6 п.1–12).
+"""Пробы состояния процесса (спека §3, §5, §6 п.1–12).
 
 Разрешитель scripts/lib/process_state.py — одна функция resolve(records, facts, now)
 для панели и CLI; факты собирают gather() (быстрые, панель) и state_facts()
@@ -7,7 +7,7 @@
 библиотека, свои журналы, поддельные systemctl / docker / systemd-analyze,
 свой каталог cgroup и свой claude-demon.sh с другим кодом лимита — живые
 журналы, витрина, systemd и docker не трогаются (только чтение настоящего
-systemd-analyze в п.9). Контракт: .tasks/hr.zapuskov-none-net-informacii-znachit/контракт.md.
+systemd-analyze в п.9). Контракт — в карточке задачи.
 
 Двери кода (окружение, читаются при каждом вызове): PROCESS_STATE_SYSTEMCTL,
 PROCESS_STATE_DOCKER, PROCESS_STATE_ANALYZE, PROCESS_STATE_CGROUP,

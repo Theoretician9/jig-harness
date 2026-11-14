@@ -1035,7 +1035,7 @@ handle_callback() {  # $1 = update
     target=$(printf '%s' "$verdict" | jq -r '.target // empty')
     if [ -n "$target" ]; then
         ( exec 3<&- 9>&-; setsid nohup python3 "$PROJECT_DIR/scripts/account-switch.py" --хочу "$target" \
-            >> "$LOG_DIR/account-switch.log" 2>&1 < /dev/null & )
+            >> "$LOG_DIR/account-switch.out" 2>&1 < /dev/null & )
         say "выбран аккаунт $target — дверь переключения позвана"
     fi
     return 0
@@ -1097,6 +1097,17 @@ say "старт: слушаю чат $TG_CHAT_ID, offset=$OFFSET"
 # что пришло после этой отметки: раньше квитанции не записывались.
 HARNESS_LOG_DIR="$LOG_DIR" harness_event доставка scripts/tg-dispatcher.sh delivery.ack_journal_on ok \
     "started_at=$(date +%s.%N)"
+
+# Меню бота в Telegram сверяется с данными при каждом старте: диспетчер при выкате
+# не перезапускается, а меню живёт на стороне Telegram. Фоном — getMyCommands
+# отвечает до 20 с, и первый getUpdates её не ждёт; отказ Telegram канал не роняет.
+# Без дескрипторов 3 и 9 потомок не держит лок диспетчера.
+( exec 3<&- 9>&-; setsid nohup bash -c '
+    if python3 "$1/bot-commands.py" --проверить >/dev/null 2>&1; then echo "меню бота сверено"
+    elif python3 "$1/bot-commands.py" --поставить >/dev/null 2>&1; then echo "меню бота поставлено заново"
+    else echo "меню бота не поставлено: Telegram не ответил или отказал"; fi
+' _ "$HERE" 2>&1 | while IFS= read -r line; do printf '%s  %s\n' "$(date '+%F %T')" "$line"; done \
+    >> "$DISPATCH_LOG" 2>&1 < /dev/null & )
 
 while true; do
     mark_alive

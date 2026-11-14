@@ -22,7 +22,7 @@
 # Переведены: guard_bash.py, agent_skill_guard.py, skill_log.sh → B1;
 # map-from-message.py (превращает ВХОДЯЩЕЕ сообщение в карточку) → B2;
 # model-for.sh (отвечает моделью по таблице, отказывать ему нечего) → C2.
-# Остаток той же беды назван карточкой hr.klassy-zhivoj-proverki-razduty: из 62
+# Остаток той же беды назван отдельной карточкой: из 62
 # непроверенных C1 роль в реестре называет судьёй 24.
 # Поправлены четыре: осмотр смены (показывает экран), очередь работы (считает
 # и расставляет), прибор одобрения спек (держит развилку владельца), сборщик
@@ -1263,4 +1263,25 @@
   "scripts/test_commit_friction.py":
     класс: D
   "scripts/test_compare_package_deferred.py":
+    класс: D
+  "scripts/gates-quarantine.py":
+    класс: C1
+    почему: "суд карантина: прикрывает красный гейт только годной записью, негодную считает бедой и краснит код ворот — существует, чтобы отказывать"
+  "scripts/gates_cache.py":
+    класс: C2
+    почему: "считает отпечатки входов, читает список одиночных проверок, ужимает кэш — помощник ворот, отказывать ему нечем"
+  "scripts/lib/account_buttons.py":
+    класс: C2
+    почему: "библиотека диспетчера, как соседняя scripts/lib/consent_buttons.py (C2): суд нажатия — край меню, а поимённо его доказывает проба test_switch_account_bot.sh"
+  "scripts/test_gates_quarantine.py":
+    класс: D
+  "scripts/test_gates_parallel_cache.py":
+    класс: D
+  "scripts/test_gates_bounds.py":
+    класс: D
+  "scripts/test_switch_account_bot.sh":
+    класс: D
+  "scripts/test_switch_account_limit.sh":
+    класс: D
+  "scripts/test_warden_forced_exit_confirm.sh":
     класс: D

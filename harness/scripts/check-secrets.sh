@@ -10,9 +10,10 @@
 # Проверка дефолтов из шаблона сознательно не тащится: у неё другой момент
 # жизни (установка, не коммит) и другой владелец (00-ВВОДНЫЕ §5).
 #
-# Прогон СТРОГО по git ls-files, не обходом каталога: обход втянул бы
-# node_modules и venv, где «секрет» найдётся на любой вкус, и гейт умер бы
+# В репозитории прогон СТРОГО по git ls-files, не обходом каталога: обход втянул
+# бы node_modules и venv, где «секрет» найдётся на любой вкус, и гейт умер бы
 # от ложных срабатываний (та же улика, что в fix-claude-mem-project.py).
+# Каталог без git обходится с отсевом таких каталогов (scan_tree).
 #
 # Ложное срабатывание гасится маркером в той же строке:  # не-секрет
 #
@@ -22,7 +23,7 @@
 #   check-secrets.sh --selftest    # больной + здоровый случай во временном репо
 #
 # Код возврата: 0 — чисто, 1 — найден похожий на секрет текст (или сбой git:
-# «не проверено» красное, не жёлтое), 77 — не git-репозиторий.
+# «не проверено» красное, не жёлтое). Каталог без git судится обходом файлов.
 set -euo pipefail
 
 # Паттерны — только то, что похоже на настоящий секрет, а не на слово «пароль»:
@@ -221,6 +222,42 @@ scan_env_source() {  # $1 репо, $2 файл, $3.. область git grep
     [ "$found" = 0 ]
 }
 
+# Каталог без git (выгрузка, копия, каталог сети) судится обходом файлов теми же
+# шаблонами: учтённых файлов там нет, а секрет из такой копии утекает так же.
+# Зависимости и кэши отсеиваются по имени каталога — в node_modules и venv
+# «секрет» найдётся на любой вкус. Список — SECRETS_SKIP_DIRS в harness.conf,
+# пусто — вшитый. Точные значения из источников не сверяются: их поиск стоит на
+# git grep по индексу, и об этом сказано в выводе, а не умолчано.
+SKIP_DIRS_DEFAULT="node_modules venv .venv __pycache__ .tox .mypy_cache .pytest_cache .ruff_cache site-packages"
+scan_tree() {  # $1 = каталог
+    local root="$1" skip d rc=0 hits
+    # Код 1 от неудачного cd неотличим от «совпадений нет» у grep.
+    [ -d "$root" ] && [ -r "$root" ] && [ -x "$root" ] || {
+        echo "check-secrets: $root — каталога нет или он нечитаем: секреты НЕ проверены"; return 1; }
+    # shellcheck disable=SC1091
+    source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/lib/config.sh"
+    skip="$(konf_iz_fajla SECRETS_SKIP_DIRS)"
+    local -a excl=()
+    for d in ${skip:-$SKIP_DIRS_DEFAULT}; do excl+=("--exclude-dir=$d"); done
+    local xtrace_hits=0
+    case $- in *x*) xtrace_hits=1; set +x ;; esac
+    # cd и «.»: пути находок — от корня каталога, как у git grep.
+    (cd "$root" && grep -rinIE "${excl[@]}" "${PATTERNS[@]}" -- .) > "$TMPD/tree.out" 2>"$TMPD/tree.err" || rc=$?
+    if [ "$rc" -gt 1 ]; then
+        echo "check-secrets: $root — обход каталога без git упал (код $rc): секреты НЕ проверены"
+        [ "$xtrace_hits" = 0 ] || set -x
+        return 1
+    fi
+    hits=$(sed 's|^\./||' "$TMPD/tree.out" | grep -v "$MARKER" | grep -vE "$VERSIYA" | grep -viE "$CHISLO" || true)
+    [ -z "$hits" ] || mask_findings <<< "$hits"
+    [ "$xtrace_hits" = 0 ] || set -x
+    if [ -n "$hits" ]; then
+        echo "check-secrets: ПОХОЖЕ НА СЕКРЕТ в каталоге без git $root — убери значение в \$SECRETS_DIR (ложное срабатывание гасится маркером «$MARKER» в строке)"
+        return 1
+    fi
+    echo "check-secrets: $root — не git-репозиторий, файлы обойдены: чисто, НО точные значения из источников не сверялись"
+}
+
 run_scan_inner() {  # $1 = каталог репо, $2 = режим all|staged, $3 = каталог ключей (по умолчанию — из паспорта),
                 #  $4 = конфиг источников значений (по умолчанию secret-sources.yaml рядом)
     local repo="$1" mode="$2" fail=0 hits f rc
@@ -233,8 +270,8 @@ run_scan_inner() {  # $1 = каталог репо, $2 = режим all|staged, 
             echo "check-secrets: $repo — git не ответил, а репозиторий на месте: секреты НЕ проверены"
             return 1
         fi
-        echo "check-secrets: $repo — не git-репозиторий, сканировать нечего (жёлтый)"
-        return 77
+        scan_tree "$repo"
+        return
     fi
     # core.quotepath=false: без него git экранирует кириллические имена
     # («память/» → \320...), и поиск по такому имени падает. Поймано
@@ -403,6 +440,10 @@ if [ "${1:-}" = "--selftest" ]; then
     # /srv/sample-17/.env, и исход самотеста зависел бы от машины.
     KONF_PUSTOJ="$C/pustoj.yaml"; printf '# источников нет\n' > "$KONF_PUSTOJ"
     KONF_KATALOG="$C/katalog.yaml"; printf -- '- вид: каталог\n  путь: SECRETS_DIR\n' > "$KONF_KATALOG"
+    # Стендовые harness.conf для обхода каталога без git: исход не зависит от
+    # списка отсева установки.
+    printf 'SECRETS_SKIP_DIRS=""\n' > "$C/skip-pusto.conf"
+    printf 'SECRETS_SKIP_DIRS="vendor"\n' > "$C/skip-vendor.conf"  # не-секрет: имя каталога
 
     # Случай 1. Токен в кавычках — красный.
     sluchai_token_v_kavychkah() {
@@ -463,13 +504,20 @@ if [ "${1:-}" = "--selftest" ]; then
         [ "$kod" = 1 ] || { echo "  битый репозиторий дал код $kod, а не красный 1"; return 1; }
     }
 
-    # Случай 7. Свежая машина без git — жёлтый 77: ворота не краснеют там, где
-    # проверять нечем.
+    # Случай 7. Каталог без git (выгрузка, копия, каталог сети) судится обходом:
+    # жёлтый 77 «сканировать нечего» пропускал секрет в такой копии мимо ворот.
+    # Чистый каталог без git — зелёный.
     sluchai_bez_git() {
-        local pusto; pusto=$(mktemp -d)
-        local kod=0; run_scan "$pusto" all "" "$KONF_PUSTOJ" >/dev/null 2>&1 || kod=$?
+        local pusto; pusto=$(mktemp -d -t proba-check-secrets-XXXXXX)
+        echo 'db_password_file = "/etc/x/secrets/db_password"' > "$pusto/clean.py"
+        local kod=0; HARNESS_CONF="$C/skip-pusto.conf" HARNESS_INSTALL_CONF=/dev/null \
+            run_scan "$pusto" all "" "$KONF_PUSTOJ" >/dev/null 2>&1 || kod=$?
         rm -rf "$pusto"
-        [ "$kod" = 77 ] || { echo "  машина без git дала код $kod, а не жёлтый 77"; return 1; }
+        [ "$kod" = 0 ] || { echo "  чистый каталог без git дал код $kod, а не 0"; return 1; }
+        # Каталога нет — судить нечего, и «чисто» было бы враньём.
+        kod=0; HARNESS_CONF="$C/skip-pusto.conf" HARNESS_INSTALL_CONF=/dev/null \
+            run_scan "$pusto" all "" "$KONF_PUSTOJ" >/dev/null 2>&1 || kod=$?
+        [ "$kod" = 1 ] || { echo "  несуществующий каталог дал код $kod, а не 1"; return 1; }
     }
 
     # Случай 8. Имя пакета со словом token и версия следом (pnpm-lock) — НЕ
@@ -966,6 +1014,47 @@ SHIM
         printf %s "$vyvod" | grep -q 'lim.env:5:' || { echo "  хвост строки погасил настоящий пароль"; return 1; }
     }
 
+    # Случай 30. Секрет в каталоге без git — красный, значение в вывод не идёт.
+    # Значение порождается прогоном: настоящий ключ в пробе — сам утечка.
+    sluchai_bez_git_sekret() {
+        local K znach vyvod kod=0; K=$(mktemp -d -t proba-check-secrets-XXXXXX)
+        znach=$(od -An -N12 -tx1 /dev/urandom | tr -d ' \n')
+        mkdir -p "$K/conf"; printf 'api_key = "%s"\n' "$znach" > "$K/conf/app.py"  # не-секрет: стенд
+        vyvod=$(HARNESS_CONF="$C/skip-pusto.conf" HARNESS_INSTALL_CONF=/dev/null \
+            run_scan "$K" all "" "$KONF_PUSTOJ" 2>&1) || kod=$?
+        rm -rf "$K"
+        [ "$kod" = 1 ] || { echo "  секрет в каталоге без git дал код $kod, а не 1"; return 1; }
+        printf %s "$vyvod" | grep -qF 'СЕКРЕТ? conf/app.py:1:' || { echo "  находка без пути conf/app.py:1"; return 1; }
+        ! printf %s "$vyvod" | grep -qF "$znach" || { echo "  значение секрета в выводе"; return 1; }
+    }
+
+    # Случай 31. Каталоги зависимостей обход не судит — список из SECRETS_SKIP_DIRS
+    # (пусто — вшитый); свой список заменяет вшитый целиком.
+    sluchai_bez_git_otsev() {
+        local K znach kod=0 kod2=0; K=$(mktemp -d -t proba-check-secrets-XXXXXX)
+        znach=$(od -An -N12 -tx1 /dev/urandom | tr -d ' \n')
+        mkdir -p "$K/node_modules/pkg" "$K/vendor"
+        printf 'api_key = "%s"\n' "$znach" > "$K/node_modules/pkg/index.js"  # не-секрет: стенд
+        printf 'api_key = "%s"\n' "$znach" > "$K/vendor/lib.py"  # не-секрет: стенд
+        echo '# чисто' > "$K/main.py"
+        # Вшитый список: node_modules отсеян, vendor — нет.
+        HARNESS_CONF="$C/skip-pusto.conf" HARNESS_INSTALL_CONF=/dev/null \
+            run_scan "$K" all "" "$KONF_PUSTOJ" >"$C/otsev.out" 2>&1 || kod=$?
+        rm -rf "$K/vendor"
+        HARNESS_CONF="$C/skip-pusto.conf" HARNESS_INSTALL_CONF=/dev/null \
+            run_scan "$K" all "" "$KONF_PUSTOJ" >/dev/null 2>&1 || kod2=$?
+        # Свой список без node_modules: секрет в нём снова виден.
+        local kod3=0
+        HARNESS_CONF="$C/skip-vendor.conf" HARNESS_INSTALL_CONF=/dev/null \
+            run_scan "$K" all "" "$KONF_PUSTOJ" >/dev/null 2>&1 || kod3=$?
+        rm -rf "$K"
+        [ "$kod" = 1 ] && grep -qF 'СЕКРЕТ? vendor/lib.py:1:' "$C/otsev.out" \
+            || { echo "  секрет вне списка отсева не пойман (код $kod)"; return 1; }
+        ! grep -qF 'node_modules' "$C/otsev.out" || { echo "  node_modules судится"; return 1; }
+        [ "$kod2" = 0 ] || { echo "  секрет только в node_modules дал код $kod2, а не 0"; return 1; }
+        [ "$kod3" = 1 ] || { echo "  свой список отсева не заменил вшитый (код $kod3)"; return 1; }
+    }
+
     # ТАБЛИЦА СЛУЧАЕВ. Число печатается из её длины: рукописное «N/7» уже
     # разъезжалось с действительностью, и заметить это было некому.
     SLUCHAI=(
@@ -975,7 +1064,7 @@ SHIM
         "секрет из индекса при чистом дереве — красный:sluchai_staged"
         "секрет без говорящего имени, по форме — красный:sluchai_forma_bez_imeni"
         "битый репозиторий — красный, не жёлтый:sluchai_bityj_repozitorij"
-        "машина без git — жёлтый 77:sluchai_bez_git"
+        "чистый каталог без git — зелёный:sluchai_bez_git"
         "версия пакета не секрет, токен рядом — красный:sluchai_otsev_versij"
         "значение из каталога ключей в репозитории — красный:sluchai_zhivoj_kljuch"
         "форматы чужих систем ловятся все семь:sluchai_formaty_chuzhih_sistem"
@@ -998,6 +1087,8 @@ SHIM
         "временные файлы не остаются после прогона и SIGTERM:sluchai_tmp_ne_ostayotsya"
         "каталог ключей: глубина, симлинки, JSON, Telegram, нечитаемый, пустой:sluchai_katalog_formy"
         "числовой лимит TOKENS не секрет, токены рядом — красные:sluchai_chislovoj_limit"
+        "секрет в каталоге без git — красный, без значения в выводе:sluchai_bez_git_sekret"
+        "каталог без git, node_modules не судится, список отсева — данные:sluchai_bez_git_otsev"
     )
 
     vsego=${#SLUCHAI[@]}

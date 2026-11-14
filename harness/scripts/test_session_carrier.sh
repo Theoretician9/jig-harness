@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Проба сверки носителя личности при старте смены (hr.standards-and-policy,
-# спека §6.2 «при старте смены», контракт Н-5).
+# Проба сверки носителя личности при старте смены
+# (спека §6.2 «при старте смены», контракт Н-5).
 #
 # Хук SessionStart (scripts/hooks/session_state.sh) обязан заметить смену,
 # поднятую без личности: голым claude мимо komanda_agenta, своей AGENT_START_CMD,
@@ -246,6 +246,137 @@ case_check "Т14 дверь SHIFT_SELF_MARK: отметка по двери" "д
     "$(mark_verdict "$DOOR_MARK" "$(printf '%s\n' "$out" | head -1)")"
 case_check "Т14 дверь SHIFT_SELF_MARK: в \$LOG_DIR отметки нет" "нет" \
     "$([ -e "$MARK" ] && echo есть || echo нет)"
+
+# Т15. Каждая проба, что зовёт хук, ставит дверь SHIFT_SELF_MARK. Под тестом
+# родитель хука не claude, и без двери отметка ложится в $LOG_DIR из install.conf —
+# у пробы без своего install.conf это боевой каталог: сторож шлёт владельцу
+# ложную «смену без личности» на каждый прогон набора. Список — разбором
+# исходников рядом с пробой (путь хука в строке кода, не в комментарии).
+# Одним grep, без конвейера: под pipefail ранний выход grep -q рвёт трубу
+# писателю, и конвейер по большому файлу отвечает 141 — проба теряла вызывающего.
+code_has() { grep -aqE "^[[:space:]]*([^#[:space:]].*)?($2)" "$1"; }
+# Питон-проба может читать хук как ТЕКСТ (вычитать строки сообщений) — это не
+# вызов, и дверь ей не нужна. Судит разбор AST: упоминание пути хука — вызов,
+# если по дороге к своему оператору оно проходит через запуск процесса (имя
+# вида run/exec/spawn/popen/system/call или функция этого файла, которая сама,
+# прямо или через другую свою, запускает процесс), либо оператор не голое
+# выражение (путь сохранён — его могут запустить позже). Голое выражение без
+# запуска (докстрока, judge(..., message_lines(путь))) — чтение. Не разобрался
+# файл — считаем вызывающим: сомнение судится строже.
+py_calls_hook() {
+    python3 -I - "$1" <<'PY'
+import ast
+import re
+import sys
+
+HOOK = re.compile(r"hooks/session_state\.sh|^session_state\.sh$")
+RUNS = re.compile(r"run|exec|spawn|popen|system|call|check_output|getoutput", re.I)
+try:
+    tree = ast.parse(open(sys.argv[1], encoding="utf-8", errors="replace").read())
+except (SyntaxError, ValueError):
+    sys.exit(0)
+parent = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+defs = {n.name: n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+
+
+def name_of(call):
+    f = call.func
+    return f.attr if isinstance(f, ast.Attribute) else getattr(f, "id", "")
+
+
+runners = set()
+
+
+def starts_process(call):
+    name = name_of(call)
+    return name in runners if name in defs else bool(RUNS.search(name))
+
+
+grown = True
+while grown:
+    grown = False
+    for name, fn in defs.items():
+        if name not in runners and any(isinstance(c, ast.Call) and starts_process(c) for c in ast.walk(fn)):
+            runners.add(name)
+            grown = True
+
+for node in ast.walk(tree):
+    if not (isinstance(node, ast.Constant) and isinstance(node.value, str) and HOOK.search(node.value)):
+        continue
+    cur = node
+    while not isinstance(cur, ast.stmt):
+        cur = parent[cur]
+        if isinstance(cur, ast.Call) and starts_process(cur):
+            sys.exit(0)
+    if not isinstance(cur, ast.Expr):
+        sys.exit(0)
+sys.exit(1)
+PY
+}
+calls_hook() {
+    case "$1" in
+        *.py) py_calls_hook "$1" ;;
+        *) code_has "$1" "hooks/session_state\.sh|[\"']session_state\.sh[\"']" ;;
+    esac
+}
+sets_door() { code_has "$1" "SHIFT_SELF_MARK=|[\"']SHIFT_SELF_MARK[\"'][[:space:]]*:"; }
+# Судья сам на образцах: читающий хук как текст — не вызывающий; прямой зов,
+# зов через свою функцию и путь, сохранённый для позднего зова, — вызывающие.
+J="$S/t15-judge"; mkdir -p "$J"
+cat > "$J/reader.py" <<'EOF'
+"""Строки-сообщения hooks/session_state.sh судятся как текст."""
+from pathlib import Path
+
+
+def message_lines(path):
+    return [l for l in path.read_text(encoding="utf-8").splitlines() if "echo" in l]
+
+
+def judge(name, lines):
+    print(name, len(lines))
+
+
+judge("hooks/session_state.sh", message_lines(Path("pkg") / "hooks" / "session_state.sh"))
+EOF
+cat > "$J/direct.py" <<'EOF'
+import subprocess
+subprocess.run(["bash", "scripts/hooks/session_state.sh"])
+EOF
+cat > "$J/helper.py" <<'EOF'
+import subprocess
+from pathlib import Path
+
+
+def shell(path):
+    return subprocess.run(["bash", str(path)], capture_output=True)
+
+
+def run_hook(path):
+    return shell(path).returncode
+
+
+print(run_hook(Path("scripts") / "hooks" / "session_state.sh"))
+EOF
+cat > "$J/stored.py" <<'EOF'
+import os
+import subprocess
+from pathlib import Path
+HOOK = Path(os.environ.get("SESSION_STATE_SH") or Path("scripts") / "hooks" / "session_state.sh")
+subprocess.run(["bash", str(HOOK)])
+EOF
+for sample in reader:нет direct:да helper:да stored:да; do
+    case_check "Т15 судья: образец ${sample%%:*}.py зовёт хук" "${sample#*:}" \
+        "$(calls_hook "$J/${sample%%:*}.py" && echo да || echo нет)"
+done
+hook_callers=0; doorless=""
+for f in "$HERE"/test_*.sh "$HERE"/test_*.py "$(dirname "$HOOK")"/test_*.sh "$(dirname "$HOOK")"/test_*.py; do
+    [ -f "$f" ] && calls_hook "$f" || continue
+    hook_callers=$((hook_callers + 1))
+    sets_door "$f" || doorless="$doorless $(basename "$f")"
+done
+case_check "Т15 пробы, зовущие хук, найдены разбором (пусто — судить нечего)" "да" \
+    "$([ "$hook_callers" -gt 0 ] && echo да || echo "нет, найдено 0")"
+case_check "Т15 каждая из $hook_callers проб, зовущих хук, ставит дверь SHIFT_SELF_MARK" "" "${doorless# }"
 
 echo
 if [ "$CASES_FAILED" -eq 0 ]; then

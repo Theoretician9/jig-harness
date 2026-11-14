@@ -394,6 +394,13 @@ AGENT_USER="$(id -un)"
 LOG_DIR="$1/log"
 HEARTBEAT_DIR="$1/hb"
 EOF
+    # Копия уже разложенного проекта несёт карточки с путём ПРЕЖНЕГО проекта (личность
+    # раскрывает ${PROJECT_DIR}): пересобрать под новый путь, иначе повтор раскладки
+    # честно перепишет карточки, а проба «повтор пуст» судила бы путь стенда, не раскладку.
+    if [[ -f "$2/scripts/self-prompt.py" && -d "$2/.claude/agents" ]]; then
+      HARNESS_INSTALL_CONF="$1/install.conf" python3 "$2/scripts/self-prompt.py" --карточки \
+        --в "$2/.claude/agents" >/dev/null 2>&1 || true
+    fi
   }
   new_case() {  # $1=имя → печатает каталог стенда с копией проекта-основы
     local c="$T/cases/$1"
@@ -1134,7 +1141,9 @@ PY
   case_result "фб-д)" "порог $pct % при 5 из $n_prior: снято 0, порог назван, 5 строк в теле" ${bad[@]+"${bad[@]}"}
 
   # фб-е) запретный список в прежней описи: ярус 1 (STATE.md, память/x.md,
-  #   harness/config/pipeline.yaml) — «опись испорчена» и вон из тела; ярус 2
+  #   harness/config/pipeline.yaml) — «из описи вынут (не дело раскладки), файл не
+  #   тронут», не «опись испорчена» (строку вписала прежняя версия пакета), вон из
+  #   тела и с диска не снят; ярус 2
   #   (scripts/hooks/guard_bash.py, убран из пакета Ag) — «не снимается», в теле.
   #   Ловит: запретное попадает в «снято». Зелёным оставит: .claude/settings.json
   #   вне плана — его источник безусловен, без него раскладка даёт код 3; судит M8.
@@ -1147,15 +1156,18 @@ PY
   grep -q '^scripts/hooks/guard_bash.py'$'\t' <(manifest_body "$P") || bad+=("стенд: scripts/hooks/guard_bash.py нет в описи после A")
   rc=0; out=$(run_pkg "$FB/Ag/harness" "$C" 2>&1) || rc=$?
   [[ $rc -eq 0 ]] || bad+=("код $rc (ждали 0): $(tail -2 <<<"$out" | tr '\n' ' ')")
-  collect < <(expect_texts "$out" "опись испорчена: STATE.md" "опись испорчена: память/x.md" \
-                "опись испорчена: harness/config/pipeline.yaml" "не снимается: scripts/hooks/guard_bash.py")
+  fb_e_line="из описи вынут (не дело раскладки), файл не тронут:"
+  collect < <(expect_texts "$out" "$fb_e_line STATE.md" "$fb_e_line память/x.md" \
+                "$fb_e_line harness/config/pipeline.yaml" "не снимается: scripts/hooks/guard_bash.py")
+  collect < <(forbid_texts "$out" "опись испорчена")
   grep -qE '^опись: в описи [0-9]+; снято 0;' <<<"$(summary_line "$out")" || bad+=("в «снято» есть запретное: $(summary_line "$out")")
   manifest_body "$P" > "$C/тело-после"
   for rel in "${tier1[@]}"; do
     if grep -q "^$rel"$'\t' "$C/тело-после"; then bad+=("ярус 1 $rel остался в теле"); fi
+    [[ -f "$P/$rel" ]] || bad+=("ярус 1 $rel снят с диска")
   done
   grep -q '^scripts/hooks/guard_bash.py'$'\t' "$C/тело-после" || bad+=("ярус 2 scripts/hooks/guard_bash.py выпал из тела")
-  case_result "фб-е)" "ярус 1 назван «опись испорчена» и вне тела, ярус 2 «не снимается» и в теле, снято 0" ${bad[@]+"${bad[@]}"}
+  case_result "фб-е)" "ярус 1 назван «из описи вынут…файл не тронут», на диске и вне тела, ярус 2 «не снимается» и в теле, снято 0" ${bad[@]+"${bad[@]}"}
 
   # фб-ж) проект — worktree: строка /.layout-manifest ровно одна в exclude общего
   #   .git после двух раскладок, git status описи не видит. Пара — проект-подкаталог
@@ -2305,36 +2317,55 @@ PY
 
   # ══ Ф-д: затравка по истории пакета — фд-а…фд-и ══
   # Стенд-пакет H — копия пакета с главами рядом и СВОИМ git: master — пакет
-  # как есть, ветка «страховка» — коммит с harness/ОПИСЬ.md (blob X) и пустым
-  # harness/ПУСТО.md. H2 — тот же репозиторий, но коммит «страховки» доступен
-  # только через refs/remotes/x/master. В H scripts/tg_send.sh — заглушка: любой
+  # как есть поверх коммита-предка «ранее» с harness/ОПИСЬ.md (blob X) и пустым
+  # harness/ПУСТО.md: история пакета — то, что достижимо из HEAD и тегов
+  # (layout_history.LOG_ARGS). H2 — тот же пакет, но коммит с X лежит только в
+  # ветке «страховка» и в refs/remotes/x/master: своё копии, не история пакета.
+  # В H scripts/tg_send.sh — заглушка: любой
   # её зов оставляет метку «отправлено» двумя каталогами выше себя (у пакета —
   # $H, у разложенной копии — каталог стенда). Журнал вопроса и согласия пишет
-  # проба в LOG_DIR стенда (<стенд>/log). FD_BAD — беды сборки стендов: без
-  # истории случай был бы зелен даром.
+  # проба в LOG_DIR стенда (<стенд>/log). Согласие дверь берёт у носителя слова
+  # МАШИНЫ (owner_word.носитель), окружение он не слушает: в lib стенда-пакета H
+  # носитель подменён — папка = LOG_DIR из install.conf стенда (как CARRIER_RUNNER
+  # у test_layout_door). FD_BAD — беды сборки стендов: без истории случай был бы
+  # зелен даром.
   FD_BAD=()
   H="$FB/H"; mkdir -p "$H"; cp -a "$HERE" "$H/harness"
   if [[ -d "$FB/A/UNIFIED" ]]; then cp -a "$FB/A/UNIFIED" "$H/UNIFIED"; else FD_BAD+=("стенд: глав рядом с пакетом нет — группа unified пуста"); fi
   printf '#!/bin/sh\nd=$(cd "$(dirname "$0")/../.." && pwd)\necho "$*" >> "$d/отправлено"\n' > "$H/harness/scripts/tg_send.sh"
   chmod 755 "$H/harness/scripts/tg_send.sh"
+  cat >> "$H/harness/scripts/lib/owner_word.py" <<'EOF'
+
+
+def носитель() -> Носитель:  # стенд самотеста раскладчика: слово владельца — в LOG_DIR стенда
+    папка = Path(конф.из_файла(os.environ["HARNESS_INSTALL_CONF"])["LOG_DIR"])
+    return Носитель(папка=папка, uid=None, паспорт={}, граница=папка.parent, окно_мин=60,
+                    срок_кнопки_мин=15, ручки={})
+EOF
   FD_X_TEXT='# опись, разложенная прежним кодом раскладки (стенд Ф-д)'
   FD_X=$(printf '%s\n' "$FD_X_TEXT" | git hash-object --stdin)
   FD_EMPTY=e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
-  { stand_git init -q "$H" && stand_git -C "$H" add -A && stand_git -C "$H" commit -q -m A \
-      && stand_git -C "$H" checkout -q -b страховка \
-      && printf '%s\n' "$FD_X_TEXT" > "$H/harness/ОПИСЬ.md" && : > "$H/harness/ПУСТО.md" \
-      && stand_git -C "$H" add -A && stand_git -C "$H" commit -q -m страховка \
-      && stand_git -C "$H" checkout -q -; } >/dev/null 2>&1 || FD_BAD+=("стенд: репозиторий пакета H не собран")
-  [[ ! -e "$H/harness/ОПИСЬ.md" ]] || FD_BAD+=("стенд: harness/ОПИСЬ.md остался в рабочем дереве пакета H")
+  H2="$FB/H2"; mkdir -p "$H2"; cp -a "$H/harness" "$H2/harness"
+  if [[ -d "$H/UNIFIED" ]]; then cp -a "$H/UNIFIED" "$H2/UNIFIED"; fi
+  fd_x_files() { printf '%s\n' "$FD_X_TEXT" > "$1/harness/ОПИСЬ.md" && : > "$1/harness/ПУСТО.md"; }
+  { stand_git init -q "$H" && fd_x_files "$H" && stand_git -C "$H" add -A && stand_git -C "$H" commit -q -m ранее \
+      && rm "$H/harness/ОПИСЬ.md" "$H/harness/ПУСТО.md" \
+      && stand_git -C "$H" add -A && stand_git -C "$H" commit -q -m A; } >/dev/null 2>&1 || FD_BAD+=("стенд: репозиторий пакета H не собран")
+  { stand_git init -q "$H2" && stand_git -C "$H2" add -A && stand_git -C "$H2" commit -q -m A \
+      && stand_git -C "$H2" checkout -q -b страховка && fd_x_files "$H2" \
+      && stand_git -C "$H2" add -A && stand_git -C "$H2" commit -q -m страховка \
+      && stand_git -C "$H2" update-ref refs/remotes/x/master страховка \
+      && stand_git -C "$H2" checkout -q -; } >/dev/null 2>&1 || FD_BAD+=("стенд: репозиторий пакета H2 не собран")
+  for d in "$H" "$H2"; do
+    [[ ! -e "$d/harness/ОПИСЬ.md" ]] || FD_BAD+=("стенд: harness/ОПИСЬ.md остался в рабочем дереве пакета $d")
+  done
   fd_hist() {  # $1=репозиторий, дальше доводы выбора ссылок → строки --raw истории
     stand_git -C "$1" log --no-renames --raw --no-abbrev --format= "${@:2}" 2>/dev/null || true
   }
-  grep -qF "$FD_X" <<<"$(fd_hist "$H" --branches --tags)" || FD_BAD+=("стенд: blob X не виден в --branches --tags пакета H")
-  grep -qF "$FD_EMPTY" <<<"$(fd_hist "$H" --branches --tags -- harness/ПУСТО.md)" || FD_BAD+=("стенд: пустого blob по harness/ПУСТО.md в истории H нет")
-  H2="$FB/H2"; cp -a "$H" "$H2"
-  { sha_s=$(stand_git -C "$H2" rev-parse страховка) && stand_git -C "$H2" update-ref refs/remotes/x/master "$sha_s" \
-      && stand_git -C "$H2" branch -q -D страховка; } >/dev/null 2>&1 || FD_BAD+=("стенд: ссылки пакета H2 не переложены")
-  ! grep -qF "$FD_X" <<<"$(fd_hist "$H2" --branches --tags)" || FD_BAD+=("стенд: blob X виден в --branches --tags пакета H2 — пара не различает --all")
+  grep -qF "$FD_X" <<<"$(fd_hist "$H" HEAD --tags)" || FD_BAD+=("стенд: blob X не виден в HEAD --tags пакета H")
+  grep -qF "$FD_EMPTY" <<<"$(fd_hist "$H" HEAD --tags -- harness/ПУСТО.md)" || FD_BAD+=("стенд: пустого blob по harness/ПУСТО.md в истории H нет")
+  ! grep -qF "$FD_X" <<<"$(fd_hist "$H2" HEAD --tags)" || FD_BAD+=("стенд: blob X виден в HEAD --tags пакета H2 — пара не различает своё копии")
+  grep -qF "$FD_X" <<<"$(fd_hist "$H2" --branches)" || FD_BAD+=("стенд: blob X не виден в --branches пакета H2")
   grep -qF "$FD_X" <<<"$(fd_hist "$H2" --all)" || FD_BAD+=("стенд: blob X не виден и в --all пакета H2")
   # FD1 — проект после первой раскладки пакетом H (опись заведена) — образец случаев.
   FD1=$(fb_stand fd-base)
@@ -2368,7 +2399,7 @@ PY
     return 0
   }
 
-  # фд-а) 1а: неизвестный harness/ОПИСЬ.md с blob X, X только в refs/heads/страховка
+  # фд-а) 1а: неизвестный harness/ОПИСЬ.md с blob X, X в коммите-предке HEAD
   #   → «по истории пакета снял бы 1: harness/ОПИСЬ.md; ждёт «да, убрать»», файл на
   #   месте, tg_send.sh не зван (§5: раскладка в канал не пишет). Ловит: раскладчик
   #   не передаёт двери --package-root; история не читается; снятие без вопроса;
@@ -2384,9 +2415,10 @@ PY
   for f in "$C/отправлено" "$H/отправлено"; do
     [[ ! -e "$f" ]] || bad+=("раскладка звала tg_send.sh ($f): $(head -c 200 "$f" | tr '\n' ' ')")
   done
-  case_result "фд-а)" "1: X в refs/heads/страховка → «снял бы 1: harness/ОПИСЬ.md», файл на месте, tg_send.sh не зван" ${bad[@]+"${bad[@]}"}
-  # 2. Пара: X только в refs/remotes/x/master → «снял бы» нет, путь истории не
-  #   знает — «чужих вне описи N». Ловит: --all вместо --branches --tags.
+  case_result "фд-а)" "1: X в предке HEAD → «снял бы 1: harness/ОПИСЬ.md», файл на месте, tg_send.sh не зван" ${bad[@]+"${bad[@]}"}
+  # 2. Пара: X только в ветке «страховка» и refs/remotes/x/master → «снял бы» нет,
+  #   путь истории не знает — «чужих вне описи N». Ловит: --all или --branches
+  #   вместо HEAD --tags (своё копии сочтено историей пакета).
   C=$(fd_stand fd-a2 x); P="$C/proj"; bad=(${FD_BAD[@]+"${FD_BAD[@]}"})
   rc=0; out=$(run_pkg "$H2/harness" "$C" 2>&1) || rc=$?
   [[ $rc -eq 0 ]] || bad+=("код $rc (ждали 0): $(tail -2 <<<"$out" | tr '\n' ' ')")
@@ -2394,7 +2426,7 @@ PY
   collect < <(expect_texts "$out" "чужих вне описи " " — история пакета их не знает")
   [[ "$(fd_blob "$P/harness/ОПИСЬ.md")" == "$FD_X" ]] || bad+=("harness/ОПИСЬ.md снят или изменён")
   [[ ! -e "$C/отправлено" ]] || bad+=("раскладка звала tg_send.sh")
-  case_result "фд-а)" "2: X только в refs/remotes/x/master → «снял бы» нет, «чужих вне описи» есть" ${bad[@]+"${bad[@]}"}
+  case_result "фд-а)" "2: X только в ветке и refs/remotes → «снял бы» нет, «чужих вне описи» есть" ${bad[@]+"${bad[@]}"}
 
   # фд-б) 1б: тот же файл + 1 байт → «не наш по содержимому: harness/ОПИСЬ.md», в
   #   «снял бы» его нет, файл на месте. Ловит: «наш» по пути без сверки blob.
@@ -2410,7 +2442,7 @@ PY
   [[ "$(fd_blob "$P/harness/ОПИСЬ.md")" == "$fd_b_blob" ]] || bad+=("правленый harness/ОПИСЬ.md снят или изменён")
   case_result "фд-б)" "X + 1 байт → «не наш по содержимому: harness/ОПИСЬ.md», не в «снял бы», на месте" ${bad[@]+"${bad[@]}"}
 
-  # фд-в) 1в: пустой harness/ПУСТО.md, пустой blob в истории «страховки» по этому
+  # фд-в) 1в: пустой harness/ПУСТО.md, пустой blob в истории пакета по этому
   #   пути → путь не назван ни одной строкой (ни «снял бы», ни «не наш»), счёт
   #   «пустых вне описи N» есть (решение (д)). Ловит: пустой blob признан нашим;
   #   пустой — «не наш». Зелёным оставит: пустой, посчитанный «чужим», при другом
@@ -2457,7 +2489,7 @@ PY
   printf '#!/bin/sh\necho f правлен здесь\n' > "$FDG2/proj/scripts/f.sh"; fd_fc=$(fd_blob "$FDG2/proj/scripts/f.sh")
   cp -p "$FDG2/proj/scripts/f.sh" "$FDG3/proj/scripts/f.sh"
   { rm -f "$fd_f" && stand_git -C "$Hg" add -A && stand_git -C "$Hg" commit -q -m C; } >/dev/null 2>&1 || FDG_BAD+=("стенд: коммит C пакета Hg не собран")
-  grep -qF "$FD_FA" <<<"$(fd_hist "$Hg" --branches --tags)" || FDG_BAD+=("стенд: Fa не виден в истории Hg")
+  grep -qF "$FD_FA" <<<"$(fd_hist "$Hg" HEAD --tags)" || FDG_BAD+=("стенд: Fa не виден в истории Hg")
   fd_g_removed() {  # $1=стенд $2=вывод $3=архивы «до» → беды строками
     local arch n_arch
     expect_texts "$2" "снято по истории пакета: scripts/f.sh"
@@ -2563,7 +2595,7 @@ PY
   for name in $LIVE_NAMES; do
     f="$P/harness/config/$name"
     [[ -f "$f" ]] || continue
-    if grep -qF "$(fd_blob "$f")" <<<"$(fd_hist "$H" --branches --tags -- "harness/config/$name")"; then
+    if grep -qF "$(fd_blob "$f")" <<<"$(fd_hist "$H" HEAD --tags -- "harness/config/$name")"; then
       n_live=$((n_live + 1))
       grep -q "^harness/config/$name"$'\t' <(manifest_body "$P") && bad+=("стенд: harness/config/$name в теле описи — он не «вне плана»")
       collect < <(forbid_texts "$out" "harness/config/$name")
@@ -2826,15 +2858,24 @@ polozhit_fajl config "$HERE/config/harness.conf" "$PROJECT_DIR/harness/config/ha
 # владелец включил шаги для мелких и обычных задач, и раскладка 12.09 вернула
 # ему пакетные умолчания молча. Файл кладётся ТОЛЬКО если его ещё нет — так же,
 # как harness.conf в /etc. Гейт сверки с пакетом его тоже не сторожит.
-LIVE_SETTINGS="pipeline.yaml queue.yaml models.yaml audit.yaml live-check-state.yaml"   # имя латиницей: bash не берёт кириллические имена
+LIVE_SETTINGS="pipeline.yaml queue.yaml models.yaml audit.yaml live-check-state.yaml gates-quarantine.yaml"   # имя латиницей: bash не берёт кириллические имена
 # live-check-state.yaml — записи живой проверки ЭТОЙ установки: затирание
 # заменило бы их заготовкой из пакета, то есть потеряло бы работу (И-1).
+# gates-quarantine.yaml — карантин с карточками этой установки; сборка несёт
+# пустую заготовку, а свой карантин копии не трогается.
 for f in "$HERE"/config/*; do
   [[ -f "$f" ]] || continue
   name="$(basename "$f")"
   not_laid "config/$name" && continue
   if [[ " $LIVE_SETTINGS " == *" $name "* ]] && [[ -f "$PROJECT_DIR/harness/config/$name" ]]; then
-    echo "  $name — настройки владельца, не трогаю"
+    # Живой файл сверяется с историей пакета: не правленный заменяется, правленному
+    # дописываются недостающие верхние ключи (scripts/lib/live_settings.py).
+    # Записи установки модуль не пишет вовсе.
+    records_flag=()
+    [[ "$name" == live-check-state.yaml ]] && records_flag=(--записи)
+    if ! python3 -B "$HERE/scripts/lib/live_settings.py" "$f" "$PROJECT_DIR/harness/config/$name" ${records_flag[@]+"${records_flag[@]}"}; then
+      echo "ВНИМАНИЕ: $name не сверен с пакетом — python3 -B $HERE/scripts/lib/live_settings.py $f $PROJECT_DIR/harness/config/$name ${records_flag[*]:-} (причина выше)"
+    fi
     continue
   fi
   if [[ "$name" == process-library.json ]]; then
@@ -2914,9 +2955,6 @@ else
   echo "  .claude/settings.json продукта не разобран как JSON — кладу пакетный (прежний уйдёт копией)"
 fi
 polozhit_fajl settings "$SETTINGS_SRC" "$PROJECT_DIR/.claude/settings.json"
-# Свои типы помощников (omitClaudeMd: старт без CLAUDE.md проекта): оболочка
-# читает их только из <проект>/.claude/agents.
-lay_tree agents "$HERE"/agents "$PROJECT_DIR/.claude/agents"
 # «-r» обязателен: в scripts/ лежит КАТАЛОГ lib/ с общим модулем чтения
 # конфига, от которого зависят четыре гейта. Без него cp печатал «omitting
 # directory», раскладка шла дальше, и на новом сервере эти гейты падали бы
@@ -3278,13 +3316,29 @@ fi
 # выглядел бы отсутствием правила. Нет правила (установка старее него) — предупреждение,
 # раскладка цела; отказ самой печати — отказ раскладки.
 # Самотест раскладывает во временный каталог и живой эталон печатать не должен.
-if [[ "${HARNESS_SELFTEST:-0}" != 1 ]]; then
+# Дверь HARNESS_LAYOUT_SELF_SEAL: 1 — печатать (в самотесте — через sudo из PATH, подставным),
+# 0 — не печатать; не задана — печатать, кроме самотеста.
+if [[ "${HARNESS_LAYOUT_SELF_SEAL:-$([[ "${HARNESS_SELFTEST:-0}" == 1 ]] && echo 0 || echo 1)}" == 1 ]]; then
   if ! sudo -n -l /usr/local/lib/harness/self-seal >/dev/null 2>&1; then
     echo "ВНИМАНИЕ: эталон личности не напечатан — нет правила sudo на self-seal; добавьте правило и повторите раскладку"
   elif ! sudo -n /usr/local/lib/harness/self-seal "$(cd "$HERE/.." && pwd)" >/dev/null; then
     echo "ОТКАЗ: печать эталона личности (self-seal) не прошла — причина строкой выше" >&2
     exit 1
   fi
+fi
+
+# Карточки помощников (.claude/agents) — производное личности ЭТОГО проекта:
+# слой 1 уже напечатан (выше), политика и instance проекта на месте. Карточка из пакета несёт
+# личность машины разработки, и без пересборки сторож запуска помощников
+# (agent_budget_guard) отказывает каждому типу. Код 3 — эталона нет, карточки собраны из дерева.
+if [[ ${#ROLLBACK_ARGS[@]} -eq 0 ]]; then
+  cards_rc=0
+  python3 "$PROJECT_DIR/scripts/self-prompt.py" --карточки --в "$PROJECT_DIR/.claude/agents" \
+    >/dev/null || cards_rc=$?
+  case "$cards_rc" in
+    0|3) echo "карточки помощников пересобраны из личности проекта" ;;
+    *)   echo "ВНИМАНИЕ: карточки помощников не пересобраны (self-prompt.py код $cards_rc)" ;;
+  esac
 fi
 
 echo "раскладка завершена: $PROJECT_DIR"

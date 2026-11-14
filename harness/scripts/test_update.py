@@ -828,13 +828,31 @@ try:
     timer_ids = библиотека.checks_ids()
     timers = [f"harness-{i}.timer" for i in timer_ids] + ["harness-sentinel.timer"]
 
-    def root_stand(rights=True, agent_rules=True, logrotate=True) -> Path:
+    # Юниты, которые обновление перезапускает сам (_перезапустить_службы): право на их
+    # restart обязано быть в копии прав. Запасной список — на случай, пока в update.py
+    # нет RESTARTED_UNITS: стенд «всё на месте» должен оставаться полным и тогда.
+    restarted = tuple(getattr(обновление, "RESTARTED_UNITS", ()) or ()) or (
+        "harness-panel.service", "harness-sentinel.timer", "harness-dispatcher.service")
+
+    def root_stand(rights=True, agent_rules=True, logrotate=True,
+                   readonly_file=True, units_file=True, skip_unit=None) -> Path:
         etc = Path(tempfile.mkdtemp(prefix="proba-update-root-"))
         (etc / "harness").mkdir()
         (etc / "logrotate.d").mkdir()
         if rights:
-            rule = "# файл: /etc/sudoers.d/harness-agent-readonly\n" if agent_rules else "# файл: /etc/sudoers.d/50-agent\n"
-            (etc / "harness" / "sudo-rights.txt").write_text(rule + "agent ALL=(root) NOPASSWD: /usr/bin/ss -ltnp\n", encoding="utf-8")
+            if not agent_rules:
+                text = "# файл: /etc/sudoers.d/50-agent\nagent ALL=(root) NOPASSWD: /usr/bin/ss -ltnp\n"
+            else:
+                text = ""
+                if readonly_file:
+                    text += "# файл: /etc/sudoers.d/harness-agent-readonly\nagent ALL=(root) NOPASSWD: /usr/bin/ss -ltnp\n"
+                if units_file:
+                    rules = [f"/usr/bin/systemctl {action} {unit}" for unit in restarted if unit != skip_unit
+                             for action in ("restart", "start", "stop", "status")]
+                    text += ("# файл: /etc/sudoers.d/harness-agent-units\n"
+                             "# Управление своими юнитами харнеса: точные имена, без подстановок.\n"
+                             f"agent ALL=(root) NOPASSWD: {', '.join(rules)}\n")
+            (etc / "harness" / "sudo-rights.txt").write_text(text, encoding="utf-8")
         if logrotate:
             (etc / "logrotate.d" / "harness").write_text("/var/log/harness/*.log {}\n", encoding="utf-8")
         return etc
@@ -862,6 +880,43 @@ try:
             troubles.append(f"спрошены не все таймеры: {sorted(set(timers) - set(asked))}")
         return troubles
     root_case("R1 root-часть: всё на месте — тишина; каждый пробел (права, копия прав, logrotate, таймер) назван", case_root_gaps)
+
+    # БОЛЬНОЙ СЛУЧАЙ (копия харнеса, 10.11.2026, Г5б): в копии прав был
+    # harness-agent-readonly, но не было права на restart harness-sentinel.timer —
+    # root_part_gaps искал подстроку «/sudoers.d/harness-agent-» и молчал, а
+    # обновление потом просило у sudo пароль на рестарт сторожа.
+    def case_root_unit_rights():
+        troubles = []
+        units = tuple(getattr(обновление, "RESTARTED_UNITS", ()) or ())
+        if "harness-sentinel.timer" not in units:
+            troubles.append(f"update.RESTARTED_UNITS без harness-sentinel.timer или его нет: {units!r}")
+        asked = []
+
+        def run_записать(команда, *доводы, **ключи):
+            asked.append(команда[-1])
+            return subprocess.CompletedProcess(команда, 0, b"", b"")
+        было_run = обновление.subprocess.run
+        обновление.subprocess.run = run_записать
+        try:
+            обновление._перезапустить_службы()
+        finally:
+            обновление.subprocess.run = было_run
+        if units and asked != list(units):
+            troubles.append(f"_перезапустить_службы рестартует {asked}, а судится RESTARTED_UNITS {list(units)}")
+        if обновление.root_part_gaps(etc=root_stand(), enabled=lambda unit: True) != []:
+            troubles.append("права на все юниты есть, а пробелы названы")
+        for unit in restarted:
+            gaps = обновление.root_part_gaps(etc=root_stand(skip_unit=unit), enabled=lambda unit: True)
+            if len(gaps) != 1 or unit not in gaps[0]:
+                troubles.append(f"нет права restart {unit}: ждали один пробел с его именем, вышло {gaps!r}")
+        for name, stand, needle in (
+                ("нет файла юнитов", root_stand(units_file=False), "harness-agent-units"),
+                ("нет файла чтения", root_stand(readonly_file=False), "harness-agent-readonly")):
+            gaps = обновление.root_part_gaps(etc=stand, enabled=lambda unit: True)
+            if len(gaps) != 1 or needle not in gaps[0]:
+                troubles.append(f"{name}: ждали один пробел с «{needle}», вышло {gaps!r}")
+        return troubles
+    root_case("R1б root-часть: право restart на каждый юнит, который рестартует обновление, судится поимённо", case_root_unit_rights)
 
     def case_timer_enabled():
         bin_dir = Path(tempfile.mkdtemp(prefix="proba-update-systemctl-"))

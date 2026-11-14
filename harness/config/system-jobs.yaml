@@ -130,6 +130,16 @@
     расписание: 5 * * * *
     команда: harness/demons/evolution-collector.sh
     журнал: evo-collector.log
+  # Читатель сети серверов: без расписания находки копий не доходили до карточек
+  # (последний тик был руками 12.11.2026). Дерево клона он не обновляет, только fetch.
+  # `если_задан`: пока адрес общего репозитория не задан в машинном конфиге, сеть
+  # выключена и задание не ставится и срока метки не получает. Метку evolution-net
+  # ставит только удачный тик: отказ подряд — та смерть, о которой скажет сторож.
+  - имя: evolution-net-reader
+    расписание: '*/15 * * * *'
+    команда: scripts/evolution-net.py --читать
+    журнал: evolution-net.log
+    если_задан: EVOLUTION_REMOTE_URL
   - имя: tokens-collector
     расписание: 10 * * * *
     команда: harness/demons/tokens-collector.sh
@@ -222,6 +232,7 @@
   memory-commit: 10
   task-closer: 60
   evolution-collector: 60
+  evolution-net: 15
   tokens-collector: 60
   disk-cleanup: 1440
   # 120, а не 60: один пропущенный почасовой прогон — не беда, два подряд — беда.

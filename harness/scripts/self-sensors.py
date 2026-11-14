@@ -9,7 +9,7 @@
     self-sensors.py --record              раз в сутки строка sensors.daily + карточки
     self-sensors.py --selftest            проба scripts/test_self_sensors.py
 
-Данные (окна, маркеры, порог, статусы «закрыта») — harness/config/self-sensors.yaml,
+Данные (окна, отставание окон, маркеры, порог, статусы «закрыта») — harness/config/self-sensors.yaml,
 путь можно подменить HARNESS_SELF_SENSORS_CONFIG.
 Код возврата --record: 0 — записано, уже есть или alert-task отказал (код 6 из
 сессии, 4/5 отложено/потолок, таймаут): тогда строки дня нет и крон повторит через час.
@@ -87,8 +87,14 @@ class World:
         name = str(passport.get("OWNER_TZ") or "").strip()
         # Пустой пояс владельца — пояс машины: aware-время с tzinfo=None остаётся наивным.
         self.tz = zoneinfo.ZoneInfo(name) if name else None
-        span = self.settings["окно_суток"] * DAY
-        self.windows = {"сейчас": (at - span, at), "прошлое": (at - 2 * span, at - span)}
+        # Окна кончаются не в «сейчас», а на отставание раньше: закрытия задач
+        # доезжают задним числом, а токены пишутся сразу, и недописанный край
+        # окна давал ложное «хуже» (13.11: в 00:05 закрыто 49, к 13:11 по тому
+        # же окну — 58).
+        self.span = self.settings["окно_суток"] * DAY
+        self.end = at - self.settings["отставание_суток"] * DAY
+        self.windows = {"сейчас": (self.end - self.span, self.end),
+                        "прошлое": (self.end - 2 * self.span, self.end - self.span)}
 
     def day(self) -> str:
         return datetime.datetime.fromtimestamp(self.at, self.tz).date().isoformat()
@@ -211,8 +217,7 @@ def broken_counts(world: World) -> dict:
 
 
 def created_counts(world: World) -> dict:
-    span = world.settings["окно_суток"] * DAY
-    edges = [mechanisms_at(world, world.at - k * span) for k in (0, 1, 2)]
+    edges = [mechanisms_at(world, world.end - k * world.span) for k in (0, 1, 2)]
     # Зажим max(0, …): убыль реестра — не «создано минус N», а «создано 0».
     return {"сейчас": max(0, edges[0] - edges[1]), "прошлое": max(0, edges[1] - edges[2])}
 

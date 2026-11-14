@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Пробы счётчика трения коммитов scripts/commit-friction.py — до кода.
 
-Спека .tasks/hr.per-helper-code-copies/спека.md §1, §4.5, Р-6, Т5. Контракт:
+Спека задачи §1, §4.5, Р-6, Т5. Контракт:
   commit-friction.py --дней N [--json]; без --дней или N не целое > 0 — код 2.
   Источники за N дней (окно по `ts`): $LOG_DIR/gates.jsonl (gate == "pre-commit"),
   merge-queue.jsonl (прогон ворот очереди — строка с числом в data.ворота_с; итог — хвост

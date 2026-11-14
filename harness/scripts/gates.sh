@@ -214,13 +214,14 @@ done
 проверка "библиотека процессов" python3 scripts/check-process-library.py
 проверка "реестр стека" python3 scripts/check-stack-registry.py
 проверка "реестр стека-самотест" python3 scripts/check-stack-registry.py --selftest
-# Личность и зов модели (hr.standards-and-policy): пробы носителей, стенд
+# Личность и зов модели: пробы носителей, стенд
 # каждой подменяет claude, модель не тратится. Живая приёмка — только с
 # ключом --подставной; живьём её гонит смена по слову.
 проверка "личность: сборка"           python3 scripts/test_self_prompt.py
 проверка "личность: носитель claude-run" bash scripts/test_claude_run.sh
 проверка "аккаунт: переключение смены" bash scripts/test_switch_account.sh
 проверка "аккаунт: смена из Telegram" bash scripts/test_switch_account_bot.sh
+проверка "аккаунт: автопереход — сигналы лимита" bash scripts/test_switch_account_limit.sh
 проверка "личность: карточки помощников" python3 scripts/test_agent_cards.py
 проверка "личность: печать эталона"   bash scripts/test_self_seal.sh
 проверка "личность: слой человека"    python3 scripts/test_self_set.py
@@ -231,6 +232,12 @@ done
 проверка "личность: смена без личности" bash scripts/test_shift_self_mark.sh
 проверка "личность: носитель сессии"  bash scripts/test_session_carrier.sh
 проверка "личность: живая приёмка (подставной claude)" bash scripts/test_self_prompt_live.sh --подставной
+# Чистая установка несёт личность (Р2–Р6).
+проверка "личность: слой 1 без паспорта" python3 scripts/check-self-layer-neutral.py
+проверка "личность: слой 1 без паспорта, самотест" python3 scripts/check-self-layer-neutral.py --selftest
+проверка "личность: раскладка собирает карточки" python3 scripts/test_layout_builds_cards.py
+проверка "личность: подсказки запуска через носитель" python3 scripts/test_agent_start_hints.py
+проверка "личность: отказ печати при обновлении — сигнал" python3 scripts/test_update_self_seal.py
 проверка "зов модели: сторож"         python3 scripts/test_check_model_call.py
 проверка "зов модели: приборы"        python3 scripts/test_instrument_carrier.py
 проверка "зов модели: код 79 у фоновых служб" bash scripts/test_carrier_exit79.sh
@@ -399,6 +406,8 @@ done
 # Описание устройства стареет быстрее всего: механизмы заводятся каждую смену.
 # Сверка двусторонняя — механизм без описания и описание без механизма красные.
 проверка "обновление"     python3 scripts/test_update.py
+проверка "неполная история" python3 scripts/test_update_shallow_history.py
+проверка "опись и своё копии" python3 scripts/test_layout_keeps_copy_own.py
 проверка "доустановка"    python3 scripts/test_install_new.py
 проверка "исход одним судьёй" python3 scripts/test_map_from_message_outcome.py
 проверка "«не работает» — работа" python3 scripts/test_map_from_message_not_work.py
@@ -466,6 +475,20 @@ done
 проверка "сборка-в-секунду" python3 scripts/test_build_public_same_second.py
 проверка "манифест-в-сборке" python3 scripts/test_build_public_self_manifest.py
 проверка "чистота-самотест" python3 scripts/check-public-clean.py --selftest
+проверка "карточки в сборке" python3 scripts/test_public_clean_map_ids.py
+проверка "карточки в коммите" python3 scripts/test_commit_map_ids.py
+проверка "каталог следов из данных" python3 scripts/test_live_check_trace_dir.py
+# Пробы, которых не звал никто: «население кода» 14.11.2026 — 8 без вызывающего
+# и на HEAD, и на копии. Все зелёные, вместе около минуты.
+проверка "сторож записи приказов" python3 scripts/hooks/test_orders_write_guard.py
+проверка "манифест эталона-проба" python3 scripts/test_check_self_manifest.py
+проверка "сверка с пакетом-проба" python3 scripts/test_compare_with_package.py
+проверка "обёртка коммита-проба" bash scripts/test_git_commit_locked.sh
+проверка "обёртка: старый индекс" bash scripts/test_git_commit_stale_index.sh
+проверка "приоритет релиза" python3 scripts/test_release_priority.py
+проверка "чтение скила-проба" python3 scripts/test_security_skill_by_read.py
+проверка "коды двери отправки" bash scripts/test_tg_send_door_codes.sh
+проверка "эталон обновления" python3 scripts/test_update_etalon_text.py
 проверка "quotepath"      python3 scripts/check-quotepath-flag.py
 # Расширения ставит код, а не человек слэш-командой: список жил текстом скила
 # со слэш-формами и простоял месяц с нулём установок (замер 12.09.2026).
@@ -550,6 +573,8 @@ done
 # Две проверки, написанные 12.09.2026, не звал НИКТО — ни ворота, ни pre-commit
 # (ревью кода, №8). Проверка, которую не запускают, не сторожит.
 проверка "данные сборки"  python3 scripts/test_public_build.py
+проверка "карантин установки" python3 scripts/test_quarantine_install_data.py
+проверка "живые настройки" python3 scripts/test_live_settings.py
 # Живая проверка механизмов (его задание 15.10): обёртка следа и разрез по
 # классам. Без вызова из ворот пробы не сторожат ничего.
 проверка "обёртка живой проверки" bash scripts/test_live_check_sh.sh

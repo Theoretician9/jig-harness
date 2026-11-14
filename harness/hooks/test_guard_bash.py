@@ -158,7 +158,7 @@ CASES = [
      "python3 - <<'PY'\nx = 1\nPY\nПУТЬ=/tmp/лог; cat $ПУТЬ"),
     (2, "правка состава MCP", "claude mcp add tg npx server"),
     (2, "правка состава MCP без телеграма в имени — состав всё равно меняется", "claude mcp remove gmail"),
-    # Путь 16 спеки hr.standards-and-policy: claude из оболочки модели мимо
+    # Путь 16 спеки: claude из оболочки модели мимо
     # носителя приходит без личности — отказ с готовой командой носителя.
     (2, "headless-запуск мимо носителя — отказ", 'claude -p "сделай X"'),
     (2, "он же в конвейере", 'echo hi | claude -p "x"'),
@@ -1611,6 +1611,66 @@ def проверить_публикацию_мимо_двери() -> tuple[int, 
     return bad, путей
 
 
+def проверить_коммит_мимо_обёртки() -> tuple[int, int]:
+    """Коммит с личным индексом или с путями — только обёрткой git-commit-locked.sh.
+
+    `git commit` пишет -F в общий .git/COMMIT_EDITMSG и перечитывает его после хука
+    commit-msg; при личном индексе (GIT_INDEX_FILE) и при `-- <пути>` index.lock у
+    каждого свой, и соседний помощник подменяет сообщение (разбор
+    задачи: 135 подмен из 200 на стенде).
+    Обычный `git commit -F m` без путей и личного индекса сторож здесь не режет:
+    его сериализует общий index.lock.
+    """
+    bad = 0
+    путей = 0
+    случаи = [
+        (2, "личный индекс и пути мимо обёртки", "GIT_INDEX_FILE=x git commit -F m -- p"),
+        (2, "личный индекс без путей мимо обёртки", "GIT_INDEX_FILE=x git commit -F m"),
+        (2, "пути мимо обёртки (-F)", "git commit -F m -- p"),
+        (2, "пути мимо обёртки (-m)", "git commit -m t -- p"),
+        (2, "в цепочке после cd", "cd /tmp && git commit -F m -- p"),
+        (2, "личный индекс через env", "env GIT_INDEX_FILE=x git commit -F m"),
+        (2, "git -C каталог commit с путями", "git -C /tmp commit -F m -- p"),
+        (0, "обёртка с путями", "bash scripts/git-commit-locked.sh -F m -- p"),
+        (0, "обёртка с личным индексом", "GIT_INDEX_FILE=x bash scripts/git-commit-locked.sh -F m"),
+        (0, "обёртка в цепочке", "cd /tmp && bash scripts/git-commit-locked.sh -F m -- p"),
+        (0, "обычный коммит без путей и личного индекса", "git commit -F m"),
+        (0, "commit-tree — не коммит", "git commit-tree HEAD^{tree} -m x"),
+        (0, "commit-graph — не коммит", "git commit-graph write"),
+        (0, "слово commit в поиске лога", "git log --grep commit -- p"),
+        (2, "export личного индекса отдельным звеном", "export GIT_INDEX_FILE=x; git commit -F m"),
+        (2, "export без значения после присваивания", "GIT_INDEX_FILE=x; export GIT_INDEX_FILE; git commit -F m"),
+        (2, "declare -x личного индекса", "declare -x GIT_INDEX_FILE=x; git commit -F m"),
+        (2, "typeset -x личного индекса", "typeset -x GIT_INDEX_FILE; git commit -F m"),
+        (2, "позиционный путь без --", "git commit -F m p"),
+        (2, "-o с путём", "git commit -o -F m p"),
+        (2, "--pathspec-from-file", "git commit -F m --pathspec-from-file=l"),
+        (2, "нагрузка bash -c", "bash -c 'git commit -F m -- p'"),
+        (2, "нагрузка eval", "eval \"git commit -F m -- p\""),
+        (0, "значение -F и -m не путь", "git commit -F m -m t --author=a"),
+        (0, "export другой переменной", "export FOO=x; git commit -F m"),
+        (0, "обёртка в нагрузке bash -c", "bash -c 'bash scripts/git-commit-locked.sh -F m -- p'"),
+    ]
+    for ждём, имя, cmd in случаи:
+        путей += 1
+        код = run(cmd)
+        if код != ждём:
+            print(f"  ПЛОХО {имя}: ждали {ждём}, вышло {код} — {cmd}")
+            bad += 1
+        else:
+            print(f"  ок    {имя}")
+    # Отказ без названной двери толкает помощника искать обход, а не обёртку.
+    путей += 1
+    код, текст = run_вывод("GIT_INDEX_FILE=x git commit -F m -- p")
+    if код == 2 and "git-commit-locked.sh" in текст:
+        print("  ок    текст отказа называет git-commit-locked.sh")
+    else:
+        print(f"  ПЛОХО текст отказа обязан назвать git-commit-locked.sh: код {код}, "
+              f"текст: {текст.strip()[:200]!r}")
+        bad += 1
+    return bad, путей
+
+
 def проверить_сеть_мимо_двери() -> tuple[int, int]:
     """G1–G8: push в общий репозиторий сети — только дверью evolution-net.py --отправить.
 
@@ -1991,7 +2051,7 @@ def проверить_подсказку_pgrep() -> tuple[int, int]:
 def проверить_подсказку_носителя() -> tuple[int, int]:
     """Отказ claude мимо носителя обязан дать ГОТОВУЮ команду носителя с флагом.
 
-    K29 контракта hr.standards-and-policy, Н-4: носитель --strict-mcp-config сам
+    K29 контракта, Н-4: носитель --strict-mcp-config сам
     не добавляет, и подсказка без флага вела бы к вызову, который отбирает канал
     у владельца. Готовая команда из подсказки обязана проходить самого сторожа.
     """
@@ -2538,6 +2598,9 @@ def main() -> int:
     _плохо, _путей = проверить_публикацию_мимо_двери()
     bad += _плохо
     total += _путей
+    _плохо_к, _путей_к = проверить_коммит_мимо_обёртки()
+    bad += _плохо_к
+    total += _путей_к
     _плохо_сеть, _путей_сеть = проверить_сеть_мимо_двери()
     bad += _плохо_сеть
     total += _путей_сеть
@@ -2812,6 +2875,11 @@ def прогоны_ворот() -> int:
 
 if __name__ == "__main__":
     # Одна проба 13 отдельно: весь прогон сторожа долог для приёмки одной задачи.
+    # Только правило коммита мимо обёртки.
+    if sys.argv[1:] == ["--случай", "коммит"]:
+        плохо, путей = проверить_коммит_мимо_обёртки()
+        print(f"падений {плохо} из {путей} путей")
+        sys.exit(1 if плохо else 0)
     if sys.argv[1:] == ["--случай", "13"]:
         плохо, путей = check_push_subject_hook()
         print(f"падений {плохо} из {путей} путей")

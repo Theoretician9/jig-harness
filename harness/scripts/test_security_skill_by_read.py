@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-"""Проба: полное чтение помощником SKILL.md = вызов скила (задача
-hr.security-skill-unreachable-for-helpers) — ДО кода.
+"""Проба: полное чтение помощником SKILL.md = вызов скила — ДО кода.
 
 Почему так. Гейт шага «безопасность» (check-pipeline.py, _seal_debts) ждёт в
 skills.jsonl машинную запись security-check от того помощника, что запечатал

@@ -580,6 +580,46 @@ def g13(tmp: Path) -> None:
         check(f"G-13: {label} — идёт через дверь (обёртка 1 раз)", 1, len(recs))
 
 
+def probe_batch_guard(s: Stand) -> None:
+    """Сторож пачки: второй заход мутаций задач, пока первый ждёт или идёт, —
+    отказ кодом 75 с законным путём; прочие прогоны и заход после — свободны."""
+    marker = s.tmp / "в-обёртке"
+    slow = executable(s.tmp / "slow-wrapper.sh",
+                      f"#!/usr/bin/env bash\ntouch {marker}\nsleep 8\nexec {s.wrapper} \"$@\"\n")
+    first = subprocess.Popen([sys.executable, str(s.root / "scripts" / "acceptance.py"),
+                              "--мутации-задачи", "hr.первая"], cwd=str(s.work),
+                             env=s.env(HARNESS_CHECKS_SLICE_WRAPPER=str(slow)),
+                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    deadline = time.time() + 20
+    while not marker.exists() and time.time() < deadline:
+        time.sleep(0.1)
+    rc, out, recs = s.acceptance(s.env())
+    rc_probe, _, recs_probe = s.probe(s.env())
+    first_rc = first.wait(timeout=60)
+    check("пачка: второй заход мутаций задачи при живом первом — отказ 75, обёртка не звана",
+          (BUSY_RC, 0), (rc, len(recs)))
+    check("пачка: отказ называет законный путь — свои id в пачку через запятую", True,
+          "--мутации-задачи hr.проба-среза,<id2>" in out)
+    check("пачка: отказ называет держателя (pid и задачи первого)", True,
+          str(first.pid) in out and "hr.первая" in out)
+    check("пачка: прибор механизма при живом заходе задач не режется", 1, len(recs_probe))
+    check("пачка: первый заход дошёл сам (код 2 — история не прочитана)", 2, first_rc)
+    rc, _, recs = s.acceptance(s.env())
+    check("пачка: после конца первого заход свободен", (2, 1), (rc, len(recs)))
+    # Фоновый потомок прогона переживает дверь; замок пачки ему не достаётся.
+    door = str(s.root / "scripts" / "run-in-checks-slice.sh")
+    pidfile = s.tmp / "потомок.pid"
+    s.run(["bash", door, "bash", "-c", f"sleep 30 >/dev/null 2>&1 & echo $! > {pidfile}",
+           "--мутации-задачи", "hr.потомок"], s.env(), s.work)
+    try:
+        rc, _, recs = s.acceptance(s.env())
+        check("пачка: фоновый потомок захода не держит замок пачки после двери",
+              (2, 1), (rc, len(recs)))
+    finally:
+        if pidfile.is_file():
+            os.kill(int(pidfile.read_text().strip()), signal.SIGTERM)
+
+
 def main() -> int:
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
@@ -593,7 +633,8 @@ def main() -> int:
                             ("G-06", g06),
                             ("G-07", lambda: g07(tmp / "g07")),
                             ("G-11", g11),
-                            ("G-13", lambda: g13(tmp / "g13"))):
+                            ("G-13", lambda: g13(tmp / "g13")),
+                            ("пачка", lambda: probe_batch_guard(Stand(tmp / "batch")))):
             try:
                 probe()
             except Exception as error:  # упавший стенд — красный путь, а не трассировка

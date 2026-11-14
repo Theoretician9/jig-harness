@@ -53,7 +53,7 @@ FORBIDDEN_NOT_LISTED = (
     MANIFEST_NAME,
     "harness/config/pipeline.yaml", "harness/config/queue.yaml",
     "harness/config/models.yaml", "harness/config/audit.yaml",
-    "harness/config/live-check-state.yaml",
+    "harness/config/live-check-state.yaml", "harness/config/gates-quarantine.yaml",
 )
 
 # Ярус 2: в описи есть, заменяется раскладкой, но не снимается. Опись нужна, чтобы
@@ -222,13 +222,28 @@ class Verdict:
         self.kept: dict = {}
         self.gone: set = set()
         self.broken: set = set()
+        self.out_of_scope: set = set()
         self.not_removable: set = set()
+        self.own: set = set()
         self.new_body: dict = {}
         self.new_kept: dict = {}
         self.revived: dict = {}
         self.seeded: dict = {}
         self.threshold_line = ""
         self.absent_lines: list = []
+
+    def set_aside(self, path: str) -> bool:
+        """Путь прежней описи, за который раскладка не отвечает: True — назван и дальше не
+        судится. Порча — только путь, который в опись не записать. Ярус 1 — не порча: его
+        честно вписала прежняя версия пакета, пока путь был нашим (так стало с
+        harness/config/gates-quarantine.yaml, когда он ушёл в данные установки)."""
+        if listable(path):
+            self.broken.add(path)
+        elif forbidden_tier(path) == 1:
+            self.out_of_scope.add(path)
+        else:
+            return False
+        return True
 
     def body_after(self, removed: set) -> dict:
         """Тело новой описи без путей, которые дверь действительно сняла: оборвавшаяся
@@ -263,8 +278,11 @@ class Verdict:
         lines = [f"опись: в описи {self.old_rows}; {removed_text}; перекрыто {overwritten}; "
                  f"{deferred}; {kept}; уже не было {len(self.gone)}"]
         lines += [f"опись испорчена: {p}" for p in sorted(self.broken)]
+        lines += [f"из описи вынут (не дело раскладки), файл не тронут: {p}"
+                  for p in sorted(self.out_of_scope)]
         lines += [f"не снимается: {p}" for p in sorted(self.not_removable)]
         lines += [f"уже не было: {p}" for p in sorted(self.gone)]
+        lines += [f"своё копии, оставлено: {p}" for p in sorted(self.own)]
         lines += self.absent_lines
         if self.threshold_line:
             lines.append(self.threshold_line)
@@ -392,13 +410,16 @@ def _defer_reason(count: int, total: int, percent) -> tuple:
 
 
 def judge_extra(old: Manifest, plan: set, absent: list, project: str, percent,
-                lift: bool = False, lift_only=None, ours=None) -> Verdict:
+                lift: bool = False, lift_only=None, ours=None,
+                own=frozenset()) -> Verdict:
     """Порядок суда одного пути: запретный, группа без источника, «уже нет»,
     состояние на диске, кандидат, порог — и порог только здесь. Довод (lift) снимает порог,
     но не предохранитель группы, и только для lift_only (None — для всех кандидатов): новый
     кандидат, которого прежний прогон не откладывал, порог по-прежнему держит.
     ours(путь) → blob диска, если правка — прежняя версия нашего же файла по истории пакета,
-    иначе None: такой «правлен здесь» тоже кандидат, и снимается он с blob диска (verdict.seeded)."""
+    иначе None: такой «правлен здесь» тоже кандидат, и снимается он с blob диска (verdict.seeded).
+    own — пути, тронутые своими коммитами копии: опись их не снимает и не предлагает, строка
+    остаётся как есть, порог их не считает; следующий прогон судит путь заново."""
     verdict = Verdict()
     verdict.old_rows = len(old.body)
     verdict.percent = percent
@@ -415,10 +436,9 @@ def judge_extra(old: Manifest, plan: set, absent: list, project: str, percent,
     for path, (blob, group) in sorted(old.body.items(), key=_by_bytes):
         if path in verdict.new_body:
             continue
-        tier = 1 if listable(path) else forbidden_tier(path)
-        if tier == 1:
-            verdict.broken.add(path)
-        elif tier == 2:
+        if verdict.set_aside(path):
+            continue
+        if forbidden_tier(path) == 2:
             verdict.not_removable.add(path)
             verdict.new_body[path] = (blob, group)
         elif absent_dest(path, absent) is not None:
@@ -426,6 +446,9 @@ def judge_extra(old: Manifest, plan: set, absent: list, project: str, percent,
             verdict.new_body[path] = (blob, group)
         elif not os.path.lexists(os.path.join(project, path)):
             verdict.gone.add(path)
+        elif path in own:
+            verdict.own.add(path)
+            verdict.new_body[path] = (blob, group)
         else:
             reason = disk_state(project, project_real, path, blob)
             if reason is None or edited_but_ours(path, reason):
@@ -440,10 +463,13 @@ def judge_extra(old: Manifest, plan: set, absent: list, project: str, percent,
     for path, (blob, reason) in old.kept.items():
         if path in verdict.new_body or path in verdict.new_kept:
             continue
-        if listable(path) or forbidden_tier(path) == 1:
-            verdict.broken.add(path)
-        elif not os.path.lexists(os.path.join(project, path)):
+        if verdict.set_aside(path):
+            continue
+        if not os.path.lexists(os.path.join(project, path)):
             verdict.gone.add(path)
+        elif path in own:
+            verdict.own.add(path)
+            verdict.new_kept[path] = (blob, reason)
         else:
             now = disk_state(project, project_real, path, blob)
             verdict.new_kept[path] = (blob, reason if now is None else now)

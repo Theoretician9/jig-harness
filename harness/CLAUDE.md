@@ -164,7 +164,11 @@ Bans are enforced by `scripts/hooks/guard_bash.py`, not by your memory.
 
 - A development task updates `dev-map.yaml` in the SAME commit; the trailer
   `Dev-Map: <task-id>` sits in one block with `Co-Authored-By`, and the message
-  is passed via `git commit -F -`.
+  goes through the commit wrapper: the orchestrator runs
+  `B=$(git rev-parse HEAD); GIT_INDEX_FILE=<own> git read-tree "$B"; …; GIT_INDEX_FILE=<own> bash scripts/git-commit-locked.sh --base "$B" -F - <<'EOF' … EOF` (no paths; a stale index is refused with code 5,
+  then `git reset -q -- <paths>`), helpers run
+  `bash scripts/git-commit-locked.sh -F <file> -- <paths>`; the Bash call takes
+  `timeout` >= 300000 (the wrapper waits up to 300 s for the commit lock).
 - Statuses: `done` = verified by the owner · `test` = waiting for a live check
   (the default for work you finished) · `wip` · `plan`.
 - `STATE.md` holds only what is true right now, is rewritten rather than
@@ -194,7 +198,7 @@ Bans are enforced by `scripts/hooks/guard_bash.py`, not by your memory.
 ## What is watching (built from the registry)
 
 <!-- AUTO:mechanisms -->
-533 mechanisms are registered in `harness/config/mechanisms.yaml` (gates — 451, daemons — 39, skills — 19, hooks — 24). Each one names what it does, when it runs, what breaks without it and the command that proves it works. The registry is data: `python3 scripts/check-registry.py` fails when the code and the registry disagree.
+579 mechanisms are registered in `harness/config/mechanisms.yaml` (gates — 496, daemons — 39, skills — 19, hooks — 25). Each one names what it does, when it runs, what breaks without it and the command that proves it works. The registry is data: `python3 scripts/check-registry.py` fails when the code and the registry disagree.
 <!-- /AUTO -->
 
 ---

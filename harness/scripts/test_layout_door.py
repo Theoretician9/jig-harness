@@ -1754,10 +1754,12 @@ def case_d40() -> None:
             PROBE.check("D40", f"«оставлено» в описи: {path} — {reason}",
                         kept.get(path, ("", ""))[1] == reason, f"оставлено {kept}")
         PROBE.check("D40", "отдельные строки: «уже не было: scripts/gone.sh», «не снимается: "
-                    "scripts/hooks/guard_bash.py», «опись испорчена: STATE.md»",
+                    "scripts/hooks/guard_bash.py», «из описи вынут (не дело раскладки), файл "
+                    "не тронут: STATE.md», «опись испорчена» нет",
                     "уже не было: scripts/gone.sh" in r.out
                     and "не снимается: scripts/hooks/guard_bash.py" in r.out
-                    and "опись испорчена: STATE.md" in r.out, r.brief())
+                    and "из описи вынут (не дело раскладки), файл не тронут: STATE.md" in r.out
+                    and "опись испорчена" not in r.out, r.brief())
     with Stand() as s:
         s.set_limit("100")
         s.foreign("scripts/deploy.sh")
@@ -2693,9 +2695,9 @@ def package_files(s: Stand) -> dict:
 
 
 def seed_stand(s: Stand, branch: dict, old: dict | None = None) -> None:
-    """Стенд Ф-д: дверь уложила A (опись есть); в s.pkg git: master = A, ветка «страховка»
-    = A + branch {путь пакета: текст}; old — прежний коммит под master (история «старого
-    кода»). LOG_DIR стенда, ложный git с меткой."""
+    """Стенд Ф-д: дверь уложила A (опись есть); в s.pkg git: master = A поверх коммита-предка
+    с branch {путь пакета: текст} (история пакета: достижима из HEAD) и old — прежнего
+    коммита (история «старого кода»). LOG_DIR стенда, ложный git с меткой."""
     lay_a(s)
     table = s.pkg / "harness" / "config" / "layout-history-paths.yaml"
     table.parent.mkdir(parents=True, exist_ok=True)
@@ -2703,8 +2705,9 @@ def seed_stand(s: Stand, branch: dict, old: dict | None = None) -> None:
     subprocess.run([REAL_GIT, "init", "-q", "-b", "master", str(s.pkg)], env=git_env(),
                    capture_output=True, check=True)
     base = git_commit(s.pkg, "прежний", {**package_files(s), **old}) if old else ""
-    master = git_commit(s.pkg, "master", package_files(s), base)
-    git_commit(s.pkg, "страховка", {**package_files(s), **branch}, master)
+    if branch:
+        base = git_commit(s.pkg, "ранее", {**package_files(s), **branch}, base)
+    git_commit(s.pkg, "master", package_files(s), base)
     git(s.pkg, "symbolic-ref", "HEAD", "refs/heads/master")
     point_log_dir(s, s.t / "журналы")
     s.git_mark = s.t / "git-зовы"

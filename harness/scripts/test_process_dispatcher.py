@@ -1113,7 +1113,7 @@ def case_cron_daemon_subtree():
     report(not bad, "ограничитель строки на заданиях крона: группа и Σ ≤ ёмкости окна", bad)
 
 
-# ───────────────────────── hr.zapuskov-none-net-informacii-znachit ─────────────────────────
+# ───────────────────────── нагрузка и состояние процесса ─────────────────────────
 # Модуль берётся рядом с диспетчером: дверь HARNESS_PROCESS_DISPATCHER уводит на копию и его.
 PROCESS_LOAD = DISPATCHER.parent / "lib" / "process_load.py"
 CHECKS_SLICE = "/harness.slice/harness-checks.slice"

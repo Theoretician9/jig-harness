@@ -1660,7 +1660,7 @@ def case_m5_left_not_counted():
 
 
 
-# ───────── стенды по префиксу харнеса (hr.esli-tmp-samo-ne-ubiraetsya) ─────────
+# ───────── стенды по префиксу харнеса ─────────
 # Семья имён, а не один создатель: proba-*, live-check-probe-*, claude-<uid>/evo-*.
 # Срок — ключ harness.conf, живость — те же держатели, что у отходов.
 STAND = "proba-"

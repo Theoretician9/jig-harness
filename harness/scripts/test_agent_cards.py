@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Пробы собранных карточек помощников (спека hr.standards-and-policy §4.4, Ф3).
+"""Пробы собранных карточек помощников (спека §4.4, Ф3).
 
 Системный промпт помощника — тело его карточки .claude/agents/<тип>.md: добавку
 смены помощник не наследует (спека §3). Поэтому карточки СОБИРАЮТСЯ тем же
@@ -30,6 +30,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 import yaml
@@ -203,6 +204,40 @@ def check_verify(root: Path, env: dict, cards: Path) -> None:
                 (1, True), (rc, "harness-worker" in err))
 
 
+def inodes(folder: Path) -> dict:
+    return {p.name: (p.stat().st_ino, p.stat().st_mtime_ns) for p in sorted(folder.glob("*.md"))}
+
+
+def check_only_stale(root: Path, env: dict) -> None:
+    """Ревью #5, Н1: сборка сама создаёт каталог и пишет только карточки, не равные сборке.
+
+    Повтор раскладки не трогает файлы; правленая руками карточка переписывается одна."""
+    print("── пишутся только устаревшие карточки ──")
+    fresh = root / "нет-каталога" / "agents"
+    rc, err = run(["--карточки", "--в", str(fresh)], env)
+    cases.check("каталога нет — сборщик создаёт его сам: код 0 и три карточки",
+                (0, sorted(f"{name}.md" for name in CLASS_OF)),
+                (rc, sorted(snapshot(fresh)) if rc == 0 else err.strip()[:200]))
+    before = inodes(fresh)
+    time.sleep(0.05)   # mtime_ns переписанного файла обязан отличаться
+    run(["--карточки", "--в", str(fresh)], env)
+    cases.check("повтор без правки: inode и mtime каждой карточки прежние", (True, before),
+                (bool(before), inodes(fresh)))
+    edited = fresh / "harness-lead.md"
+    if not edited.exists():
+        cases.check("правка руками — условие: harness-lead собран", True, False)
+        return
+    good = edited.read_bytes()
+    edited.write_bytes(good + "\nправка руками\n".encode("utf-8"))
+    before = inodes(fresh)
+    time.sleep(0.05)
+    run(["--карточки", "--в", str(fresh)], env)
+    after = inodes(fresh)
+    cases.check("правка руками: переписана только harness-lead, её байты — сборка",
+                (["harness-lead.md"], good),
+                (sorted(n for n in before if before[n] != after.get(n)), edited.read_bytes()))
+
+
 def check_degraded_and_refusal(root: Path, env: dict, cards: Path) -> None:
     print("── без эталона и сверх потолка — как в классовой сборке ──")
     no_etalon = {**env, "SELF_ETALON_DIR": str(root / "нет-эталона")}
@@ -245,6 +280,7 @@ def main() -> int:
         env = env_of(etalon)
         cards = check_build(root, env)
         check_repeat(root, env, cards)
+        check_only_stale(root, env)
         check_verify(root, env, cards)
         check_degraded_and_refusal(root, env, cards)
     finally:

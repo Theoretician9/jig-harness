@@ -1,102 +1,13 @@
-# События живой проверки перехватчиков (класс B1) — ДАННЫЕ для
-# scripts/live-check-hook.py.
+# События живой проверки хуков — ЗАГОТОВКА для новой установки.
 #
-# Откуда взято: спека живой проверки §3.1, класс B1 — «совершено перехватываемое
-# действие и увидено решение». У хука оболочки при РАЗРЕШЕНИИ вывода нет вовсе,
-# поэтому доказательством служит ОТКАЗ: хуку подаётся событие ровно той формы,
-# какую шлёт оболочка, и он отвечает своими словами.
+# Уезжает в публичную сборку ВМЕСТО рабочего harness/config/live-check-hooks.yaml
+# (данные сборки: заменить_шаблоном). Рабочие записи несут стенды в каталоге
+# следов КОНКРЕТНОЙ установки и её задачи.
 #
-# Поля:
-#   событие        — JSON на stdin, как его шлёт Claude Code
-#   ждём_в_решении — подстрока, которую может напечатать ТОЛЬКО это правило
-#                    (один код возврата служит целому классу бед)
-#   журнал         — имя файла в LOG_DIR, куда хук пишет своё решение;
-#                    прибор требует ПРИРОСТ, а не существование файла
-#
-# ЧЕГО ЗДЕСЬ НЕТ И ПОЧЕМУ (решение смены 17.10.2026):
-#   * scripts/hooks/skill_log.sh — пишет запись о вызове скила в журнал, по
-#     которому гейты считают исполнение пайплайна. Живой зов подделал бы улику,
-#     которой судят работу: его живая проверка — наблюдение НАСТОЯЩЕГО вызова,
-#     а не вызов ради проверки.
-#   * scripts/hooks/pause_guard.py — отказывает, только когда владелец нажал
-#     паузу. Чтобы увидеть решение, пришлось бы поставить паузу боевой смене,
-#     то есть остановить работу ради проверки.
-#   * scripts/hooks/pre_compact_handover.sh — пишет передачу смены; живой зов
-#     оставил бы в передаче запись о событии, которого не было.
-#   * scripts/hooks/agent_budget_guard.py — каждый пропущенный запуск пишет в
-#     вызовы-агентов.jsonl строку, по которой считается потолок НАСТОЯЩЕЙ задачи
-#     в работе: живой зов съел бы её потолок запуском, которого не было, а отказ
-#     увидеть можно только на исчерпанном потолке. Решения судит проба на стенде
-#     (scripts/hooks/test_agent_budget_guard.py), живьём — настоящие запуски.
-#   * scripts/hooks/file_claim_guard.py — его решение ЗАПИСЬ заявки в боевой журнал
-#     заявки-на-файлы.jsonl: живой зов с выдуманным помощником держал бы путь за
-#     несуществующим агентом FILE_CLAIM_MIN минут, и настоящие помощники получали бы
-#     предупреждение о нём. Решения судит проба на стенде
-#     (scripts/hooks/test_file_claim_guard.py), живьём — записи настоящих помощников.
+# Формат (ключ — путь хука, как в реестре механизмов):
+#   scripts/hooks/guard_bash.py:
+#     событие: '{"tool_name":"Bash","tool_input":{"command":"..."}}'
+#     ждём_в_решении: <строка, которую хук обязан сказать>
 
-хуки:
-  scripts/hooks/guard_bash.py:
-    событие: '{"tool_name":"Bash","tool_input":{"command":"docker compose restart api"}}'
-    ждём_в_решении: НЕ пересобирает образ
-    журнал: guard.jsonl
-  scripts/hooks/stop_reminder.sh:
-    событие: '{"hook_event_name":"Stop"}'
-    ждём_в_решении: перед завершением
-  # Номер смены в событии — ДАННЫЕ, и он назван явно: сторож отказывает лишь
-  # там, где скил помощников в этой смене не звали, а в смене проверяющего он
-  # может быть позван. Форма события — та же, что шлёт оболочка.
-  scripts/hooks/agent_skill_guard.py:
-    событие: '{"tool_name":"Agent","session_id":"smena-bez-skila","tool_input":{"subagent_type":"general-purpose","prompt":"разбери код"}}'
-    ждём_в_решении: без скила «subagent-work»
-  scripts/hooks/model_guard.py:
-    событие: '{"tool_name":"Write","session_id":"smena-prover","tool_input":{"file_path":"/var/www/project/docs/specs/zhivaya-proverka-sluchaj.md","content":"x"}}'
-    ждём_в_решении: шаг «спека» делает ПОМОЩНИК
-    журнал: model-guard.jsonl
-
-  # ── Порция B1 (часть 7 плана hr.zhivaya-proverka-vseh-mehanizmov) ──
-  # СТЕНД. Пять хуков ниже пишут в живое: очередь и замок ротации, журналы
-  # роли-помощников, вложенность, rotation, ответы-в-канал, вызовы-агентов.
-  # Прибор передаёт хуку своё окружение, но сам стенда не готовит и окружения
-  # из данных не берёт, поэтому зов — только так (иначе хук тронет живую
-  # очередь смены и журналы, по которым судят работу):
-  #   ST=/var/log/harness/живая-проверка/hr.zhivaya-proverka-vseh-mehanizmov/стенд-хуков
-  #   mkdir -p "$ST/журналы/inbox" "$ST/панель" "$ST/стенограмма/stend-b1-hukov/subagents"
-  #   touch "$ST/журналы/tg_out.jsonl"
-  #   echo стенд > "$ST/журналы/inbox/1794000000.000000000.txt"
-  #   echo '{"помощников": 1}' > "$ST/панель/rotation-waits-helpers.json"
-  #   echo '{"toolUseId": "toolu_stend_b1"}' > "$ST/стенограмма/stend-b1-hukov/subagents/agent-stend.meta.json"
-  #   HARNESS_LOG_DIR="$ST/журналы" HARNESS_PANEL_STATE="$ST/панель" python3 scripts/live-check-hook.py <пути>
-  # Сообщение в inbox и флаг ротации живы по mtime (120 и 30 минут), поэтому
-  # их пишут заново перед каждым зовом. channel_reply_guard молчит без TMUX в
-  # окружении (headless claude -p владельцу не пишет) — зов из окна tmux.
-  # Сессия во всех событиях — stend-b1-hukov: по ней видно, что в живые
-  # журналы стенд не протёк.
-  scripts/hooks/lead_role_guard.py:
-    событие: '{"hook_event_name":"PreToolUse","tool_name":"Write","session_id":"stend-b1-hukov","agent_id":"stend","agent_type":"harness-lead","tool_input":{"file_path":"/var/www/project/docs/zhivaya-proverka-sluchaj.md","content":"x"}}'
-    ждём_в_решении: управляющий файлы не пишет
-    журнал: роли-помощников.jsonl
-  # Номер части #99 — данные: метка называет часть, которой нет в плане
-  # запуска (нарушение 3 идёт раньше 4 и 5). Строгость «жёлтый» — то же слово
-  # приходит в stdout предупреждением, «красный» — в stderr отказом.
-  scripts/hooks/launch_plan_guard.py:
-    событие: '{"hook_event_name":"PreToolUse","tool_name":"Agent","session_id":"stend-b1-hukov","tool_input":{"description":"живая проверка","subagent_type":"harness-worker","model":"opus","prompt":"Часть: hr.zhivaya-proverka-vseh-mehanizmov#99 проба сторожа"}}'
-    ждём_в_решении: метка называет часть, которой нет в плане запуска
-    журнал: вложенность.jsonl
-  scripts/hooks/rotation_queue_guard.py:
-    событие: '{"hook_event_name":"PreToolUse","tool_name":"Agent","session_id":"stend-b1-hukov","tool_input":{"description":"живая проверка","subagent_type":"harness-worker","model":"opus","prompt":"Часть: stend-b1#1 проба очереди"}}'
-    ждём_в_решении: смена ждёт ротации, пока закончат идущие помощники
-    журнал: rotation.jsonl
-  scripts/hooks/channel_reply_guard.py:
-    событие: '{"hook_event_name":"Stop","session_id":"stend-b1-hukov","stop_hook_active":false}'
-    ждём_в_решении: на его последнее сообщение нет доставленного ответа
-    журнал: ответы-в-канал.jsonl
-  scripts/hooks/memory_layer_guard.py:
-    событие: '{"hook_event_name":"PreToolUse","tool_name":"Write","session_id":"stend-b1-hukov","cwd":"/var/www/project","tool_input":{"file_path":"/var/www/project/harness/self/core.json","content":"x"}}'
-    ждём_в_решении: слой 1 памяти
-  # agent_finish_log.py решения ТЕКСТОМ не печатает вовсе: его решение —
-  # только строка agent.finish в вызовы-агентов.jsonl. Слова решения у него
-  # нет, придумывать его нельзя; событие и журнал названы, а судить прирост
-  # журнала без слова прибор не умеет (находка части 7).
-  scripts/hooks/agent_finish_log.py:
-    событие: '{"hook_event_name":"SubagentStop","session_id":"stend-b1-hukov","agent_id":"stend","stop_hook_active":false,"transcript_path":"/var/log/harness/живая-проверка/hr.zhivaya-proverka-vseh-mehanizmov/стенд-хуков/стенограмма/stend-b1-hukov.jsonl"}'
-    журнал: вызовы-агентов.jsonl
+# Пусто НАРОЧНО: события пишет установка под свои хуки и стенды.
+хуки: {}

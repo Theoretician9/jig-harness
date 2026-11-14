@@ -151,6 +151,7 @@ class Stand:
         path = self.root / rel
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("#!/bin/sh\ntrue\n", encoding="utf-8")
+        path.chmod(0o755)   # как в репозитории: крон зовёт файл напрямую
 
     def write(self) -> None:
         (self.config / "process-library.json").write_text(
@@ -170,10 +171,10 @@ class Stand:
         self.crontab_file.write_text("\n".join(self.cron) + "\n", encoding="utf-8")
         self.units_file.write_text("\n".join(self.units) + "\n", encoding="utf-8")
 
-    def judge(self) -> tuple:
+    def judge(self, env=None) -> tuple:
         self.write()
         rc, out = run([sys.executable, str(JUDGE), "--root", str(self.root),
-                       "--crontab", str(self.crontab_file), "--units", str(self.units_file)])
+                       "--crontab", str(self.crontab_file), "--units", str(self.units_file)], env)
         return rc, out, [line for line in out.splitlines() if line.startswith("НАРУШЕНИЕ ")]
 
     def fake_bin(self, crontab=True, systemctl=True, crontab_fails=False) -> Path:
@@ -321,6 +322,7 @@ def case_precommit_live_prefix() -> None:
     shutil.copytree(live.root, snap)
     (snap / "scripts").mkdir(exist_ok=True)
     shutil.copy2(JUDGE, snap / "scripts" / "check-process-library.py")
+    shutil.copytree(JUDGE.parent / "lib", snap / "scripts" / "lib")   # снимок pre-commit несёт и lib судьи
     bindir = live.fake_bin()
     # Строка гейта исполняется как есть: pre-commit идёт из корня проекта, гейт и на_снимке — сквозные.
     script = (f'cd "{live.root}" || exit 99\nSNAP_DIR="{snap}"\nSCRIPT_DIR="{snap}/scripts"\n'
@@ -366,6 +368,40 @@ def case_dead_sources() -> None:
     stand = Stand("dead-cron-gone")
     del stand.cron[0]
     judged_red("строка крона убрана", stand, "мёртвая запись", "crontab", "alpha")
+
+
+def case_gate_key_live_conf() -> None:
+    print("── 19а. «если_задан» судится по живому harness.conf, а не по образцу в конфигах ──")
+    # Улика 14.11.2026: evolution-net-reader с EVOLUTION_REMOTE_URL в живом конфиге
+    # стоял без строки крона, а судья читал пустой ключ образца и молчал.
+    for title, sample, live, wanted in (("ключ задан вживую, в образце пуст", "", "https://x", 1),
+                                        ("ключ пуст вживую, в образце задан", "https://x", "", 0)):
+        stand = Stand("gate-" + ("on" if live else "off"))
+        stand.touch("scripts/eta.sh")   # свой файл: строка alpha в кроне не должна засчитаться за eta
+        stand.library["процессы"].append(record("eta", "крон", ["scripts/eta.sh"]))
+        stand.write()
+        with (stand.config / "process-library.yaml").open("a", encoding="utf-8") as handle:
+            handle.write('  eta:\n    запуск: крон\n    расписание: "*/15 * * * *"\n'
+                         '    команда: "scripts/eta.sh"\n    журнал: eta.log\n'
+                         "    если_задан: ETA_URL\n")
+        (stand.config / "harness.conf").write_text(f'ETA_URL="{sample}"\n', encoding="utf-8")
+        live_conf = stand.root.parent / f"{stand.root.name}-live.conf"
+        live_conf.write_text(f'ETA_URL="{live}"\n', encoding="utf-8")
+        stand.write = lambda: None   # yaml с ключом уже дописан — judge() не должен его затереть
+        rc, out, found = stand.judge(dict(os.environ, HARNESS_CONF=str(live_conf)))
+        hits = [line for line in found if "мёртвая запись: eta :: crontab" in line]
+        report(rc == wanted and len(found) == wanted and len(hits) == wanted,
+               f"{title}: нарушений «eta :: crontab» {wanted}", [f"rc={rc}", f"нарушения {found[:3]}"])
+
+
+def case_cron_not_executable() -> None:
+    print("── 19б. команда задания крона без бита исполнения → «не исполняется» ──")
+    # Улика 14.11.2026: scripts/evolution-net.py лежал 100644 — строка крона
+    # обёртки отдала бы Permission denied на каждом тике.
+    stand = Stand("noexec")
+    stand.write()
+    (stand.root / "harness/demons/alpha.sh").chmod(0o644)
+    judged_red("команда alpha без +x", stand, "не исполняется", "harness/demons/alpha.sh", "alpha")
 
 
 def case_sources_unavailable() -> None:
@@ -562,7 +598,7 @@ def main() -> int:
         for fn in (case_clean, case_new_demon, case_record_without_source, case_cron_wrapped, case_cron_bare,
                    case_hook, case_ghost_mechanism, case_removed_demon, case_unit, case_schedule,
                    case_empty_root, case_wiring, case_precommit_live_prefix, case_cron_bypasses,
-                   case_dead_sources, case_sources_unavailable, case_live_machine_wording):
+                   case_dead_sources, case_gate_key_live_conf, case_cron_not_executable, case_sources_unavailable, case_live_machine_wording):
             try:
                 fn()
             except Exception as error:  # noqa: BLE001 — проба называет, а не падает

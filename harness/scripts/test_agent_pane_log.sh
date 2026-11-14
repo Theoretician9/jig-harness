@@ -211,7 +211,7 @@ own_tmux kill-server 2>/dev/null
 
 # ── 5. хук старта ───────────────────────────────────────────────────────────
 hook_first() { (cd "$1" && HARNESS_INSTALL_CONF="$STAND/home/install.conf" HARNESS_HOME="$STAND/home" \
-    SESSION_PROC_ROOT="$STAND/sproc" SESSION_PROC_START=4242 \
+    SESSION_PROC_ROOT="$STAND/sproc" SESSION_PROC_START=4242 SHIFT_SELF_MARK="$STAND/shift.mark" \
     timeout 30 bash "$HOOK" </dev/null 2>/dev/null | head -1); }
 # Вывод берётся в переменную: pipefail и ранний выход head дали бы ложное «нет».
 OUT_FOREIGN=$(hook_first "$STAND/other")

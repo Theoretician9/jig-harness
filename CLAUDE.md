@@ -148,7 +148,11 @@ Bans are enforced by `scripts/hooks/guard_bash.py`, not by your memory.
 
 - A development task updates `dev-map.yaml` in the SAME commit; the trailer
   `Dev-Map: <task-id>` sits in one block with `Co-Authored-By`, and the message
-  is passed via `git commit -F -`.
+  goes through the commit wrapper: the orchestrator runs
+  `GIT_INDEX_FILE=<own> bash scripts/git-commit-locked.sh -F - <<'EOF' … EOF` (no paths,
+  then `git reset -q -- <paths>`), helpers run
+  `bash scripts/git-commit-locked.sh -F <file> -- <paths>`; the Bash call takes
+  `timeout` >= 300000 (the wrapper waits up to 300 s for the commit lock).
 - Statuses: `done` = verified by the owner · `test` = waiting for a live check
   (the default for work you finished) · `wip` · `plan`.
 - `STATE.md` holds only what is true right now, is rewritten rather than

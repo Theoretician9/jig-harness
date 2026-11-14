@@ -136,6 +136,17 @@ def бытие_из_своего_пакета(каталог) -> bool:
                 где=каталог).returncode == 0
 
 
+def _неполный_клон(каталог: Path) -> bool:
+    return _гит("rev-parse", "--is-shallow-repository", где=каталог).stdout.strip() == "true"
+
+
+def _раскрыть_если_неполный(каталог: Path) -> tuple:
+    """Ключ fetch для неполного клона. Затравка раскладки и merge-base «свои
+    коммиты / есть новое» судят по истории пакета; на обрезанной они слепы или
+    врут. Без проверки нельзя: на полном клоне git отвергает --unshallow."""
+    return ("--unshallow",) if _неполный_клон(каталог) else ()
+
+
 def спросить_обновления() -> dict:
     """Что в публичной ветке против того, что лежит в пакете.
 
@@ -147,7 +158,8 @@ def спросить_обновления() -> dict:
     if not (каталог / ".git").is_dir():
         return {"есть новое": False, "коммит": "",
                 "беда": f"пакета нет или он не репозиторий: {каталог}"}
-    добыто = _гит("fetch", "--quiet", удалённый(каталог), ветка(), где=каталог)
+    добыто = _гит("fetch", "--quiet", *_раскрыть_если_неполный(каталог),
+                  удалённый(каталог), ветка(), где=каталог)
     if добыто.returncode != 0:
         строки = [с.strip() for с in (добыто.stderr or добыто.stdout).splitlines()
                   if с.strip()]
@@ -156,6 +168,9 @@ def спросить_обновления() -> dict:
         причина = next((с for с in строки if "fatal" in с.lower()), строки[0] if строки else "?")
         return {"есть новое": False, "коммит": "",
                 "беда": f"репозиторий не отвечает: {причина}"}
+    if _неполный_клон(каталог):
+        return {"есть новое": False, "коммит": "",
+                "беда": "история пакета неполная (shallow): fetch её не раскрыл"}
     свой = _гит("rev-parse", "HEAD", где=каталог).stdout.strip()
     чужой = _гит("rev-parse", "FETCH_HEAD", где=каталог).stdout.strip()
     дата = _гит("log", "-1", "--format=%ci", "FETCH_HEAD", где=каталог).stdout.strip()
@@ -263,15 +278,33 @@ def timer_enabled(unit: str) -> bool:
         return False
 
 
+# Единственный перечень рестартуемых обновлением юнитов: из него и цикл
+# _перезапустить_службы, и суд прав в root_part_gaps. Диспетчер последним: он
+# держит канал с владельцем, и его перезапуск обрывает разговор (находка C4).
+RESTARTED_UNITS = ("harness-panel.service", "harness-sentinel.timer", "harness-dispatcher.service")
+RIGHTS_FILES = ("harness-agent-readonly", "harness-agent-units")
+
+
+def _rights_gaps(rights: Path) -> list[str]:
+    """Что не так в копии прав агента: файлы прав и право restart на каждый юнит.
+    Право даёт любой файл копии, поэтому правило ищется по всей копии, а имя
+    юнита — целым словом (за ним запятая, пробел или конец строки)."""
+    try:
+        text = rights.read_text(encoding="utf-8")
+    except OSError:
+        return [f"нет копии прав {rights}"]
+    absent = [f"/etc/sudoers.d/{name}" for name in RIGHTS_FILES
+              if f"# файл: /etc/sudoers.d/{name}" not in text]
+    unruled = [unit for unit in RESTARTED_UNITS
+               if not re.search(rf"systemctl restart {re.escape(unit)}(?![\w.-])", text)]
+    parts = ([f"файлы {', '.join(absent)}"] if absent else []) + \
+            ([f"restart юнитов: {', '.join(unruled)}"] if unruled else [])
+    return [f"нет прав агента: {'; '.join(parts)}"] if parts else []
+
+
 def root_part_gaps(etc: Path = Path("/etc"), enabled=timer_enabled) -> list[str]:
     """Чего из root-части установки нет — по пункту на пробел."""
-    gaps = []
-    rights = etc / "harness" / "sudo-rights.txt"
-    try:
-        if "/sudoers.d/harness-agent-" not in rights.read_text(encoding="utf-8"):
-            gaps.append("нет прав агента /etc/sudoers.d/harness-agent-*")
-    except OSError:
-        gaps.append(f"нет копии прав {rights}")
+    gaps = _rights_gaps(etc / "harness" / "sudo-rights.txt")
     if not (etc / "logrotate.d" / "harness").is_file():
         gaps.append(f"нет {etc / 'logrotate.d' / 'harness'}")
     timers = [f"harness-{i}.timer" for i in process_library.checks_ids()] + ["harness-sentinel.timer"]
@@ -996,12 +1029,48 @@ def _launch_layout(archive=None, rollback_of=None, timeout=LAYOUT_TIMEOUT_SEC):
 def _напечатать_эталон() -> None:
     """Просит у root печать эталона личности по только что разложенному пакету.
 
-    Права может не быть (установка старее этой строки) — это не беда обновления:
-    молча идём дальше: эталон останется прежним до права или следующей печати.
-    Вывод sudo не показываем: владельцу он ничего не даёт."""
+    Отказ (права нет, печать упала) оставляет эталон прежним: модели получают
+    старую личность, а обновление выглядело бы успешным. Поэтому отказ — сигнал
+    писателю тревог (карточка), а не тишина. Вывод sudo владельцу не показываем."""
     try:
-        subprocess.run(["sudo", "-n", "/usr/local/lib/harness/self-seal", str(пакет())],
-                       capture_output=True, text=True, timeout=60)
+        done = subprocess.run(["sudo", "-n", "/usr/local/lib/harness/self-seal", str(пакет())],
+                              capture_output=True, text=True, timeout=60)
+        refused = done.returncode != 0
+        detail = f"код {done.returncode}: {(done.stderr or done.stdout).strip()[-300:]}"
+    except (OSError, subprocess.SubprocessError) as error:
+        refused, detail = True, f"не запущено: {error}"
+    if refused:
+        _сигнал_отказа_печати(detail)
+
+
+def _пересобрать_карточки() -> bool:
+    """Карточки несут слой 1: после печати эталона они пересобираются по нему.
+
+    Код 3 — эталона нет, карточки собраны из дерева (не сбой). Любой иной код, таймаут и
+    ошибка запуска — сбой: True, если пересборка не удалась. Исключение наружу не выходит."""
+    try:
+        done = subprocess.run([sys.executable, str(КОРЕНЬ / "scripts" / "self-prompt.py"), "--карточки", "--в",
+                               str(КОРЕНЬ / ".claude" / "agents")], capture_output=True, text=True, timeout=120)
+    except (OSError, subprocess.SubprocessError):
+        return True
+    return done.returncode not in (0, 3)
+
+
+def _эталон_личности() -> str:
+    """Каталог эталона из того же источника, что читает self-prompt.py."""
+    return os.environ.get("SELF_ETALON_DIR") or конф_модуль.корень_машины() + "/self"
+
+
+def _сигнал_отказа_печати(detail: str) -> None:
+    writer = os.environ.get("HARNESS_ALERT_TASK") or str(КОРЕНЬ / "scripts" / "alert-task.py")
+    command = [writer] if os.environ.get("HARNESS_ALERT_TASK") else [sys.executable, writer]
+    command += ["--key", "update:self-seal-refused", "--watcher", "update",
+                "--title", "Обновление: эталон личности не напечатан (self-seal отказал)",
+                "--text", f"После раскладки sudo self-seal отказал ({detail}). Модели читают прежний "
+                          f"эталон {_эталон_личности()}. Напечатать эталон по кнопке согласия или "
+                          "выдать право sudo на self-seal."]
+    try:
+        subprocess.run(command, capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL)
     except (OSError, subprocess.SubprocessError):
         pass
 
@@ -1019,7 +1088,12 @@ def _разложить_пакет(archive=None, rollback_of=None) -> tuple:
         return launched, []
     if launched:   # откат с кодом 1 не печатает: эталон ставит только удавшаяся раскладка
         _напечатать_эталон()
+        карточки_упали = _пересобрать_карточки()
+    else:
+        карточки_упали = False
     упавшие = пересобрать_производные()
+    if карточки_упали:
+        упавшие = [*упавшие, ("карточки помощников", "self-prompt.py --карточки не собрал карточки")]
     # Новый демон без строки cron и без периода метки мёртв и незаметен
     # (находка C7): доустановка добавляет недостающее и ничего не удаляет.
     доставлено = subprocess.run(
@@ -1125,10 +1199,9 @@ def _archive_line(result: dict) -> str | None:
 
 
 def _перезапустить_службы() -> bool:
-    """Носители обновлённого кода. Диспетчер ПОСЛЕДНИМ: он держит канал с
-    владельцем, и его перезапуск обрывает разговор (находка C4)."""
+    """Носители обновлённого кода — RESTARTED_UNITS, диспетчер последним."""
     ок = True
-    for служба in ("harness-panel.service", "harness-sentinel.timer", "harness-dispatcher.service"):
+    for служба in RESTARTED_UNITS:
         готово = subprocess.run(["sudo", "-n", "systemctl", "restart", служба],
                                 capture_output=True, timeout=120)
         ок = ок and готово.returncode == 0

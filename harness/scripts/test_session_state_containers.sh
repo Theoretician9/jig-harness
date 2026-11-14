@@ -28,7 +28,8 @@ passed=0; failed=0
 judge() {  # $1 = имя случая; $2 = ждали (yes|no — есть ли строка сбоя); $3 = подстрока, которую ждём/не ждём в выдаче
     local out
     out=$(cd "$STAND/proj" && STAND_DIR="$STAND" PATH="$STAND/bin:/usr/bin:/bin" PROJECT_DIR="$STAND/proj" \
-          CLAUDE_PROJECT_DIR="$STAND/proj" HOME="$STAND" bash "$HOOK" 2>&1 </dev/null)
+          CLAUDE_PROJECT_DIR="$STAND/proj" HOME="$STAND" SHIFT_SELF_MARK="$STAND/shift.mark" \
+          bash "$HOOK" 2>&1 </dev/null)
     local has=no; echo "$out" | grep -q "контейнеры не в строю" && has=yes
     local named=no; echo "$out" | grep -q "$3" && named=yes
     if [ "$has" = "$2" ] && { [ "$2" = no ] || [ "$named" = yes ]; }; then

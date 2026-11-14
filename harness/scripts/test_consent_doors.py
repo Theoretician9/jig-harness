@@ -1073,17 +1073,23 @@ def probe_spec(yard: Yard) -> None:
               str(answer).startswith(want))
 
     st = SpecStand(yard, stub_ask=True)
-    runner = SET_CARRIER + ("import sys; sys.path.insert(0, sys.argv[1]); import spec_approval as s; "
+    # set_carrier ставит ЗАПРОС_КНОПКИ на обёртку к НАСТОЯЩЕМУ ask-consent — заглушка стенда
+    # тогда молчит, и 9з/9з2 судили пустой файл. Здесь зов должен дойти до заглушки.
+    stub = st.tree / "scripts" / ASK.name
+    runner = SET_CARRIER + ("import sys, pathlib; sys.path.insert(0, sys.argv[1]); import spec_approval as s; "
                             "set_carrier(s.owner_word, sys.argv[4]); "
+                            "s.owner_word.ЗАПРОС_КНОПКИ = pathlib.Path(sys.argv[5]); "
                             "sys.exit(s.запросить_кнопку(sys.argv[2], 'Проба', sys.argv[3]))")
     digest = st.subject().split(" ")[1]
-    rc, out = st.s.run(["python3", "-c", runner, str(st.tree / "scripts"), TASK, "f" * 64, st.s.carrier], env=st.env)
+    rc, out = st.s.run(["python3", "-c", runner, str(st.tree / "scripts"), TASK, "f" * 64, st.s.carrier, str(stub)],
+                       env=st.env)
     called = st.argv.exists()
     check(f"9з) Н-15: хэш снимка ≠ хэш диска → rc 1, ask-consent не звался [{short(out)}]", (1, False), (rc, called))
-    rc, out = st.s.run(["python3", "-c", runner, str(st.tree / "scripts"), TASK, digest, st.s.carrier], env=st.env)
+    rc, out = st.s.run(["python3", "-c", runner, str(st.tree / "scripts"), TASK, digest, st.s.carrier, str(stub)],
+                       env=st.env)
     calls = st.argv.read_text(encoding="utf-8") if st.argv.exists() else ""
-    check(f"9з2) хэш снимка = диска → rc 0, ask-consent --вид спека --предмет <id> [{short(calls)}]", (0, True),
-          (rc, f"--вид спека --предмет {TASK}" in calls))
+    check(f"9з2) хэш снимка = диска → rc 0, ask-consent --вид спека --предмет-двери «<id> <хэш>» "
+          f"[{short(calls)}]", (0, True), (rc, f"--вид спека --предмет-двери {TASK} {digest}" in calls))
 
 
 # ── 10. сторож охраняет журнал выкатов ───────────────────────────────────────

@@ -2831,7 +2831,7 @@ def case_lies_commit_no_empty_brackets(stand: Path) -> None:
     # Живой отчёт 13.11: «Карта: известный риск Р-8 в карточку Б ()» — id вырезан, скобки остались.
     write_journal(stand, lead_rows())
     set_mark(stand, at(100))
-    git_stand(stand / "project", [(with_trailer("Карта: известный риск в карточку Б (hr.word-receiver-own-user)"),
+    git_stand(stand / "project", [(with_trailer("Карта: известный риск в карточку Б (hr.stand-risk-card)"),
                                    at(20))])
     line = cleanup_note(stand)
     PROBE.check("условие: примечание о коммите есть", line.startswith("коммитов 1"), line)

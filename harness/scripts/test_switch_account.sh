@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Пробы ЯДРА переключения смены на аккаунт по ключу setup-token
-# (задача hr.switch-account, срез «ядро» 11.11.2026, план .tasks/hr.switch-account/план.md).
+# (срез «ядро» 11.11.2026, план задачи).
 #
 # Что держат пробы. Смена поднимается через komanda_agenta; между срывом
 # чужого носителя (`env -u CLAUDE_CODE_OAUTH_TOKEN`) и носителем личности
@@ -26,6 +26,8 @@
 #   CLAUDE_BIN, SELF_PROMPT_PY, HARNESS_ALERT_TASK — двери claude-run.sh
 #   ACCOUNT_WARDEN       чем account-switch.py будит сторожа (этап 1б; умолч. сторож рядом со скриптом)
 #   HARNESS_SESSION_WARDEN  чей сторож судят пробы 1б-С (дверь мутаций)
+#   HARNESS_PANEL_STATE  где pause.py ищет паузу (случаи 1в; боевая пауза не читается)
+#   ACCOUNT_VERIFY_WAIT_SEC  сколько --итог ждёт процесс смены (1в: 0 — не ждать)
 #
 #   bash scripts/test_switch_account.sh
 # Код возврата: 0 — все случаи прошли, 1 — есть упавший.
@@ -135,26 +137,46 @@ export CLAUDE_BIN="$S/bin/claude" SELF_PROMPT_PY="$S/bin/self-prompt.py" \
 : > "$TG_OUT"; : > "$ALERT_OUT"
 
 # ── подставной API организации: Bearer → sha → организация в заголовке ─────
+# Значение карты — строка-организация (200 без заголовков лимита) или объект
+# {орг, код, статус, окно, сброс, ут5, ут7, задержка}: заголовки лимита Ф-38
+# по ключу. Карта читается на каждый запрос — случаи 1в меняют её по ходу.
+# Сервер многопоточный: гонка А-11 ждёт два ответа с задержкой разом.
 cat > "$S/bin/org_api.py" <<'API'
-import hashlib, http.server, json, os, sys
-MAP = json.load(open(sys.argv[1], encoding="utf-8"))
+import hashlib, http.server, json, sys, time
+LIMIT_HEADERS = (("status", "статус"), ("representative-claim", "окно"), ("reset", "сброс"),
+                 ("5h-utilization", "ут5"), ("7d-utilization", "ут7"))
+def answer(digest):
+    try:
+        value = json.load(open(sys.argv[1], encoding="utf-8")).get(digest, "")
+    except (OSError, ValueError):
+        value = ""
+    return value if isinstance(value, dict) else {"орг": value}
 class H(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         self.rfile.read(int(self.headers.get("Content-Length") or 0))
         key = (self.headers.get("Authorization") or "").removeprefix("Bearer ").strip()
         digest = hashlib.sha256(key.encode()).hexdigest()
-        org = MAP.get(digest, "")
+        a = answer(digest)
+        org = a.get("орг") or ""
         with open(sys.argv[3], "a", encoding="utf-8") as log:
             log.write(f"{self.path} {digest[:8]} {org or '-'}\n")
-        self.send_response(200 if org else 401)
+        if a.get("задержка"):
+            time.sleep(float(a["задержка"]))
+        code = int(a.get("код") or (200 if org else 401))
+        self.send_response(code)
         if org:
             self.send_header("anthropic-organization-id", org)
+        for name, field in LIMIT_HEADERS:
+            if a.get(field) not in (None, ""):
+                self.send_header(f"anthropic-ratelimit-unified-{name}", str(a[field]))
+        if code == 429:
+            self.send_header("retry-after", "60")
         self.send_header("Content-Type", "application/json")
         self.end_headers()
         self.wfile.write(b"{}")
     def log_message(self, *a):
         pass
-srv = http.server.HTTPServer(("127.0.0.1", 0), H)
+srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
 open(sys.argv[2], "w").write(str(srv.server_address[1]))
 srv.serve_forever()
 API
@@ -434,6 +456,9 @@ mkdir -p "$S/proj/scripts" "$S/proj/harness/demons"
 cp "$DOOR" "$S/proj/scripts/account-switch.py"
 cp "$LOGIN_PY" "$S/proj/scripts/check-login-expiry.py"
 cp -r "$HERE/lib" "$S/proj/scripts/lib"
+# Метка лимита — настоящая и с 1б (ревью кода М-1): успех --итог снимает её, и
+# копия дерева без limit_mark.py оставила бы двери повод глотать ImportError молча.
+cp "$HERE/limit_mark.py" "$S/proj/scripts/limit_mark.py"
 cat > "$S/proj/harness/demons/session-warden.sh" <<'WARDEN'
 #!/usr/bin/env bash
 # Подставной сторож: доводы и поле `запуск` state.json на миг вызова.
@@ -448,8 +473,10 @@ export ACCOUNT_WARDEN="$S/proj/harness/demons/session-warden.sh" WARDEN_CALLS="$
 : > "$WARDEN_CALLS"
 warden_calls() { local n; n=$(grep -c . "$WARDEN_CALLS" 2>/dev/null); echo "${n:-0}"; }
 state_sw() {  # $1 запуск, $2 идёт, $3 откуда, $4 куда, $5 откат (true|false)
-    printf '{"запуск": "%s", "идёт": "%s", "переключение": {"откуда": "%s", "куда": "%s", "начало": "2026-11-13T08:00:00+05:00", "откат": %s}, "переключения": []}\n' \
-        "$1" "$2" "$3" "$4" "$5" > "$S/acc/state.json"
+    # Начало — «сейчас»: дверь снимает переход старше ACCOUNT_SWITCH_STUCK_MIN как
+    # «застрял», и зашитая дата решала бы исход случаев 1б возрастом фикстуры.
+    printf '{"запуск": "%s", "идёт": "%s", "переключение": {"откуда": "%s", "куда": "%s", "начало": "%s", "откат": %s}, "переключения": []}\n' \
+        "$1" "$2" "$3" "$4" "$(date --iso-8601=seconds)" "$5" > "$S/acc/state.json"
 }
 sw_field() {  # $1 = поле переключения → значение; переключения нет → «нет»
     python3 -I -c 'import json,sys
@@ -685,6 +712,546 @@ run_direct
 case_check "П-13 запуск=login → без ключа, claude запущен" "нет|да" "$(traced_sha)|$(yes_no args_have -p)"
 run_direct HARNESS_ACCOUNT_DIR="$S/net-kataloga" LOG_DIR="$S/log-direct-off"
 case_check "П-13 profiles.json нет → запуск без ключа, как сейчас" "нет|да" "$(traced_sha)|$(yes_no args_have -p)"
+
+# ═══ Этап 1в: автопереход при лимите — дверь (--авто, --итог, --ждёт, --в-лимите) ═══
+# Спека §1в.3, §1в.5, §1в.6, таблица §1в.10. Стенд прежний: копия дерева с
+# подставным сторожем; limit_mark, pause, судьи — НАСТОЯЩИЕ, рядом с дверью
+# (дверь импортирует их из своего каталога). Свой LOG_DIR (метка лимита и журнал
+# двери), своя пауза, свой файл входа /login с фиктивным ключом. Весть идёт
+# через подставной tg_send, который, как настоящий (tg_send.sh:501–509),
+# придерживает весть без --несмотря-на-лимит при стоящей метке limit.
+echo "── 1в: стенд автоперехода ──"
+export LOG_DIR="$S/log-1v" HARNESS_PANEL_STATE="$S/panel" PANEL_STATE_DIR="$S/panel" ACCOUNT_VERIFY_WAIT_SEC=0
+mkdir -p "$LOG_DIR" "$S/panel"
+cp "$HERE/limit_mark.py" "$HERE/pause.py" "$HERE/stall-in-log.py" "$HERE/limit-in-log.py" "$S/proj/scripts/"
+KEY_E="proba-klyuch-epsilon-$(rnd)"; KEY_X="proba-klyuch-iks-$(rnd)"; KEY_L="proba-klyuch-login-$(rnd)"
+ORG_X="0rg-xxxx-$(rnd)"   # вне LOGIN_EXPECTED_ORG
+ALL_KEYS+=("$KEY_E" "$KEY_X" "$KEY_L")
+printf '%s' "$KEY_E" > "$S/secrets/claude-oauth-eps"
+printf '%s' "$KEY_X" > "$S/secrets/claude-oauth-chuzhaya"
+chmod 600 "$S/secrets/claude-oauth-eps" "$S/secrets/claude-oauth-chuzhaya"
+# Файл входа старше любого процесса стенда: «/login в сессии» здесь не судится.
+printf '{"claudeAiOauth": {"accessToken": "%s"}}' "$KEY_L" > "$CLAUDE_CREDENTIALS"
+touch -d '-1 hour' "$CLAUDE_CREDENTIALS"
+JOURNAL="$LOG_DIR/account-switch.jsonl"
+MARK="$LOG_DIR/лимит-подписки.состояние"
+HELD="$LOG_DIR/придержано-лимитом.jsonl"
+cat > "$S/bin/tg_send_v.sh" <<'TG'
+#!/usr/bin/env bash
+case " $* " in
+    *" --несмотря-на-лимит "*) ;;
+    *) if [ "$(awk '{print $2}' "$LOG_DIR/лимит-подписки.состояние" 2>/dev/null)" = limit ]; then
+           printf '{"придержано": 1}\n' >> "$LOG_DIR/придержано-лимитом.jsonl"; exit 3
+       fi ;;
+esac
+printf '%s\n' "$*" | tr '\n' ' ' >> "$TG_OUT"; printf '\n' >> "$TG_OUT"
+exit 0
+TG
+chmod +x "$S/bin/tg_send_v.sh"
+export TG_SEND="$S/bin/tg_send_v.sh" HARNESS_TG_SEND="$S/bin/tg_send_v.sh"
+
+cat > "$S/bin/api_map.py" <<'PY'
+import json, os, sys
+path, spec = sys.argv[1], json.loads(sys.argv[2])
+answers = {}
+for arg in sys.argv[3:]:            # имя=sha:орг
+    name, rest = arg.split("=", 1)
+    digest, org = rest.split(":", 1)
+    value = spec.get(name)
+    answers[digest] = org if value is None else {"орг": org, **value}
+tmp = path + ".tmp"
+json.dump(answers, open(tmp, "w", encoding="utf-8"), ensure_ascii=False)
+os.replace(tmp, path)
+PY
+api_set() {  # $1 = {"A": {…}, …}; не названный ключ отвечает 200 без заголовков лимита
+    python3 -I "$S/bin/api_map.py" "$S/api-map.json" "$1" \
+        A="$(sha "$KEY_A"):$ORG_A" B="$(sha "$KEY_B"):$ORG_B" G="$(sha "$KEY_G"):$ORG_C" \
+        D="$(sha "$KEY_D"):$ORG_A" F="$(sha "$KEY_FOREIGN"):$ORG_A" E="$(sha "$KEY_E"):$ORG_B" \
+        X="$(sha "$KEY_X"):$ORG_X" L="$(sha "$KEY_L"):$ORG_A"
+}
+api_rej() { printf '{"код":429,"статус":"rejected","окно":"%s","сброс":%s,"задержка":%s}' "${2:-five_hour}" "$1" "${3:-0}"; }
+api_alw() { printf '{"статус":"allowed","ут5":%s,"ут7":%s,"задержка":%s}' "$1" "$2" "${3:-0}"; }
+api_wrn() { printf '{"статус":"allowed_warning","ут5":%s,"ут7":%s,"задержка":%s}' "$1" "$2" "${3:-0}"; }
+calls() { local n; n=$(grep -c " $(sha "$1" | cut -c1-8) " "$S/out/api.log" 2>/dev/null); echo "${n:-0}"; }
+
+write_profiles_v() {  # доводы — имена профилей по порядку (умолч. alpha beta gamma)
+    python3 -I - "$S/acc/profiles.json" "$ORG_A" "$ORG_B" "$ORG_C" "$ORG_X" "${@:-alpha beta gamma}" <<'PY'
+import json, sys
+path, oa, ob, oc, ox, *names = sys.argv[1:]
+names = " ".join(names).split()
+known = {"alpha": (oa, "claude-oauth-alpha"), "beta": (ob, "claude-oauth-beta"),
+         "gamma": (oc, "claude-oauth-gamma"), "chuzhaya": (ox, "claude-oauth-chuzhaya")}
+json.dump({"профили": [{"имя": n, "подпись": n.upper(), "орг": known[n][0], "почта": "",
+                        "ключ": known[n][1], "отпечаток": ""} for n in names]},
+          open(path, "w", encoding="utf-8"), ensure_ascii=False)
+PY
+}
+cat > "$S/bin/state_v.py" <<'PY'
+import datetime, json, sys
+now = datetime.datetime.now().astimezone()
+def iso(мин=0):
+    return (now - datetime.timedelta(minutes=мин)).isoformat(timespec="seconds")
+def руч(откуда, куда, мин=0, **ещё):
+    p = {"откуда": откуда, "куда": куда, "начало": iso(мин), "срок_с": iso(мин), "откат": False,
+         "проверок": 0, "пропуск": []}
+    p.update(ещё)
+    return p
+def авто(откуда, куда, мин=0, сброс=0, **ещё):
+    до = datetime.datetime.fromtimestamp(сброс).strftime("%H:%M")
+    return руч(откуда, куда, мин, авто=True, причина=f"{откуда} в лимите до {до}", **ещё)
+def без(p, *поля):
+    return {k: v for k, v in p.items() if k not in поля}
+def лим(**имена):
+    return {n: {"сброс": s, "окно": "five_hour", "когда": iso()} for n, s in имена.items()}
+def стр(что, исход="", мин=0, откуда="alpha", куда="beta"):
+    return {"время": iso(мин), "откуда": откуда, "куда": куда, "что": что, **({"исход": исход} if исход else {})}
+json.dump(eval(sys.argv[2]), open(sys.argv[1], "w", encoding="utf-8"), ensure_ascii=False)
+PY
+sv() { python3 -I "$S/bin/state_v.py" "$S/acc/state.json" "$1"; }   # $1 = выражение Python
+jv() {  # $1 = выражение над d (state.json) → значение
+    python3 -I -c 'import json,sys
+try: d=json.load(open(sys.argv[1],encoding="utf-8"))
+except (OSError, ValueError): print("битый"); sys.exit()
+try: v=eval(sys.argv[2],{"d":d})
+except Exception as e: v="ОШИБКА "+type(e).__name__
+print(str(v).lower() if isinstance(v,bool) else v)' "$S/acc/state.json" "$1"
+}
+jl() {  # $1 = выражение над r (data последней строки журнала двери) и n (строк)
+    python3 -I -c 'import json,sys
+try: rows=[json.loads(s) for s in open(sys.argv[1],encoding="utf-8") if s.strip()]
+except (OSError, ValueError): print("нет-журнала"); sys.exit()
+r=(rows[-1].get("data") or {}) if rows else {}
+print(eval(sys.argv[2],{"r":r,"n":len(rows)}))' "$JOURNAL" "$1"
+}
+LIMITS='",".join(k+"="+str(v.get("сброс")) for k,v in sorted((d.get("лимиты") or {}).items()))'
+OUTCOMES='",".join(r.get("исход","") for r in d.get("переключения") or [])'
+cnt() { cat "$1" 2>/dev/null | grep -c .; }
+mark_of() { [ -f "$MARK" ] && awk '{print $2"/"$3}' "$MARK" || echo нет-метки; }
+same_state() { [ "$1" = "$(state_sha)" ] && echo тот-же || echo изменён; }
+tg_new() { tail -n +"$(( $1 + 1 ))" "$TG_OUT"; }   # $1 = счёт вестей до случая
+tg_has() { tg_new "$1" | grep -qF -- "$2" && echo да || echo нет; }
+hhmm() { date -d "@$1" +%H:%M; }
+reset_v() {
+    rm -f "$MARK" "$LOG_DIR/лимит-подписки.пинок" "$HELD"
+    : > "$WARDEN_CALLS"
+    python3 -I "$S/proj/scripts/pause.py" --снять >/dev/null 2>&1
+}
+raise_on() { state "$1"; raise >/dev/null; }   # смена в панели стенда на ключе профиля $1
+raise_keep() {  # то же, не теряя state.json случая
+    cp "$S/acc/state.json" "$S/out/state.keep"; raise_on "$1"; cp "$S/out/state.keep" "$S/acc/state.json"
+}
+run_v() {  # $1 = имя, дальше доводы двери → код (124 — не уложилась в предел)
+    local name="$1" rc=0; shift
+    timeout 60 python3 "$DOOR_B" "$@" > "$S/out/v-$name.log" 2>&1 || rc=$?
+    # Как перенаправление диспетчера (tg-dispatcher.sh → account-switch.out): ключ судит А-18.
+    cat "$S/out/v-$name.log" >> "$LOG_DIR/account-switch.out"
+    echo "$rc"
+}
+NOW=$(date +%s); R1=$((NOW + 3600)); R2=$((NOW + 5400)); R3=$((NOW + 7200))
+HR1=$(hhmm "$R1")
+
+echo "── 1в А-1: доступ() — заголовки лимита по живому вызову ──"
+api_set "{\"A\":$(api_rej "$R1" seven_day),\"B\":$(api_wrn 0.99 0.3),\"D\":{\"код\":429}}"
+python3 -I - "$LOGIN_PY" "$KEY_A" "$KEY_B" "$KEY_G" "$KEY_D" "$ORG_C" > "$S/out/a1.txt" 2>"$S/out/a1.err" <<'PY'
+import importlib.util, sys
+path, ka, kb, kg, kd, oc = sys.argv[1:]
+def say(k, v): print(f"{k}\t{v}")
+try:
+    spec = importlib.util.spec_from_file_location("cle", path); m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+except Exception as e:
+    say("загрузка", type(e).__name__); sys.exit(0)
+def t(k, f):
+    try: say(k, f())
+    except Exception as e: say(k, "ОШИБКА " + type(e).__name__)
+def a(key): return m.доступ(key)
+t("rej", lambda: f"{a(ka)['код']}/{a(ka)['статус']}/{a(ka)['окно']}/{a(ka)['сброс']}")
+t("warn", lambda: f"{a(kb)['статус']}/{a(kb)['ут5']}/{a(kb)['ут7']}")
+t("bare", lambda: f"{a(kg)['код']}/[{a(kg)['статус']}]/{a(kg)['орг'] == oc}/{m.организация(kg)[0] == oc}")
+t("429-bare", lambda: f"{a(kd)['код']}/[{a(kd)['статус']}]")
+PY
+a1() { awk -F'\t' -v k="$1" '$1==k {print $2}' "$S/out/a1.txt"; }
+case_check "А-1 429+rejected → код, статус, окно и сброс из заголовков" "429/rejected/seven_day/$R1" "$(a1 rej)"
+case_check "А-1 200+allowed_warning → утилизации 5h/7d (не «allowed» по коду)" "allowed_warning/0.99/0.3" "$(a1 warn)"
+case_check "А-1 200 без заголовков лимита → статус пуст, организация как прежде" "200/[]/True/True" "$(a1 bare)"
+case_check "А-1 429 без заголовка статуса → статус пуст, а не rejected по коду" "429/[]" "$(a1 429-bare)"
+
+echo "── 1в А-2: --авто --от смена — текущий в лимите, выбор лучшего кандидата ──"
+write_profiles_v; reset_v; raise_on alpha
+sv "dict(запуск='alpha', идёт='alpha', переключения=[])"
+api_set "{\"A\":$(api_rej "$R1"),\"B\":$(api_wrn 0.99 0.2),\"G\":$(api_alw 0 0.55)}"
+before=$(tg_count)
+A2="$(run_v a2 --авто --от смена)|$(grep -qx gamma "$S/out/v-a2.log" && echo печатает-gamma || echo не-печатает)|$(state_field запуск)|$(sw_field авто)|$(sw_field откуда)>$(sw_field куда)|$(paste -sd'#' "$WARDEN_CALLS")|$(( $(tg_count) - before ))"
+case_check "А-2 B allowed_warning 99 %, C allowed 55 % → 0, цель gamma, авто, сторож раз «--account-switch», вестей 0" \
+    "0|печатает-gamma|gamma|true|alpha>gamma|--account-switch|gamma|0" "$A2"
+AUTO_LIVE="$([ "$A2" = "0|печатает-gamma|gamma|true|alpha>gamma|--account-switch|gamma|0" ] && echo жива || echo мертва)"
+case_check "А-2 лимиты[alpha] — сброс из заголовка; переход метку лимита не ставит (А-12)" "alpha=$R1|нет-метки" \
+    "$(jv "$LIMITS")|$(mark_of)"
+case_check "А-2 переключение: причина «alpha в лимите до $HR1», проверок 0, пропуск пуст" "alpha в лимите до $HR1|0|[]" \
+    "$(sw_field причина)|$(sw_field проверок)|$(sw_field пропуск)"
+
+echo "── 1в А-7: --итог при авто — одна весть «<откуда> упёрся в лимит до HH:MM, перешёл на <куда>» ──"
+raise_keep gamma; before=$(tg_count)
+A7="$(run_v a7 --итог)|$(state_field идёт)|$(sw_field куда)|$(( $(tg_count) - before ))"
+case_check "А-7 процесс на gamma, доступ allowed → 0, идёт=gamma, переключение снято, весть одна" "0|gamma|нет|1" "$A7"
+case_check "А-7 текст вести: «ALPHA упёрся в лимит до $HR1, перешёл на GAMMA»" да \
+    "$(tg_has "$before" "ALPHA упёрся в лимит до $HR1, перешёл на GAMMA")"
+case_check "А-7 последняя строка переключений — исход «ок»" ок \
+    "$(jv '(d.get("переключения") or [{}])[-1].get("исход","")')"
+
+echo "── 1в А-3: текущий по живому вызову не в лимите → 1, ничего не тронуто ──"
+write_profiles_v; reset_v; raise_on alpha
+sv "dict(запуск='alpha', идёт='alpha', переключения=[])"
+api_set "{\"A\":$(api_alw 0.2 0.3)}"
+was=$(state_sha); before=$(tg_count); jb=$(cnt "$JOURNAL")
+case_check "А-3 allowed → 1, state байт в байт, сторож не зван, вестей 0, одна строка журнала двери «авто/1»" \
+    "жива|1|тот-же|0|0|1|авто/1" \
+    "$AUTO_LIVE|$(run_v a3 --авто --от смена)|$(same_state "$was")|$(warden_calls)|$(( $(tg_count) - before ))|$(( $(cnt "$JOURNAL") - jb ))|$(jl 'str(r.get("вход"))+"/"+str(r.get("код"))')"
+# Дверь --в-лимите (ветка ротации сторожа, §1в.4): тот же выбор ключа, живой вызов.
+api_set "{\"A\":$(api_rej "$R1")}"; VL0=$(run_v vl0 --в-лимите)
+api_set "{\"A\":$(api_alw 0.2 0.3)}"; VL1=$(run_v vl1 --в-лимите)
+case_check "А-9 (дверь) --в-лимите: смена на alpha, живой rejected → 0, allowed → 1" "0|1" "$VL0|$VL1"
+
+echo "── 1в А-4: все в лимите → 4, лимиты, метка limit, одна весть; повтор без вызовов и вестей ──"
+write_profiles_v; reset_v
+sv "dict(запуск='alpha', идёт='alpha', переключения=[])"
+api_set "{\"A\":$(api_rej "$R3"),\"B\":$(api_rej "$R1" seven_day),\"G\":$(api_rej "$R2")}"
+before=$(tg_count)
+case_check "А-4 все rejected → 4, лимиты с часами, запуск не тронут, метка limit со сбросом ближайшего, весть одна" \
+    "4|alpha=$R3,beta=$R1,gamma=$R2|alpha|limit/$R1|1" \
+    "$(run_v a4 --авто --от демоны)|$(jv "$LIMITS")|$(state_field запуск)|$(mark_of)|$(( $(tg_count) - before ))"
+case_check "А-4 весть: «Все аккаунты в лимите. Первым освободится BETA в $HR1»" да \
+    "$(tg_has "$before" "Все аккаунты в лимите. Первым освободится BETA в $HR1")"
+before=$(tg_count); bg=$(( $(calls "$KEY_B") + $(calls "$KEY_G") ))
+case_check "А-4 повтор: 4, кандидаты с будущим сбросом без вызова API, вестей 0" "4|0|0" \
+    "$(run_v a4r --авто --от демоны)|$(( $(calls "$KEY_B") + $(calls "$KEY_G") - bg ))|$(( $(tg_count) - before ))"
+
+echo "── 1в В-2: все rejected, но часа сброса не назвал никто → 2 (прежний путь со своей вестью), state байт в байт ──"
+# Ревью кода В-2: код 4 без метки и вести — полная тишина: limit-watch при 4
+# молчит, считая, что весть дала дверь. Ловится: 4 при пустом часе; запись
+# лимитов со сбросом 0 (state меняется).
+api_rej_nr() { printf '{"код":429,"статус":"rejected","окно":"five_hour"}'; }
+write_profiles_v; reset_v
+sv "dict(запуск='alpha', идёт='alpha', переключения=[])"
+api_set "{\"A\":$(api_rej_nr),\"B\":$(api_rej_nr),\"G\":$(api_rej_nr)}"
+was=$(state_sha); before=$(tg_count)
+case_check "В-2 без заголовка reset у всех → 2, state байт в байт, метки нет, вестей 0, сторож не зван" \
+    "жива|2|тот-же|нет-метки|0|0" \
+    "$AUTO_LIVE|$(run_v v2 --авто --от демоны)|$(same_state "$was")|$(mark_of)|$(( $(tg_count) - before ))|$(warden_calls)"
+
+echo "── 1в А-5: предел неудачных автопереходов, чужая организация, login ──"
+write_profiles_v; reset_v
+sv "dict(запуск='alpha', идёт='alpha', переключения=[стр('авто','не перешёл',50), стр('авто','цель в лимите',40,куда='gamma'), стр('авто','не подтверждён',30)])"
+api_set "{\"A\":$(api_rej "$R1"),\"B\":$(api_alw 0.1 0.1),\"G\":$(api_alw 0.2 0.2)}"
+before=$(tg_count)
+case_check "А-5 три неудачных авто за 6 ч → 6, запуск не тронут, сторож не зван, весть одна «остановил автопереход»" \
+    "6|alpha|0|1|да" \
+    "$(run_v a5 --авто --от демоны)|$(state_field запуск)|$(warden_calls)|$(( $(tg_count) - before ))|$(tg_has "$before" "становил автопереход")"
+before=$(tg_count)
+case_check "А-5 вторая попытка в том же окне → 6, вестей 0" "жива|6|0" \
+    "$AUTO_LIVE|$(run_v a5r --авто --от демоны)|$(( $(tg_count) - before ))"
+reset_v
+sv "dict(запуск='alpha', идёт='alpha', переключения=[стр('авто','не перешёл',430), стр('авто','застрял',420), стр('авто','не подтверждён',410), стр('авто','',50), стр('итог','ок',45), стр('авто','',30), стр('итог','ок',25), стр('авто','',10), стр('итог','ок',5)])"
+case_check "А-5 три удачных за 6 ч и три неудачных старше 6 ч → переход идёт (0)" 0 "$(run_v a5ok --авто --от демоны)"
+write_profiles_v alpha chuzhaya beta gamma; reset_v
+sv "dict(запуск='alpha', идёт='alpha', переключения=[])"
+api_set "{\"A\":$(api_rej "$R1"),\"X\":$(api_alw 0 0),\"B\":$(api_rej "$R2"),\"G\":$(api_rej "$R3"),\"L\":$(api_alw 0 0)}"
+bl=$(calls "$KEY_L")
+case_check "А-5 кандидат вне LOGIN_EXPECTED_ORG и свободный /login не выбираются → 4, запуск alpha, /login не зван" \
+    "4|alpha|0" "$(run_v a5x --авто --от демоны)|$(state_field запуск)|$(( $(calls "$KEY_L") - bl ))"
+
+echo "── 1в А-6: лимит цели — отказ только у выбора; подключение и --запуск принимают ──"
+write_profiles_v; reset_v
+sv "dict(запуск='alpha', идёт='alpha', переключения=[])"
+api_set "{\"B\":$(api_rej "$R1"),\"E\":$(api_rej "$R1")}"
+was=$(state_sha); before=$(tg_count)
+case_check "А-6 --хочу beta (rejected) → отказ, state байт в байт, весть одна «сам в лимите до $HR1»" \
+    "жива|1|тот-же|1|да" \
+    "$H_LIVE|$(run_v a6h --хочу beta)|$(same_state "$was")|$(( $(tg_count) - before ))|$(tg_has "$before" "сам в лимите до $HR1")"
+case_check "А-6 --профиль-добавить на ключе в лимите → 0, «принят, сейчас в лимите до $HR1»" "0|да" \
+    "$(run_v a6p --профиль-добавить eps --подпись Эпс --орг "$ORG_B" --ключ claude-oauth-eps)|$(grep -qF "принят, сейчас в лимите до $HR1" "$S/out/v-a6p.log" && echo да || echo нет)"
+case_check "А-6 --запуск beta на ключе в лимите → 0, запуск=beta, «принят, сейчас в лимите до $HR1»" "0|beta|да" \
+    "$(run_v a6z --запуск beta)|$(state_field запуск)|$(grep -qF "принят, сейчас в лимите до $HR1" "$S/out/v-a6z.log" && echo да || echo нет)"
+
+echo "── 1в А-11: гонка --хочу и --авто (API отвечает через 3 с) ──"
+write_profiles_v; reset_v
+sv "dict(запуск='alpha', идёт='alpha', переключения=[])"
+api_set "{\"A\":$(api_rej "$R1" five_hour 3),\"B\":$(api_alw 0.1 0.1 3),\"G\":$(api_alw 0.5 0.5 3)}"
+race() {  # $1 = имя, дальше доводы; код — в файл
+    local rc=0; timeout 40 python3 "$DOOR_B" "${@:2}" > "$S/out/v-$1.log" 2>&1 || rc=$?
+    cat "$S/out/v-$1.log" >> "$LOG_DIR/account-switch.out"; echo "$rc" > "$S/out/v-$1.rc"
+}
+race race-auto --авто --от демоны & pa=$!
+race race-hochu --хочу beta & ph=$!
+wait "$pa" "$ph"
+RA_RC=$(cat "$S/out/v-race-auto.rc"); RH_RC=$(cat "$S/out/v-race-hochu.rc")
+case_check "А-11 оба уложились в предел 40 с; победил --хочу: запуск beta, переключение ручное; --авто 0 или 5" \
+    "жива|в-пределе|0|beta|beta/false|0или5" \
+    "$AUTO_LIVE|$([ "$RA_RC" != 124 ] && [ "$RH_RC" != 124 ] && echo в-пределе || echo завис)|$RH_RC|$(state_field запуск)|$(jv '(d.get("переключение") or {}).get("куда","нет")+"/"+str(bool((d.get("переключение") or {}).get("авто"))).lower()')|$(case "$RA_RC" in (0|5) echo 0или5 ;; (*) echo "$RA_RC" ;; esac)"
+case_check "А-11 авто успело записать (0) → его попытка в переключениях «вытеснен»" "жива|следы-верны" \
+    "$AUTO_LIVE|$([ "$RA_RC" = 5 ] || jv "$OUTCOMES" | grep -q 'вытеснен' && echo следы-верны || echo следов-нет)"
+reset_v
+sv "dict(запуск='alpha', идёт='alpha', переключения=[])"
+api_set "{\"A\":$(api_rej "$R1"),\"B\":$(api_alw 0.1 0.1),\"G\":$(api_alw 0 0)}"
+SEQ="$(run_v a11a --авто --от демоны)|$(run_v a11h --хочу beta)"
+case_check "А-11 авто записало gamma, затем --хочу beta → вытесняет: ручное beta, обе попытки в переключениях" \
+    "0|0|beta|beta/false|да|да" \
+    "$SEQ|$(state_field запуск)|$(jv '(d.get("переключение") or {}).get("куда","нет")+"/"+str(bool((d.get("переключение") or {}).get("авто"))).lower()')|$(jv "$OUTCOMES" | grep -q 'вытеснен выбором владельца' && echo да || echo нет)|$(jv '",".join(r.get("что","") for r in d.get("переключения") or [])' | grep -q 'хочу' && echo да || echo нет)"
+reset_v
+sv "dict(запуск='beta', идёт='alpha', переключение=руч('alpha','beta'), переключения=[])"
+# Цель beta сама в лимите: иначе ручной переход, принятый за автоматический, тоже
+# ответил бы 5 («цель не в лимите — менять нечего»), и случай не отличал бы их.
+api_set "{\"A\":$(api_rej "$R1"),\"B\":$(api_rej "$R2"),\"G\":$(api_alw 0 0)}"
+was=$(state_sha)
+case_check "А-11 ручное переключение идёт → --авто 5, ручное не тронуто, сторож не зван" "жива|5|тот-же|0" \
+    "$AUTO_LIVE|$(run_v a11r --авто --от демоны)|$(same_state "$was")|$(warden_calls)"
+
+echo "── 1в М-5: два --авто разом при достигнутом пределе неудач → одна весть «остановил автопереход» ──"
+# Ревью кода М-5: «сказать ли» решалось по state, прочтённому до живых вызовов,
+# и оба процесса говорили. API отвечает текущему через 2 с — оба успевают прочесть
+# state до первой записи. Ловится: предел_сказан решается вне записи под замком.
+write_profiles_v; reset_v
+sv "dict(запуск='alpha', идёт='alpha', переключения=[стр('авто','не перешёл',50), стр('авто','цель в лимите',40,куда='gamma'), стр('авто','не подтверждён',30)])"
+api_set "{\"A\":$(api_rej "$R1" five_hour 2),\"B\":$(api_alw 0.1 0.1),\"G\":$(api_alw 0.2 0.2)}"
+before=$(tg_count)
+race m5-one --авто --от демоны & p1=$!
+race m5-two --авто --от демоны & p2=$!
+wait "$p1" "$p2"
+M5_RC="$(sort <<< "$(cat "$S/out/v-m5-one.rc" "$S/out/v-m5-two.rc")" | paste -sd' ')"
+case_check "М-5 оба в пределе (коды 5/6), в tg_out ровно одна весть «остановил автопереход»" "жива|коды-5-6|1|1" \
+    "$AUTO_LIVE|$(case "$M5_RC" in ("5 6"|"6 6") echo коды-5-6 ;; (*) echo "$M5_RC" ;; esac)|$(( $(tg_count) - before ))|$(tg_new "$before" | grep -c 'становил автопереход')"
+
+echo "── 1в А-12: переход метку не ставит; --итог = 1 без кандидатов → одна весть «все в лимите» ──"
+write_profiles_v; reset_v; raise_on alpha
+sv "dict(запуск='alpha', идёт='alpha', переключения=[])"
+api_set "{\"A\":$(api_rej "$R3"),\"B\":$(api_alw 0.1 0.1),\"G\":$(api_rej "$R1")}"
+before=$(tg_count)
+case_check "А-12 --авто → 0 на beta, метки нет, вестей 0" "0|beta|нет-метки|0" \
+    "$(run_v a12a --авто --от демоны)|$(state_field запуск)|$(mark_of)|$(( $(tg_count) - before ))"
+before=$(tg_count)
+run_v a12i --итог >/dev/null
+case_check "А-12 процесс не на beta, кандидатов нет → запуск=gamma (ближайший сброс), переключение снято, метка limit, весть одна" \
+    "gamma|нет|limit/$R1|1|да" \
+    "$(state_field запуск)|$(sw_field куда)|$(mark_of)|$(( $(tg_count) - before ))|$(tg_has "$before" "Все аккаунты в лимите")"
+case_check "А-12 провал не по лимиту: beta не записан в лимиты" "alpha=$R3,gamma=$R1" "$(jv "$LIMITS")"
+# Ревью кода М-12 (pretask, --авто from_itog): исход «все в лимите» — строкой
+# переключений, иначе в истории перехода нет, чем он кончился.
+case_check "М-12 --итог без кандидатов → строка переключений что=авто, исход «все в лимите»" true \
+    "$(jv 'any(r.get("что") == "авто" and r.get("исход") == "все в лимите" for r in d.get("переключения") or [])')"
+
+echo "── 1в А-13: цель в пути упирается в лимит ──"
+write_profiles_v; reset_v
+sv "dict(запуск='beta', идёт='alpha', переключение=авто('alpha','beta',сброс=$R1), лимиты=лим(alpha=$R1), переключения=[])"
+api_set "{\"A\":$(api_rej "$R1"),\"B\":$(api_rej "$R2"),\"G\":$(api_alw 0.1 0.1)}"
+case_check "А-13 цель beta стала rejected → повторный сигнал: 0, куда=gamma, запуск=gamma, лимиты[beta], строка «цель в лимите»" \
+    "0|alpha>gamma|gamma|alpha=$R1,beta=$R2|да" \
+    "$(run_v a13s --авто --от демоны)|$(sw_field откуда)>$(sw_field куда)|$(state_field запуск)|$(jv "$LIMITS")|$(jv "$OUTCOMES" | grep -q 'цель в лимите' && echo да || echo нет)"
+reset_v; raise_on beta
+sv "dict(запуск='beta', идёт='alpha', переключение=авто('alpha','beta',сброс=$R1), лимиты=лим(alpha=$R1), переключения=[])"
+before=$(tg_count)
+A13I="$(run_v a13i --итог)"
+case_check "А-13 --итог: процесс на beta, доступ(beta) rejected → не «перешёл»: лимиты[beta], выбор gamma" \
+    "не0|gamma|нет|true" \
+    "$([ "$A13I" != 0 ] && echo не0 || echo 0)|$(sw_field куда)|$(tg_has "$before" "ерешёл")|$(jv '"beta" in (d.get("лимиты") or {})')"
+case_check "А-13 --итог при rejected цели: идёт не стал beta" alpha "$(state_field идёт)"
+reset_v; raise_on alpha
+sv "dict(запуск='beta', идёт='alpha', переключение=авто('alpha','beta',сброс=$R1), лимиты=лим(alpha=$R1), переключения=[])"
+api_set "{\"A\":$(api_rej "$R1"),\"B\":$(api_alw 0.1 0.1),\"G\":$(api_alw 0.2 0.2)}"
+run_v a13f --итог >/dev/null
+case_check "А-13 провал не по лимиту (процесс не на beta) → beta в пропуск, не в лимиты; новая цель gamma" \
+    "gamma|gamma|true|false|не перешёл" \
+    "$(sw_field куда)|$(state_field запуск)|$(jv '"beta" in ((d.get("переключение") or {}).get("пропуск") or [])')|$(jv '"beta" in (d.get("лимиты") or {})')|$(jv "$OUTCOMES" | grep -o 'не перешёл' | head -n1)"
+
+echo "── 1в В-3: --итог провалил авто, а кандидат без заголовков лимита → провал записан, второй ротации на ту же цель нет ──"
+# Ревью кода В-3: ветка «у кандидатов нет ответа о лимите» писала только лимиты —
+# строка о провале и пропуск терялись, переход оставался на beta, и следующий
+# --ждёт отвечал 0: вторая ротация на ту же цель. gamma отвечает 200 без заголовков.
+write_profiles_v; reset_v; raise_on alpha
+sv "dict(запуск='beta', идёт='alpha', переключение=авто('alpha','beta',сброс=$R1), лимиты=лим(alpha=$R1), переключения=[])"
+api_set "{\"A\":$(api_rej "$R1"),\"B\":$(api_alw 0.1 0.1)}"
+: > "$WARDEN_CALLS"
+run_v v3i --итог >/dev/null
+case_check "В-3 провал записан: строка «не перешёл», beta в пропуск или переход снят" "да|да" \
+    "$(jv "$OUTCOMES" | grep -q 'не перешёл' && echo да || echo нет)|$(jv '"да" if not d.get("переключение") or "beta" in (d["переключение"].get("пропуск") or []) else "нет"')"
+case_check "В-3 следующий --ждёт ≠ 0 (не «ротировать» на ту же beta), сторож не зван" "не0|0" \
+    "$(r=$(run_v v3j --ждёт); [ "$r" != 0 ] && echo не0 || echo 0)|$(warden_calls)"
+
+echo "── 1в А-15: метка limit стоит — весть «перешёл» не придержана ──"
+write_profiles_v; reset_v; raise_on gamma
+sv "dict(запуск='gamma', идёт='alpha', переключение=авто('alpha','gamma',сброс=$R1), лимиты=лим(alpha=$R1), переключения=[])"
+api_set "{\"A\":$(api_rej "$R1"),\"G\":$(api_alw 0.1 0.1)}"
+printf '%s limit %s\n' "$(date +%s)" "$R1" > "$MARK"
+before=$(tg_count)
+case_check "А-15 --итог 0: в tg_out одна «перешёл», придержанных нет, метка снята" "0|1|да|пусто|нет-метки" \
+    "$(run_v a15 --итог --после-ротации --остановлено 2)|$(( $(tg_count) - before ))|$(tg_has "$before" "ерешёл")|$([ -s "$HELD" ] && echo есть || echo пусто)|$(mark_of)"
+case_check "А-15 весть называет остановленных помощников: «помощников остановлено: 2»" да \
+    "$(tg_has "$before" "помощников остановлено: 2")"
+# Ревью кода М-12 (pretask, --итог): владелец должен понять, почему помощников остановили.
+case_check "М-12 весть: «помощников остановлено: 2 (стояли в лимите)»" да \
+    "$(tg_has "$before" "помощников остановлено: 2 (стояли в лимите)")"
+A15_LIVE="$([ "$(tg_has "$before" "ерешёл")" = да ] && echo жива || echo мертва)"
+
+echo "── 1в М-1: limit_mark в копии дерева сломан → успех --итог об этом не молчит ──"
+# Ревью кода М-1: except ImportError глотал отсутствие limit_mark — метка лимита
+# оставалась стоять при «успехе». Импорт стендовой копии падает ModuleNotFoundError
+# (подкласс ImportError — его и глотал код). Ловится: код 0 и строка журнала «ok».
+write_profiles_v; reset_v; raise_on gamma
+sv "dict(запуск='gamma', идёт='alpha', переключение=авто('alpha','gamma',сброс=$R1), лимиты=лим(alpha=$R1), переключения=[])"
+api_set "{\"A\":$(api_rej "$R1"),\"G\":$(api_alw 0.1 0.1)}"
+printf '%s limit %s\n' "$(date +%s)" "$R1" > "$MARK"
+cp "$S/proj/scripts/limit_mark.py" "$S/out/limit_mark.keep"
+printf 'import limit_mark_net_takogo_modulya_proba  # стенд М-1: импорт падает\n' > "$S/proj/scripts/limit_mark.py"
+M1_RC=$(run_v m1 --итог)
+M1_ROW="$(jl 'r.get("код")')"
+cp "$S/out/limit_mark.keep" "$S/proj/scripts/limit_mark.py"
+case_check "М-1 limit_mark не импортируется, метка стоит → --итог не 0 или журнал двери с ошибкой" "жива|сказала" \
+    "$A15_LIVE|$([ "$M1_RC" != 0 ] || [ "$M1_ROW" != 0 ] && echo сказала || echo "молчит: код $M1_RC, журнал $M1_ROW")"
+
+echo "── 1в А-17: пауза, --сухо, ответ без заголовков, смена на /login ──"
+write_profiles_v; reset_v
+sv "dict(запуск='alpha', идёт='alpha', переключения=[])"
+api_set "{\"A\":$(api_rej "$R1"),\"B\":$(api_wrn 0.99 0.2),\"G\":$(api_alw 0 0.55)}"
+python3 -I "$S/proj/scripts/pause.py" --поставить "проба 1в" >/dev/null 2>&1
+was=$(state_sha); before=$(tg_count)
+case_check "А-17 пауза → 2, state байт в байт, сторож не зван, вестей 0" "жива|2|тот-же|0|0" \
+    "$AUTO_LIVE|$(run_v a17p --авто --от демоны)|$(same_state "$was")|$(warden_calls)|$(( $(tg_count) - before ))"
+reset_v; jb=$(cnt "$JOURNAL"); before=$(tg_count)
+case_check "А-17 --сухо → код как без него, кандидат gamma назван; state, сторож, журнал, канал не тронуты" \
+    "0|да|тот-же|0|0|0" \
+    "$(run_v a17d --авто --от демоны --сухо)|$(grep -q 'кандидат: gamma' "$S/out/v-a17d.log" && echo да || echo нет)|$(same_state "$was")|$(warden_calls)|$(( $(cnt "$JOURNAL") - jb ))|$(( $(tg_count) - before ))"
+reset_v
+sv "dict(запуск='beta', идёт='alpha', переключение=руч('alpha','beta'), переключения=[])"
+was=$(state_sha)
+# Ревью кода М-12: --сухо при идущем переходе молча отвечал 5 — живая проверка
+# выбора не видела, почему выбора нет.
+case_check "М-12 --сухо при идущем переходе → 5 и строка «переход идёт: alpha → beta», state байт в байт" \
+    "5|да|тот-же" \
+    "$(run_v m12d --авто --от демоны --сухо)|$(grep -qF 'переход идёт: alpha → beta' "$S/out/v-m12d.log" && echo да || echo нет)|$(same_state "$was")"
+reset_v
+sv "dict(запуск='alpha', идёт='alpha', переключения=[])"
+api_set "{\"A\":$(api_rej "$R1"),\"G\":$(api_alw 0.1 0.1)}"
+case_check "А-17 кандидат beta без заголовков лимита → пропущен, в лимиты не записан; цель gamma" \
+    "0|gamma|alpha=$R1" "$(run_v a17b --авто --от демоны)|$(state_field запуск)|$(jv "$LIMITS")"
+reset_v
+sv "dict(запуск='alpha', идёт='alpha', переключения=[])"
+api_set "{}"
+was=$(state_sha)
+case_check "А-17 у текущего ответ без заголовков → 2 (пустой статус ≠ rejected), state байт в байт" "жива|2|тот-же" \
+    "$AUTO_LIVE|$(run_v a17c --авто --от демоны)|$(same_state "$was")"
+reset_v; raise_on login
+sv "dict(запуск='login', идёт='login', переключения=[])"
+api_set "{\"L\":$(api_alw 0.1 0.1)}"
+bl=$(calls "$KEY_L")
+case_check "А-17 смена на /login (носителя нет) → судится подписочный ключ: вызван, не в лимите → 1" "1|вызван" \
+    "$(run_v a17l --авто --от смена)|$([ "$(calls "$KEY_L")" -gt "$bl" ] && echo вызван || echo не-вызван)"
+
+echo "── 1в А-10: --итог «судить нечем», --ждёт после ротации, «застрял», пауза ──"
+tmux kill-session -t switch-proba 2>/dev/null || true
+write_profiles_v; reset_v
+api_set "{\"A\":$(api_rej "$R1"),\"B\":$(api_alw 0.1 0.1),\"G\":$(api_alw 0.1 0.1)}"
+sv "dict(запуск='beta', идёт='alpha', переключение=руч('alpha','beta'), переключения=[])"
+before=$(tg_count)
+case_check "А-10 ручной переход, процесса нет: --итог → 2, без отката: запуск beta, проверок 1, сторож не зван, вестей 0" \
+    "2|beta|1|0|0" \
+    "$(run_v a10m --итог)|$(state_field запуск)|$(sw_field проверок)|$(warden_calls)|$(( $(tg_count) - before ))"
+reset_v
+sv "dict(запуск='beta', идёт='alpha', переключение=авто('alpha','beta',сброс=$R1), лимиты=лим(alpha=$R1), переключения=[])"
+before=$(tg_count)
+case_check "А-10 авто, --итог 2 первый обход → 2, проверок 1, остаётся, вестей 0" "2|1|beta|0" \
+    "$(run_v a10a1 --итог)|$(sw_field проверок)|$(sw_field куда)|$(( $(tg_count) - before ))"
+run_v a10a2 --итог >/dev/null; run_v a10a3 --итог >/dev/null
+case_check "А-10 третий обход → снято «не подтверждён», запуск не откатан, весть одна за три обхода" "нет|beta|1|да" \
+    "$(sw_field куда)|$(state_field запуск)|$(( $(tg_count) - before ))|$(jv "$OUTCOMES" | grep -q 'не подтверждён' && echo да || echo нет)"
+reset_v
+sv "dict(запуск='beta', идёт='alpha', переключение=авто('alpha','beta',сброс=$R1), лимиты=лим(alpha=$R1), переключения=[])"
+A10R="$(run_v a10r --итог --после-ротации)|$(jv 'bool((d.get("переключение") or {}).get("ротирован_в"))')"
+case_check "А-10 --итог --после-ротации, процесса нет → 2, ротирован_в записан, три --ждёт → 4 без сторожа" "2|true|4 4 4|0" \
+    "$A10R|$(run_v a10j1 --ждёт) $(run_v a10j2 --ждёт) $(run_v a10j3 --ждёт)|$(warden_calls)"
+reset_v
+sv "dict(запуск='beta', идёт='alpha', переключение=руч('alpha','beta',61), переключения=[])"
+before=$(tg_count)
+A10S="$(run_v a10s --ждёт)|$(sw_field куда)|$(state_field запуск)|$(( $(tg_count) - before ))|$(jv "$OUTCOMES" | grep -q 'застрял' && echo застрял || echo нет)"
+case_check "А-10 ручной переход старше 60 мин → --ждёт 1, снято «застрял», запуск=идёт (alpha), весть одна" \
+    "1|нет|alpha|1|застрял" "$A10S"
+STUCK_LIVE="$([ "$A10S" = "1|нет|alpha|1|застрял" ] && echo жива || echo мертва)"
+case_check "А-10 после «застрял» --хочу gamma принят" "жива|0|gamma" "$STUCK_LIVE|$(run_v a10h --хочу gamma)|$(state_field запуск)"
+reset_v
+sv "dict(запуск='beta', идёт='alpha', переключение=без(руч('alpha','beta',70),'срок_с','проверок','пропуск'), переключения=[])"
+case_check "А-10 переключение 1б без срок_с, начало 70 мин назад → срок от начала: --ждёт 1, снято" "1|нет" \
+    "$(run_v a10o --ждёт)|$(sw_field куда)"
+reset_v
+sv "dict(запуск='beta', идёт='alpha', переключение=руч('alpha','beta',70), переключения=[])"
+python3 -I "$S/proj/scripts/pause.py" --поставить "проба 1в" >/dev/null 2>&1
+run_v a10p --ждёт >/dev/null
+case_check "А-10 пауза 70 мин посреди перехода → не снято, срок_с сдвинут на сейчас" "жива|beta|свежий" \
+    "$STUCK_LIVE|$(sw_field куда)|$(jv '"свежий" if (__import__("datetime").datetime.now().astimezone()-__import__("datetime").datetime.fromisoformat((d.get("переключение") or {}).get("срок_с",""))).total_seconds() < 300 else "старый"')"
+reset_v
+
+# М-г (повторное ревью #13): сторож читает цель как ACCOUNT_TARGET=$(account-switch.py
+# --ждёт 2>/dev/null). Автопереход, застрявший дольше срока, выбирает из --ждёт новую
+# цель, печатает её и будит сторожа — а вывод сторожа шёл в тот же stdout и дописывался
+# к имени профиля. Подставной сторож здесь шумит в stdout и stderr; stdout двери — только
+# имя цели. Ловится: разбудить_сторожа отдаёт сторожу stdout двери.
+cat > "$S/proj/harness/demons/noisy-warden.sh" <<NOISY
+#!/usr/bin/env bash
+echo "сторож: толчок принят — шум в stdout"
+echo "сторож: шум в stderr" >&2
+exec bash "$ACCOUNT_WARDEN" "\$@"
+NOISY
+api_set "{\"A\":$(api_rej "$R1"),\"B\":$(api_alw 0.1 0.1),\"G\":$(api_alw 0.1 0.1)}"
+sv "dict(запуск='beta', идёт='alpha', переключение=авто('alpha','beta',61,сброс=$R1), лимиты=лим(alpha=$R1), переключения=[])"
+MG_RC=0
+MG_OUT="$(ACCOUNT_WARDEN="$S/proj/harness/demons/noisy-warden.sh" timeout 60 python3 "$DOOR_B" --ждёт 2>/dev/null)" || MG_RC=$?
+case_check "М-г авто застрял → --ждёт 0, сторож разбужен, stdout двери — только «gamma» (вывод сторожа не в цели)" \
+    "0|1|gamma" "$MG_RC|$(warden_calls)|$(printf '%s' "$MG_OUT" | paste -sd'~')"
+reset_v
+
+echo "── 1в В-4: метка limit стоит — вести двери о выборе и переходе не придержаны ──"
+# Ревью кода В-4: эти вести шли без --несмотря-на-лимит, и подставная отправка
+# (как настоящая) придерживала их кодом 3 в придержано-лимитом.jsonl: владелец
+# нажал кнопку и не услышал ничего. Каждый путь — своя весть, ждём её в tg_out.
+mark_on() { printf '%s limit %s\n' "$(date +%s)" "$R1" > "$MARK"; }
+not_held() {  # $1 = счёт вестей до, $2 = кусок текста → «вестей|текст|придержанные»
+    echo "$(( $(tg_count) - $1 ))|$(tg_has "$1" "$2")|$([ -s "$HELD" ] && echo есть || echo пусто)"
+}
+write_profiles_v; reset_v
+sv "dict(запуск='beta', идёт='alpha', переключение=руч('alpha','beta',проверок=2), переключения=[])"
+mark_on; before=$(tg_count); run_v v4n --итог >/dev/null
+case_check "В-4 «не подтверждён» (3-я проверка, процесса нет) при метке → в tg_out, не придержано" "1|да|пусто" \
+    "$(not_held "$before" "не подтвердился")"
+reset_v
+sv "dict(запуск='beta', идёт='alpha', переключение=руч('alpha','beta',61), переключения=[])"
+mark_on; before=$(tg_count); run_v v4s --ждёт >/dev/null
+case_check "В-4 «застрял» (переход старше 60 мин) при метке → в tg_out, не придержано" "1|да|пусто" \
+    "$(not_held "$before" "не завершился")"
+reset_v; raise_on alpha
+sv "dict(запуск='beta', идёт='alpha', переключение=руч('alpha','beta'), переключения=[])"
+mark_on; before=$(tg_count); run_v v4b --итог >/dev/null
+case_check "В-4 откат ручного (процесс остался на alpha) при метке → «Возвращаю» в tg_out, не придержано" "1|да|пусто" \
+    "$(not_held "$before" "Возвращаю ALPHA")"
+reset_v
+sv "dict(запуск='alpha', идёт='alpha', переключения=[])"
+mark_on; before=$(tg_count); run_v v4u --хочу alpha >/dev/null
+case_check "В-4 «Уже работаю на ALPHA» при метке → в tg_out, не придержано" "1|да|пусто" \
+    "$(not_held "$before" "Уже работаю на ALPHA")"
+reset_v
+sv "dict(запуск='alpha', идёт='alpha', переключения=[])"
+api_set "{\"B\":$(api_rej "$R1")}"
+mark_on; before=$(tg_count); run_v v4h --хочу beta >/dev/null
+case_check "В-4 отказ выбора «сам в лимите до $HR1» при метке → в tg_out, не придержано" "1|да|пусто" \
+    "$(not_held "$before" "сам в лимите до $HR1")"
+reset_v
+
+echo "── 1в А-18: ключа и имени файла ключа нет в журнале двери, account-switch.out, tg_out ──"
+leaks=0
+for f in "$JOURNAL" "$LOG_DIR/account-switch.out" "$TG_OUT"; do
+    for k in "${ALL_KEYS[@]}"; do grep -qF -- "$k" "$f" 2>/dev/null && leaks=$((leaks + 1)); done
+    grep -qF -- "claude-oauth" "$f" 2>/dev/null && leaks=$((leaks + 1))
+done
+case_check "А-18 журнал двери и account-switch.out есть; вхождений ключей и имён файлов ключей — 0" \
+    "журнал-есть|out-есть|0" \
+    "$([ -s "$JOURNAL" ] && echo журнал-есть || echo журнала-нет)|$([ -s "$LOG_DIR/account-switch.out" ] && echo out-есть || echo out-нет)|$leaks"
+api_set "{}"
 
 echo "── П-6: ключа нет нигде, куда смотрит человек или журнал ──"
 if [ "$P1_SHA" = "$(sha "$KEY_A")" ]; then

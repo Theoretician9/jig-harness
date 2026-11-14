@@ -51,6 +51,47 @@ no_ceiling() { # $1=причина
     return 0
 }
 
+# Приоритет релиза: пока в карте идёт релиз, чужой прогон срез не занимает.
+# Задачи — из --мутации-задачи, иначе HARNESS_TASK; судья один на все места.
+release_guard() { # $@ = команда
+    local ids="" prev="" reason rc
+    for a in "$@"; do [ "$prev" = --мутации-задачи ] && ids="$a"; prev="$a"; done
+    [ -n "$ids" ] || { [ "${HARNESS_TASK:--}" = - ] || ids="$HARNESS_TASK"; }
+    reason="$(python3 -I "$HERE/lib/release_priority.py" --задачи "$ids" 2>&1 >/dev/null)"
+    rc=$?
+    if [ "$rc" != "$BUSY_RC" ]; then
+        [ "$rc" = 0 ] || reason="судья вышел кодом $rc: $reason"
+        [ -z "$reason" ] || echo "run-in-checks-slice: ВНИМАНИЕ $reason" >&2
+        return 0
+    fi
+    echo "run-in-checks-slice: отказ — $reason" >&2
+    event checks.slice.release-yield refused "задачи=$ids" "релиз=$(printf '%s' "$reason" | sed -n 's/^идёт релиз \([^ ]*\) до .*/\1/p')" \
+        "до=$(printf '%s' "$reason" | sed -n 's/^идёт релиз [^ ]* до \([^ ]*\) .*/\1/p')"
+    exit "$BUSY_RC"
+}
+release_guard "$@"
+
+# Мутации задач — пачкой (слово владельца 13.11): пока один заход ждёт очереди
+# или идёт, второй одиночный не встаёт за ним, а уходит с законным путём. Замок
+# держит сама дверь на всё время захода; sudo закрывает чужие дескрипторы, так
+# что замок не переживает дверь в юните.
+batch_guard() { # $@ = команда
+    local ids="" prev=""
+    for a in "$@"; do [ "$prev" = --мутации-задачи ] && ids="$a"; prev="$a"; done
+    [ -n "$ids" ] || return 0
+    exec 7>>"$BATCH_LOCK"
+    if ! flock -n 7; then
+        local holder; holder="$(cat "$BATCH_LOCK" 2>/dev/null)"
+        echo "run-in-checks-slice: отказ — мутации задач уже в очереди или идут (pid ${holder%% *}: ${holder#* })." >&2
+        echo "  Законный путь: дождись его конца и запусти все свои задачи ОДНОЙ пачкой: python3 scripts/acceptance.py --мутации-задачи $ids,<id2>" >&2
+        event checks.slice.batch-refused refused "держатель=${holder%% *}" "задачи=$ids"
+        exit "$BUSY_RC"
+    fi
+    printf '%s %s\n' "$$" "$ids" > "$BATCH_LOCK"
+}
+BATCH_LOCK=/run/lock/harness-task-mutations.lock
+batch_guard "$@"
+
 WRAPPER="${HARNESS_CHECKS_SLICE_WRAPPER:-$DEFAULT_WRAPPER}"
 sudo_cmd=(sudo -n)
 [ "$WRAPPER" != "$DEFAULT_WRAPPER" ] && sudo_cmd=()
@@ -81,7 +122,7 @@ cmd="$1"; shift
 case "$cmd" in */*) ;; *) cmd="$(command -v "$cmd")" || { echo "run-in-checks-slice: нет команды $cmd" >&2; exit 127; } ;; esac
 
 "${sudo_cmd[@]}" "$WRAPPER" --run-max-min "$RUN_MAX_MIN" --lock-wait-min "$LOCK_WAIT_MIN" \
-    "$PWD" "${pairs[@]}" -- "$cmd" "$@"
+    "$PWD" "${pairs[@]}" -- "$cmd" "$@" 7>&-
 rc=$?
 if [ "$rc" = "$BUSY_RC" ]; then
     holder="$(cat "$OWNER_FILE" 2>/dev/null)"

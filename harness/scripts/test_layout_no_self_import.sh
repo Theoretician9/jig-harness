@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Проба: личность приходит системным промптом носителя, а не @-импортом CLAUDE.md.
 #
-# hr.standards-and-policy §4.4: после носителя строки @harness/self/core.json и
+# Спека §4.4: после носителя строки @harness/self/core.json и
 # @harness/self/instance.yaml в CLAUDE.md дают смене личность ДВАЖДЫ (~3 200
 # токенов). Их источники: шаблон CLAUDE-EN.md.in (из него собирается CLAUDE.md
 # пакета) и слияние раскладки, которое дописывает в CLAUDE.md продукта

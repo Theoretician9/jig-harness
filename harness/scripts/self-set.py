@@ -33,6 +33,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -262,7 +263,19 @@ def write_field(path: Path, field: str, value: str, source: str) -> int:
     if not record(field, value, source, "да", sha256=digest, поля=field_hashes(yaml.safe_load(new))):
         raise DoorError("поле записано, но журнал self-set.jsonl его не принял")
     print(f"{field}: записано по кнопке «Да»")
+    rebuild_cards()
     return WRITTEN
+
+
+def rebuild_cards() -> None:
+    """Карточки помощников несут instance: после правки они устарели (сторож запуска откажет).
+    Дверь SELF_INSTANCE — проба с чужим файлом: карточки живого дерева она не трогает."""
+    if os.environ.get("SELF_INSTANCE"):
+        return
+    done = subprocess.run([sys.executable, str(ROOT / "scripts" / "self-prompt.py"), "--карточки", "--в",
+                           str(ROOT / ".claude" / "agents")], capture_output=True, text=True)
+    if done.returncode not in (0, 3):
+        print(f"ВНИМАНИЕ: карточки помощников не пересобраны: {done.stderr.strip()[-200:]}")
 
 
 # ── старт смены ──────────────────────────────────────────────────────────────

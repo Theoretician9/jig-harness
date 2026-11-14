@@ -250,14 +250,18 @@ def stand_root() -> Path:
 # ─────────────────────────────── случаи ──────────────────────────────────────
 
 def case_h1() -> None:
-    """История берёт ветки и теги, но не remotes; путь с кириллицей — ключ дословно; blob — 40 hex.
-    Стенд: master (A, A2), ветка «страховка» с harness/ОПИСЬ.md = X, коммит только под тегом,
-    коммит только под refs/remotes/x/master.
-    Зелен на поломке? `--all` — нет: blob удалённой ссылки и счёт коммитов его выдают, и пара
-    (ветка снята, тот же коммит под remotes) обязана потерять X; `--abbrev` — нет: X сверяется
-    40-знаковым; снятый `-z` — нет: ключ с пробелом и «ё» обязан прийти дословно; снятый
-    `--tags` — нет: blob под тегом обязан найтись; перевод «harness/scripts/» → «scripts/»
-    не применён — нет: оба blob a.sh ждутся под scripts/a.sh."""
+    """История берёт HEAD и теги, но не прочие ветки и не remotes; путь с кириллицей — ключ
+    дословно; blob — 40 hex.
+    Стенд: master (A, A2 с путём «ё»), ветка «страховка» с harness/ОПИСЬ.md = X (свои коммиты
+    копии: update.py --сбросить-свои кладёт их в ветку server-*-local-*), коммит только под
+    тегом, коммит только под refs/remotes/x/master.
+    Почему не --branches: 13.11.2026 копия bkb после сброса своих коммитов в ветку-страховку
+    получила от раскладки предложение снять 4 своих файла (cf-exchange-watch.sh …) как
+    «пакетные, убранные» — затравка читала ветку-страховку как историю пакета.
+    Зелен на поломке? `--all`/`--branches` — нет: X из ветки «страховка» обязан НЕ найтись;
+    `--abbrev` — нет: blob сверяется 40-знаковым; снятый `-z` — нет: ключ с пробелом и «ё»
+    обязан прийти дословно; снятый `--tags` — нет: blob под тегом обязан найтись; перевод
+    «harness/scripts/» → «scripts/» не применён — нет: оба blob a.sh ждутся под scripts/a.sh."""
     root = stand_root()
     try:
         rules = stand_rules(root)
@@ -266,9 +270,9 @@ def case_h1() -> None:
         x_data = "# опись прежней раскладки\nharness/старое.md\n".encode()
         odd_rel, odd_data = "harness/старое/список ё.md", "ёлка\n".encode()
         commit(repo, {"harness/scripts/a.sh": a1}, "A")
-        commit(repo, {"harness/scripts/a.sh": a2}, "A2")
+        commit(repo, {"harness/scripts/a.sh": a2, odd_rel: odd_data}, "A2")
         git(repo, "checkout", "-q", "-b", "страховка")
-        insurance = commit(repo, {"harness/ОПИСЬ.md": x_data, odd_rel: odd_data}, "страховка")
+        insurance = commit(repo, {"harness/ОПИСЬ.md": x_data}, "страховка")
         git(repo, "checkout", "-q", "master")
         git(repo, "checkout", "-q", "--detach")
         tag_data = b"tagged\n"
@@ -281,13 +285,13 @@ def case_h1() -> None:
 
         x = blob_of(x_data)
         hist = history(repo, rules)
-        PROBE.check("H1", "X по harness/ОПИСЬ.md из ветки «страховка»",
-                    x in blobs_at(hist, "harness/ОПИСЬ.md"),
+        PROBE.check("H1", "X из ветки «страховка» (свои коммиты копии) НЕ в истории",
+                    x not in blobs_at(hist, "harness/ОПИСЬ.md"),
                     f"blobs[harness/ОПИСЬ.md] = {sorted(blobs_at(hist, 'harness/ОПИСЬ.md'))}")
         PROBE.check("H1", "все blob пути — 40 hex",
-                    all(re.fullmatch(r"[0-9a-f]{40}", b) for b in blobs_at(hist, "harness/ОПИСЬ.md"))
-                    and bool(blobs_at(hist, "harness/ОПИСЬ.md")),
-                    f"{sorted(blobs_at(hist, 'harness/ОПИСЬ.md'))}")
+                    all(re.fullmatch(r"[0-9a-f]{40}", b) for b in blobs_at(hist, "scripts/a.sh"))
+                    and bool(blobs_at(hist, "scripts/a.sh")),
+                    f"{sorted(blobs_at(hist, 'scripts/a.sh'))}")
         PROBE.check("H1", "harness/scripts/a.sh → scripts/a.sh, оба blob истории",
                     blobs_at(hist, "scripts/a.sh") == {blob_of(a1), blob_of(a2)},
                     f"scripts/a.sh {sorted(blobs_at(hist, 'scripts/a.sh'))}, ключи {sorted(hist.blobs)[:8]}")
@@ -299,8 +303,8 @@ def case_h1() -> None:
                     f"ключи истории {sorted(hist.blobs)}")
         PROBE.check("H1", "blob только под refs/remotes НЕ найден (не --all)",
                     "harness/удалённое.md" not in hist.blobs, f"ключи истории {sorted(hist.blobs)}")
-        expect = int(git(repo, "rev-list", "--count", "--branches", "--tags"))
-        PROBE.check("H1", f"commits = rev-list --branches --tags ({expect})",
+        expect = int(git(repo, "rev-list", "--count", "HEAD", "--tags"))
+        PROBE.check("H1", f"commits = rev-list HEAD --tags ({expect})",
                     hist.commits == expect, f"commits {hist.commits!r}")
         PROBE.check("H1", "полный клон стенда — shallow False", hist.shallow is False,
                     f"shallow {hist.shallow!r}")
@@ -893,7 +897,7 @@ def case_h12() -> None:
         shutil.rmtree(root, ignore_errors=True)
 
 
-# ──────────── мусор на входе (разведка фаззингом, hr.fuzzing-for-special-tasks) ────────────
+# ──────────── мусор на входе (разведка фаззингом) ────────────
 # Входы — дословно из пробы /var/log/harness/fuzz-probe.log. Исключение, вылетевшее из
 # модуля, судится как ответ «упало: <тип>», а не роняет весь случай: у каждого дефекта
 # своя красная строка.
@@ -1049,8 +1053,47 @@ def case_h16() -> None:
         shutil.rmtree(root, ignore_errors=True)
 
 
+def case_h17() -> None:
+    """Своё копии не предлагается к снятию: затравка видит только историю публичного коммита.
+    Стенд как у копии после `update.py --сбросить-свои`: master = P (публичный, под тегом),
+    до него P0 с harness/demons/old.sh (убран в P); ветка server-bkb-local-… от P со СВОИМ
+    коммитом копии, добавившим harness/demons/x.sh; HEAD = P. В проекте x.sh (его клала
+    раскладка, пока свой коммит стоял на HEAD) и old.sh — оба вне описи.
+    Живой случай: копия bkb 13.11.2026, раскладка предложила снять cf-exchange-watch.sh и ещё 3.
+    Зелен на поломке? `--branches`/`--all` — нет: x.sh обязан НЕ попасть в would_remove;
+    пустая история — нет: old.sh из публичной истории обязан попасть."""
+    root = stand_root()
+    try:
+        rules = stand_rules(root)
+        repo = new_package(root)
+        keep, old, own = b"#!/bin/sh\necho keep\n", b"#!/bin/sh\necho old\n", b"#!/bin/sh\necho own\n"
+        commit(repo, {"harness/demons/keep.sh": keep, "harness/demons/old.sh": old}, "P0")
+        public = commit(repo, {"harness/demons/old.sh": None}, "P")
+        git(repo, "tag", "v0.11.0")
+        git(repo, "checkout", "-q", "-b", "server-bkb-local-20261113-1200")
+        commit(repo, {"harness/demons/x.sh": own}, "свой коммит копии")
+        git(repo, "checkout", "-q", "master")
+        PROBE.check("H17", "стенд: HEAD = публичный P", git(repo, "rev-parse", "HEAD") == public)
+        hist = history(repo, rules)
+        project = root / "проект"
+        for rel, data in (("harness/demons/x.sh", own), ("harness/demons/old.sh", old)):
+            (project / rel).parent.mkdir(parents=True, exist_ok=True)
+            (project / rel).write_bytes(data)
+        seed = LH.seed_verdict(project, ["harness/demons/old.sh", "harness/demons/x.sh"], hist)
+        PROBE.check("H17", "x.sh из своего коммита копии НЕ в списке на снятие",
+                    "harness/demons/x.sh" not in seed.would_remove,
+                    f"would_remove {sorted(seed.would_remove)}")
+        PROBE.check("H17", "x.sh — чужой (история публичного его не знает): strangers = 1",
+                    seed.strangers == 1, f"strangers {seed.strangers!r}, foreign {seed.foreign!r}")
+        PROBE.check("H17", "пара: old.sh из публичной истории — в списке на снятие",
+                    seed.would_remove.get("harness/demons/old.sh") == blob_of(old),
+                    f"would_remove {dict(seed.would_remove)}")
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 CASES = (case_h1, case_h2, case_h3, case_h4, case_h5, case_h6, case_h7, case_h8, case_h9,
-         case_h10, case_h11, case_h12, case_h13, case_h14, case_h15, case_h16)
+         case_h10, case_h11, case_h12, case_h13, case_h14, case_h15, case_h16, case_h17)
 
 
 def main() -> int:

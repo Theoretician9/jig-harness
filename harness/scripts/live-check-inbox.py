@@ -45,16 +45,16 @@ import yaml
                          or КОРЕНЬ / "harness" / "config" / "live-check-state.yaml")
 ДАННЫЕ = pathlib.Path(os.environ.get("HARNESS_LIVE_CHECK_INBOX")
                       or КОРЕНЬ / "harness" / "config" / "live-check-inbox.yaml")
-def _корень_следов() -> pathlib.Path:
-    """Корень следов — у общего загрузчика: умолчание внутри репозитория
-    отдавало весь вывод произвольной команды гиту."""
+def _каталог_задачи() -> pathlib.Path:
+    """Каталог следов — у общего загрузчика, вне репозитория; его имя — данные
+    состояния установки, не код: код едет в сборку."""
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent / "lib"))
     import config as конф                                 # noqa: PLC0415
-    return pathlib.Path(конф.live_check_trace_root())
+    return конф.live_check_task_dir(СОСТОЯНИЕ)
 
 
 СЛЕДЫ = pathlib.Path(os.environ.get("HARNESS_LIVE_CHECK_INBOX_TRACE_DIR")
-                     or _корень_следов() / "hr.zhivaya-proverka-vseh-mehanizmov"
+                     or _каталог_задачи()
                      / "живьём-входящие")
 ЦИТАТА_ЗНАКОВ = 12
 ЭХО_ЗНАКОВ = 6

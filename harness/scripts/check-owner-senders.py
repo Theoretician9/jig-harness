@@ -72,15 +72,17 @@ def _данные(путь: pathlib.Path) -> dict:
 
 
 def файлы_кода(корень: pathlib.Path) -> list[pathlib.Path]:
-    """Код харнеса из ГИТА, а не обходом дерева.
+    """Код харнеса по описи git: учтённое и ещё не добавленное, без скрытого.
 
-    Обход подхватил бы копии в /tmp, сборки и чужие деревья; git знает ровно
-    то, что уедет на другую машину.
+    Обход подхватил бы копии и сборки — их скрывает .gitignore. Не добавленное
+    судится: раскладка на свежей копии файлы не коммитит, и только учтённое
+    видело её отправителей «вне гита», а новый отправитель до `git add` прятался.
     """
     # core.quotepath=false: иначе кириллические имена придут экранированными
     # байтами, и путь из данных с ними не совпадёт.
     готово = subprocess.run(["git", "-C", str(корень), "-c", "core.quotepath=false",
-                             "ls-files", *КАТАЛОГИ],
+                             "ls-files", "--cached", "--others", "--exclude-standard",
+                             *КАТАЛОГИ],
                             capture_output=True, text=True)
     if готово.returncode != 0:
         # «Не прочитали» ≠ «пусто»: пустой список шёл в приговор «чисто» —
@@ -331,16 +333,43 @@ def _selftest() -> int:
         проба("БОЛЬНОЙ СЛУЧАЙ: адрес API сам по себе ловится (токен может быть в переменной)",
               нарушители(корень, данные)[0], ["scripts/novyj-demon.sh"])
 
-        # Файл вне гита не судится: в дереве лежат копии и сборки.
+        # БОЛЬНОЙ СЛУЧАЙ: только что разложенный (не добавленный в git) отправитель
+        # без записи — тоже нарушитель: на свежей копии раскладка не коммитит.
         обход.unlink()
-        (корень / "scripts" / "ne-v-gite.sh").write_text(
-            'curl "https://api.telegram.org/bot$T/sendMessage"\n', encoding="utf-8")
-        subprocess.run(["git", "-C", двор, "add", "-A", "--", "scripts/tg_send.sh"],
-                       check=True)
         subprocess.run(["git", "-C", двор, "rm", "-q", "--cached",
                         "scripts/novyj-demon.sh"], check=False)
-        проба("незакоммиченный файл вне счёта (в дереве бывают копии)",
-              "scripts/ne-v-gite.sh" in нарушители(корень, данные)[0], False)
+        (корень / "scripts" / "ne-v-gite.sh").write_text(
+            'curl "https://api.telegram.org/bot$T/sendMessage"\n', encoding="utf-8")
+        проба("БОЛЬНОЙ СЛУЧАЙ: разложенный, но не добавленный в git прямой путь назван",
+              "scripts/ne-v-gite.sh" in нарушители(корень, данные)[0], True)
+        # Копии и сборки в дереве скрыты .gitignore — их гейт не судит.
+        (корень / ".gitignore").write_text("*.kopiya.sh\n", encoding="utf-8")
+        (корень / "scripts" / "ne-v-gite.sh").rename(корень / "scripts" / "demon.kopiya.sh")
+        проба("копия, скрытая .gitignore, вне счёта",
+              нарушители(корень, данные)[0], [])
+
+    # БОЛЬНОЙ СЛУЧАЙ 14.11.2026 (стенд копии): раскладка положила отправителей с
+    # записью в данных, но не закоммитила их — гейт краснел «файла нет в гите».
+    with tempfile.TemporaryDirectory() as двор:
+        корень = pathlib.Path(двор)
+        (корень / "scripts").mkdir()
+        subprocess.run(["git", "-C", двор, "init", "-q"], check=True)
+        (корень / "scripts" / "tg_send.sh").write_text(
+            'curl "https://api.telegram.org/bot$T/sendMessage" # --несмотря-на-лимит\n',
+            encoding="utf-8")
+        subprocess.run(["git", "-C", двор, "add", "-A"], check=True)
+        (корень / "scripts" / "razlozhen.sh").write_text(
+            'bash scripts/tg_send.sh --несмотря-на-лимит "весть"\n', encoding="utf-8")
+        данные = {"pryamoj_api": {"scripts/tg_send.sh": "дверь"},
+                  "nesmotrya_na_limit": {"scripts/tg_send.sh": "дверь",
+                                         "scripts/razlozhen.sh": "смена сессии"},
+                  "model_task": {"scripts/razlozhen.sh": [{"kind": "owner-only", "why": "w"}]},
+                  "not_senders": {"scripts/tg_send.sh": "сама дверь"},
+                  "debt_max": 0}
+        проба("БОЛЬНОЙ СЛУЧАЙ: разложенный незакоммиченный отправитель с записью — "
+              "заявка не мёртвая", мёртвые_заявки(корень, данные), ([], []))
+        проба("БОЛЬНОЙ СЛУЧАЙ: разложенный незакоммиченный отправитель с записью — "
+              "без замечаний", судить_ключи(_тексты(корень), данные, None)[0], [])
 
     # Храповик судится в обе стороны: заявленный прямым путём файл без прямого
     # пути — мёртвая строка, она лжёт о том, что охраняет, и молча разрешает

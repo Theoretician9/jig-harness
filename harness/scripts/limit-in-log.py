@@ -29,6 +29,13 @@ from pathlib import Path
 ХВОСТ_БАЙТ = int(os.environ.get("STALL_TAIL_BYTES", 4_000_000))
 
 
+def _отказ_лимита(запись: dict) -> bool:
+    """Отказ по лимиту называет САМ CLI своими полями — не наш поиск слов. Синтетическая
+    запись об ошибке API без срока (перегрузка, сеть) лимитом не считается."""
+    return (запись.get("error") == "rate_limit" or запись.get("apiErrorStatus") == 429
+            or (запись.get("isApiErrorMessage") is True and _resets_at(запись) is not None))
+
+
 def минут_с_отказа(путь: str, хвост: int = ХВОСТ_БАЙТ, сейчас: float | None = None):
     """→ минуты с последнего отказа 429, либо None — отказов нет."""
     сейчас = сейчас if сейчас is not None else time.time()
@@ -49,7 +56,7 @@ def минут_с_отказа(путь: str, хвост: int = ХВОСТ_БА�
             запись = json.loads(строка)
         except ValueError:
             continue
-        if запись.get("error") == "rate_limit" or запись.get("apiErrorStatus") == 429:
+        if _отказ_лимита(запись):
             метка = запись.get("timestamp")
             if метка:
                 последняя = метка
@@ -164,11 +171,7 @@ def сброс_числом(путь: str, хвост: int = ХВОСТ_БАЙТ
             запись = json.loads(строка)
         except ValueError:
             continue
-        # Отказом запись называет САМ CLI своими полями — не наш поиск слов.
-        отказ = (запись.get("error") == "rate_limit"
-                 or запись.get("apiErrorStatus") == 429
-                 or запись.get("isApiErrorMessage") is True)
-        метка = _resets_at(запись) if отказ else None
+        метка = _resets_at(запись) if _отказ_лимита(запись) else None
         if метка:
             последний = метка
     return последний
@@ -404,9 +407,7 @@ def _сигналы_журнала(путь: str, сейчас: float, хвос�
         if момент is None or момент > сейчас:
             continue
         сброс = _resets_at(запись)
-        if запись.get("type") == "assistant" and (
-                запись.get("error") == "rate_limit" or запись.get("apiErrorStatus") == 429
-                or (запись.get("isApiErrorMessage") is True and сброс)):
+        if запись.get("type") == "assistant" and _отказ_лимита(запись):
             сигналы.append((момент, сброс, "отказ"))
         elif запись.get("type") == "assistant" and (запись.get("message") or {}).get("model") != "<synthetic>":
             ответ = max(ответ, момент)
@@ -420,12 +421,16 @@ def _сигналы_журнала(путь: str, сейчас: float, хвос�
 
 
 def действует(путь: str, экран: str = "", сейчас: float | None = None,
-              с_меткой: bool = False) -> tuple[int | None, int | None, bool] | None:
+              с_меткой: bool = False, после: float = 0) -> tuple[int | None, int | None, bool] | None:
     """Держится ли лимит: (сброс, подъём, был_отказ); срок None — не назван; None — не держится.
 
     Лимит держится до подъёма (сброс + LIMIT_KICK_DELAY_SEC), если срок назван;
     без срока — пока признак моложе LIMIT_KICK_MAX_MIN. Срок из числа resetsAt старше срока из текста: текст
     («5:30pm») без даты, и учитывается лишь новее последнего отказа.
+
+    `после` — момент смены ключа: сигналы не новее него принадлежат прежнему
+    аккаунту и отбрасываются. С меткой он не меньше времени последнего перехода,
+    так что `limit-watch` и сторож сами не принимают отказ прежнего ключа.
     """
     сейчас = сейчас if сейчас is not None else time.time()
     задержка = int(_ключ_конфига("LIMIT_KICK_DELAY_SEC") or 10)
@@ -434,9 +439,11 @@ def действует(путь: str, экран: str = "", сейчас: float 
     if с_меткой:
         sys.path.insert(0, str(Path(__file__).resolve().parent))
         import limit_mark as метка                     # noqa: PLC0415
+        после = max(после, метка.последний_переход())
         когда, повод, сброс = метка.прочитать()
         if метка.файл().exists() and повод == "limit" and сброс and когда <= сейчас:
             сигналы.append((когда, сброс, "метка"))
+    сигналы = [с for с in сигналы if с[0] > после]
     # Смена отвечает по делу после метки или отказа — модель лимита не видит
     # (недельный лимит другой модели); держать лимит дальше значит глушить живую смену.
     сигналы = [с for с in сигналы if с[2] == "текст" or с[0] > содержательный]
@@ -452,6 +459,36 @@ def действует(путь: str, экран: str = "", сейчас: float 
     новые = [вид for м, с, вид in сигналы
              if с is None and м > подъём and сейчас - м <= потолок and (вид == "текст" or м > ответ)]
     return (None, None, "отказ" in новые) if новые else None
+
+
+def стоит_в_лимите(путь: str) -> bool:
+    """Стоит ли помощник в лимите: его последняя содержательная запись — отказ 429.
+
+    Открытый вызов инструмента (`tool_use` без `tool_result`) держит помощника:
+    он ждёт команду, а не лимит. OSError — звонящий различает «не прочесть» (2).
+    """
+    with open(путь, encoding="utf-8", errors="replace") as файл:
+        строки = файл.read().splitlines()
+    записи = []
+    for строка in строки:
+        try:
+            запись = json.loads(строка)
+        except ValueError:
+            continue
+        if isinstance(запись, dict) and запись.get("type") in ("assistant", "user"):
+            записи.append(запись)
+    if not записи:
+        return False
+    вызовы, итоги = set(), set()
+    for запись in записи:
+        содержимое = (запись.get("message") or {}).get("content")
+        for часть in содержимое if isinstance(содержимое, list) else []:
+            if isinstance(часть, dict) and часть.get("type") == "tool_use":
+                вызовы.add(часть.get("id"))
+            elif isinstance(часть, dict) and часть.get("type") == "tool_result":
+                итоги.add(часть.get("tool_use_id"))
+    последняя = записи[-1]
+    return последняя.get("type") == "assistant" and _отказ_лимита(последняя) and вызовы <= итоги
 
 
 def _пробы_сброса(проба) -> None:
@@ -533,6 +570,43 @@ def _пробы_ответа_после_отказа(проба) -> None:
     проба("ответ с текстом лимита новее отказа не снимает",
           судья((600, отказ), (60, ответ("You've hit your weekly limit · resets Nov 4, 6pm"))))
     проба("отказ новее ответа — держится", судья((600, ответ("Сделано.")), (60, отказ)))
+
+
+def _пробы_после_и_стоит(проба) -> None:
+    """Довод `после` (смена ключа) и разбор «помощник стоит в лимите»."""
+    import tempfile
+    сейчас = time.time()
+
+    def момент(назад: float) -> str:
+        return datetime.datetime.fromtimestamp(сейчас - назад, datetime.timezone.utc).isoformat()
+    отказ = {"type": "assistant", "error": "rate_limit", "apiErrorStatus": 429,
+             "resetsAt": int(сейчас) + 3600, "message": {"model": "<synthetic>"}}
+    ответ = {"type": "assistant", "message": {"model": "m", "content": [{"type": "text", "text": "ок"}]}}
+    вызов = {"type": "assistant", "message": {"model": "m", "content": [
+        {"type": "tool_use", "id": "t1", "name": "Bash", "input": {}}]}}
+    итог = {"type": "user", "message": {"role": "user", "content": [
+        {"type": "tool_result", "tool_use_id": "t1", "content": "ок"}]}}
+
+    def журнал(*записи: tuple[int, dict]) -> str:
+        путь = os.path.join(врем, "ж.jsonl")
+        with open(путь, "w", encoding="utf-8") as ф:
+            ф.write("".join(json.dumps({**з, "timestamp": момент(н)}) + "\n" for н, з in записи))
+        return путь
+
+    with tempfile.TemporaryDirectory() as врем:
+        путь = журнал((600, отказ))
+        проба("после: отказ новее смены ключа — держится",
+              действует(путь, сейчас=сейчас, после=сейчас - 900) is not None)
+        проба("БОЛЬНОЙ СЛУЧАЙ: отказ прежнего ключа старше смены — отброшен",
+              действует(путь, сейчас=сейчас, после=сейчас - 300) is None)
+        проба("помощник: последняя запись — отказ, стоит",
+              стоит_в_лимите(журнал((600, ответ), (300, отказ))))
+        проба("помощник: после отказа есть ответ — не стоит",
+              not стоит_в_лимите(журнал((600, отказ), (300, ответ))))
+        проба("помощник: открытый вызов держит — не стоит",
+              not стоит_в_лимите(журнал((600, вызов), (300, отказ))))
+        проба("помощник: вызов закрыт результатом, затем отказ — стоит",
+              стоит_в_лимите(журнал((900, вызов), (600, итог), (300, отказ))))
 
 
 def _selftest() -> int:
@@ -622,8 +696,9 @@ def _selftest() -> int:
 
     _пробы_сброса(проба)
     _пробы_ответа_после_отказа(проба)
+    _пробы_после_и_стоит(проба)
 
-    print("САМОТЕСТ %s: 15 путей, первым — больной случай"
+    print("САМОТЕСТ %s: 30 путей, первым — больной случай"
           % ("ПРОВАЛЕН" if плохо else "ПРОЙДЕН"))
     return 1 if плохо else 0
 
@@ -637,8 +712,10 @@ def main(argv) -> int:
         экран = довод("--экран")
         текст = Path(экран).read_text(encoding="utf-8", errors="replace") if экран else ""
         сейчас = довод("--сейчас")
+        после = довод("--после")
         итог = действует(argv[argv.index("--действует") + 1], текст,
-                         float(сейчас) if сейчас else None, "--метка" in argv)
+                         float(сейчас) if сейчас else None, "--метка" in argv,
+                         float(после) if после else 0)
         if итог is None:
             print(0)
             return 1
@@ -647,6 +724,13 @@ def main(argv) -> int:
         # одна заметка CLI (владельцу «упёрся» говорят после отказа).
         print("1\t%s\t%s" % срок + ("\t%d" % итог[2] if "--с-отказом" in argv else ""))
         return 0
+    if "--стоит-в-лимите" in argv:
+        # Зовёт сторож сессий по транскрипту помощника: 0 — стоит, 1 — нет, 2 — не прочесть.
+        try:
+            return 0 if стоит_в_лимите(argv[argv.index("--стоит-в-лимите") + 1]) else 1
+        except OSError as беда:
+            print(f"транскрипт не прочитан: {беда}", file=sys.stderr)
+            return 2
     if "--в-тексте" in argv:
         # Зовёт обёртка claude-demon.sh: у факта «лимит подписки» один судья.
         путь = argv[argv.index("--в-тексте") + 1]

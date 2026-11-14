@@ -67,11 +67,17 @@ KEYS = ("attention", "autonomy", "efficiency", "creation")
 
 DAY = 86400
 OWNER_TZ = datetime.timezone(datetime.timedelta(hours=5))
+# Окна кончаются не в NOW, а в END = NOW − отставание из конфига: данные
+# случаев 1–12 ставятся от END, поэтому мутация отставания краснеет только
+# случаем 13, который судит само отставание.
 # Даты карты — без времени, начало суток +05: сдвиг до суток. Поэтому «внутри
-# окна» — 3 и 10 суток назад, далеко от границ 7 и 14.
+# окна» — 3 и 10 суток до END, далеко от границ 7 и 14.
 NOW = int(time.time())
-IN_CURRENT = NOW - 3 * DAY
-IN_PAST = NOW - 10 * DAY
+LAG = (yaml.safe_load(CONFIG_SOURCE.read_text(encoding="utf-8")) or {}).get("отставание_суток", 0) * DAY \
+    if CONFIG_SOURCE.is_file() else 0
+END = NOW - LAG
+IN_CURRENT = END - 3 * DAY
+IN_PAST = END - 10 * DAY
 
 cases = Cases()
 check = cases.check
@@ -312,8 +318,8 @@ def classify(base: Path, text: str, marker: str | None = None, quoted: str | Non
     """Чем код счёл ОДНО сообщение: по счётам внимания текущего окна."""
     st = Stand(base, marker=marker)
     if quoted:
-        st.our_message(NOW - DAY - 600, quoted)
-    st.message(NOW - DAY, text)
+        st.our_message(END - DAY - 600, quoted)
+    st.message(END - DAY, text)
     rc, data, why = st.show()
     if rc != 0 or not data:
         return f"нет итога (код {rc}): {why}"
@@ -367,8 +373,8 @@ def case_quote(tmp: Path) -> None:
 def case_windows(tmp: Path) -> None:
     print("── 3. окна ──")
     st = Stand(tmp)
-    st.message(NOW - 8 * DAY, "почему пусто")
-    st.message(NOW - DAY, "предлагаю новый раздел")
+    st.message(END - 8 * DAY, "почему пусто")
+    st.message(END - DAY, "предлагаю новый раздел")
     rc, data, why = st.show()
     check(f"--show код 0 ({why[:80]})" if rc else "--show код 0", 0, rc)
     check("сообщение 8 суток назад в текущее окно не попало", 0,
@@ -483,7 +489,7 @@ def case_token_window(tmp: Path) -> None:
     print("── 10. верхняя граница окна токенов ──")
     st = Stand(tmp)
     st.tokens(IN_PAST, 100, 900)
-    st.tokens(NOW - 2 * DAY, 3, 4)
+    st.tokens(END - 2 * DAY, 3, 4)
     rc, data, why = st.show()
     check(f"--show код 0 ({why[:80]})" if rc else "--show код 0", 0, rc)
     check("текущее окно: токенов 7", 7, counts(data, "efficiency", "сейчас").get("токены"))
@@ -494,9 +500,9 @@ def case_token_window(tmp: Path) -> None:
 def case_own_alerts(tmp: Path) -> None:
     print("── 11. своя карточка не «сломано» ──")
     st = Stand(tmp)
-    st.alert(NOW - 2 * DAY, "self-sensors:attention", "заведена")
-    st.alert(NOW - 2 * DAY, "nightly-gates:red", "заведена")
-    st.alert(NOW - 2 * DAY + 60, "nightly-gates:red", "повтор")
+    st.alert(END - 2 * DAY, "self-sensors:attention", "заведена")
+    st.alert(END - 2 * DAY, "nightly-gates:red", "заведена")
+    st.alert(END - 2 * DAY + 60, "nightly-gates:red", "повтор")
     st.alert(IN_PAST, "nightly-gates:old", "заведена")
     st.miss(IN_CURRENT, "пропуск стенда")
     rc, data, why = st.show()
@@ -522,6 +528,35 @@ def case_alert_refused(tmp: Path) -> None:
     check("alert-task ответил 0: строка дня записана", 1, len(st.daily_rows()))
 
 
+def case_closed_window(tmp: Path) -> None:
+    print("── 13. судится закрытое окно: закрытия доезжают задним числом ──")
+    # Токены пишутся сразу, а закрытия задач датируются задним числом: за
+    # последние сутки токены уже есть, закрытий ещё нет. Каждые сутки, кроме
+    # последних, — 2 закрытия и 1 млн токенов, все в полдень суток (далеко от
+    # границ окон при любом целом отставании ≤ 1). Последние сутки — 5 млн
+    # токенов и 0 закрытий. Датчик без отставания видит в них «хуже»
+    # (11 млн / 12 против 7 млн / 14).
+    def noon(k: int) -> float:
+        return NOW - (k + 0.5) * DAY
+    tasks = "".join(task_block(f"hr.closed-day{k}-{i}", "test", tested_at=iso_of(noon(k) + i * 60))
+                    for k in range(1, 16) for i in range(2))
+    st = Stand(tmp, tasks=tasks)
+    for k in range(1, 16):
+        st.tokens(noon(k), 1_000_000, 0)
+    st.tokens(noon(0), 5_000_000, 0)
+    rc, before, why = st.show()
+    check(f"--show код 0 ({why[:80]})" if rc else "--show код 0", 0, rc)
+    check("последние сутки ещё дописываются: эффективность не «хуже» — сравниваются закрытые окна",
+          "в пороге", sensor(before, "efficiency").get("вердикт"))
+    late = "".join(task_block(f"hr.closed-late-{i}", "test", tested_at=iso_of(noon(0) + i * 60))
+                   for i in range(10))
+    st.map.write_text(map_text(tasks + late), encoding="utf-8")
+    rc, after, why = st.show()
+    check("закрытия, доехавшие задним числом за последние сутки, не меняют судимые окна",
+          [sensor(before, k).get("счёты") for k in ("autonomy", "efficiency")],
+          [sensor(after, k).get("счёты") for k in ("autonomy", "efficiency")])
+
+
 def run_copy(st: "Stand", script: Path) -> tuple[int, str, str]:
     done = subprocess.run([sys.executable, str(script), "--record"], env=st.env(),
                           capture_output=True, text=True, timeout=120, cwd=str(st.base))
@@ -530,7 +565,7 @@ def run_copy(st: "Stand", script: Path) -> tuple[int, str, str]:
 
 CASES = (case_classifier, case_quote, case_windows, case_closed, case_minimum,
          case_record_once, case_worse, case_resolve, case_empty, case_token_window,
-         case_own_alerts, case_alert_refused)
+         case_own_alerts, case_alert_refused, case_closed_window)
 
 
 # ── стенд не протёк ────────────────────────────────────────────────────────
@@ -557,7 +592,7 @@ def main() -> int:
     if not (SENSORS.is_file() and CONFIG_SOURCE.is_file()):
         missing = "нет scripts/self-sensors.py" if not SENSORS.is_file() else "нет self-sensors.yaml"
         print(f"self-sensors проба: случаев {cases.paths}, падений {cases.failures} — "
-              f"{missing}, случаи 1–12 не прогнаны")
+              f"{missing}, случаи 1–13 не прогнаны")
         return 1
     before = live_state()
     with tempfile.TemporaryDirectory(prefix="self-sensors-probe-") as tmp:

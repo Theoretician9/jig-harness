@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Проба двери слоя человека: instance.yaml пишется только по кнопке «Да».
 
-Откуда взята. Спека hr.standards-and-policy §5.1–§5.3, В-3 (а): слой 2 памяти
+Откуда взята. Спека §5.1–§5.3, В-3 (а): слой 2 памяти
 (проект, роль, цель) — слой владельца. Модель только ПРЕДЛАГАЕТ; записывает код
 по нажатию «Да» на тот же предмет. Единственная дверь — scripts/self-set.py,
 вид согласия «слой-человека» (owner_word.ВИДЫ_СОГЛАСИЯ, контракт K45). Правка
@@ -25,6 +25,9 @@ instance.yaml мимо двери видна сверкой sha256 при ста
     мимо согласия: <поля>»; без правки — молчит;
   - пробелы обязательные_поля_человека — один вопрос за запуск и не чаще раза
     в сутки (по журналу self-set.jsonl, «источник: вопрос»).
+  - запись поля зовёт пересборку карточек помощников: self-prompt.py --карточки
+    --в <ROOT>/.claude/agents; с дверью SELF_INSTANCE — не зовёт (subprocess
+    подменён в процессе двери, живые карточки не трогаются).
 Живые instance.yaml, журналы и канал не трогаются: снимок до и после.
 
 Интерфейс (его закрепляет проба):
@@ -149,6 +152,27 @@ sys.argv = spec["argv"]
 runpy.run_path(spec["argv"][0], run_name="__main__")
 """
 
+# Пересборка карточек после записи (Р4): дверь в своём
+# процессе, subprocess.run и record подменены записью — живые карточки и журнал не трогаются.
+CARDS_RUNNER = r"""
+import importlib.util, json, pathlib, sys, types
+given = json.loads(sys.argv[1])
+spec = importlib.util.spec_from_file_location("self_set_under_probe", given["door"])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+calls = []
+def fake_run(argv, **_):
+    calls.append([str(a) for a in argv])
+    return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+module.subprocess = types.SimpleNamespace(run=fake_run)
+module.rebuild_cards()
+rebuilds = []
+module.rebuild_cards = lambda: rebuilds.append(1)
+module.record = lambda *a, **k: True
+module.write_field(pathlib.Path(given["instance"]), "цель", "проба карточек", "контекст")
+print(json.dumps({"rebuild": calls, "root": str(module.ROOT), "write_field": len(rebuilds)}, ensure_ascii=False))
+"""
+
 cases = 0
 failures = 0
 
@@ -209,7 +233,7 @@ class Stand:
                    HARNESS_CONF=str(self.base / "harness.conf"),
                    HARNESS_LOG_DIR=str(self.log), LOG_DIR=str(self.log),
                    PROJECT_DIR=str(self.project), SELF_INSTANCE=str(self.instance),
-                   MEMORY_LAYERS=str(self.layers),
+                   MEMORY_LAYERS=str(self.layers), SHIFT_SELF_MARK=str(self.log / "shift.mark"),
                    HARNESS_TASK="-")
         for door in ("SELF_SET_PY", "SESSION_STATE_SH", "HEARTBEAT_DIR", "STATE_DIR"):
             env.pop(door, None)
@@ -475,6 +499,38 @@ def case_gaps() -> None:
           f"вопросов {len(questions(full))}")
 
 
+def case_cards_rebuild() -> None:
+    """После записи поля карточки помощников пересобираются (они несут instance); дверь
+    SELF_INSTANCE (проба с чужим файлом) живые карточки не трогает."""
+    base = STAND / "cards"
+    base.mkdir(parents=True, exist_ok=True)
+    instance = base / "instance.yaml"
+    for door_set in (False, True):
+        instance.write_text(INSTANCE_TEXT, encoding="utf-8")
+        env = {k: v for k, v in os.environ.items() if k not in ("SELF_INSTANCE", "SELF_SET_PY")}
+        env.update(HARNESS_LOG_DIR=str(base), LOG_DIR=str(base))
+        if door_set:
+            env["SELF_INSTANCE"] = str(instance)
+        done = subprocess.run([sys.executable, "-c", CARDS_RUNNER,
+                               json.dumps({"door": str(SELF_SET), "instance": str(instance)})],
+                              capture_output=True, text=True, timeout=60, env=env, stdin=subprocess.DEVNULL)
+        try:
+            seen = json.loads(done.stdout.strip().splitlines()[-1])
+        except (ValueError, IndexError):
+            check(f"карточки (дверь {door_set}): раннер ответил", False,
+                  f"код {done.returncode}; {done.stderr.strip()[-300:]}")
+            continue
+        root = Path(seen["root"])
+        want = [] if door_set else [["--карточки", "--в", str(root / ".claude" / "agents")]]
+        got = [c[2:] for c in seen["rebuild"] if len(c) > 1 and c[1] == str(root / "scripts" / "self-prompt.py")]
+        got += [c for c in seen["rebuild"] if not (len(c) > 1 and c[1] == str(root / "scripts" / "self-prompt.py"))]
+        label = "дверь SELF_INSTANCE: живые карточки не трогаются" if door_set else \
+            "без двери: self-prompt.py --карточки --в <ROOT>/.claude/agents"
+        check(label, got == want, f"зовы {seen['rebuild']}")
+        check(f"запись поля зовёт пересборку карточек (дверь {door_set})", seen["write_field"] == 1,
+              f"зовов {seen['write_field']}")
+
+
 def main() -> int:
     print(f"дверь: {SELF_SET}\nстарт смены: {SESSION_STATE}")
     live_before = snapshot(LIVE_TRACES)
@@ -488,6 +544,7 @@ def main() -> int:
     case_wrong_yes(main_stand)
     case_bypass(main_stand)
     case_gaps()
+    case_cards_rebuild()
     live_after = snapshot(LIVE_TRACES)
     changed = [p for p in live_before if live_before[p] != live_after[p]]
     check("живые instance.yaml и self-set.jsonl не тронуты", not changed, f"изменены: {changed}")

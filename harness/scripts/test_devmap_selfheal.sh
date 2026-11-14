@@ -283,6 +283,33 @@ verdict "$([ "$before" != "$(head_of "$T")" ] && [ "$(status_in_head "$T" hr.b)"
     "VG-01, проход 2, сосед: чужая правка hr.b wip→test закоммичена, карта не заперта" \
     "HEAD сдвинут: $([ "$before" != "$(head_of "$T")" ] && echo да || echo нет), hr.b в HEAD = $(status_in_head "$T" hr.b), rc=$(cat "$T/rc")"
 
+# ── БОЛЬНОЙ СЛУЧАЙ 14.11.2026: гейт отверг ЧУЖУЮ правку, ехавшую в коммите ────
+# В дереве лежали незакоммиченные переводы карточек в test (смена ждала мутаций),
+# демон коммитил карту целиком, гейт пайплайна отказал — и пропуски, заведённые
+# моделью, не уехали вовсе (код 1). Правило: на отказе демон коммитит одну свою
+# правку поверх HEAD, чужая остаётся в дереве как была.
+new_stand
+cat > "$T/repo/.git/hooks/pre-commit" <<'SH'
+#!/usr/bin/env bash
+git show :dev-map.yaml | grep -A1 -- '- id: hr.b$' | grep -q 'status: test' && { echo 'гейт: hr.b в test без мутаций'; exit 1; }
+exit 0
+SH
+chmod +x "$T/repo/.git/hooks/pre-commit"
+map_text test test 1 0 0 > "$T/repo/dev-map.yaml"     # чужая правка: hr.b wip→test
+map_text test test 1 1 0 > "$T/model-map.yaml"        # модель: дописала hr.n
+before=$(head_of "$T")
+out=$(run_daemon "$T")
+verdict "$([ "$before" != "$(head_of "$T")" ] && [ "$(in_head_map "$T" hr.n)" = 1 ] && [ "$(cat "$T/rc")" = 0 ] && echo 1 || echo 0)" \
+    "БОЛЬНОЙ 14.11: гейт отверг чужую правку — своя (hr.n) закоммичена одна, код 0" \
+    "HEAD сдвинут: $([ "$before" != "$(head_of "$T")" ] && echo да || echo нет), hr.n в HEAD: $(in_head_map "$T" hr.n), rc=$(cat "$T/rc"); вывод: $(printf '%s' "$out" | tail -2 | tr '\n' ' ')"
+verdict "$([ "$(status_in_head "$T" hr.b)" = wip ] && echo 1 || echo 0)" \
+    "БОЛЬНОЙ 14.11: отвергнутая чужая правка hr.b в HEAD не уехала" "hr.b в HEAD = $(status_in_head "$T" hr.b)"
+verdict "$(grep -A1 -- '- id: hr.b$' "$T/repo/dev-map.yaml" | grep -q 'status: test' && grep -q -- '- id: hr.n$' "$T/repo/dev-map.yaml" && [ -z "$(git -C "$T/repo" diff --cached --name-only)" ] && echo 1 || echo 0)" \
+    "БОЛЬНОЙ 14.11: чужая правка hr.b осталась в дереве, индекс чист" \
+    "индекс: $(git -C "$T/repo" diff --cached --name-only | tr '\n' ' '); дерево: $(git -C "$T/repo" diff --stat | tail -1)"
+verdict "$(cmp -s "$T/repo/dev-map.yaml" "$T/model-map.yaml" && echo 1 || echo 0)" \
+    "14.11, сосед: дерево карты = правка модели поверх чужой, ничего не потеряно"
+
 # ── сверка: служебные темы и покрытые картой коммиты не считаются пропуском ──
 # Фильтр судится на ЖИВОМ значении ключа из harness.conf (разбор файла), а не
 # на копии списка: копия разъехалась бы с конфигом молча.

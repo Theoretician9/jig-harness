@@ -32,16 +32,30 @@ def refuse(message: str) -> None:
     sys.exit(2)
 
 
-def probe_files(tree: Path) -> list[str]:
+def tree_files(tree: Path) -> list[str]:
     # Непроиндексированная, но не игнорируемая проба — ровно тот молчаливый случай.
     listed = subprocess.run(
-        ["git", "-C", str(tree), "ls-files", "--cached", "--others",
-         "--exclude-standard"], capture_output=True, text=True)
+        ["git", "-C", str(tree), "-c", "core.quotepath=off", "ls-files", "--cached",
+         "--others", "--exclude-standard"], capture_output=True, text=True)
     if listed.returncode != 0:
         refuse(f"дерево не читается git: {tree}: {listed.stderr.strip()}")
-    return sorted(f for f in listed.stdout.splitlines()
+    return listed.stdout.splitlines()
+
+
+def probe_files(files: list[str]) -> list[str]:
+    return sorted(f for f in files
                   if fnmatch.fnmatchcase(os.path.basename(f), "test_*.py")
                   or fnmatch.fnmatchcase(os.path.basename(f), "test_*.sh"))
+
+
+def dir_absent(key: str, files: list[str]) -> bool:
+    """Каталог исключения, которого в дереве нет вовсе.
+
+    Данные едут в публичную сборку и копии, а `.tasks/` — каталог задач ЭТОЙ
+    установки: в сборке его нет, и исключение там ничего не обещает. Каталог
+    есть, а проб в нём нет — исключение мёртвое, это судится как прежде.
+    """
+    return key.endswith("/") and not any(f.startswith(key) for f in files)
 
 
 def main() -> int:
@@ -53,7 +67,8 @@ def main() -> int:
         if not carrier.exists():
             refuse(f"носителя нет: {carrier}")
 
-    probes = probe_files(tree)
+    files = tree_files(tree)
+    probes = probe_files(files)
     covered = probe_coverage.covered_probes(mutations, invariants)
     exceptions = probe_coverage.declared_exceptions(mutations)
 
@@ -61,7 +76,8 @@ def main() -> int:
     for key, reason in exceptions.items():
         if not str(reason or "").strip():
             problems.append(f"исключение без причины: {key}")
-        if not any(probe_coverage.under_exception(p, key) for p in probes):
+        if not dir_absent(key, files) and not any(
+                probe_coverage.under_exception(p, key) for p in probes):
             problems.append(f"исключение ни к чему не относится: {key}")
     for probe in probes:
         if probe not in covered and not any(

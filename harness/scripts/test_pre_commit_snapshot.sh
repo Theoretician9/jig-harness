@@ -5,7 +5,7 @@
 # диск (check-event-writers.py — os.walk, check-external-callers.py — файлы по
 # пути), судили чужие незакоммиченные файлы. 02.11.2026 демон «память в гит»
 # шесть раз подряд получил «GATE FAIL: писатели_журналов» из-за чужого файла
-# вне git, которого в его коммите не было (hr.memory-edits-not-reaching-code).
+# вне git, которого в его коммите не было.
 #
 # Стенд: клон проекта в mktemp, своя установка (HARNESS_INSTALL_CONF: PROJECT_DIR,
 # LOG_DIR, STATE_DIR — стенд), свои crontab/systemctl/sudo на PATH: внешние
@@ -58,28 +58,82 @@ EOF
 export HARNESS_INSTALL_CONF="$T/install.conf"
 unset PROJECT_DIR LOG_DIR STATE_DIR SECRETS_DIR HEARTBEAT_DIR PANEL_STATE_DIR INSTALL_CONF GIT_INDEX_FILE
 
-# Подставные внешние вызывающие. crontab зовёт один файл стенда; systemctl
-# показывает службу, только если стенд положил её путь в $T/stale.
+# Подставные внешние вызывающие. crontab и список юнитов отдают строки стенда:
+# их выводит stand_sources из библиотеки процессов клона, так что гейт
+# библиотека_процессов зелёный по построению, а живой crontab не участвует.
+# systemctl показывает работающую службу, только если стенд положил её путь в $T/stale.
 cat > "$T/bin/crontab" <<EOF
 #!/usr/bin/env bash
-[ "\${1:-}" = "-l" ] && echo "*/5 * * * * $S/scripts/ext_target.sh"
+[ "\${1:-}" = "-l" ] && cat "$T/crontab.lines"
 EOF
 cat > "$T/bin/systemctl" <<EOF
 #!/usr/bin/env bash
-[ -s "$T/stale" ] || exit 0
 case "\$1" in
-    list-units) echo "harness-proba.service loaded active running proba" ;;
-    show) echo "ActiveState=active"
+    list-unit-files) cat "$T/units.lines" ;;
+    list-units) [ ! -s "$T/stale" ] || echo "harness-proba.service loaded active running proba" ;;
+    show) [ -s "$T/stale" ] || exit 0
+          echo "ActiveState=active"
           echo "ActiveEnterTimestamp=\$(date -d '-1 hour' '+%a %Y-%m-%d %H:%M:%S %Z')"
           echo "ExecStart={ path=\$(cat "$T/stale") ; argv[]=\$(cat "$T/stale") ; }" ;;
 esac
+exit 0
 EOF
 printf '#!/usr/bin/env bash\nexit 1\n' > "$T/bin/sudo"
 chmod +x "$T/bin/"*
 export PATH="$T/bin:$PATH"
 
+# Источники запуска стенда — из библиотеки процессов клона: строка крона на каждую
+# крон-запись (путь — на клон), юниты служб и «состояние_из», git-хуки записей git-<хук>.
+# Файл, который зовёт cron в случаях пробы (ext_target.sh), вносится в библиотеку
+# клона своей записью: иначе он «без записи» и гейт библиотеки краснит каждый коммит.
+stand_sources() {  # клон, каталог стенда
+    python3 - "$1" "$2" <<'PY'
+import json, sys
+from pathlib import Path
+import yaml
+root, stand = Path(sys.argv[1]), Path(sys.argv[2])
+lib = root / "harness/config/process-library.json"
+sched = root / "harness/config/process-library.yaml"
+data = json.loads(lib.read_text(encoding="utf-8"))
+data["процессы"].append({"id": "proba-ext-target", "название": "цель крона стенда пробы",
+                         "запуск": "крон", "статус": "работает", "файлы": ["scripts/ext_target.sh"]})
+lib.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+text = sched.read_text(encoding="utf-8")
+lines = text.splitlines(keepends=True)
+heads = [i for i, line in enumerate(lines) if line.startswith("процессы:")]
+assert len(heads) == 1, "в process-library.yaml нет единственного раздела «процессы:»"
+lines.insert(heads[0] + 1, "  proba-ext-target:\n    запуск: крон\n    расписание: '*/5 * * * *'\n"
+             "    команда: scripts/ext_target.sh\n")
+text = "".join(lines)
+assert "proba-ext-target" in (yaml.safe_load(text).get("процессы") or {})
+sched.write_text(text, encoding="utf-8")
+cron, units, hooks = [], [], []
+for rec in data["процессы"]:
+    if str(rec.get("статус", "")).startswith("снят"):
+        continue
+    own = [f for f in rec.get("файлы", []) if not f.startswith("/")]
+    if rec.get("запуск") == "крон" and own:
+        cron.append(f"*/5 * * * * {root}/{own[0]}")
+    units += rec.get("юниты") or ([f"harness-{rec['id']}.service"] if rec.get("запуск") == "служба" else [])
+    units += (rec.get("состояние_из") or {}).get("systemd") or []
+    if rec.get("запуск") == "хук" and rec["id"].startswith("git-") and own:
+        hooks.append(f"{rec['id'][4:]} {own[0]}")
+assert cron and units and hooks, "библиотека клона не дала крона, юнитов или хуков"
+(stand / "crontab.lines").write_text("\n".join(cron) + "\n", encoding="utf-8")
+(stand / "units.lines").write_text("".join(f"{u} enabled enabled\n" for u in dict.fromkeys(units)), encoding="utf-8")
+(stand / "hooks.lines").write_text("\n".join(hooks) + "\n", encoding="utf-8")
+PY
+}
+
 git clone -q "$SRC" "$S" || { echo "ПЛОХО: клон не создан"; echo "ИТОГ: путей 1, неудач 1"; exit 1; }
 g() { git -C "$S" -c user.name=proba -c user.email=proba@stend -c core.quotepath=false "$@"; }
+# Свой harness.conf стенда: копия шаблона из клона с выдуманным именем продукта.
+# Живой /etc/harness/harness.conf пробу не судит: на свежей копии у шаблона
+# PRODUCT_DIR и PRODUCT_ALIASES пусты, и раздел 12 краснел без всякой поломки.
+# HARNESS_CONF читают и хук стенда, и гейты, и сама проба.
+g show HEAD:harness/config/harness.conf | sed 's/^PRODUCT_ALIASES=.*/PRODUCT_ALIASES="probeprodukt"/' > "$T/harness.conf"
+grep -q '^PRODUCT_ALIASES="probeprodukt"$' "$T/harness.conf" || { echo "ПЛОХО: в шаблоне нет PRODUCT_ALIASES"; echo "ИТОГ: путей 1, неудач 1"; exit 1; }
+export HARNESS_CONF="$T/harness.conf"
 cp "$GATE" "$S/scripts/pre-commit-gate.sh"
 cp "$WRITERS" "$S/scripts/check-event-writers.py"
 cp "$CALLERS" "$S/scripts/check-external-callers.py"
@@ -91,8 +145,13 @@ echo "заметка 0" > "$S/probe-note.txt"
 # Отслеживаемые файлы для случаев «чужая неиндексированная правка»: импорты и харнес_не_чист.
 printf 'x = 1\n' > "$S/scripts/probe_import.py"
 printf 'x = 1\n' > "$S/scripts/probe_clean.py"
+stand_sources "$S" "$T" || { echo "ПЛОХО: источники стенда не выведены из библиотеки"; echo "ИТОГ: путей 1, неудач 1"; exit 1; }
 g add -A && g commit -q --no-verify -m "стенд" || { echo "ПЛОХО: коммит стенда"; echo "ИТОГ: путей 1, неудач 1"; exit 1; }
-ln -sf "$S/scripts/pre-commit-gate.sh" "$S/.git/hooks/pre-commit"
+# Git-хуки — те, что называет библиотека (записи git-<хук>), симлинками, как в живом проекте.
+while read -r hook file; do
+    ln -sf "../../$file" "$S/.git/hooks/$hook"
+done < "$T/hooks.lines"
+[ -x "$S/.git/hooks/pre-commit" ] || { echo "ПЛОХО: библиотека клона не назвала хук pre-commit"; echo "ИТОГ: путей 1, неудач 1"; exit 1; }
 BASE_REV="$(g rev-parse HEAD)"
 
 # Нарушитель — прямая дозапись в журнал мимо emit, файла нет ни в долге, ни в реестре.
@@ -157,6 +216,8 @@ commit_note -o
 check "чистый commit -o проходит все гейты" "$(passed; echo $?)"
 check "внешние_вызовы проверили строку стенда (счёт ≥ 1)" \
     "$(grep -qE 'зовут существующие файлы \([1-9][0-9]*\)' <<< "$OUT"; echo $?)"
+check "библиотека_процессов судила источники стенда — чисто" \
+    "$(grep -qE 'check-process-library: чисто, записей [1-9]' <<< "$OUT"; echo $?)"
 
 echo "── 1. чужой мусор в рабочем дереве не краснит мой коммит"
 stray_text > "$S/$STRAY"
@@ -334,11 +395,11 @@ echo "── 12. харнес_не_чист судит коммит"
 PURE="scripts/probe_clean.py"
 # Имя продукта — из тех же данных, что читает гейт: литерал в харнесе сам
 # был бы нарушением.
-PRODUCT="$(python3 - "$S/scripts/check-harness-clean.py" <<'PY'
+PRODUCT="$(python3 - "$S/scripts/check-harness-clean.py" "$T/harness.conf" <<'PY'
 import importlib.util, sys
 spec = importlib.util.spec_from_file_location("clean", sys.argv[1])
 clean = importlib.util.module_from_spec(spec); spec.loader.exec_module(clean)
-print((clean.имена_продукта() or [""])[0])
+print((clean.имена_продукта(sys.argv[2]) or [""])[0])
 PY
 )"
 case_check "имя продукта задано в harness.conf" "$([ -n "$PRODUCT" ]; echo $?)"

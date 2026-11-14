@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Сборщик личности: системный промпт класса запуска (спека hr.standards-and-policy §4.3).
+"""Сборщик личности: системный промпт класса запуска (спека личности и политики §4.3).
 
     self-prompt.py --класс <класс> --в <файл>
     self-prompt.py --карточки --в <каталог>     собрать карточки помощников
@@ -93,6 +93,18 @@ def piece_of(name: str, spec: dict, etalon: Path, tree: Path, etalon_present: bo
     return piece if piece.endswith("\n") else piece + "\n"
 
 
+PASSPORT_KEYS = ("PROJECT_DIR", "AGENT_USER", "PROJECT_NAME")
+
+
+def expand_passport(body: str) -> str:
+    """Слой 1 обезличен (${PROJECT_DIR}): модель получает значения этой установки."""
+    values = config.конфиг()
+    for key in PASSPORT_KEYS:
+        if values.get(key):
+            body = body.replace("${" + key + "}", values[key].strip())
+    return body
+
+
 def build(cls: str, policy: dict, etalon: Path, tree: Path) -> tuple:
     classes = policy["классы"]
     if cls not in classes:
@@ -103,7 +115,7 @@ def build(cls: str, policy: dict, etalon: Path, tree: Path) -> tuple:
         if name not in policy["наборы"]:
             raise Refusal(f"класс {cls}: набора «{name}» нет в политике")
         pieces.append(piece_of(name, policy["наборы"][name], etalon, tree, etalon_present))
-    body = "\n".join(pieces)
+    body = expand_passport("\n".join(pieces))
     tail = hashlib.sha256(body.encode("utf-8")).hexdigest()[:6]
     return f"Метка сборки: {cls}-{tail}\n{body}", etalon_present
 
@@ -161,8 +173,9 @@ def run_cards(args, policy: dict, etalon: Path, tree: Path) -> int:
             print(f"self-prompt: карточка {name} не равна сборке: пересобери "
                   f"(self-prompt.py --карточки --в {folder})", file=sys.stderr)
         return REFUSED if stale else OK
-    for name, text in cards.items():
-        write_atomic(Path(args.out) / f"{name}.md", text)
+    Path(args.out).mkdir(parents=True, exist_ok=True)
+    for name in stale_cards(cards, Path(args.out)):
+        write_atomic(Path(args.out) / f"{name}.md", cards[name])
     return OK if etalon_present else DEGRADED
 
 

@@ -14,7 +14,7 @@
 Коды: 0 прочитано/отправлено · 1 push отвергнут удалённым · 2 отказ двери, правок
 или конфига клона · 3 перепись истории · 4 нет клона, ключа, ключа конфига, якоря
 или состояния читателя, роль не host · 5 сеть недоступна (таймаут или потолок fetch).
-Спека и контракт: .tasks/hr.harness-evolution-network/.
+Спека и контракт — в задаче сети эволюции харнеса.
 """
 from __future__ import annotations
 
@@ -38,8 +38,10 @@ import yaml
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE / "lib"))
 import cards  # noqa: E402
-from config import конфиг, путь_harness_conf  # noqa: E402
+import events  # noqa: E402
+from config import heartbeat_dir, конфиг, путь_harness_conf  # noqa: E402
 
+SRC = "scripts/evolution-net.py"
 OK, PUSH_REJECTED, DOOR_REFUSED, HISTORY_REWRITTEN, NOT_READY, NO_NETWORK = 0, 1, 2, 3, 4, 5
 # Причина отказа и путь, которые идут в журнал и состояние, — чужие данные: без
 # потолка коммит X раздувает их своим именем файла.
@@ -740,7 +742,20 @@ def read_tick(cfg: Settings) -> int:
     state.pop("first", None)   # читатель принял своё: --первый больше не повторить
     save_state(cfg, state)
     print(f"evolution-net --читать: судимо {judged}, принято {taken}, отвергнуто {refused}, карточек {made}")
+    touch_mark()
     return OK
+
+
+def touch_mark() -> None:
+    """Метка пульса «тик прошёл»: задание evolution-net-reader стоит в расписании,
+    и без метки его смерть не видел бы сторож меток. Ставится только удачным
+    тиком — отказ подряд и есть та смерть, о которой сторож должен сказать."""
+    try:
+        directory = Path(heartbeat_dir())
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "evolution-net").touch()
+    except OSError:
+        pass   # пульс не вправе ронять тик, уже сохранивший состояние
 
 
 # ── писатель --якорь ────────────────────────────────────────────────────────
@@ -1047,6 +1062,15 @@ def send_command(cfg: Settings, sha: str) -> int:
 
 # ── вход ────────────────────────────────────────────────────────────────────
 
+def _read_tick_code(cfg) -> int:
+    """Отказ тика становится кодом возврата ВНУТРИ events.run: снаружи он обратился бы в код 1."""
+    try:
+        return read_tick(cfg)
+    except Refusal as refusal:
+        print(refusal.text, file=sys.stderr)
+        return refusal.code
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     mode = parser.add_mutually_exclusive_group(required=True)
@@ -1064,7 +1088,8 @@ def main(argv: list[str]) -> int:
         if args.first and not args.anchor:
             raise Refusal(DOOR_REFUSED, "--первый только с --якорь")
         if args.read:
-            return read_tick(cfg)
+            return events.run(SRC, lambda: _read_tick_code(cfg), journal="evolution-net",
+                              name="evolution-net-reader")
         if args.anchor:
             if not args.edits:
                 raise Refusal(DOOR_REFUSED, "--якорь требует --правки <каталог>")

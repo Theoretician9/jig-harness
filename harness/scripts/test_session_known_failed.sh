@@ -20,7 +20,7 @@ chmod +x "$T/bin/systemctl"
   sed -n '/^# --- упавшие systemd-юниты/,/^# --- контейнеры/p' "$HOOK" | head -n -1; } > "$T/blk.sh"
 [ "$(wc -l < "$T/blk.sh")" -gt 5 ] || { echo "ПЛОХО: блок юнитов в хуке не найден"; exit 1; }
 fail=0
-run() { FAKE_UNITS="$1" PATH="$T/bin:$PATH" bash "$T/blk.sh" 2>&1; }
+run() { FAKE_UNITS="$1" PATH="$T/bin:$PATH" SHIFT_SELF_MARK="$T/shift.mark" bash "$T/blk.sh" 2>&1; }
 check() { # имя, вывод, шаблон-есть, шаблон-нет
     if grep -q "$3" <<<"$2" && ! grep -q "$4" <<<"$2"; then echo "  ок    $1"
     else echo "  ПЛОХО $1: $2"; fail=1; fi

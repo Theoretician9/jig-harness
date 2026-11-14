@@ -599,6 +599,8 @@ class PackageHistory:
     def __init__(self, root: str) -> None:
         self.root = root
         self._found = None
+        self._own = None
+        self._rules = None
 
     def get(self):
         if self._found is None:
@@ -613,7 +615,16 @@ class PackageHistory:
             rules = layout_history.load_rules(table)
         except (OSError, yaml.YAMLError, AttributeError) as error:
             return layout_history.NoHistory(f"таблица перевода не прочитана: {table}: {error}")
+        self._rules = rules
         return layout_history.read_history(self.root, rules)
+
+    def own(self):
+        """Своё копии: множество путей проекта или NoHistory; git зовётся один раз."""
+        if self._own is None:
+            found = self.get()
+            self._own = found if isinstance(found, layout_history.NoHistory) else (
+                layout_history.own_paths(self.root, self._rules))
+        return self._own
 
 
 def history_ours(history: PackageHistory, project: str):
@@ -633,13 +644,14 @@ def history_ours(history: PackageHistory, project: str):
 
 
 def judge_prior(prior: PriorManifest, entries: list, absent: list, project: str, lift: str,
-                ours=None):
+                ours=None, own=frozenset()):
     """Суд о лишнем по читаемой прежней описи; None — судить не по чему."""
     if prior.parsed is None:
         return None, Removals([])
     verdict = layout_manifest.judge_extra(prior.parsed, manifest_plan(entries), absent, project,
                                           removal_limit(), lift=bool(lift),
-                                          lift_only=prior.parsed.deferred, ours=ours)
+                                          lift_only=prior.parsed.deferred, ours=ours,
+                                          own=own)
     removals = Removals([(rel, verdict.seeded.get(rel) or row_blob(prior.parsed, rel))
                          for rel in sorted(verdict.would_remove)])
     removals.seeded = set(verdict.seeded) & verdict.would_remove
@@ -744,8 +756,13 @@ def pass_one(plan_raw: bytes, project: str, selftest: bool, lift: str,
             ready.seed_lines = ["затравки нет: режим отката"]
     else:
         ready.prior = read_prior(project)
-        ready.verdict, ready.removals = judge_prior(ready.prior, entries, ready.absent, project,
-                                                    lift, history_ours(history, project))
+        own = history.own() if ready.prior.parsed is not None else frozenset()
+        unchecked = own.reason if isinstance(own, layout_history.NoHistory) else ""
+        ready.verdict, ready.removals = judge_prior(
+            ready.prior, entries, ready.absent, project, lift, history_ours(history, project),
+            frozenset() if unchecked else own)
+        if unchecked and ready.removals.rows:
+            ready.notes.append(f"своё копии не проверено: {unchecked}")
         ready.seed_lines, approved = judge_seed(ready, project, history, selftest)
         ready.removals.add_seeded(approved)
         archive_needed = bool(ready.removals.rows) or any(

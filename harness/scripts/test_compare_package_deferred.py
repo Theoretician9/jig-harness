@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Пробы: сверка с пакетом в дереве помощника откладывается до очереди слияния.
 
-Спека .tasks/hr.per-helper-code-copies/спека.md §5, Р-1, Т3. Контракт:
+Спека задачи §5, Р-1, Т3. Контракт:
   HELPER_WORKTREE="1" (HARNESS_CONF, затем конфиг дерева; не «1» — 0) и корень
   `git rev-parse --show-toplevel` — СВЯЗАННОЕ дерево (`--git-dir` ≠ `--git-common-dir`),
   лежащее под `<родитель --git-common-dir>/.claude/worktrees/` → содержимое с пакетом не

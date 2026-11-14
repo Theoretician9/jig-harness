@@ -210,7 +210,7 @@ MCP_MUTATE = re.compile(
 )
 # 4. Модель мимо носителя. Личность смены и класс запуска даёт только
 #    scripts/claude-run.sh; голый `claude` из оболочки модели приходит без неё
-#    (спека hr.standards-and-policy, путь 16). Имя команды — как слово: `claude-run.sh`
+#    (спека личности и политики, путь 16). Имя команды — как слово: `claude-run.sh`
 #    сюда не попадает. Не модель: подкоманды и справка.
 CLAUDE_МИМО_НОСИТЕЛЯ = re.compile(
     _POS + r"(?:[\w.~$/-]*/)?claude(?![\w-])"
@@ -1785,6 +1785,92 @@ def сеть_мимо_двери(cmd: str) -> str | None:
     )
 
 
+# Глобальные флаги git со значением отдельным словом (как в _git_push_звено).
+_GIT_ФЛАГ_СО_ЗНАЧЕНИЕМ = {"-C", "-c", "--git-dir", "--work-tree", "--namespace"}
+# Флаги `git commit`, берущие значение следующим словом: значение — не путь.
+_COMMIT_ДЛИННЫЕ_СО_ЗНАЧЕНИЕМ = {
+    "--file", "--message", "--reuse-message", "--reedit-message", "--template", "--author",
+    "--date", "--cleanup", "--fixup", "--squash", "--trailer",
+}
+# Короткие флаги со значением: приклеено, если за буквой есть текст, иначе — следующее слово.
+_COMMIT_КОРОТКИЕ_СО_ЗНАЧЕНИЕМ = "FmCct"
+_ЭКСПОРТ_ИНДЕКСА = {"export", "declare", "typeset"}
+
+
+def _доводы_commit(звено: dict) -> list[str] | None:
+    """Доводы звена `git [флаги] commit …` после слова commit; иначе None.
+
+    Слово сравнивается целиком: `commit-tree` и `commit-graph` — другие команды.
+    """
+    argv = звено["argv"]
+    if not argv or os.path.basename(argv[0]) != "git":
+        return None
+    i = 1
+    while i < len(argv) and argv[i].startswith("-"):
+        i += 2 if argv[i] in _GIT_ФЛАГ_СО_ЗНАЧЕНИЕМ else 1
+    if i < len(argv) and argv[i] == "commit":
+        return argv[i + 1:]
+    return None
+
+
+def _есть_путь_у_commit(доводы: list[str]) -> bool:
+    """Назван ли путь: после `--`, позиционным словом или `--pathspec-from-file`."""
+    i = 0
+    while i < len(доводы):
+        д = доводы[i]
+        i += 1
+        if д == "--":
+            return i < len(доводы)
+        if д.startswith("--pathspec-from-file"):
+            return True
+        if д.startswith("--"):
+            i += 1 if д in _COMMIT_ДЛИННЫЕ_СО_ЗНАЧЕНИЕМ else 0
+        elif д.startswith("-") and len(д) > 1:
+            буквы = д[1:]
+            где = next((k for k, б in enumerate(буквы) if б in _COMMIT_КОРОТКИЕ_СО_ЗНАЧЕНИЕМ), None)
+            i += 1 if где is not None and где == len(буквы) - 1 else 0
+        else:
+            return True
+    return False
+
+
+def _экспортирует_индекс(звено: dict) -> bool:
+    """Звено `export`/`declare -x`/`typeset -x`, среди слов которого имя GIT_INDEX_FILE (с `=` или без)."""
+    argv = звено["argv"]
+    if not argv or argv[0] not in _ЭКСПОРТ_ИНДЕКСА:
+        return False
+    флаги = [а for а in argv[1:] if а.startswith("-")]
+    if argv[0] != "export" and not any("x" in ф for ф in флаги):
+        return False
+    return any(а.partition("=")[0] == "GIT_INDEX_FILE" for а in argv[1:])
+
+
+def коммит_мимо_обёртки(cmd: str) -> str | None:
+    """Причина отказа, если `git commit` идёт с личным индексом или путями мимо обёртки.
+
+    `git commit -F` пишет текст в общий .git/COMMIT_EDITMSG и перечитывает его после хука
+    commit-msg; при личном индексе и при путях index.lock у каждого свой, и сосед подменяет
+    сообщение. Обёртка держит общий замок и сверяет сообщение после. Обычный коммит без
+    путей и личного индекса сторож пропускает: его сериализует общий index.lock.
+    Звенья разбирает `_звенья`; нагрузки `bash -c`/`eval` судит рекурсия check().
+    """
+    индекс_экспортирован = False
+    for звено in _звенья(cmd):
+        индекс_экспортирован = индекс_экспортирован or _экспортирует_индекс(звено)
+        доводы = _доводы_commit(звено)
+        if доводы is None:
+            continue
+        if "GIT_INDEX_FILE" in звено["env"] or индекс_экспортирован or _есть_путь_у_commit(доводы):
+            return (
+                "Коммит с личным индексом или путями — только обёрткой:\n"
+                "  bash scripts/git-commit-locked.sh -F <файл> -- <пути>\n"
+                "(общий .git/COMMIT_EDITMSG: сосед подменяет сообщение).\n"
+                "Личный индекс — переменной\n"
+                "перед обёрткой: GIT_INDEX_FILE=<личный> bash scripts/git-commit-locked.sh -F -"
+            )
+    return None
+
+
 def имена_продукта() -> list[str]:
     """Имена продукта из harness.conf: каталог и прозвища. Нет ключей — пусто."""
     данные = read_conf(os.environ.get("HARNESS_CONF") or HARNESS_CONF_PATH)
@@ -2838,6 +2924,10 @@ def check(cmd: str, вложенная: bool = False, предел_снаруж�
     сеть = сеть_мимо_двери(видимое)
     if сеть:
         return deny(сеть)
+
+    мимо_обёртки = коммит_мимо_обёртки(cmd)
+    if мимо_обёртки:
+        return deny(мимо_обёртки)
 
     if ALERT_TASK_WRITE.search(видимое):
         return deny(

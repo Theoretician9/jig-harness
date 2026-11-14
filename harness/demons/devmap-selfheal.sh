@@ -455,6 +455,30 @@ if [ "${AGENT_RC:-0}" -ne 0 ]; then
     exit 1
 fi
 
+# Своя правка без чужой: pre-commit вправе отвергнуть чужую правку дерева
+# (переводы в test, оставленные ждать мутаций), и тогда пропуски модели не
+# уехали бы вовсе. Правка модели — разница «снимок до → карта после»;
+# трёхсторонним слиянием она ложится на карту HEAD и коммитится своим индексом,
+# чужая остаётся в дереве. Конфликт слияния — отказ, как без этой попытки.
+commit_own_edit() {
+    local merged index blob rc=0
+    merged=$(mktemp); index=$(mktemp -u)
+    if git -C "$PROJECT_DIR" show HEAD:dev-map.yaml > "$merged" \
+        && git merge-file -q "$merged" "$MAP_BEFORE" "$DEVMAP" \
+        && blob=$(git -C "$PROJECT_DIR" hash-object -w --path=dev-map.yaml "$merged") \
+        && GIT_INDEX_FILE="$index" git -C "$PROJECT_DIR" read-tree HEAD \
+        && GIT_INDEX_FILE="$index" git -C "$PROJECT_DIR" update-index --cacheinfo "100644,$blob,dev-map.yaml" \
+        && soobshchenie_kommita "" | GIT_INDEX_FILE="$index" git -C "$PROJECT_DIR" commit -q -F -; then
+        # Общий индекс держит карту, застёгнутую отвергнутым add: вернуть к HEAD.
+        git -C "$PROJECT_DIR" reset -q -- "${COMMIT_PATHS[@]}" \
+            || say "общий индекс не сброшен к HEAD (git занят) — карта в нём старше коммита"
+    else
+        rc=1
+    fi
+    rm -f "$merged" "$index"
+    return "$rc"
+}
+
 # Коммит карты — забота демона (Д-6): у агента нет Bash, git ему недоступен.
 # Трейлера Dev-Map здесь НЕТ и быть не должно: это служебный коммит, и правило
 # карты их освобождает (см. SVC_PREFIXES ниже — там же живёт `devmap:`).
@@ -490,6 +514,8 @@ if [ -n "$(git -C "$PROJECT_DIR" status --porcelain -- dev-map.yaml)" ]; then
         && soobshchenie_kommita "$FOREIGN_EDIT" \
         | git -C "$PROJECT_DIR" commit -q -F - -- "${COMMIT_PATHS[@]}"; then
         say "карта закоммичена${FOREIGN_EDIT:+ (вместе с чужой правкой, сказано в сообщении)}"
+    elif [ -n "$FOREIGN_EDIT" ] && commit_own_edit; then
+        say "карта закоммичена без чужой правки: целиком её отверг pre-commit, чужая осталась в дереве"
     else
         say "коммит карты НЕ прошёл — правка в рабочем дереве, водораздел на месте"
         alive

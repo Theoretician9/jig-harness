@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Пробы сборщика личности scripts/self-prompt.py (спека hr.standards-and-policy §4.3).
+"""Пробы сборщика личности scripts/self-prompt.py (спека §4.3).
 
 Сборщик кладёт в файл системный промпт класса запуска: наборы текста по
 harness/config/launch-policy.yaml. Сбой здесь опасен тихо: модель уходит в
@@ -283,6 +283,87 @@ def check_label_and_no_cache(root: Path) -> None:
     cases.check("подменённый файл перезаписан следующей сборкой", (True, True), (is_label(rebuilt), rebuilt == third))
 
 
+PASSPORT_KEYS = ("PROJECT_DIR", "AGENT_USER", "PROJECT_NAME")
+
+
+def run_with_passport(cls: str, out: Path, etalon: Path, tree: Path, policy: Path, conf: Path):
+    """Сборка на стенде с install.conf стенда: ключи паспорта из окружения убраны,
+    иначе они старше файла (config.конфиг) и проба судила бы паспорт машины."""
+    env = {k: v for k, v in os.environ.items() if k not in DOORS + PASSPORT_KEYS}
+    env.update(SELF_ETALON_DIR=str(etalon), SELF_TREE_DIR=str(tree), LAUNCH_POLICY=str(policy),
+               HARNESS_INSTALL_CONF=str(conf))
+    out.parent.mkdir(parents=True, exist_ok=True)
+    done = subprocess.run([sys.executable, str(COLLECTOR), "--класс", cls, "--в", str(out)],
+                          env=env, capture_output=True, text=True, timeout=60)
+    return done.returncode, out.read_text(encoding="utf-8") if out.exists() else ""
+
+
+def stand_passport(root: Path) -> tuple:
+    """(install.conf стенда, его PROJECT_DIR, его домашний каталог агента)."""
+    project, user = root / "proj-стенд", "жилец-стенд"
+    conf = root / "install.conf"
+    # Пробел в кавычках у имени: значение паспорта судится очищенным от краёв.
+    write(conf, f'PROJECT_DIR="{project}"\nAGENT_USER="{user}"\nPROJECT_NAME="Стенд "\n')
+    return conf, str(project), f"/home/{user}"
+
+
+def check_passport_expanded(root: Path) -> None:
+    """Р2/Р3: эталон обезличен (${PROJECT_DIR}),
+    и модель не должна получать подстановку нераскрытой."""
+    print("── паспорт: ${PROJECT_DIR} и ${AGENT_USER} раскрыты значениями install.conf ──")
+    etalon, tree, policy = make_stand(root)
+    conf, project, home = stand_passport(root)
+    # ${PROJECT_DIR} дважды: раскрыта каждая подстановка, не только первая.
+    role = ("Проект `${PROJECT_DIR}`; пакет `/home/${AGENT_USER}/starter`; копия «${PROJECT_NAME}»;\n"
+            "журналы ${PROJECT_DIR}/.tasks.\n")
+    write(etalon / "one.md", role)
+    write(tree / "harness" / "self" / "one.md", role)
+    for mode, source in (("эталон есть", etalon), ("эталона нет", root / "нет-эталона")):
+        rc, text = run_with_passport("прямой", root / "out" / f"паспорт-{mode}.md", source, tree, policy, conf)
+        cases.check(f"{mode}: собрано (код 0 или 3)", True, rc in (0, 3))
+        cases.check(f"{mode}: в собранном нет «${{»", [], re.findall(r"\$\{\w*\}?", text))
+        cases.check(f"{mode}: PROJECT_DIR стенда подставлен", True, project in text)
+        cases.check(f"{mode}: дом AGENT_USER стенда подставлен", True, f"{home}/starter" in text)
+        cases.check(f"{mode}: PROJECT_NAME подставлен без пробелов края", True, "копия «Стенд»" in text)
+    # Паспорт без ключа (старая установка, ключ не записан): сборка не падает, модель
+    # получает личность; нераскрытая подстановка — меньшее зло, чем модель без личности.
+    bare = root / "install-без-имени.conf"
+    write(bare, f'PROJECT_DIR="{project}"\n')
+    rc, text = run_with_passport("прямой", root / "out" / "паспорт-без-ключа.md", etalon, tree, policy, bare)
+    cases.check("паспорт без AGENT_USER и PROJECT_NAME: собрано (код 0 или 3)", True, rc in (0, 3))
+    cases.check("паспорт без ключей: PROJECT_DIR всё равно подставлен", True, project in text)
+
+
+def live_sources(policy: dict, cls: str) -> list:
+    sets = policy.get("наборы") or {}
+    return [ROOT / sets[name]["из"] for name in policy["классы"][cls] if name in sets]
+
+
+def check_live_passport(root: Path) -> None:
+    """Живая политика на стенде с чужим паспортом: каждый класс без «${», и класс,
+    чья роль называет проект (подстановкой или литералом паспорта этой машины),
+    называет его значением стенда."""
+    print("── живая политика: каждый класс собран с паспортом стенда ──")
+    sys.path.insert(0, str(HERE / "lib"))
+    import config
+    machine_dir = (config.из_файла(config.путь_install_conf()).get("PROJECT_DIR") or "").strip()
+    conf, project, _ = stand_passport(root)
+    policy = yaml.safe_load(LIVE_POLICY.read_text(encoding="utf-8")) or {}
+    classes = list(policy.get("классы") or {})
+    cases.check("классы живой политики разобраны", True, len(classes) > 0)
+    for cls in classes:
+        rc, text = run_with_passport(cls, root / "live" / f"{cls}.md", root / "нет-эталона",
+                                     ROOT, LIVE_POLICY, conf)
+        cases.check(f"{cls}: собран", True, rc in (0, 3))
+        cases.check(f"{cls}: нет «${{»", [], re.findall(r"\$\{\w*\}?", text))
+        names_project = any("${PROJECT_DIR}" in s.read_text(encoding="utf-8")
+                            or (machine_dir and machine_dir in s.read_text(encoding="utf-8"))
+                            for s in live_sources(policy, cls) if s.is_file())
+        if names_project:
+            cases.check(f"{cls}: роль называет проект — значением стенда, не этой машины",
+                        (True, False), (project in text, bool(machine_dir) and machine_dir in text))
+
+
 def check_order(root: Path) -> None:
     print("── порядок наборов = порядок класса ──")
     etalon, tree, policy = make_stand(root)
@@ -338,7 +419,8 @@ def main() -> int:
         check_live_classes(root / "live")
         check_live_ceilings()
         for check in (check_layers, check_cut, check_refusals, check_label_and_no_cache,
-                      check_order, check_parallel, check_hygiene_ceiling):
+                      check_order, check_parallel, check_hygiene_ceiling,
+                      check_passport_expanded, check_live_passport):
             check(root / check.__name__)
     finally:
         shutil.rmtree(root, ignore_errors=True)

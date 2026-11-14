@@ -270,6 +270,68 @@ def probe_command(cp, stand: Stand, tmp: Path) -> None:
            debts(cp, root, "hr.cmd"), alerts.exists()))
 
 
+# Подставной прибор пачки: каждый вызов — строка «механизм|MUT_ONLY_LINES» в журнал.
+BATCH_PROBE = '''#!/usr/bin/env python3
+import os, sys
+with open(os.environ["STUB_CALLS"], "a", encoding="utf-8") as fh:
+    fh.write(sys.argv[-1] + "|" + os.environ.get("MUT_ONLY_LINES", "") + "\\n")
+print("=== мутационная проба: покраснели как надо 2, дыр 0, из кэша 0 ===")
+'''
+
+# Подставная дверь среза: каждый заход — строка в журнал, затем сама команда.
+BATCH_DOOR = '''#!/usr/bin/env bash
+echo "$*" >> "$STUB_DOOR_LOG"
+export HARNESS_IN_CHECKS_SLICE=1
+exec "$@"
+'''
+
+
+def probe_batch(cp, stand: Stand, tmp: Path) -> None:
+    """--мутации-задачи a,b,c: один заход в срез, общий механизм — один прогон,
+    бумага каждой задачи — только её механизмы."""
+    root = stand.root
+    scripts = root / "scripts"
+    shutil.copy(ACCEPTANCE, scripts / "acceptance.py")
+    (scripts / "lib").symlink_to(ACCEPTANCE.resolve().parent / "lib")
+    (scripts / "run-in-checks-slice.sh").write_text(BATCH_DOOR, encoding="utf-8")
+    stub = tmp / "batch-probe.py"
+    stub.write_text(BATCH_PROBE, encoding="utf-8")
+    calls, door = tmp / "batch-calls.log", tmp / "batch-door.log"
+    stand.commit("hr.a", MECHANISM)
+    stand.commit("hr.b", MECHANISM, SECOND)
+    stand.commit("hr.c", PLAIN)
+    acc = load(scripts / "acceptance.py", "acceptance_batch_stand")
+    lines = {i: set((acc.task_changed_lines(i, root, MECHANISM) or "").split(","))
+             for i in ("hr.a", "hr.b")}
+    env = {**os.environ, "HARNESS_MUTATION_PROBE": f"{sys.executable} {stub}",
+           "STUB_CALLS": str(calls), "STUB_DOOR_LOG": str(door)}
+    env.pop("HARNESS_IN_CHECKS_SLICE", None)
+    rc = subprocess.run([sys.executable, str(scripts / "acceptance.py"), "--мутации-задачи",
+                         "hr.a,hr.b,hr.c"], cwd=str(root), env=env, capture_output=True,
+                        text=True, timeout=120).returncode
+    runs = [l.split("|") for l in calls.read_text(encoding="utf-8").splitlines()] \
+        if calls.is_file() else []
+
+    def sections(task: str):
+        log = root / ".tasks" / task / "мутации.log"
+        if not log.is_file():
+            return None
+        return sorted(acc.paper_sections(log.read_text(encoding="utf-8"), [MECHANISM, SECOND]))
+
+    check("17 пачка a,b,c: один заход в срез, код 0", (1, 0),
+          (len(door.read_text(encoding="utf-8").splitlines()) if door.is_file() else 0, rc))
+    check("18 пачка: общий механизм прогнан один раз, всего прогонов 2",
+          sorted([MECHANISM, SECOND]), sorted(r[0] for r in runs))
+    mech_lines = next((set(r[1].split(",")) for r in runs if r[0] == MECHANISM), set())
+    check("19 пачка: прогон общего механизма покрывает строки обеих задач", True,
+          bool(lines["hr.a"] - {""}) and lines["hr.a"] | lines["hr.b"] <= mech_lines)
+    check("20 пачка: бумага у каждой своя — a только механизм, b оба, c без бумаги",
+          ([MECHANISM], sorted([MECHANISM, SECOND]), None),
+          (sections("hr.a"), sections("hr.b"), sections("hr.c")))
+    check("21 пачка: бумаги a и b судятся зелёными", ([], []),
+          (debts(cp, root, "hr.a"), debts(cp, root, "hr.b")))
+
+
 def probe_live(cp) -> None:
     live = cp._модуль_цены().конфиг()
     steps = live.get("шаги") or {}
@@ -293,6 +355,7 @@ def main() -> int:
                 ("уровни", lambda: probe_levels(cp)),
                 ("без git", lambda: probe_no_git(acc, cp, tmp / "nogit")),
                 ("команда", lambda: probe_command(cp, Stand(tmp / "cmd"), tmp)),
+                ("пачка", lambda: probe_batch(cp, Stand(tmp / "batch"), tmp)),
                 ("пульт", lambda: probe_live(cp))):
             try:
                 probe()

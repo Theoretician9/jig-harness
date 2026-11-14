@@ -105,6 +105,14 @@ report(not jobs_error and bool(jobs_parsed),
        f"разбор system-jobs.yaml даёт задания ({len(jobs_parsed)})",
        [jobs_error or "пустой список `задания`"] if jobs_error or not jobs_parsed else ())
 
+print("── 0а. читатель сети серверов стоит в расписании ──")
+# Читатель --читать без расписания не доносит находки копий до карточек: до 13.11.2026 его никто не звал.
+READER = "scripts/evolution-net.py --читать"
+reader_jobs = [j.get("имя") for j in jobs_parsed if READER in str(j.get("команда"))]
+report(bool(jobs_parsed) and bool(reader_jobs),
+       f"среди заданий system-jobs есть вызов `{READER}` ({len(reader_jobs)})",
+       [] if reader_jobs else ["задания с таким вызовом нет"])
+
 print("── 1. задания system-jobs → записи обоих файлов ──")
 # Задание system-jobs крутит либо крон, либо служба потока проверок — третьего хозяина у него нет.
 JOB_LAUNCHES = {"крон", "служба-проверок"}
@@ -408,7 +416,7 @@ with tempfile.TemporaryDirectory(prefix="pl-layer-") as layer_dir:
         else:
             os.environ["HARNESS_PROCESS_LIBRARY_LOCAL"] = saved_door
 
-print("── 13. судья поля «состояние_из» (hr.zapuskov-none-net-informacii-znachit §3.5) ──")
+print("── 13. судья поля «состояние_из» (§3.5) ──")
 # Поле говорит разрешителю состояния, откуда брать живость записи вне соглашения harness-<id>.*;
 # кривое или мёртвое поле дало бы вечное «неизвестно» без единой красной строки в воротах.
 JUDGE = HERE / "check-process-library.py"

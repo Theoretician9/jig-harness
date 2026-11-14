@@ -304,7 +304,7 @@ def case_failing_last_run(tmp: Path) -> None:
     log_dir.mkdir()
     hb.mkdir()
     passport(stand / "install.conf", tree, log_dir, hb)
-    names = "crashy steady healed paused verdict wrongcode"
+    names = "crashy steady healed paused verdict wrongcode restarted rerunfail"
     (stand / "harness.conf").write_text(f'HEARTBEAT_PERIODS="{" ".join(n + ":10" for n in names.split())}"\n',
                                         encoding="utf-8")
     for name in (".install-stamp", *names.split()):
@@ -317,10 +317,17 @@ def case_failing_last_run(tmp: Path) -> None:
 
     def end(ident: str, rc: int) -> str:
         return json.dumps({"event": "process.end", "data": {"id": ident, "pid": 1, "rc": rc}}) + "\n"
+
+    def start(ident: str) -> str:
+        return json.dumps({"event": "process.start", "data": {"id": ident, "pid": 2}}) + "\n"
     # healed: упал, потом вышел чисто — судится ПОСЛЕДНИЙ запуск.
+    # restarted: убит (143), перезапуск ещё идёт — код убитого уже не о нём.
+    # rerunfail: убит, перезапущен и перезапуск упал — падающий.
     (log_dir / "process-runs.jsonl").write_text(
         end("crashy", 1) + end("steady", 0) + end("healed", 1) + end("healed", 0)
-        + end("paused", 78) + end("verdict", 1) + end("wrongcode", 2), encoding="utf-8")
+        + end("paused", 78) + end("verdict", 1) + end("wrongcode", 2)
+        + end("restarted", 143) + start("restarted")
+        + end("rerunfail", 143) + start("rerunfail") + end("rerunfail", 1), encoding="utf-8")
     env = base_env(stand) | {"HARNESS_INSTALL_CONF": str(stand / "install.conf"),
                              "HARNESS_CONF": str(stand / "harness.conf"), "HEARTBEAT_DRY_SEND": "1",
                              "HARNESS_PROCESS_LIBRARY_JSON": str(library)}
@@ -335,7 +342,9 @@ def case_failing_last_run(tmp: Path) -> None:
     check("S4·healed (упал, затем rc=0) не падающий", not falls("healed"), said)
     check("S4·paused (rc=78, общий законный код) не падающий", not falls("paused"), said)
     check("S4·verdict (rc=1, законен по полю записи) не падающий", not falls("verdict"), said)
-    check("S4·сводка: МЁРТВЫХ 2, живых 4", "живых 4, МЁРТВЫХ 2" in out, said)
+    check("S4·restarted (убит 143, перезапуск идёт) не падающий", not falls("restarted"), said)
+    check("S4·rerunfail (убит, перезапуск вышел кодом 1) — падающий", falls("rerunfail"), said)
+    check("S4·сводка: МЁРТВЫХ 3, живых 5", "живых 5, МЁРТВЫХ 3" in out, said)
 
 
 def case_door_codes(tmp: Path) -> None:

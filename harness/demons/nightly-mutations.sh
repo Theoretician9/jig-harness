@@ -206,6 +206,18 @@ ZHURNAL="$LOG_DIR/nightly-mutations-$(date +%Y%m%d).log"
 say "недельный прогон мутаций: $MUT_CMD"
 harness_run nightly-mutations
 trap 'rc=$?; report_no_summary "$rc"; harness_run_end "$rc"' EXIT
+# Релиз идёт — прибор ждёт его конца; ожидание идёт в счёт срока (START_TS).
+RELEASE_POLL_S="${NIGHTLY_MUTATIONS_RELEASE_POLL_S:-300}"
+while reason="$(python3 -I "$PROJECT_DIR/scripts/lib/release_priority.py" --задачи "" 2>&1 >/dev/null)"; [ $? = 75 ]; do
+    if awk -v s="$START_TS" -v n="$(date +%s)" -v p="$RELEASE_POLL_S" -v m="$NIGHTLY_MUTATIONS_MAX_MIN" \
+        'BEGIN { exit !(n + p - s >= m * 60) }'; then
+        VERDICT=yielded
+        say "уступил релизу: срок ${NIGHTLY_MUTATIONS_MAX_MIN} мин вышел, пока шёл релиз — прибор не запущен"
+        exit 0
+    fi
+    say "ждёт релиза: $(printf '%s' "$reason" | head -1)"
+    sleep "$RELEASE_POLL_S"
+done
 # Срок мягкой остановки уходит прибору в окружении; дробные минуты допустимы.
 # Запас не меньше предела одного запуска пробы плюс минута: мутация, начатая у срока,
 # обязана кончиться до жёсткого предела.

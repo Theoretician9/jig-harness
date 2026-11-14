@@ -482,7 +482,7 @@ switched_off() {  # $1 = имя метки; rc 0 — процесс погаше
 }
 
 # Метку демон ставит и при запуске, который затем падает трейсбеком: свежая метка
-# не доказывает здоровья. Судья здесь один — последний process.end id в журнале
+# не доказывает здоровья. Судья здесь один — последнее событие id в журнале
 # запусков обёртки: rc вне законных кодов — демон падающий. Законные коды — данные
 # библиотеки процессов (общие + поле записи «законные_коды_выхода»): вердикт или
 # пауза не есть падение. Хвост журнала читаем, а не весь: он растёт.
@@ -502,13 +502,19 @@ with open(sys.argv[1], "rb") as fh:
     fh.seek(0, 2)
     fh.seek(max(0, fh.tell() - 4000000))
     lines = fh.read().decode("utf-8", "replace").splitlines()
+# Начатый после конца запуск отменяет вердикт прошлого: код убитого прогона —
+# не о том, что идёт сейчас (его висение ловит возраст метки).
 last = {}
 for line in lines:
-    if '"process.end"' not in line:
+    if '"process.end"' in line:
+        event = "end"
+    elif '"process.start"' in line:
+        event = "start"
+    else:
         continue
     try:
         data = json.loads(line)["data"]
-        last[data["id"]] = int(data["rc"])
+        last[data["id"]] = int(data["rc"]) if event == "end" else 0
     except (ValueError, KeyError, TypeError):
         continue
 for ident, rc in last.items():

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Пробы очереди слияния scripts/merge-queue.py — до кода (Т1).
 
-Спека .tasks/hr.per-helper-code-copies/спека.md §4 (контракт, шаги 1–7, коды 0–9), §7 Т1 а…о.
+Спека задачи §4 (контракт, шаги 1–7, коды 0–9), §7 Т1 а…о.
 Что проба ждёт от кода (сверх спеки):
   * корни: проект — PROJECT_DIR из install.conf (HARNESS_INSTALL_CONF), пакет —
     config.katalog_paketa() (HARNESS_STARTER); cwd пробы — не проект;

@@ -72,6 +72,29 @@ raised=0
     echo "сессия '$1' поднята с оболочкой, агент запущен вводом: $3"
 }
 
+# Режимы для сессии, которая УЖЕ есть: без режима скрипт говорит «уже есть — не трогаю»,
+# и подсказка «запусти start-agent.sh» там ничего не делает.
+#   --команда   печатает команду запуска агента (с носителем личности) и выходит;
+#   --в-панель  сессия есть и в панели оболочка — вводит в неё команду агента; в панели
+#               уже работает не оболочка (агент, любая программа) — ничего не вводит.
+if [ "${1:-}" = "--команда" ]; then
+    printf '%s\n' "$AGENT_START_CMD"
+    exit 0
+fi
+if [ "${1:-}" = "--в-панель" ]; then
+    if tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
+        pane_now=$(tmux display-message -p -t "$TMUX_SESSION" '#{pane_current_command}')
+        case "$pane_now" in
+            bash|sh|zsh|dash)
+                tmux send-keys -t "$TMUX_SESSION" "$AGENT_START_CMD" Enter
+                [ -z "${LOG_DIR:-}" ] || agent_started_mark "$LOG_DIR"
+                echo "в панели сессии '$TMUX_SESSION' была оболочка — агент запущен вводом: $AGENT_START_CMD" ;;
+            *) echo "в панели сессии '$TMUX_SESSION' работает «$pane_now», не оболочка — ничего не ввожу" ;;
+        esac
+        exit 0
+    fi
+fi
+
 if [ "${1:-}" = "--selftest" ]; then
     command -v tmux >/dev/null 2>&1 || { echo "SELFTEST: нет tmux — поднимать нечем"; exit 1; }
     ok=1

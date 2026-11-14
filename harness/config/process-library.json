@@ -390,7 +390,7 @@
       },
       "заводит_задачи": {
         "да": true,
-        "какие": "hr.alert-nightly-mutations-broken (ключ nightly-mutations:broken); для красного — nightly-mutations:red"
+        "какие": "карточка тревоги по ключу nightly-mutations:broken; для красного — nightly-mutations:red"
       },
       "файлы": [
         "harness/demons/nightly-mutations.sh",
@@ -629,6 +629,26 @@
         "приписка": {
           "способ": "обёртка",
           "признак": "run-background.sh evolution-collector"
+        },
+        "замер": "не измерено"
+      }
+    },
+    {
+      "id": "evolution-net-reader",
+      "название": "Читатель сети серверов харнеса",
+      "класс": "фоновый",
+      "запуск": "крон",
+      "статус": "работает",
+      "механизмы": [
+        "scripts/evolution-net.py"
+      ],
+      "файлы": [
+        "scripts/evolution-net.py"
+      ],
+      "доля_нагрузки": {
+        "приписка": {
+          "способ": "обёртка",
+          "признак": "run-background.sh evolution-net-reader"
         },
         "замер": "не измерено"
       }

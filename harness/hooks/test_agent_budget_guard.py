@@ -33,7 +33,7 @@
   * тип без собранной карточки (без типа, пусто, general-purpose, claude, Explore,
     Plan, claude-code-guide, plugin:x) — ОТКАЗ (код 2 или permissionDecision deny)
     с подсказкой harness-explorer и harness-worker: их системный промпт не правится,
-    личности в них нет (спека hr.standards-and-policy §4.4); отказ потолок не ест;
+    личности в них нет (спека §4.4); отказ потолок не ест;
     свои собранные карточки (harness-worker, harness-lead, harness-explorer) с
     отпечатком, равным текущей сборке класса, — проход без предупреждения;
     карточка с чужим отпечатком, без отпечатка или устаревшая после правки роли —

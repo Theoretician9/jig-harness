@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Пробы сети серверов харнеса, фаза 1 — написаны ДО кода.
 
-Карточка hr.harness-evolution-network, часть #2. Контракт v2:
-.tasks/hr.harness-evolution-network/pretask.yaml (решения управляющего Н-1..Н-7
+Часть #2 задачи. Контракт v2 —
+pretask.yaml задачи (решения управляющего Н-1..Н-7
 перекрывают план docs/plans/2026-11-12-evolution-net-phase1.md).
 
 Что охраняется. Хозяин читает общий репозиторий HarnessEvolution, куда пишут
@@ -266,6 +266,9 @@ class Stand:
         self.push(self.anchor)
         git(root, "clone", "-q", self.url, str(self.clone))
         git(root, "clone", "-q", self.url, str(self.project))
+        # Судья следов установки берёт id карточек из карты ПРОЕКТА (замок «карточки
+        # проекта не едут в сборку»); без неё он отвечает кодом 2 на любые правки.
+        (self.project / "dev-map.yaml").write_text(SAMPLE_MAP, encoding="utf-8")
         config = self.project / "harness" / "config"
         config.mkdir(parents=True)
         (config / "evolution-host.pub").write_text(
@@ -1438,7 +1441,14 @@ def section_boot(base: Path, keys: Keys) -> None:
     # изменения, родитель не origin/main или подпись не хозяина
     check("B4 --отправить первого якоря → код 0, remote main = sha", (0, anchor), (r2.rc, st.remote_main()))
     (st.project / "harness" / "config" / "evolution-anchor").write_text(anchor + "\n", encoding="utf-8")
+    mark = st.root / "heartbeat" / "evolution-net"
+    mark_before = mark.exists()
     r3 = st.tick()
+    # B4 — краснеет, если удачный тик не оставляет метку пульса evolution-net или она стоит
+    # до первого тика: задание evolution-net-reader в расписании, и без метки его смерть
+    # не видит сторож меток (гейты «задание и метка», «сроки присмотра»)
+    check("B4 метка пульса evolution-net: до тика нет, после удачного тика есть", (False, True),
+          (mark_before, mark.is_file()))
     # B4 — краснеет, если читатель не судит сам якорь как принятый коммит хозяина или не
     # заводит по карточке на каждую находку отсеянного дерева
     check("B4 --читать после якоря: код 0, карточек = находок дерева", (0, len(BOOT_FINDS), sorted(BOOT_FINDS)),

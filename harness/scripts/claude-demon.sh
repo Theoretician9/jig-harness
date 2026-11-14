@@ -114,40 +114,18 @@ POTOK_KAT="$LOG_DIR/demon-stream"
 RASHOD="$LOG_DIR/demon-spend.jsonl"
 mkdir -p "$POTOK_KAT"
 
-# Свой id сессии на каждый вызов и строка о нём ДО вызова: разрешитель токенов
-# по ней узнаёт, чей это вызов модели (транскрипт головной сессии называется id).
-SESSION_ID="$(cat /proc/sys/kernel/random/uuid)"
-DOVODY=(--session-id "$SESSION_ID" "${DOVODY[@]}")
-
 # Агент демона работает из пустого временного каталога: .claude/settings.json проекта
 # у него не грузится. Сторож записи память/ORDERS.md подключается явно, абсолютным
 # путём; признак демона HARNESS_DEMON он читает из окружения.
 export HARNESS_DEMON="$DEMON"
 ORDERS_HOOK_SETTINGS="$(jq -nc --arg c "python3 $PROJECT_DIR/scripts/hooks/orders_write_guard.py" \
     '{hooks: {PreToolUse: [{matcher: "Write|Edit|NotebookEdit|Bash", hooks: [{type: "command", command: $c, timeout: 5}]}]}}')"
-DOVODY=(--settings "$ORDERS_HOOK_SETTINGS" "${DOVODY[@]}")
-jq -nc --arg d "$DEMON" --arg s "$SESSION_ID" --arg w "$(date -Iseconds)" \
-    '{event: "demon.start", "демон": $d, session_id: $s, "когда": $w}' >>"$RASHOD"
 
 VYVOD_FAJL="$(mktemp)"
 OSHIBKI_FAJL="$(mktemp)"
 SUD_FAJL="$(mktemp)"
 TEKST_FAJL="$(mktemp)"
 trap 'rm -f "$VYVOD_FAJL" "$OSHIBKI_FAJL" "$SUD_FAJL" "$TEKST_FAJL"' EXIT
-# tee: сырой поток ложится в файл демона ПО ХОДУ, байт в байт; stderr отдельно,
-# чтобы его строки не попали в поток. Код берётся у первого звена конвейера.
-# Модель зовётся только через носитель: он собирает личность класса «демон» и
-# сам шлёт сигнал, если не собрал.
-bash "$PROJECT_DIR/scripts/claude-run.sh" --класс демон "${DOVODY[@]}" 2>"$OSHIBKI_FAJL" | tee -a "$POTOK_KAT/$DEMON.jsonl" >"$VYVOD_FAJL"
-KOD=${PIPESTATUS[0]}
-
-# 79: личность не собрана, модель не запускалась. Это не отказ API и не лимит:
-# судью и счёт повторяющихся отказов не трогаем, владельцу не пишем (сигнал
-# уже дал носитель), код отдаём вызывающему как есть.
-if [ "$KOD" -eq 79 ]; then
-    say "$DEMON: личность не собрана (носитель вернул 79) — модель не звана"
-    exit 79
-fi
 
 # Сырой поток растёт на каждый вызов (tee -a): сверх потолка из данных остаётся
 # хвост по границе строки — последний вызов цел, начало файла (может быть
@@ -157,12 +135,6 @@ potok_urezat() {
     [ "$(stat -c %s "$fajl" 2>/dev/null || echo 0)" -gt "$potolok" ] || return 0
     tail -c "$potolok" "$fajl" | sed '1d' >"$fajl.urezka" && mv "$fajl.urezka" "$fajl"
 }
-potok_urezat "$POTOK_KAT/$DEMON.jsonl"
-
-# Судье — stdout и stderr вместе: при выводе без JSON отказ CLI приходит
-# текстом на stderr, и прежний разбор по тексту обязан его видеть.
-cat "$VYVOD_FAJL" "$OSHIBKI_FAJL" >"$SUD_FAJL"
-
 # Первая НЕПУСТАЯ строка текста — подпись отказа (из result, не из JSON).
 # Пустая строка подписью быть не может: тогда любые два молчаливых отказа
 # слились бы в один.
@@ -208,43 +180,116 @@ otkaz_proshyol() {
     skazat "Прошло: фоновые демоны снова получают ответ модели (проверено демоном $DEMON)."
 }
 
-SBROS="$(python3 "$SUDYA" --в-потоке "$SUD_FAJL" 2>/dev/null)"
-SUD_KOD=$?
+# Один вызов модели и разбор его вывода. Функция, а не скрипт сплошь: после
+# автоперехода на другой ключ вызов повторяется, и каждому нужны свой id сессии
+# (транскрипт головной сессии называется id) и своя строка demon.start до вызова —
+# по ней разрешитель токенов узнаёт, чей это вызов. Печать ответа — после
+# окончательного вызова: демон получает один ответ, а не отказ и ответ подряд.
+vyzov_modeli() {
+    SESSION_ID="$(cat /proc/sys/kernel/random/uuid)"
+    local ZAPUSK=(--settings "$ORDERS_HOOK_SETTINGS" --session-id "$SESSION_ID" "${DOVODY[@]}")
+    jq -nc --arg d "$DEMON" --arg s "$SESSION_ID" --arg w "$(date -Iseconds)" \
+        '{event: "demon.start", "демон": $d, session_id: $s, "когда": $w}' >>"$RASHOD"
 
-if [ "$SUD_KOD" -eq 2 ]; then
-    # «Не смог прочитать» и «не лимит» — разные ответы: молчащий судья снова
-    # сделал бы лимит невидимым ([[unreadable-source-turns-check-green]]).
-    say "$DEMON: судья лимита не ответил ($SUDYA) — отказ разобран как обычный"
-fi
+    # tee: сырой поток ложится в файл демона ПО ХОДУ, байт в байт; stderr отдельно,
+    # чтобы его строки не попали в поток. Код берётся у первого звена конвейера.
+    # Модель зовётся только через носитель: он собирает личность класса «демон» и
+    # сам шлёт сигнал, если не собрал.
+    bash "$PROJECT_DIR/scripts/claude-run.sh" --класс демон "${ZAPUSK[@]}" 2>"$OSHIBKI_FAJL" | tee -a "$POTOK_KAT/$DEMON.jsonl" >"$VYVOD_FAJL"
+    KOD=${PIPESTATUS[0]}
 
-if [ "$SUD_KOD" -eq 3 ]; then
-    # Поток оборван: ни расхода, ни вердикта — слова в недописанном потоке
-    # судить нельзя, а успехом обрыв быть не может. Подписью отказа служит
-    # наша фраза, не текст модели: иначе её слова ушли бы владельцу.
-    say "$DEMON: поток CLI оборван без итога (код $KOD) — отказ не по лимиту, не судим"
-    echo "без итога: поток CLI оборван (код $KOD)" >&2
-    echo "поток CLI оборван без итога" >"$TEKST_FAJL"
-    [ "$KOD" -eq 0 ] && KOD=1
-    otkaz_povtoryayushchijsya
-    exit "$KOD"
-fi
+    # 79: личность не собрана, модель не запускалась. Это не отказ API и не лимит:
+    # судью и счёт повторяющихся отказов не трогаем, владельцу не пишем (сигнал
+    # уже дал носитель), код отдаём вызывающему как есть.
+    if [ "$KOD" -eq 79 ]; then
+        say "$DEMON: личность не собрана (носитель вернул 79) — модель не звана"
+        exit 79
+    fi
 
-NET_ITOGA=1
-IS_ERROR=false
-if python3 "$SUDYA" --текст-итога "$SUD_FAJL" >"$TEKST_FAJL" 2>/dev/null \
-   && python3 "$SUDYA" --расход "$SUD_FAJL" "$DEMON" "$(date -Iseconds)" >"$SUD_FAJL.rashod" 2>/dev/null; then
-    NET_ITOGA=0
-    cat "$SUD_FAJL.rashod" >>"$RASHOD"
-    IS_ERROR="$(jq -r '.is_error' "$SUD_FAJL.rashod" 2>/dev/null || echo false)"
+    potok_urezat "$POTOK_KAT/$DEMON.jsonl"
+
+    # Судье — stdout и stderr вместе: при выводе без JSON отказ CLI приходит
+    # текстом на stderr, и прежний разбор по тексту обязан его видеть.
+    cat "$VYVOD_FAJL" "$OSHIBKI_FAJL" >"$SUD_FAJL"
+
+    SBROS="$(python3 "$SUDYA" --в-потоке "$SUD_FAJL" 2>/dev/null)"
+    SUD_KOD=$?
+
+    if [ "$SUD_KOD" -eq 2 ]; then
+        # «Не смог прочитать» и «не лимит» — разные ответы: молчащий судья снова
+        # сделал бы лимит невидимым ([[unreadable-source-turns-check-green]]).
+        say "$DEMON: судья лимита не ответил ($SUDYA) — отказ разобран как обычный"
+    fi
+
+    if [ "$SUD_KOD" -eq 3 ]; then
+        # Поток оборван: ни расхода, ни вердикта — слова в недописанном потоке
+        # судить нельзя, а успехом обрыв быть не может. Подписью отказа служит
+        # наша фраза, не текст модели: иначе её слова ушли бы владельцу.
+        say "$DEMON: поток CLI оборван без итога (код $KOD) — отказ не по лимиту, не судим"
+        echo "без итога: поток CLI оборван (код $KOD)" >&2
+        echo "поток CLI оборван без итога" >"$TEKST_FAJL"
+        [ "$KOD" -eq 0 ] && KOD=1
+        otkaz_povtoryayushchijsya
+        exit "$KOD"
+    fi
+
+    NET_ITOGA=1
+    IS_ERROR=false
+    if python3 "$SUDYA" --текст-итога "$SUD_FAJL" >"$TEKST_FAJL" 2>/dev/null \
+       && python3 "$SUDYA" --расход "$SUD_FAJL" "$DEMON" "$(date -Iseconds)" >"$SUD_FAJL.rashod" 2>/dev/null; then
+        NET_ITOGA=0
+        cat "$SUD_FAJL.rashod" >>"$RASHOD"
+        IS_ERROR="$(jq -r '.is_error' "$SUD_FAJL.rashod" 2>/dev/null || echo false)"
+    fi
+    rm -f "$SUD_FAJL.rashod"
+}
+
+pechat_otveta() {
+    # Демону — только ответ модели. Вывод без JSON отдаётся целиком, как раньше.
+    if [ "$NET_ITOGA" -eq 0 ]; then
+        cat "$TEKST_FAJL"
+    else
+        cat "$SUD_FAJL" >"$TEKST_FAJL"
+        cat "$TEKST_FAJL"
+    fi
+}
+
+# Автопереход на другой аккаунт при отказе по лимиту (account-switch.py). Зовётся
+# только когда аккаунты заведены. Лок — на время самого вызова двери: два демона
+# в одну минуту получают её ответы по очереди (0, затем 5), а повтор модели идёт
+# ВНЕ лока, иначе демоны ждали бы друг друга весь вызов. Код — в AUTO_RC, пусто — не звана.
+avto_perehod() {
+    AUTO_RC=""
+    [ -f "${HARNESS_ACCOUNT_DIR:-${STATE_DIR:-}/account}/profiles.json" ] || return 0
+    local out
+    mkdir -p "$LOG_DIR/locks"
+    exec 8>>"$LOG_DIR/locks/лимит-демонов.lock"
+    flock 8
+    AUTO_RC=0
+    out=$(python3 "$PROJECT_DIR/scripts/account-switch.py" --авто --от демоны 2>&1) || AUTO_RC=$?
+    flock -u 8
+    say "$DEMON: авто: дверь автоперехода ответила кодом $AUTO_RC: $(printf '%s' "$out" | tr '\n' ' ' | head -c 300)"
+}
+
+vyzov_modeli
+if [ "$SUD_KOD" -eq 0 ]; then
+    avto_perehod
+    case "$AUTO_RC" in
+        0|5)
+            say "$DEMON: авто: аккаунт сменён дверью, повторяю вызов модели"
+            vyzov_modeli
+            if [ "$SUD_KOD" -eq 0 ]; then
+                say "$DEMON: авто: после перехода снова отказ по лимиту ($SBROS) — о лимите говорит дверь"
+                pechat_otveta
+                exit "$KOD_LIMITA"
+            fi ;;
+        4|6)
+            say "$DEMON: авто: все аккаунты в лимите или предел неудач (код $AUTO_RC) — о лимите говорит дверь"
+            pechat_otveta
+            exit "$KOD_LIMITA" ;;
+    esac
 fi
-rm -f "$SUD_FAJL.rashod"
-# Демону — только ответ модели. Вывод без JSON отдаётся целиком, как раньше.
-if [ "$NET_ITOGA" -eq 0 ]; then
-    cat "$TEKST_FAJL"
-else
-    cat "$SUD_FAJL" >"$TEKST_FAJL"
-    cat "$TEKST_FAJL"
-fi
+pechat_otveta
 
 if [ "$SUD_KOD" -ne 0 ]; then
     # Отказ API при коде CLI 0 успехом не считается (код при отказе не замерен).

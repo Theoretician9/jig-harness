@@ -22,8 +22,9 @@ from pathlib import Path
 HERE = Path(__file__).parent
 MODULE_PATH = (HERE / "lib" / "layout_manifest.py").absolute()
 COMPARE_PATH = (HERE / "compare-with-package.py").absolute()
+# Зеркало LIVE_SETTINGS раскладчика: живой файл — ярус 1, в опись не идёт.
 LIVE_SETTINGS = ("pipeline.yaml", "queue.yaml", "models.yaml", "audit.yaml",
-                 "live-check-state.yaml")
+                 "live-check-state.yaml", "gates-quarantine.yaml")
 
 
 def load_module():
@@ -390,22 +391,36 @@ TIER1 = ("STATE.md", "память/x.md", "harness/config/pipeline.yaml",
          "harness/vozmozhnosti/a/.установлено", "scripts/.x.layout-tmp", "docs/a.md",
          ".layout-manifest")
 TIER2 = (".claude/settings.json", "scripts/hooks/guard_bash.py")
+# Пути, которые в опись записать нельзя вовсе (listable): только они — порча описи.
+UNLISTABLE = ("/abs/x.sh", "scripts/../x.sh")
+OUT_OF_SCOPE_LINE = "из описи вынут (не дело раскладки), файл не тронут: "
 
 
 def case_m8() -> None:
-    """Запретный список в прежней описи: ярус 1 — «опись испорчена», вне тела; ярус 2 —
-    «не снимается», в теле. Файлы лежат с blob описи — без запретного все были бы кандидатами
-    (percent=100: при ключе «не задан» Ф-в откладывает всё, и проверка «не кандидат» ослепла бы).
+    """Запретный список в прежней описи: ярус 1 — «из описи вынут (не дело раскладки), файл
+    не тронут», вне тела, НЕ «опись испорчена»: такую строку пишет прежняя версия пакета, когда
+    путь был нашим (живой случай: harness/config/gates-quarantine.yaml после 04abc9d). Порча —
+    только путь, который в опись не записать (UNLISTABLE). Ярус 2 — «не снимается», в теле.
+    Файлы лежат с blob описи — без запретного все были бы кандидатами (percent=100: при ключе
+    «не задан» Ф-в откладывает всё, и проверка «не кандидат» ослепла бы).
     Зелен на поломке? «ярус 2 → ярус 1» — нет: хук и settings обязаны остаться в new_body."""
     with Mini() as m:
         rows = [(m.put(p), "scripts", p) for p in TIER1 + TIER2]
+        rows += [("e69de29bb2d1d6434b8b29ae775ad8c2e48c5391", "scripts", p) for p in UNLISTABLE]
         old = m.old(rows)
         verdict = m.judge(old, [], percent=100)
         text = summary_any(verdict)
         body = as_body(verdict.new_body)
         removed = as_paths(verdict.would_remove)
         for path in TIER1:
-            PROBE.check("M8", f"ярус 1 {path}: «опись испорчена», не в теле, в broken",
+            PROBE.check("M8", f"ярус 1 {path}: «из описи вынут…файл не тронут», не «испорчена», "
+                        "не в теле, в out_of_scope",
+                        OUT_OF_SCOPE_LINE + path in text and f"опись испорчена: {path}" not in text
+                        and path not in body
+                        and path in as_paths(getattr(verdict, "out_of_scope", set())),
+                        f"тело {path in body}; broken {as_paths(verdict.broken)}; {text}")
+        for path in UNLISTABLE:
+            PROBE.check("M8", f"не записываемый путь {path}: «опись испорчена», не в теле, в broken",
                         f"опись испорчена: {path}" in text and path not in body
                         and path in as_paths(verdict.broken),
                         f"тело {path in body}; broken {as_paths(verdict.broken)}; {text}")

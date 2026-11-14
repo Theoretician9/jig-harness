@@ -1811,19 +1811,19 @@ EOF
 
 осталось_руками() {
   заголовок "ОСТАЛОСЬ РУКАМИ (только физически неавтоматизируемое)"
-  local AGENT_DEAD_HINT=15
+  local AGENT_DEAD_HINT=15 agent_cmd
+  # Команду запуска считает та же функция, что кладёт её сторожу (носитель личности,
+  # без чужого входа): набранная руками шла бы мимо неё.
+  agent_cmd=$(PROJECT_DIR="$PROJECT_DIR" HARNESS_CONF="$HARNESS_SRC/config/harness.conf" HARNESS_INSTALL_CONF=/dev/null \
+    bash -c '. "$1/scripts/lib/config.sh"; konf_zagruzit AGENT_START_CMD; komanda_agenta "${AGENT_START_CMD:-claude --dangerously-skip-permissions}"' \
+    _ "$HARNESS_SRC" 2>/dev/null) || agent_cmd=""
+  [[ -n "$agent_cmd" ]] || agent_cmd="bash $PROJECT_DIR/scripts/start-agent.sh --команда   # напечатает команду запуска"
   if [[ -r "$HARNESS_SRC/config/harness.conf" ]]; then
     AGENT_DEAD_HINT=$(sed -n 's/^[[:space:]]*AGENT_DEAD_MIN=\([0-9]*\).*/\1/p' \
                       "$HARNESS_SRC/config/harness.conf" | tail -n1)
     AGENT_DEAD_HINT="${AGENT_DEAD_HINT:-15}"
   fi
   скажи ""
-  local start_cmd="claude --dangerously-skip-permissions"
-  if [[ -r "$HARNESS_SRC/config/harness.conf" ]]; then
-    start_cmd=$(sed -n 's/^[[:space:]]*AGENT_START_CMD="\{0,1\}\([^"#]*\)"\{0,1\}.*/\1/p' \
-                "$HARNESS_SRC/config/harness.conf" | tail -n1)
-    start_cmd="${start_cmd:-claude --dangerously-skip-permissions}"
-  fi
   скажи "ЭТОТ БЛОК СОХРАНЁН ФАЙЛОМ: $LOG_DIR/ОСТАЛОСЬ-РУКАМИ.txt — закрыли"
   скажи "терминал, потеряли прокрутку: откройте файл, там ровно этот текст."
   скажи ""
@@ -1839,8 +1839,11 @@ EOF
   скажи "а) OAuth-вход (подписка Max) — ДЕЛАЙТЕ СРАЗУ В СЕССИИ АГЕНТА,"
   скажи "   тогда та же сессия и авторизуется, и останется работать:"
   скажи ""
+  скажи "   sudo -u $AGENT_USER -H bash $PROJECT_DIR/scripts/start-agent.sh   # поднимет сессию agent с агентом"
   скажи "   sudo -u $AGENT_USER -H tmux attach -t agent"
-  скажи "   cd $PROJECT_DIR && $start_cmd     # ← ВНУТРИ tmux; из другого каталога CLAUDE.md, память и скилы не загрузятся"
+  скажи "   # Если в сессии вместо экрана входа оболочка — ВНУТРИ tmux:"
+  скажи "   cd $PROJECT_DIR && $agent_cmd"
+  скажи "   # Только так: голый claude стартует без личности (ядро, стандарты, роль)."
   скажи ""
   скажи "   Появится ссылка — откройте её В БРАУЗЕРЕ НА СВОЁМ КОМПЬЮТЕРЕ, войдите в"
   скажи "   аккаунт и вставьте код обратно. Вопрос о доверии к каталогу — Y."
@@ -1865,8 +1868,8 @@ EOF
     скажи "   механика подтверждений слабее; поддерживаемый путь — вариант Б):"
     скажи ""
     скажи "   sudo -u $AGENT_USER -H tmux attach -t agent"
-    скажи "   # внутри tmux (флаг --channels нужен ПРИ КАЖДОМ запуске):"
-    скажи "   cd $PROJECT_DIR && claude --dangerously-skip-permissions --channels plugin:telegram@claude-plugins-official"
+    скажи "   # внутри tmux (флаг --channels нужен ПРИ КАЖДОМ запуске; личность даёт носитель):"
+    скажи "   cd $PROJECT_DIR && $agent_cmd --channels plugin:telegram@claude-plugins-official"
     скажи ""
     скажи "   Затем в Telegram напишите боту ДВА сообщения — 6-символьный код придёт"
     скажи "   в ответ на ВТОРОЕ. В сессии Claude Code выполните:"
@@ -1906,7 +1909,7 @@ EOF
   скажи "   sudo -u $AGENT_USER -H tmux display-message -p -t agent '#{pane_current_command}'"
   скажи ""
   скажи "   Последняя должна печатать claude или node. Печатает bash — агент выпал"
-  скажи "   в оболочку: подключитесь и запустите «cd $PROJECT_DIR && $start_cmd»,"
+  скажи "   в оболочку: подключитесь и запустите «bash $PROJECT_DIR/scripts/start-agent.sh --в-панель»,"
   скажи "   либо подождите — сторож поднимет сам и напишет вам."
   # Подсказки, добавленные шагами (запасной код панели, вывод наружу), печатались
   # в сводке — а файлом сохраняется только ЭТОТ блок, и подсказка оставалась в

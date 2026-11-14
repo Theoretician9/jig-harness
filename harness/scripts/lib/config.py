@@ -7,9 +7,11 @@ HARNESS_INSTALL_CONF — из-за чего самотест журнала пр
 
 Не source: гейту нельзя исполнять чужой код, ему нужны только значения.
 """
+import datetime
 import os
 import re
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
 def корень() -> str:
@@ -155,6 +157,21 @@ def конфиг(путь: str | None = None) -> dict:
     return итог
 
 
+def час_владельца(unix: int) -> str:
+    """«HH:MM» момента в поясе ВЛАДЕЛЬЦА (OWNER_TZ), а не машины: на свежем VPS пояс обычно UTC,
+    и владелец прочёл бы час, которого у него нет. Пояс не назван или неизвестен — пояс машины.
+
+    Через общий загрузчик (окружение старше файла): `source harness.conf` в демоне ключи не
+    экспортирует, и питоновский помощник их не увидел бы ([[default-above-loader-kills-setting]]).
+    """
+    момент = datetime.datetime.fromtimestamp(unix, datetime.timezone.utc)
+    пояс = str(конфиг(путь_harness_conf()).get("OWNER_TZ") or "").strip()
+    try:
+        return момент.astimezone(ZoneInfo(пояс) if пояс else None).strftime("%H:%M")
+    except (ZoneInfoNotFoundError, ValueError):
+        return момент.astimezone().strftime("%H:%M")
+
+
 def активная_линия() -> str:
     """Над каким направлением карты работаем: харнес, продукт или пусто.
 
@@ -198,6 +215,21 @@ def live_check_trace_root() -> str:
     return (os.environ.get("LIVE_CHECK_TRACE_ROOT")
             or из_файла(путь_harness_conf()).get("LIVE_CHECK_TRACE_ROOT")
             or os.path.join(log_dir(), "живая-проверка"))
+
+
+def live_check_task_dir(состояние) -> Path:
+    """Каталог следов приборов живой проверки ЭТОЙ установки.
+
+    Имя — ключ «каталог_следов» её состояния (live-check-state.yaml), а не код:
+    код едет в публичную сборку, и id карточки установки в нём краснил замок
+    сборки. Заготовка состояния ключа не несёт — копия пишет в нейтральный
+    каталог, как прибор и проба."""
+    import yaml                                           # noqa: PLC0415 — нужен только здесь
+    try:
+        данные = yaml.safe_load(Path(состояние).read_text(encoding="utf-8")) or {}
+    except FileNotFoundError:
+        данные = {}
+    return Path(live_check_trace_root()) / (данные.get("каталог_следов") or "живая-проверка")
 
 
 def heartbeat_dir() -> str:

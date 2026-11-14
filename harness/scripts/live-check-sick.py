@@ -67,13 +67,20 @@ def _корень_следов() -> pathlib.Path:
     return pathlib.Path(конф.live_check_trace_root())
 
 
+def _каталог_задачи() -> pathlib.Path:
+    """Каталог следов задачи: имя — данные состояния установки, не код: код едет в сборку."""
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent / "lib"))
+    import config as конф                                 # noqa: PLC0415
+    return конф.live_check_task_dir(СОСТОЯНИЕ)
+
+
 СЛЕДЫ = pathlib.Path(os.environ.get("HARNESS_LIVE_CHECK_SICK_TRACE_DIR")
-                     or _корень_следов() / "hr.zhivaya-proverka-vseh-mehanizmov"
+                     or _каталог_задачи()
                      / "живьём-больные")
 # След здоровой половины: она идёт из корня, и её след не должен затирать след
 # больной, поэтому каталог свой.
 СЛЕДЫ_ЖИВЬЁМ = pathlib.Path(os.environ.get("HARNESS_LIVE_CHECK_SICK_LIVE_TRACE_DIR")
-                            or _корень_следов() / "hr.zhivaya-proverka-vseh-mehanizmov"
+                            or _каталог_задачи()
                             / "живьём")
 РАЗДЕЛИТЕЛЬ_ВЫВОДА = "--- вывод механизма ---"
 # След, которому в гите не место. Гейты секретов доказываются ТЕМ, что они

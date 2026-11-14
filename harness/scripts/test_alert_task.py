@@ -323,27 +323,27 @@ def section_door(tmp: Path) -> None:
 
     # p.1 call from a session
     before = sha1(st.map)
-    rc, out, err = st.raise_alert("nightly-gates:red", CLAUDE_CODE_SESSION_ID="x")
+    rc, out, err = st.raise_alert("stand-gates:red", CLAUDE_CODE_SESSION_ID="x")
     check("п.1 зов из сессии — код 6", 6, rc)
     check("п.1 карта не тронута", before, sha1(st.map))
-    check("п.1 в журнале событие «из-сессии»", ["из-сессии"], st.kinds("nightly-gates:red"))
+    check("п.1 в журнале событие «из-сессии»", ["из-сессии"], st.kinds("stand-gates:red"))
 
     # p.2 new card
     ids_before = {t["id"] for t in st.tasks()}
     title = "Ночные ворота красные: check-secrets, test_guard_bash"
-    rc, out, err = st.raise_alert("nightly-gates:red", title,
+    rc, out, err = st.raise_alert("stand-gates:red", title,
                                   "Сторож nightly-gates: красных 2 — check-secrets, test_guard_bash. "
                                   "Журнал nightly-gates-20261026.log.")
     check("п.2 новая беда — код 0", 0, rc)
-    check("п.2 печать «заведена hr.alert-nightly-gates-red»",
-          "заведена hr.alert-nightly-gates-red", first(out))
-    cards = st.by_source("nightly-gates:red")
-    check("п.2 в карте ровно одна карточка с источником тревога:nightly-gates:red", 1, len(cards))
+    check("п.2 печать «заведена hr.alert-stand-gates-red»",
+          "заведена hr.alert-stand-gates-red", first(out))
+    cards = st.by_source("stand-gates:red")
+    check("п.2 в карте ровно одна карточка с источником тревога:stand-gates:red", 1, len(cards))
     card = cards[0] if cards else {}
     ids_after = {t["id"] for t in st.tasks()}
     check("п.2 ни один прежний id не пропал", set(), ids_before - ids_after)
     check("п.2 задач стало ровно на одну больше", len(ids_before) + 1, len(ids_after))
-    check("п.2 id по приставке линии: hr.alert-<ключ>", "hr.alert-nightly-gates-red", card.get("id"))
+    check("п.2 id по приставке линии: hr.alert-<ключ>", "hr.alert-stand-gates-red", card.get("id"))
     check("п.2 карточка в линии harness", "harness", card.get("_line"))
     check("п.2 status plan", "plan", card.get("status"))
     check("п.2 owner_testable: false — в очередь владельца не встаёт", False,
@@ -353,9 +353,9 @@ def section_door(tmp: Path) -> None:
     check("п.2 заведено сегодня", TODAY, str(card.get("заведено")))
     check("п.2 title — заголовок зова", title, card.get("title"))
     check("п.2 проверка.команда — форма приёмки --is-green",
-          "python3 scripts/alert-task.py --is-green nightly-gates:red",
+          "python3 scripts/alert-task.py --is-green stand-gates:red",
           (card.get("проверка") or {}).get("команда"))
-    check("п.2 проверка.ждём — «ЗЕЛЁНОЕ <ключ>»", "ЗЕЛЁНОЕ nightly-gates:red",
+    check("п.2 проверка.ждём — «ЗЕЛЁНОЕ <ключ>»", "ЗЕЛЁНОЕ stand-gates:red",
           (card.get("проверка") or {}).get("ждём"))
     depth = card.get("глубина") or {}
     check("Р-10 глубина.характер == починка (не полный пайплайн на каждый отказ)",
@@ -364,12 +364,12 @@ def section_door(tmp: Path) -> None:
     summary = str(card.get("summary") or "")
     check("Р-7 summary несёт «Перепроверить сторожем:»", True, "Перепроверить сторожем:" in summary)
     check("summary не длиннее 500", True, 0 < len(summary) <= 500)
-    rows = st.events("nightly-gates:red")
+    rows = st.events("stand-gates:red")
     born = [e for e in rows if e.get("событие") == "заведена"]
     check("п.2 в журнале одна строка «заведена»", 1, len(born))
     if born:
-        check("журнал: строка несёт id карточки", "hr.alert-nightly-gates-red", born[0].get("id"))
-        check("журнал: сторож — часть ключа до «:»", "nightly-gates", born[0].get("сторож"))
+        check("журнал: строка несёт id карточки", "hr.alert-stand-gates-red", born[0].get("id"))
+        check("журнал: сторож — часть ключа до «:»", "stand-gates", born[0].get("сторож"))
         check("журнал: ts есть", True, bool(born[0].get("ts")))
     raw = st.journal.read_text(encoding="utf-8").splitlines() if st.journal.exists() else []
     check("журнал: каждая строка — JSON короче 4 КБ", True,
@@ -377,21 +377,21 @@ def section_door(tmp: Path) -> None:
 
     # p.3 repeat to an open card
     before = sha1(st.map)
-    rc, out, _ = st.raise_alert("nightly-gates:red", title)
+    rc, out, _ = st.raise_alert("stand-gates:red", title)
     check("п.3 повтор к открытой — код 0", 0, rc)
-    check("п.3 печать «повтор hr.alert-nightly-gates-red»", "повтор hr.alert-nightly-gates-red",
+    check("п.3 печать «повтор hr.alert-stand-gates-red»", "повтор hr.alert-stand-gates-red",
           first(out))
     check("п.3 карта НЕ правится на повторе (Р-2)", before, sha1(st.map))
-    check("п.3 в журнале «повтор»", "повтор", (st.kinds("nightly-gates:red") or [""])[-1])
+    check("п.3 в журнале «повтор»", "повтор", (st.kinds("stand-gates:red") or [""])[-1])
 
     # p.3 card in test is still a repeat
-    st.set_status("hr.alert-nightly-gates-red", "test")
+    st.set_status("hr.alert-stand-gates-red", "test")
     before = sha1(st.map)
-    rc, out, _ = st.raise_alert("nightly-gates:red", title)
+    rc, out, _ = st.raise_alert("stand-gates:red", title)
     check("п.3 карточка в test — тоже повтор, код 0", 0, rc)
     check("п.3 карточка в test — карта не тронута, дубля нет (Р-7)", before, sha1(st.map))
     check("п.3 карточка в test — карточек по источнику одна", 1,
-          len(st.by_source("nightly-gates:red")))
+          len(st.by_source("stand-gates:red")))
 
     # p.2 closed card → a new case with a suffix
     for closed, key in (("принято", "closed-p:x"), ("done", "closed-d:x")):
@@ -448,21 +448,21 @@ def section_door(tmp: Path) -> None:
           "Перепроверить сторожем:" in summary and summary.endswith("."))
 
     # p.8 resolve / --is-green / --open
-    rc, out, _ = st.run("--is-green", "nightly-gates:red")
+    rc, out, _ = st.run("--is-green", "stand-gates:red")
     check("--is-green открытой: код 1", 1, rc)
-    check("--is-green открытой: «КРАСНОЕ nightly-gates:red…»", True,
-          first(out).startswith("КРАСНОЕ nightly-gates:red"))
+    check("--is-green открытой: «КРАСНОЕ stand-gates:red…»", True,
+          first(out).startswith("КРАСНОЕ stand-gates:red"))
     rc, out, _ = st.run("--open")
     check("--open: код 0 и называет ключ с id", True,
-          rc == 0 and "nightly-gates:red" in out and "hr.alert-nightly-gates-red" in out)
+          rc == 0 and "stand-gates:red" in out and "hr.alert-stand-gates-red" in out)
     before = sha1(st.map)
-    rc, out, _ = st.run("--resolve", "nightly-gates:red")
+    rc, out, _ = st.run("--resolve", "stand-gates:red")
     check("п.8 --resolve открытого — код 0", 0, rc)
     check("п.8 --resolve карту не трогает", before, sha1(st.map))
-    check("п.8 в журнале «зелёное»", "зелёное", (st.kinds("nightly-gates:red") or [""])[-1])
-    rc, out, _ = st.run("--is-green", "nightly-gates:red")
-    check("--is-green после зелёного: код 0 и «ЗЕЛЁНОЕ nightly-gates:red»",
-          (0, "ЗЕЛЁНОЕ nightly-gates:red"), (rc, first(out)))
+    check("п.8 в журнале «зелёное»", "зелёное", (st.kinds("stand-gates:red") or [""])[-1])
+    rc, out, _ = st.run("--is-green", "stand-gates:red")
+    check("--is-green после зелёного: код 0 и «ЗЕЛЁНОЕ stand-gates:red»",
+          (0, "ЗЕЛЁНОЕ stand-gates:red"), (rc, first(out)))
     rows_before = len(st.events())
     rc, out, _ = st.run("--resolve", "never-seen:x")
     check("п.8 --resolve незнакомого ключа — код 0", 0, rc)
@@ -470,8 +470,8 @@ def section_door(tmp: Path) -> None:
     rc, out, _ = st.run("--is-green", "never-seen:x")
     check("--is-green незнакомого: код 1 и «НЕТ never-seen:x»", (1, "НЕТ never-seen:x"),
           (rc, first(out)))
-    rc, _, _ = st.raise_alert("nightly-gates:red", title)
-    rc, out, _ = st.run("--is-green", "nightly-gates:red")
+    rc, _, _ = st.raise_alert("stand-gates:red", title)
+    rc, out, _ = st.run("--is-green", "stand-gates:red")
     check("зелёное, потом беда снова — ключ снова красный", 1, rc)
 
     # p.5 ceiling per watcher
@@ -634,12 +634,12 @@ def section_session(tmp: Path) -> None:
     if GUARD.is_file():
         print("── сторож команд: alert-task.py из сессии (R1-01, второй носитель) ──")
         for verdict, command in (
-                (2, "env -u CLAUDE_CODE_SESSION_ID python3 scripts/alert-task.py --resolve nightly-gates:red"),
-                (2, "python3 scripts/alert-task.py --resolve nightly-gates:red"),
+                (2, "env -u CLAUDE_CODE_SESSION_ID python3 scripts/alert-task.py --resolve stand-gates:red"),
+                (2, "python3 scripts/alert-task.py --resolve stand-gates:red"),
                 (2, "CLAUDE_CODE_SESSION_ID= python3 scripts/alert-task.py --key a:b --title t"),
                 (2, "setsid nohup env -u CLAUDE_CODE_SESSION_ID python3 "
                     "/var/www/project/scripts/alert-task.py --resolve a:b > /dev/null 2>&1 &"),
-                (0, "python3 scripts/alert-task.py --is-green nightly-gates:red"),
+                (0, "python3 scripts/alert-task.py --is-green stand-gates:red"),
                 (0, "python3 scripts/alert-task.py --open")):
             done = subprocess.run([sys.executable, str(GUARD)],
                                   input=json.dumps({"tool_name": "Bash",
@@ -1296,7 +1296,8 @@ REFERENCE: dict = {
         ]
     },
     "отказ правил": {
-        "rc": 1,
+        # код 4 — «перепиши текст», отличный от сбоя связи (1): досыл и звонящий читают его
+        "rc": 4,
         "out": "",
         "err": "[переписка] 2437 знаков при потолке 1800: это простыня. Оставь вывод и числа, подробности — в журнал или вложением\ntg_send: ОТКАЗ — сообщение нарушает правила переписки (владелец 11.09.2026).\n  Перепиши: итог и числа в канал, разбор своих действий — в память и журнал.\n  Документ длиннее потолка отправляй вложением ВМЕСТЕ с подписью:\n  tg_send.sh --file <путь> --caption «о чём документ одной строкой»\n",
         "curl": []
@@ -1359,16 +1360,16 @@ def section_tgsend(tmp: Path) -> None:
     check("эталон двери снят (иначе побайтная проба ни о чём)", True, len(REFERENCE) >= 5)
 
     plain = st.send(PLAIN)
-    tagged = st.send("--task", "nightly-gates:red", PLAIN)
+    tagged = st.send("--task", "stand-gates:red", PLAIN)
     check("--task K: код доставки прежний", plain["rc"], tagged["rc"])
     check("--task K: в curl побайтно тот же текст (ключ не съел текст)", plain["curl"], tagged["curl"])
     check("--task K: писатель позван один раз", 1, len(tagged["writer"]))
     check("--task K: писатель позван ДО curl", ["alert-task", "curl"], tagged["order"])
     argv = split_eq((tagged["writer"] or [[]])[0])
     check("--task K: писателю ушли --key K --title <первая строка> --text <текст>",
-          ["--key", "nightly-gates:red", "--title", PLAIN, "--text", PLAIN], argv)
+          ["--key", "stand-gates:red", "--title", PLAIN, "--text", PLAIN], argv)
     check("--task K: stdout двери прежний", plain["out"], tagged["out"])
-    syn = st.send("--задача", "nightly-gates:red", PLAIN)
+    syn = st.send("--задача", "stand-gates:red", PLAIN)
     check("--задача — синоним --task (писатель позван так же)", (True, tagged["writer"]),
           (bool(syn["writer"]), syn["writer"]))
 
@@ -1378,20 +1379,20 @@ def section_tgsend(tmp: Path) -> None:
     check("заголовок — первая строка, обрезанная до 110", LONG_FIRST[:110], title)
 
     for rc in (1, 5, 6):
-        got = st.send("--task", "nightly-gates:red", PLAIN, writer_rc=rc)
+        got = st.send("--task", "stand-gates:red", PLAIN, writer_rc=rc)
         check(f"писатель вернул {rc}: текст в curl побайтно прежний", plain["curl"], got["curl"])
         check(f"писатель вернул {rc}: код двери — код доставки", plain["rc"], got["rc"])
         check(f"писатель вернул {rc}: в stderr «задача НЕ заведена ({rc})»", True,
               f"задача НЕ заведена ({rc})" in got["err"])
-    got = st.send("--task", "nightly-gates:red", PLAIN, writer_rc=4)
+    got = st.send("--task", "stand-gates:red", PLAIN, writer_rc=4)
     check("писатель вернул 4 (отложено): дверь молчит об отказе", (plain["rc"], False),
           (got["rc"], "НЕ заведена" in got["err"]))
 
     st.limit(True)
-    held = st.send("--task", "nightly-gates:red", PLAIN)
+    held = st.send("--task", "stand-gates:red", PLAIN)
     check("лимит: писатель позван, весть придержана, код 0", (1, [], 0),
           (len(held["writer"]), held["curl"], held["rc"]))
-    held3 = st.send("--не-досылать", "--task", "nightly-gates:red", PLAIN)
+    held3 = st.send("--не-досылать", "--task", "stand-gates:red", PLAIN)
     check("лимит + --не-досылать: писатель позван, код 3", (1, [], 3),
           (len(held3["writer"]), held3["curl"], held3["rc"]))
     st.limit(False)
@@ -1430,7 +1431,7 @@ def section_tgsend(tmp: Path) -> None:
     saved = writer_file.read_text(encoding="utf-8")
     writer_file.unlink()
     try:
-        gone = st.send("--task", "nightly-gates:red", PLAIN)
+        gone = st.send("--task", "stand-gates:red", PLAIN)
     finally:
         writer_file.write_text(saved, encoding="utf-8")
     check("писателя нет файлом: весть уходит (curl побайтно прежний)", plain["curl"], gone["curl"])
@@ -1461,9 +1462,9 @@ def section_patterns(tmp: Path) -> None:
     check("patterns.КЛЮЧ_ТРЕВОГИ есть", True, keyform is not None)
     if source is None or keyform is None:
         return
-    found = source.search("источник: тревога:nightly-gates:red")
-    check("ИСТОЧНИК_ТРЕВОГИ достаёт ключ", "nightly-gates:red", found and found.group(1))
-    for good in ("nightly-gates:red", "heartbeat-watch:dead:backup", "a:" + "b" * 78):
+    found = source.search("источник: тревога:stand-gates:red")
+    check("ИСТОЧНИК_ТРЕВОГИ достаёт ключ", "stand-gates:red", found and found.group(1))
+    for good in ("stand-gates:red", "heartbeat-watch:dead:backup", "a:" + "b" * 78):
         check(f"КЛЮЧ_ТРЕВОГИ принимает {good[:24]!r}", True, bool(keyform.fullmatch(good)))
     for bad in ("a b", "A:x", "a;rm", "a$b", "a|b", "a&b", "", "-a:x", "a:" + "b" * 79):
         check(f"КЛЮЧ_ТРЕВОГИ отвергает {bad[:24]!r}", False, bool(keyform.fullmatch(bad)))
@@ -1544,6 +1545,8 @@ class SendersStand:
         shutil.copytree(HERE / "lib", base / "scripts" / "lib",
                         ignore=shutil.ignore_patterns("__pycache__"))
         shutil.copy(SENDERS_GATE, base / "scripts" / "check-owner-senders.py")
+        # Гейт судит и не добавленное в git: инструмент стенда — не предмет суда.
+        self.write(".gitignore", "scripts/lib/\nscripts/check-owner-senders.py\n")
         door = (f'#!/usr/bin/env bash\n# дверь tg_send.sh стенда\ncurl "{BOT_API}"\n'
                 f'case "$1" in {SPEAK_IN_LIMIT}) shift ;; esac\n')
         self.write("scripts/tg_send.sh", door)
@@ -1718,18 +1721,38 @@ def section_senders(tmp: Path) -> None:
     rc, out = st.judge()
     check("debt без id карточки долга — красный", 1, rc)
 
+    st = fresh("untracked")
+    st.write("harness/demons/demo-new.sh", SENDER_OWNER)
+    st.data["model_task"]["harness/demons/demo-new.sh"] = [{"kind": "owner-only", "why": "не добавлен в git"}]
+    st.save()
+    want, rc, out = k8_count(st.base, st.base / "scripts" / "check-owner-senders.py")
+    check("К-8 неотслеживаемый отправитель: проба и гейт считают одно (9)", (0, 9, True),
+          (rc, want, f"ОТПРАВИТЕЛИ: файлов {want}," in out))
+
     if SENDERS_GATE == HERE / "check-owner-senders.py" and (ROOT / ".git").exists():
-        listed = subprocess.run(["git", "-C", str(ROOT), "-c", "core.quotepath=false", "ls-files", "scripts", "harness"],
-                                capture_output=True, text=True).stdout.split("\n")
-        code = [n for n in listed if re.search(r"\.(py|sh)$", n)]
-        senders = [n for n in code
-                   if "tg_send" in (ROOT / n).read_text(encoding="utf-8", errors="replace")
-                   and not re.search(r"(^|/)test_|selftest", n)] if code else []
-        live = subprocess.run([sys.executable, str(SENDERS_GATE)], capture_output=True, text=True,
-                              env=clean_env(), timeout=120)
-        check("К-8 живое дерево: код 0", 0, live.returncode)
-        check(f"К-8 живое дерево: «ОТПРАВИТЕЛИ: файлов {len(senders)}»", True,
-              f"ОТПРАВИТЕЛИ: файлов {len(senders)}," in live.stdout + live.stderr)
+        want, rc, out = k8_count(ROOT, SENDERS_GATE)
+        check("К-8 живое дерево: код 0", 0, rc)
+        check(f"К-8 живое дерево: «ОТПРАВИТЕЛИ: файлов {want}»", True,
+              f"ОТПРАВИТЕЛИ: файлов {want}," in out)
+
+
+def k8_count(root: Path, gate: Path) -> tuple[int, int, str]:
+    """(отправителей по пробе, код гейта, его вывод) для дерева root.
+
+    Опись файлов — функцией самого гейта: копия команды разошлась с ней (проба
+    брала только учтённое, гейт — и не добавленное), и на копии с файлами
+    обновления вне git проба краснела на верном гейте.
+    """
+    spec = importlib.util.spec_from_file_location("senders_gate_under_test", gate)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    code = [str(p.relative_to(root)) for p in module.файлы_кода(root)]
+    senders = [n for n in code
+               if "tg_send" in (root / n).read_text(encoding="utf-8", errors="replace")
+               and not re.search(r"(^|/)test_|selftest", n)]
+    done = subprocess.run([sys.executable, str(gate)], capture_output=True, text=True,
+                          env=clean_env(), timeout=120)
+    return len(senders), done.returncode, done.stdout + done.stderr
 
 
 # ── section: storm (K-1: 200 calls of one key) ─────────────────────────────

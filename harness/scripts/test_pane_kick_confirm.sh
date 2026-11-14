@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 #
 # test_pane_kick_confirm.sh — проба подтверждения пинка владельца снимком экрана
-# (scripts/lib/pane.sh: pane_confirm_kick, pane_tail_on_screen; карточка
-# hr.owner-messages-delivery-chaos).
+# (scripts/lib/pane.sh: pane_confirm_kick, pane_tail_on_screen).
 #
 # ЧТО ОХРАНЯЕТ. Замер 03.11.2026: пинки о сообщениях владельца лежали в строке
 # ввода claude до 43 минут и всплывали дублем, а метка kick_sent говорила «отдан»

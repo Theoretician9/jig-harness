@@ -2,7 +2,7 @@
 """Probe: the card automaton and the outcome gate judge an outcome as ONE judge.
 
 Source: spec docs/specs/2026-10-18-map-stays-clean.md §0, §9 Ф0; contract
-.tasks/hr.keep-task-map-clean/pretask-f0.yaml. The sick case: a message whose
+pretask-f0.yaml of the task. The sick case: a message whose
 card lives only in docs/dev-map-archive.yaml was a candidate for a NEW card in
 map-from-message.py (`накопленные()`), while tasks-from-channel.py saw its
 outcome — the automaton would resurrect what the map review had removed.
