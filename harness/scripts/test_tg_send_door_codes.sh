@@ -56,8 +56,11 @@ PY
 python3 -c "import secrets,io,sys; io.open(sys.argv[1],'w').write('11'+secrets.token_hex(16)+'\n')" "$STAND/klyuch"
 
 # Подставной curl: STAND_CURL_MODE=down — связи нет (код 7, как у curl), иначе ok:true.
+# Читает stdin до конца, как настоящий `curl -K -`: дверь пишет в него адрес под
+# pipefail, и заглушка, вышедшая до записи, роняла её printf в EPIPE — код 1 под нагрузкой.
 cat > "$STAND/bin/curl" <<'CURL'
 #!/usr/bin/env bash
+cat > /dev/null
 printf 'vyzvan\n' >> "$STAND_CURL_LOG"
 if [ "${STAND_CURL_MODE:-ok}" = down ]; then
     echo "curl: (7) Failed to connect to api.telegram.org port 443" >&2; exit 7

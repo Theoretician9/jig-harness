@@ -259,6 +259,10 @@ def check_into_pane(pkg: Path, root: Path) -> None:
                 (0, want), (said.returncode, said.stdout.strip()))
     cases.check("--команда — условие: komanda_agenta стенда не пуста", True, bool(want))
     try:
+        # Сессия-держатель живёт весь стенд: убитая ПОСЛЕДНЯЯ сессия гасит сервер не сразу,
+        # и new-session того же имени, попавший в его выход, не поднимался — start-agent.sh
+        # тогда сам заводил сессию со sleep («('', 'sleep', '')» под нагрузкой ворот).
+        tmux(env, "new-session", "-d", "-s", "держатель-стенда")
         tmux(env, "new-session", "-d", "-s", session, "-c", str(stand / "proj"))
         shell = pane_command(env, session, "bash")
         done = subprocess.run(["bash", str(script), "--в-панель"], env=env, capture_output=True, text=True, timeout=60)
@@ -271,7 +275,8 @@ def check_into_pane(pkg: Path, root: Path) -> None:
 
         typed = stand / "ввод"
         typed.touch()
-        tmux(env, "new-session", "-d", "-s", session, "-c", str(stand / "proj"), f"exec cat > {typed}")
+        made = tmux(env, "new-session", "-d", "-s", session, "-c", str(stand / "proj"), f"exec cat > {typed}")
+        cases.check("--в-панель — условие: вторая сессия стенда (cat) поднята", 0, made.returncode)
         busy = pane_command(env, session, "cat")
         subprocess.run(["bash", str(script), "--в-панель"], env=env, capture_output=True, text=True, timeout=60)
         time.sleep(1)

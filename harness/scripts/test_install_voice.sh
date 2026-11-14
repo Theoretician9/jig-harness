@@ -148,9 +148,11 @@ check "установщик: шаг_2в идёт после шаг_2б (нуже
 run_step() {  # $1 = каталог стенда, $2 = RESUME; окружение — STUB_PIP_RC
     local T="$1"
     {
-        for f in скажи заголовок делай проверка стоп отметить уже_сделан шаг_2в; do extract_fn "$f"; done
+        # делай зовёт пульс долгой команды: без пары функций шаг падал на 127 до venv.
+        # Пульс в секунду: снятый пульс оставляет свой sleep, и тот держит вывод шага.
+        for f in скажи заголовок пульс_старт пульс_стоп делай проверка стоп отметить уже_сделан шаг_2в; do extract_fn "$f"; done
         cat <<'EOF'
-DONE_LIST=(); CHECKED_LIST=(); FAILED_LIST=()
+DONE_LIST=(); CHECKED_LIST=(); FAILED_LIST=(); PULSE_PID=""; STEP_PULSE_SEC=1
 шаг_2в
 printf 'FAILED=%s\n' "${#FAILED_LIST[@]}"; printf 'F: %s\n' "${FAILED_LIST[@]}"
 EOF

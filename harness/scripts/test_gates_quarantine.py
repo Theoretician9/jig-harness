@@ -224,6 +224,19 @@ def case_r_torn_journal_line_skipped(stand):
     assert "в карантине 1" in summary(out), f"после оборванной строки счёт не тот: «{summary(out)}»"
 
 
+def case_s_solo_recheck_last_verdict(stand):
+    # Ворота перепрогоняют красную соло (gates_recheck_reds): у флейка вторая строка
+    # того же прогона — ok, и RED его не считает. Судит ПОСЛЕДНИЙ вердикт имени.
+    rc, out = judge(stand, [entry("след доставки")],
+                    [journal_line("след доставки", "refused"), journal_line("след доставки", "ok")], 0)
+    assert rc == 0, f"флейк под карантином (соло зелёный) дал код {rc}:\n{out}"
+    assert "счёт расходится" not in out, f"соло-зелёный посчитан красным:\n{out}"
+    assert "карантин можно снять" in out, f"соло-зелёный не назван «можно снять»:\n{out}"
+    rc2, out2 = judge(stand, [entry("след доставки")],
+                      [journal_line("след доставки", "refused"), journal_line("след доставки", "refused")], 1)
+    assert rc2 == 0 and "в карантине 1" in summary(out2), f"красный и соло не прикрыт: «{summary(out2)}»\n{out2}"
+
+
 CASES = [
     ("а) свежий карантин → зелёный", case_a_fresh_quarantine_green),
     ("б) новый красный вне карантина", case_b_new_red_outside),
@@ -243,6 +256,7 @@ CASES = [
     ("р) счёт расходится — беда", case_p_count_mismatch),
     ("с) карточка — только id задачи", case_q_card_is_task_only),
     ("т) оборванная строка журнала пропускается", case_r_torn_journal_line_skipped),
+    ("у) перепрогон соло: судит последний вердикт", case_s_solo_recheck_last_verdict),
 ]
 
 

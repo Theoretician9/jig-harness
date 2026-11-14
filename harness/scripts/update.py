@@ -21,8 +21,10 @@
 Код возврата --сверить: 0 — стоит последняя, 3 (КОД_ЕСТЬ_НОВОЕ) — вышла
 новая, 2 — спросить не удалось.
 """
+import atexit
 import contextlib
 import fcntl
+import hashlib
 import io
 import itertools
 import json
@@ -33,6 +35,8 @@ import signal
 import socket
 import subprocess
 import sys
+import tarfile
+import tempfile
 import time
 import yaml
 from collections import Counter
@@ -437,17 +441,114 @@ def слова_о_пределе_ворот() -> str:
     return f"предел {предел_ворот()} с — ключ UPDATE_GATES_TIMEOUT_SEC в harness.conf"
 
 
+def журнал_ворот() -> Path:
+    """Ход ворот постановки: «до» и «после» идут по очереди под замком постановки."""
+    журнал = Path(конф_модуль.log_dir()) / "update-gates.log"
+    журнал.parent.mkdir(parents=True, exist_ok=True)
+    return журнал
+
+
+def _ворота_в_журнал(журнал: Path, предел: int) -> bool:
+    """gates.sh своей группой, вывод в журнал по мере хода → дошли ли в срок.
+
+    Вывод в файл, а не в память: копия Content-Factory 14.11.2026 ждала ворота
+    30 мин и не видела ни строки. По пределу убивается вся группа: проверки,
+    пережившие ворота, жгли бы процессор и писали бы в журнал следующего прогона."""
+    свой_журнал = журнал.parent / "update-gates-timing"
+    свой_журнал.mkdir(exist_ok=True)
+    with open(журнал, "w", encoding="utf-8") as вывод, subprocess.Popen(
+            ["bash", str(КОРЕНЬ / "scripts" / "gates.sh")], stdout=вывод, stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL, start_new_session=True,
+            env={**os.environ, "GATES_TIMING_DIR": str(свой_журнал)}) as proc:
+        try:
+            proc.wait(timeout=предел)
+            return True
+        except subprocess.TimeoutExpired:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(proc.pid, signal.SIGKILL)
+            return False
+
+
 def прогнать_ворота() -> Counter | None:
     """Самопроверка харнеса: счёт красных имён. Код возврата не судим: жёлтые
     проверки в него не входят. Оборванный пределом прогон — не прочитанный
     итог, то есть None."""
-    print(f"[обновление] ворота идут ({слова_о_пределе_ворот()})")
-    try:
-        готово = subprocess.run(["bash", str(КОРЕНЬ / "scripts" / "gates.sh")],
-                                capture_output=True, text=True, timeout=предел_ворот())
-    except subprocess.TimeoutExpired:
+    журнал = журнал_ворот()
+    print(f"[обновление] ворота идут ({слова_о_пределе_ворот()}); ход — в {журнал}")
+    if not _ворота_в_журнал(журнал, предел_ворот()):
         return None
-    return красные_из_вывода(готово.stdout)
+    return красные_из_вывода(журнал.read_text(encoding="utf-8", errors="replace"))
+
+
+# Основа «красных до» — прошлый полный прогон ворот этой установки (ночной или
+# ручной), а не свой прогон перед постановкой: владелец 14.11.2026 на bkb —
+# «пару часов была проверка, потом раскатка, а потом самопроверка». Релиз уже
+# прошёл полные ворота у хозяина перед публикацией. Прогоны самой постановки
+# пишут свой журнал (update-gates-timing): красные откаченной версии иначе стали
+# бы основой следующей попытки, и битый релиз встал бы со второго раза.
+СВЕЖЕСТЬ_ОСНОВЫ = timedelta(days=7)
+# Итог ворот пишется сразу за последней проверкой прогона: так прогон
+# узнаётся законченным, а не оборванным.
+ЗАЗОР_ИТОГА = timedelta(minutes=5)
+ПОЛНЫЕ_РЕЖИМЫ = ("обычный", "всё")
+
+
+def _строки_jsonl(путь: Path) -> list:
+    try:
+        текст = путь.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    строки = []
+    for строка in текст.splitlines():
+        with contextlib.suppress(ValueError):
+            строки.append(json.loads(строка))
+    return [с for с in строки if isinstance(с, dict)]
+
+
+def _время(запись: dict):
+    """Время записи журнала с поясом; без пояса или битое — None: записи
+    без пояса с поясными не сравнить."""
+    try:
+        когда = datetime.fromisoformat(str(запись.get("ts")))
+    except ValueError:
+        return None
+    return когда if когда.tzinfo else None
+
+
+def _прогоны_проверок(записи: list) -> dict:
+    """Прогон → (время последней проверки, счёт красных имён). Соло-перепрогон
+    красной не считается: имя уже сосчитано общим прогоном."""
+    прогоны = {}
+    for запись in записи:
+        данные = запись.get("data") or {}
+        когда = _время(запись)
+        if (запись.get("event") != "gate.check" or not данные.get("run") or когда is None
+                or данные.get("solo")):
+            continue
+        последняя, красные = прогоны.get(данные["run"], (когда, Counter()))
+        if запись.get("outcome") != "ok":
+            красные[данные.get("name")] += 1
+        прогоны[данные["run"]] = (max(последняя, когда), красные)
+    return прогоны
+
+
+def красные_прошлых_ворот(сейчас=None) -> Красные | None:
+    """Красные последнего законченного полного прогона ворот не старше
+    СВЕЖЕСТЬ_ОСНОВЫ; None — такого нет (тогда ворота идут перед постановкой)."""
+    журналы = Path(конф_модуль.log_dir())
+    сейчас = сейчас or datetime.now().astimezone()
+    итоги = [_время(и) for и in _строки_jsonl(журналы / "ворота-итог.jsonl")
+             if и.get("режим", "обычный") in ПОЛНЫЕ_РЕЖИМЫ and _время(и)]
+    законченные = [(когда, красные) for когда, красные
+                   in _прогоны_проверок(_строки_jsonl(журналы / "gates-timing.jsonl")).values()
+                   if сейчас - когда <= СВЕЖЕСТЬ_ОСНОВЫ
+                   and any(timedelta(0) <= итог - когда <= ЗАЗОР_ИТОГА for итог in итоги)]
+    if not законченные:
+        return None
+    когда, красные = max(законченные, key=lambda пара: пара[0])
+    основа = Красные(красные)
+    основа.причины, основа.когда = {}, когда
+    return основа
 
 
 @contextlib.contextmanager
@@ -614,9 +715,16 @@ def _поставить_под_замком(*, разложить, переза�
                      f"{_commits_word(own)}, которых нет в публичной.{hint}")
 
     # Судим РАЗНИЦУ красных: среда живой установки (срок входа, nginx,
-    # журналы) даёт красные всегда, «красных 0» не бывает. Прогон «до» идёт
-    # РАНЬШЕ копии: правка пакета, сделанная за его минуты, обязана в неё попасть.
-    красные_до = проверить()
+    # журналы) даёт красные всегда, «красных 0» не бывает. Основа — последний
+    # полный прогон ворот этой установки; только когда его нет, ворота идут
+    # здесь, РАНЬШЕ копии: правка пакета, сделанная за их минуты, обязана в неё попасть.
+    красные_до = красные_прошлых_ворот()
+    if красные_до is not None:
+        print(f"[обновление] основа — ворота {красные_до.когда:%Y-%m-%d %H:%M}: красных "
+              f"{sum(красные_до.values())}; полного прогона до обновления нет")
+    else:
+        print("[обновление] свежего полного прогона ворот нет — ворота до обновления")
+        красные_до = проверить()
     if красные_до is None:
         return отказ(f"ворота до обновления не дали итога ({слова_о_пределе_ворот()}) — пакет не тронут")
     # Выкат мог начаться за время прогона, а первая проверка его не видела.
@@ -1254,6 +1362,105 @@ def _перезапустить_службы() -> bool:
     return ок
 
 
+# Постановку ведёт обновлятор НОВОЙ версии. Находка копии Content-Factory
+# 14.11.2026: 0.12.1 не вставал — ворота «до» звал update.py, который уже стоял
+# у копии (предел 1800 с, вывод в память), и починки 0.12.1 до этого места не
+# доходили. Договор между версиями обновлятора — довод «--корень <проект>» и
+# метка в окружении (коммит, чьим обновлятором идёт процесс); прежние и будущие
+# версии держат его одинаково.
+МЕТКА_ПЕРЕЗАПУСКА = "HARNESS_UPDATE_RELAUNCHED"
+# Что судится «тот же обновлятор» — его код; config едет с ним, потому что
+# process_library ищет реестр процессов рядом с собой.
+ПУТИ_ОБНОВЛЯТОРА = ("harness/scripts/update.py", "harness/scripts/lib")
+ПУТИ_ИЗВЛЕЧЕНИЯ = (*ПУТИ_ОБНОВЛЯТОРА, "harness/config")
+ПРЕФИКС_ИЗВЛЕЧЕНИЯ = "harness-update-new-"
+# Мост для копии, чей update.py перезапускаться ещё не умеет: та же постановка
+# обновлятором из публичной сборки, без правки файлов копии руками. Пакет копия
+# находит своим же update.py, публичный коммит — его же сверкой (FETCH_HEAD).
+КОМАНДА_ПЕРЕХОДА = (
+    "cd {проект} && python3 scripts/update.py --сверить; "
+    "P=$(python3 -c 'import runpy; print(runpy.run_path(\"scripts/update.py\")[\"пакет\"]())') && "
+    "D=$(mktemp -d -t harness-update-new-XXXXXX) && "
+    "git -C \"$P\" archive FETCH_HEAD harness/scripts/update.py harness/scripts/lib harness/config"
+    " | tar -x -C \"$D\" && "
+    "{{ grep -q HARNESS_UPDATE_RELAUNCHED \"$D/harness/scripts/update.py\" || "
+    "{{ echo '[переход] в публичной сборке ещё нет обновлятора с перезапуском' >&2; false; }}; }} && "
+    "python3 \"$D/harness/scripts/update.py\" --корень \"$PWD\" --поставить")
+
+
+def _blob(файл: Path) -> str | None:
+    """Хэш файла так, как его считает git (blob); None — файла нет."""
+    try:
+        данные = файл.read_bytes()
+    except OSError:
+        return None
+    return hashlib.sha1(b"blob %d\0" % len(данные) + данные).hexdigest()
+
+
+def _обновлятор_отличается(каталог: Path, коммит: str) -> bool:
+    """Код обновлятора в коммите не тот, что исполняется сейчас? Сверяются файлы
+    коммита: лишний файл в lib проекта своим обновлятор не делает."""
+    дерево = _гит("ls-tree", "-r", коммит, "--", *ПУТИ_ОБНОВЛЯТОРА, где=каталог)
+    свои = Path(__file__).resolve().parent
+    for строка in дерево.stdout.splitlines():
+        сведения, путь = строка.split("\t", 1)
+        if _blob(свои / Path(путь).relative_to("harness/scripts")) != сведения.split()[2]:
+            return True
+    return False
+
+
+def _извлечь_обновлятор(каталог: Path, коммит: str) -> Path | None:
+    """Обновлятор коммита во временный каталог → путь его update.py; None — не извлёкся."""
+    куда = Path(tempfile.mkdtemp(prefix=ПРЕФИКС_ИЗВЛЕЧЕНИЯ))
+    архив = subprocess.run(["git", "archive", "--format=tar", коммит, "--", *ПУТИ_ИЗВЛЕЧЕНИЯ],
+                           cwd=str(каталог), capture_output=True, timeout=120)
+    новый = куда / ПУТИ_ОБНОВЛЯТОРА[0]
+    if архив.returncode == 0:
+        with tarfile.open(fileobj=io.BytesIO(архив.stdout)) as tar:
+            tar.extractall(куда, filter="data")
+    if новый.is_file():
+        return новый
+    shutil.rmtree(куда, ignore_errors=True)
+    return None
+
+
+def _перезапуститься_новой_версией(argv: list) -> None:
+    """После fetch, до ворот: пришёл другой обновлятор — постановку ведёт он (exec).
+    Возвращается, только если перезапуск не нужен или не удался: тогда ведёт этот."""
+    if os.environ.get(МЕТКА_ПЕРЕЗАПУСКА):
+        return
+    ответ = спросить_обновления()
+    if ответ.get("беда") or not ответ["есть новое"]:
+        return
+    каталог, коммит = пакет(), ответ["коммит"]
+    if not _обновлятор_отличается(каталог, коммит):
+        return
+    новый = _извлечь_обновлятор(каталог, коммит)
+    if новый is None:
+        print(f"[обновление] обновлятор {коммит[:7]} не извлечён — постановку ведёт прежний",
+              file=sys.stderr)
+        return
+    print(f"[обновление] постановку ведёт обновлятор новой версии {коммит[:7]}")
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os.execve(sys.executable, [sys.executable, str(новый), "--корень", str(КОРЕНЬ), *argv],
+              {**os.environ, МЕТКА_ПЕРЕЗАПУСКА: коммит})
+
+
+def _взять_корень(argv: list) -> list:
+    """«--корень <проект>»: обновлятор исполняется из извлечения, а судит и ставит
+    проект. Своё извлечение он убирает на выходе. → доводы без этой пары."""
+    global КОРЕНЬ
+    if "--корень" not in argv:
+        return argv
+    место = argv.index("--корень")
+    КОРЕНЬ = Path(argv[место + 1]).resolve()
+    извлечение = Path(__file__).resolve().parents[2]
+    if извлечение.name.startswith(ПРЕФИКС_ИЗВЛЕЧЕНИЯ):
+        atexit.register(shutil.rmtree, извлечение, True)
+    return argv[:место] + argv[место + 2:]
+
+
 # Договор сверки с update-watch — КОД возврата, а не фраза вывода: текст
 # остаётся для человека и меняется свободно.
 КОД_ЕСТЬ_НОВОЕ = 3
@@ -1286,7 +1493,9 @@ def main(argv: list) -> int:
     for поток in (sys.stdout, sys.stderr):
         if isinstance(поток, io.TextIOWrapper):
             поток.reconfigure(line_buffering=True)
+    argv = _взять_корень(argv)
     if "--поставить" in argv:
+        _перезапуститься_новой_версией(argv)
         итог = поставить(сказать=_сказать_владельцу,
                          reset_own="--сбросить-свои" in argv)
         archive_line = _archive_line(итог)

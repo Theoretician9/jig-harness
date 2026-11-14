@@ -129,7 +129,8 @@ if grep -qE 'systemctl (enable|disable|daemon-reload|edit|mask)' <<<"$ur"; then 
 # рестарт, который делает update.py, обязан совпасть с правилом БУКВА В БУКВУ: sudo сверяет аргументы точно,
 # и `restart harness-panel` не равно `restart harness-panel.service`
 upd="${UPDATE_UNDER_TEST:-$here/scripts/update.py}"
-restarted=$(grep 'for служба in (' "$upd" | grep -o '"harness-[a-z.-]*"' | tr -d '"')
+# Список — константа RESTARTED_UNITS: по ней идёт и цикл рестарта, и проверка прав копии.
+restarted=$(grep '^RESTARTED_UNITS = (' "$upd" | grep -o '"harness-[a-z.-]*"' | tr -d '"')
 [ -n "$restarted" ] || { echo "FAIL: список рестартуемых служб update.py не найден"; fail=1; }
 for u in $restarted; do
   check "$ur" "$bin/systemctl restart $u(,|\$| )" "sudoers юнитов: update.py рестартует $u — право есть"

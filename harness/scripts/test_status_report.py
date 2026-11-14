@@ -679,7 +679,8 @@ def tg_stand(stand: Path) -> Path:
         "# Тон\n\n<!-- потолки: мягкий=700 жёсткий=1400 -->\n", encoding="utf-8")
     (stand / "bin").mkdir()
     curl = stand / "bin" / "curl"
-    curl.write_text("#!/usr/bin/env bash\nprintf 'vyzvan\\n' >> \"$STAND_CURL_LOG\"\n"
+    # stdin читается до конца, как у настоящего `curl -K -` (см. CURL_STUB).
+    curl.write_text("#!/usr/bin/env bash\ncat > /dev/null\nprintf 'vyzvan\\n' >> \"$STAND_CURL_LOG\"\n"
                     "printf '{\"ok\":true,\"result\":{\"message_id\":1}}'\n", encoding="utf-8")
     curl.chmod(0o755)
     key = stand / "klyuch"
@@ -1141,7 +1142,11 @@ sys.exit(subprocess.run([sys.executable, os.environ["STAND_REAL_REPORT"], *args]
 """
 
 # Curl стенда с отказом API по переменной пробы: ok:false — доставки нет.
+# Заглушка читает stdin до конца, как настоящий `curl -K -`: tg_send.sh пишет в него адрес
+# под pipefail, и вышедшая раньше записи заглушка роняла его printf в EPIPE — «curl не
+# дошёл до API» под нагрузкой ворот.
 CURL_STUB = """#!/usr/bin/env bash
+cat > /dev/null
 printf 'vyzvan\\n' >> "$STAND_CURL_LOG"
 if [ "${STAND_CURL_FAIL:-0}" = 1 ]; then
     printf '{"ok":false,"error_code":429,"description":"Too Many Requests"}'

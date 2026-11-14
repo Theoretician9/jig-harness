@@ -22,8 +22,11 @@ MAX_DAYS = 7
 
 
 def red_gates(journal: Path, run: str) -> tuple[set, set]:
-    """(красные, зелёные) имена гейтов этого прогона; чужие прогоны не в счёт."""
-    red, green = set(), set()
+    """(красные, зелёные) имена гейтов этого прогона; чужие прогоны не в счёт.
+
+    Вердикт имени — ПОСЛЕДНЯЯ строка: ворота перепрогоняют красную соло, и у флейка
+    вторая строка того же прогона — ok (RED его не считает)."""
+    refused: dict = {}
     for line in journal.read_text(encoding="utf-8").splitlines():
         # Журнал — наблюдение (harness_event не роняет ворота и целых строк не
         # обещает): битая строка не вердикт, а красный без своей строки и так
@@ -36,8 +39,8 @@ def red_gates(journal: Path, run: str) -> tuple[set, set]:
         if rec.get("event") != "gate.check" or data.get("run") != run:
             continue
         # gates_check.sh пишет outcome только ok|refused: всё, что не refused, — ok.
-        (red if rec.get("outcome") == "refused" else green).add(data.get("name"))
-    return red, green
+        refused[data.get("name")] = rec.get("outcome") == "refused"
+    return {n for n, r in refused.items() if r}, {n for n, r in refused.items() if not r}
 
 
 def load_entries(path: Path) -> list:

@@ -103,6 +103,10 @@ fi
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT" || { echo "не нашёл корень проекта"; exit 1; }
 
+# Красная общего прогона перед итогом перепрогоняется соло (gates_recheck_reds):
+# соло-зелёная — флейк, итог не красит, но названа и посчитана (gate.flake).
+GATES_RECHECK=1
+
 # Выборка проверок по имени (через «|») — для живой пробы прогона по снимку,
 # которому полный набор стоит полчаса. Аргумент, а не переменная среды:
 # унаследованная переменная тихо урезала бы ворота выката.
@@ -145,9 +149,10 @@ for item in checks:
     done < "$HK_LIST"
     rm -f "$HK_LIST"
     gates_wait_all
-    echo "=== итог: зелёных $GREEN, красных $RED ==="
-    printf '{"ts":"%s","режим":"%s","зелёных":%s,"красных":%s}\n' \
-        "$(date -Is)" "$REZHIM" "$GREEN" "$RED" >> "$ITOG_LOG" 2>/dev/null || true
+    gates_recheck_reds
+    echo "=== итог: зелёных $GREEN, красных $RED$(gates_flakes_tail) ==="
+    printf '{"ts":"%s","режим":"%s","зелёных":%s,"красных":%s,"флейков":%s}\n' \
+        "$(date -Is)" "$REZHIM" "$GREEN" "$RED" "$FLAKES" >> "$ITOG_LOG" 2>/dev/null || true
     exit "$RED"
 fi
 # Производные документы на свежей установке не лежат: раскладчик их не кладёт,
@@ -188,6 +193,7 @@ done
 проверка "замок раскладки" python3 scripts/test_layout_lock.py
 проверка "заметки выпуска" python3 scripts/test_release_notes.py
 проверка "карантин ворот" python3 scripts/test_gates_quarantine.py
+проверка "флейки ворот" python3 scripts/test_gates_flake_recheck.py
 # Только этот самотест судит plan_absent, info/exclude, коммит пакета и связку
 # «дверь ↔ раскладчик»; раскладчик живёт в пакете, а не в проекте.
 проверка "самотест раскладчика" bash -c 'bash "$(python3 -c "import sys; sys.path.insert(0, \"scripts/lib\"); import config; print(config.katalog_paketa())")/harness/razlozhit-harnes.sh" --selftest'
@@ -420,6 +426,7 @@ done
 # Сверка двусторонняя — механизм без описания и описание без механизма красные.
 проверка "обновление"     python3 scripts/test_update.py
 проверка "неполная история" python3 scripts/test_update_shallow_history.py
+проверка "обновление новой версией" python3 scripts/test_update_relaunch.py
 проверка "опись и своё копии" python3 scripts/test_layout_keeps_copy_own.py
 проверка "доустановка"    python3 scripts/test_install_new.py
 проверка "исход одним судьёй" python3 scripts/test_map_from_message_outcome.py
@@ -878,10 +885,11 @@ if [ "${1:-}" = "--всё" ]; then
 fi
 
 gates_wait_all
+gates_recheck_reds
 YELLOW_TAIL=""
 [ "$YELLOW" -gt 0 ] && YELLOW_TAIL=", жёлтых $YELLOW (обкатка)"
 gates_dev_skipped_line
-echo "=== итог: зелёных $GREEN, красных $RED$YELLOW_TAIL ==="
+echo "=== итог: зелёных $GREEN, красных $RED$YELLOW_TAIL$(gates_flakes_tail) ==="
 # Суд карантина (scripts/gates-quarantine.py): красные известных поломок под
 # годной записью не краснят ворота, красны только новые и беды карантина.
 # Нет файла или пуст список — суд молчит и отдаёт RED, как до карантина.
@@ -906,7 +914,7 @@ fi
 # след есть, а сказать по нему нечего).
 # Выборка — свой режим: её «красных 0» не годится за итог полного прогона.
 [ -n "$ONLY_CHECKS" ] && REZHIM="выборка"
-printf '{"ts":"%s","режим":"%s","зелёных":%s,"красных":%s,"новых":%s,"в_карантине":%s}\n' \
-    "$(date -Is)" "$REZHIM" "$GREEN" "$RED" "${QUAR_NEW:-$RED}" "${QUAR_HELD:-0}" \
+printf '{"ts":"%s","режим":"%s","зелёных":%s,"красных":%s,"новых":%s,"в_карантине":%s,"флейков":%s}\n' \
+    "$(date -Is)" "$REZHIM" "$GREEN" "$RED" "${QUAR_NEW:-$RED}" "${QUAR_HELD:-0}" "$FLAKES" \
     >> "$ITOG_LOG" 2>/dev/null || true
 exit "$QUAR_RC"

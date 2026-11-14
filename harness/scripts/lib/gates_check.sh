@@ -33,6 +33,14 @@ GATES_RUN="$(date -Is) $$"
 GREEN=0
 RED=0
 YELLOW=0
+FLAKES=0
+
+# Перепрогон соло (GATES_RECHECK=1, ставит gates.sh): красная общего прогона не
+# считается сразу, а копится в GATES_RECHECK_DIR; gates_recheck_reds после барьера
+# гонит её один раз отдельно. Три полных прогона 14.11.2026 дали по одному новому
+# красному, каждый соло 3/3 зелёный: гонка стенда под нагрузкой пула, не код.
+# Умолчание — 0: самотест ворот и стенды проб читают счёт сразу после вызова.
+GATES_RECHECK_DIR=""
 
 # Третье состояние гейта — ЖЁЛТОЕ: находки есть, но гейт ещё обкатывается и
 # коммит не валит. Носитель состояния — код возврата 77, а не догадка о тексте:
@@ -204,9 +212,10 @@ _gates_run_command() {  # группа, предел, команда...
     _gates_bounded "$limit" "$@" 2>&1 8>&-
 }
 
-_gates_journal() {  # имя, исход, секунды(мкс), код, из кэша
+_gates_journal() {  # имя, исход, секунды(мкс), код, из кэша | solo
     local cached=""
     [ "$5" = hit ] && cached=',"cached":true'
+    [ "$5" = solo ] && cached=',"solo":true'
     HARNESS_LOG_DIR="${GATES_TIMING_DIR:-$LOG_DIR}" harness_event gates-timing scripts/gates.sh gate.check "$2" \
         name="$1" run="$GATES_RUN" \
         --json "$(printf '{"secs":%d.%03d,"rc":%d%s}' $(($3 / 1000000)) $(($3 / 1000 % 1000)) "$4" "$cached")"
@@ -218,6 +227,7 @@ _gates_job() {  # каталог блока, имя, группа, команд�
     local kind=none out="" rc us=0 last started outcome=ok
     _gates_cache_key "$name" "$@"
     local key=$GATES_KEY note=$GATES_NOTE
+    printf '%s\0' "$@" > "$dir/cmd"
     if [ -n "$key" ] && [ "${GATES_CACHED[$key]:-x}" = 0 ]; then
         kind=hit; rc=0; last=${GATES_CACHE_LAST[$key]}; note=" · из кэша"
     else
@@ -261,11 +271,93 @@ _gates_print_block() {  # каталог блока
         # Выравнивания колонок нет по той же причине — printf %-22s тоже
         # байтовый, и русские имена разъезжали бы вместо ровного столбца.
         printf '  ок · %s — %s%s\n' "$name" "${last:0:90}" "$note"
+    elif [ "${GATES_RECHECK:-0}" = 1 ] && [ -f "$dir/cmd" ]; then
+        _gates_defer_red "$dir"
+        printf '  красная в общем прогоне · %s (код %d) — перепрогон соло в конце\n' "$name" "$rc"
+        sed 's/^/       /' "$dir/out"
     else
         RED=$((RED + 1))
         printf '  ПЛОХО · %s (код %d)\n' "$name" "$rc"
         sed 's/^/       /' "$dir/out"
     fi
+}
+
+# Блок красной — в отложенные: каталог базы стирается после печати, а перепрогону
+# нужны имя и команда.
+_gates_defer_red() {  # каталог блока
+    [ -n "$GATES_RECHECK_DIR" ] || GATES_RECHECK_DIR=$(mktemp -d -t harness-run-gates-recheck-XXXXXX)
+    local n
+    n=$(find "$GATES_RECHECK_DIR" -mindepth 1 -maxdepth 1 | wc -l)
+    cp -r "$1" "$GATES_RECHECK_DIR/$((n + 1))"
+}
+
+# Сколько раз проверка была флейком за 7 дней (вместе с только что записанным).
+_gates_flake_count() {  # имя
+    python3 -I -c 'import json, sys
+from datetime import datetime, timedelta
+edge = datetime.now().astimezone() - timedelta(days=7)
+n = 0
+try:
+    lines = open(sys.argv[1], encoding="utf-8").read().splitlines()
+except OSError:
+    lines = []
+for line in lines:
+    try:
+        row = json.loads(line)
+        if (row.get("event") == "gate.flake" and (row.get("data") or {}).get("name") == sys.argv[2]
+                and datetime.fromisoformat(row["ts"]) >= edge):
+            n += 1
+    except (ValueError, KeyError, TypeError, AttributeError):
+        continue
+print(n)' "${GATES_TIMING_DIR:-$LOG_DIR}/gates-timing.jsonl" "$1"
+}
+
+# Соло-вердикт — тоже строкой gate.check того же прогона: суд карантина берёт
+# последний вердикт имени, и флейк под карантином не расходится со счётом RED.
+_gates_recheck_one() {  # каталог отложенного блока
+    local dir=$1 name first out rc started us count
+    local -a cmd
+    name=$(< "$dir/name"); first=$(< "$dir/rc")
+    mapfile -d '' cmd < "$dir/cmd"
+    started=${EPOCHREALTIME/./}
+    out=$(_gates_bounded "$(_gates_check_limit "$name")" "${cmd[@]}" 2>&1); rc=$?
+    us=$(( ${EPOCHREALTIME/./} - started ))
+    if [ "$rc" -eq 0 ] || [ "$rc" -eq "$YELLOW_CODE" ]; then
+        _gates_journal "$name" ok "$us" "$rc" solo
+        HARNESS_LOG_DIR="${GATES_TIMING_DIR:-$LOG_DIR}" harness_event gates-timing scripts/gates.sh gate.flake ok \
+            name="$name" run="$GATES_RUN" --json "$(printf '{"rc_first":%d,"rc_solo":%d}' "$first" "$rc")"
+        FLAKES=$((FLAKES + 1))
+        count=$(_gates_flake_count "$name")
+        local fix=""
+        [ "${count:-0}" -ge 2 ] && fix=" — починить"
+        printf '  флейк · %s — красная в общем прогоне (код %d), соло зелёная; флейк %s раз за 7 дней%s\n' \
+            "$name" "$first" "${count:-?}" "$fix"
+    else
+        _gates_journal "$name" refused "$us" "$rc" solo
+        RED=$((RED + 1))
+        printf '  ПЛОХО · %s (код %d) — красная и соло\n' "$name" "$rc"
+        printf '%s\n' "$out" | sed 's/^/       /'
+    fi
+}
+
+# Хвост строки итога: флейки не прячутся за «красных 0».
+gates_flakes_tail() {
+    [ "$FLAKES" -gt 0 ] && printf ', флейков %d (соло зелёные — починить пробу)' "$FLAKES"
+    return 0
+}
+
+# После барьера: каждую отложенную красную — один раз отдельно, по порядку объявления.
+gates_recheck_reds() {
+    [ -n "$GATES_RECHECK_DIR" ] || return 0
+    local dir total n
+    total=$(find "$GATES_RECHECK_DIR" -mindepth 1 -maxdepth 1 | wc -l)
+    printf -- '--- перепрогон соло красных общего прогона: %d ---\n' "$total"
+    for ((n = 1; n <= total; n++)); do
+        dir="$GATES_RECHECK_DIR/$n"
+        _gates_recheck_one "$dir"
+    done
+    rm -rf "$GATES_RECHECK_DIR"
+    GATES_RECHECK_DIR=""
 }
 
 # Работа, умершая до файла rc (убита, кончилось место), при барьере считается

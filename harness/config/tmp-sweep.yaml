@@ -38,6 +38,12 @@
   - "проба-без-вида-"
   - "проба-sroki-"
   - "agent-finish-log-"
+  # Извлечение обновлятора новой версии (update.py, КОМАНДА_ПЕРЕХОДА): убирает
+  # его atexit; оборванная постановка оставляет отход.
+  - "harness-update-new-"
+  # Стенды пробы перепрогона красных ворот (test_gates_flake_recheck.py): TemporaryDirectory
+  # убирает их сам, оборванный прогон оставляет отход.
+  - "gates-flake-"
   - "heartbeat-alerts-"
   - "nrp-stand-"
   - "heartbeat-held-"
