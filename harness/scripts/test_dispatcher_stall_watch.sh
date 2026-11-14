@@ -17,6 +17,10 @@
 #   bash scripts/test_dispatcher_stall_watch.sh [--сторож <путь>]
 set -uo pipefail
 export LC_ALL=C.UTF-8
+# Журнал стенда задаёт паспорт стенда, а загрузчик конфига ставит окружение
+# выше файла: унаследованный LOG_DIR уводил сторожа в чужой каталог, и проба
+# краснела на чистом коде (прибор мутаций с LOG_DIR=… — 17 случаев из 17).
+unset LOG_DIR HARNESS_LOG_DIR
 KOREN="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
 WATCH="$KOREN/harness/demons/dispatcher-stall-watch.sh"
 [ "${1:-}" = "--сторож" ] && WATCH="$2"
@@ -123,11 +127,84 @@ ack_stand -; run_watch - 0
 case_check "сообщение 90 с без квитанции, ключа круга нет — одна тревога" 1 "$(count "$T/alarms")"
 grep -q "принял" "$T/alarms" 2>/dev/null; case_check "тревога называет «принял»" 0 $?
 run_watch - 0
-case_check "квитанции нет, повтор в окне — тишина" 1 "$(count "$T/alarms")"
+case_check "квитанции нет, тот же набор — тишина" 1 "$(count "$T/alarms")"
 ack_stand ok; run_watch - 0
 case_check "квитанция есть — тишина" 0 "$(count "$T/alarms")"
 ack_stand -; run_watch - 0 0
 case_check "DISPATCH_ACK_CHECK_ENABLED=0 — тишина" 0 "$(count "$T/alarms")"
+
+# Тревога о квитанциях — по НОВЫМ сообщениям, не по часам (опыт копии CF, ffb4db1).
+# Больной случай CF 09.11: одна и та же весть о двух старых сообщениях уходила каждый
+# час, а весть о новом ждала конца часа. Прибор — заглушка через дверь DISPATCH_ACK_CHECK
+# со строками вида настоящего («<ts>: принято N с назад, …»); N растёт от прогона к
+# прогону, как у настоящего, — поэтому «то же сообщение» судится по ts, а не по строке.
+# Свой LOG_DIR; emergency — заглушка, отказ задаётся файлом.
+AD="$T/ack-new"
+mkdir -p "$AD/log"
+sed "s#^LOG_DIR=.*#LOG_DIR=\"$AD/log\"#" "$T/install.conf" > "$AD/install.conf"
+cat > "$AD/check.py" <<PYEOF
+import sys
+from pathlib import Path
+tick = Path("$AD/tick")
+n = int(tick.read_text() or 0) + 1 if tick.exists() else 1
+tick.write_text(str(n))
+lines = [l for l in Path("$AD/found").read_text(encoding="utf-8").splitlines() if l]
+for ts in lines:
+    print(f"{ts}: принято {60 + n * 37} с назад, квитанции «принял» нет")
+sys.exit(1 if lines else 0)
+PYEOF
+printf '#!/bin/sh\n[ "$(cat "%s/emergency-rc")" = 0 ] || exit 1\necho "$1 | $2" >> "%s/alarms"\n' "$AD" "$AD" > "$AD/emergency"
+chmod +x "$AD/emergency"
+A=1762700000.000000001; B=1762700100.000000002
+ack_new_stand() {  # $1 — значение DISPATCH_ACK_TELL_MIN в конфиге («-» — ключа нет)
+    rm -f "$AD/alarms" "$AD/tick" "$AD/log/dispatcher-ack.told"
+    echo 0 > "$AD/emergency-rc"
+    cat > "$AD/harness.conf" <<CONF
+SERVICE_LOCKS_SUBDIR="services"
+DISPATCH_STALL_EMERGENCY="$AD/emergency"
+DISPATCH_STALL_SYSTEMCTL="$T/systemctl"
+DISPATCH_ACK_CHECK="$AD/check.py"
+$([ "$1" = - ] || echo "DISPATCH_ACK_TELL_MIN=\"$1\"")
+CONF
+}
+run_ack() {  # доводы — ts, которые прибор найдёт без квитанции
+    printf '%s\n' "$@" > "$AD/found"
+    HARNESS_INSTALL_CONF="$AD/install.conf" HARNESS_CONF="$AD/harness.conf" bash "$WATCH" >/dev/null 2>&1
+    echo "$?" > "$AD/rc"
+}
+told() { [ -e "$AD/log/dispatcher-ack.told" ] && paste -sd, "$AD/log/dispatcher-ack.told" || echo нет-файла; }
+
+# К1: ключ 0 снимает часовую паузу у старого сторожа, а повтора всё равно быть не
+# должно: молчание о названном держит набор названных ts, а не часы.
+ack_new_stand 0; run_ack "$A"; run_ack "$A"
+case_check "К1: тот же {A} два прогона, DISPATCH_ACK_TELL_MIN=0 — одна тревога" 1 "$(count "$AD/alarms")"
+# К2: новое сообщение — весть сразу, без ключа (умолчание старого сторожа — час паузы).
+ack_new_stand -; run_ack "$A"; run_ack "$A" "$B"
+case_check "К2: {A}, затем {A,B}, ключа нет — две тревоги" 2 "$(count "$AD/alarms")"
+case_check "К2: вторая тревога называет B и молчит об A" да \
+    "$(tail -1 "$AD/alarms" 2>/dev/null | grep -F "$B" | grep -qvF "$A" && echo да || echo нет)"
+# К3: в файле — ровно найденный набор ts: ответили на A — A уходит, файл не растёт.
+ack_new_stand -; run_ack "$A" "$B"; run_ack "$B"
+case_check "К3: {A,B}, затем {B} — в файле только B" "$B" "$(told)"
+run_ack "$B"
+case_check "К3: ещё раз {B} — новой тревоги нет" 1 "$(count "$AD/alarms")"
+# К4: файл прежнего формата (эпоха прошлой вести) — не ts: тревогу не гасит и уходит.
+ack_new_stand -; echo 1700000000 > "$AD/log/dispatcher-ack.told"; run_ack "$A"
+case_check "К4: в файле старая эпоха, найдено {A} — код 0" 0 "$(cat "$AD/rc")"
+case_check "К4: старая эпоха — одна тревога" 1 "$(count "$AD/alarms")"
+case_check "К4: старая эпоха — в файле только A" "$A" "$(told)"
+# К5: emergency отказал — A не считается названным: следующий прогон говорит о нём,
+# третий молчит (ключ 0 — чтобы молчание держал набор, а не пауза).
+ack_new_stand 0; echo 1 > "$AD/emergency-rc"; run_ack "$A"
+case_check "К5: emergency отказал — файл не записан" нет-файла "$(told)"
+echo 0 > "$AD/emergency-rc"; run_ack "$A"; run_ack "$A"
+case_check "К5: после отказа — одна тревога об A, повтора нет" 1 "$(count "$AD/alarms")"
+case_check "К5: после отказа — в файле A" "$A" "$(told)"
+# К6: часового ключа нет ни у сторожа, ни в мутациях проб: живой ключ обещал бы
+# повтор, которого уже нет.
+case_check "К6: DISPATCH_ACK_TELL_MIN нет в стороже" 0 "$(grep -c 'DISPATCH_ACK_TELL_MIN' "$WATCH")"
+case_check "К6: DISPATCH_ACK_TELL_MIN нет в probe-mutations.yaml" 0 \
+    "$(grep -c 'DISPATCH_ACK_TELL_MIN' "$KOREN/harness/config/probe-mutations.yaml")"
 
 # ═══ Страж ответа владельцу (третья работа, спека hr.alert-self-sensors-attention §5, §8.2) ═══
 # Свой LOG_DIR, свой HARNESS_PANEL_STATE, заглушка tmux и обёртка python3 первыми в

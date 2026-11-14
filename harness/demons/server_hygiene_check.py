@@ -211,6 +211,20 @@ except Exception as _e:                                     # noqa: BLE001
 ЗАПОР = "scripts/firewall-docker-ports.sh"
 
 
+# Переменные, которые официальные образы БД ставят в ENV и наследуют все
+# производные (pgvector, свои сборки FROM postgres). Имя образа у своей сборки
+# ничего не гарантирует; Config.Env контейнера уже включает ENV образа.
+ПРИЗНАК_БАЗЫ = {"PG_MAJOR": "postgres", "MYSQL_MAJOR": "mysql", "MARIADB_MAJOR": "mysql"}
+
+
+def основа_образа(образ: str, env: list[str]) -> str:
+    for строка in env:
+        имя = строка.split("=", 1)[0]
+        if имя in ПРИЗНАК_БАЗЫ:
+            return ПРИЗНАК_БАЗЫ[имя]
+    return образ.rsplit("/", 1)[-1].split(":")[0]
+
+
 def живые_контейнеры(запуск=subprocess.run, docker_стоит=None) -> list[dict] | None:
     """Что РЕАЛЬНО работает на машине. None — docker не ответил.
 
@@ -250,7 +264,7 @@ def живые_контейнеры(запуск=subprocess.run, docker_стои
         итог.append({
             "имя": (к.get("Name") or "").lstrip("/"),
             "образ": образ,
-            "основа": образ.rsplit("/", 1)[-1].split(":")[0],
+            "основа": основа_образа(образ, (к.get("Config") or {}).get("Env") or []),
             "потолок": int(хост.get("Memory") or 0),
             "перезапуск": ((хост.get("RestartPolicy") or {}).get("Name") or "no"),
             "порты": порты,
@@ -524,6 +538,35 @@ def _самотест() -> int:
     # База — законное исключение, и оно НАЗВАНО списком, а не подразумевается.
     проба("базе потолок не обязателен", 0,
           len(судить_контейнеры([{**здоровый, "потолок": 0, "основа": "postgres"}], (True, ""), наши=[])))
+
+    # БОЛЬНОЙ: производный образ базы (pgvector, своя сборка FROM postgres/mysql)
+    # по имени не узнаётся, а PG_MAJOR/MYSQL_MAJOR в Config.Env наследует от
+    # официального образа. Судится через живые_контейнеры: основу считает она.
+    def _осмотр(образ, env):
+        class _Имена:
+            returncode, stdout, stderr = 0, "x\n", ""
+
+        class _Осмотр:
+            returncode, stderr = 0, ""
+            stdout = json.dumps([{"Name": "/x", "Config": {"Image": образ, "Env": env},
+                                  "HostConfig": {"Memory": 0, "RestartPolicy": {"Name": "always"}}}])
+        живые = живые_контейнеры(lambda к, **_: _Имена() if к[1] == "ps" else _Осмотр(), docker_стоит=True)
+        return len(судить_контейнеры(живые, (True, ""), наши=[]))
+    проба("БОЛЬНОЙ: pgvector с PG_MAJOR без потолка — не находка", 0,
+          _осмотр("pgvector/pgvector:pg16", ["PATH=/usr/bin", "PG_MAJOR=16"]))
+    проба("БОЛЬНОЙ: своя сборка с PG_MAJOR без потолка — не находка", 0,
+          _осмотр("html-bot-postgres:latest", ["PG_MAJOR=15", "LANG=C.UTF-8"]))
+    проба("БОЛЬНОЙ: своя сборка с MYSQL_MAJOR без потолка — не находка", 0,
+          _осмотр("registry.local/myapp-db:2", ["MYSQL_MAJOR=8.0"]))
+    проба("БОЛЬНОЙ: сборка на MariaDB (MARIADB_MAJOR) без потолка — не находка", 0,
+          _осмотр("shop-mariadb:1", ["MARIADB_MAJOR=11.4"]))
+    # Узда: признак — переменная окружения, а не слово в имени и не любое Env.
+    проба("приложение без признака базы без потолка — находка", 1,
+          _осмотр("myapp:1", ["PATH=/bin", "NODE_VERSION=22"]))
+    проба("«postgres» в имени без PG_MAJOR (экспортёр) — находка", 1,
+          _осмотр("prometheuscommunity/postgres-exporter:v0.15", ["PATH=/bin"]))
+    проба("PG_MAJOR лишь в значении чужой переменной — находка", 1,
+          _осмотр("myapp:1", ["NOTE=PG_MAJOR=16"]))
     проба("нет политики перезапуска — находка", 1,
           len(судить_контейнеры([{**здоровый, "перезапуск": "no"}], (True, ""), наши=[])))
 

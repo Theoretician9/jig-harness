@@ -9,7 +9,9 @@
 #   0  стенд: голый git с индексом от старого HEAD откатывает правку соседа
 #      (иначе стенд слеп, и отказ в S ничего не доказывает);
 #   S1 сосед коммитит, пока обёртка ждёт замок, без --base — отказ кодом 5;
-#   S2 сосед коммитит до вызова, --base <старый HEAD> — отказ кодом 5;
+#   S2 сосед коммитит до вызова, --base <старый HEAD> — отказ кодом 5 (S2б — --base=);
+#   S3 форма `-i -- <свой путь>` с индексом от старого HEAD — отказ кодом 5;
+#   S4 --base не коммит — отказ кодом 2, коммита нет;
 #   C1 индекс от текущего HEAD — коммит идёт;
 #   C2 индекс от старого HEAD, форма `-- <свой путь>` — коммит идёт, правка соседа цела;
 #   C3 индекс от старого HEAD, но путь соседа в нём уже версии соседа — коммит идёт.
@@ -116,6 +118,31 @@ neighbour_commit "$repo2"
 case_check "S2 отказ кодом 5" "5" "$?"
 case_check "S2 правка соседа цела" "o-neighbour" "$(blob_of "$repo2" o.txt)"
 case_check "S2 отказ называет путь o.txt" "да" "$(grep -q 'o\.txt' "$STAND/s2.out" && echo да || echo нет)"
+
+echo "== S2б: то же, форма --base=<старый HEAD>"
+repo2b="$STAND/s2b"; new_repo "$repo2b"
+base2b=$(git -C "$repo2b" rev-parse HEAD)
+idx2b=$(own_index "$repo2b")
+neighbour_commit "$repo2b"
+(cd "$repo2b" && GIT_INDEX_FILE=$idx2b bash "$WRAPPER" --base="$base2b" -q -F "$STAND/msg") > "$STAND/s2b.out" 2>&1
+case_check "S2б отказ кодом 5" "5" "$?"
+case_check "S2б правка соседа цела" "o-neighbour" "$(blob_of "$repo2b" o.txt)"
+
+echo "== S3: индекс от старого HEAD, форма -i -- <свой путь> (в коммит идёт весь индекс)"
+repo3="$STAND/s3"; new_repo "$repo3"
+idx3=$(own_index "$repo3")
+commit_while_waiting "$repo3" "$STAND/s3" "$idx3" -q -F "$STAND/msg" -i -- a.txt
+case_check "S3 отказ кодом 5" "5" "$(cat "$STAND/s3.rc")"
+case_check "S3 правка соседа цела" "o-neighbour" "$(blob_of "$repo3" o.txt)"
+
+echo "== S4: --base не коммит — отказ до замка"
+repo4="$STAND/s4"; new_repo "$repo4"
+head4=$(git -C "$repo4" rev-parse HEAD)
+idx4=$(own_index "$repo4")
+(cd "$repo4" && GIT_INDEX_FILE=$idx4 bash "$WRAPPER" --base нет-такого -q -F "$STAND/msg") > "$STAND/s4.out" 2>&1
+case_check "S4 отказ кодом 2" "2" "$?"
+case_check "S4 коммита нет (HEAD тот же)" "$head4" "$(git -C "$repo4" rev-parse HEAD)"
+case_check "S4 отказ говорит «не коммит»" "да" "$(grep -q 'не коммит' "$STAND/s4.out" && echo да || echo нет)"
 
 echo "== C1: индекс от текущего HEAD"
 repoc1="$STAND/c1"; new_repo "$repoc1"

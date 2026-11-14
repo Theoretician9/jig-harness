@@ -109,6 +109,16 @@ case "$quota" in ""|infinity) no_ceiling "у harness-checks.slice нет CPUQuot
 
 RUN_MAX_MIN="${CHECKS_RUN_MAX_MIN:-120}"
 LOCK_WAIT_MIN="${MUTATION_LOCK_WAIT_MIN:-30}"
+# Мягкий срок до предела юнита — тем же запасом, что у ночного демона (не меньше
+# предела одного запуска пробы плюс минута), но не больше половины предела:
+# прибор и пачка мутаций перестают начинать новое и успевают записать итог,
+# а не убиты по RuntimeMaxSec без следа. Срок вызывающего, если раньше, — остаётся.
+margin=$(( ${MUTATION_SOFT_STOP_MIN_BEFORE:-15} * 60 ))
+[ "$margin" -ge $(( ${MUTATION_RUN_TIMEOUT_S:-180} + 60 )) ] || margin=$(( ${MUTATION_RUN_TIMEOUT_S:-180} + 60 ))
+[ "$margin" -le $(( RUN_MAX_MIN * 30 )) ] || margin=$(( RUN_MAX_MIN * 30 ))
+soft_ts=$(( $(date +%s) + RUN_MAX_MIN * 60 - margin ))
+[ -n "${MUTATION_DEADLINE_TS:-}" ] && [ "${MUTATION_DEADLINE_TS%.*}" -lt "$soft_ts" ] 2>/dev/null \
+    || export MUTATION_DEADLINE_TS="$soft_ts"
 pairs=()
 while IFS='=' read -r -d '' name value; do
     case "$name" in

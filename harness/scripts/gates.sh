@@ -53,6 +53,9 @@ if [ "${1:-}" = "--selftest" ]; then
     # Журнал секунд самотеста — во временный каталог: боевой журнал не
     # засоряется строками фиктивных проверок.
     GATES_TIMING_DIR=$(mktemp -d)
+    # Свой список проверок разработки харнеса: самотест не судит боевые данные.
+    GATES_DEV_FILE="$GATES_TIMING_DIR/gates-harness-dev.yaml"
+    printf 'проверки:\n  - имя: разработки\n    почему: самотест\n' > "$GATES_DEV_FILE"
     trap 'rm -f "$TRACE"; rm -rf "$GATES_TIMING_DIR" "$RUN_TMP"' EXIT
 
     # БОЛЬНОЙ СЛУЧАЙ первым: падающая проверка обязана попасть в красные И
@@ -79,11 +82,21 @@ if [ "${1:-}" = "--selftest" ]; then
     grep -q 'находка обкатки' "$TRACE" \
         || { echo "САМОТЕСТ ПРОВАЛЕН: находка жёлтой не показана"; cat "$TRACE"; exit 1; }
 
-    # Секунды каждой проверки — по строке на проверку в журнале прогона.
-    [ "$(grep -c '"event": "gate.check"' "$GATES_TIMING_DIR/gates-timing.jsonl" 2>/dev/null)" = 3 ] \
-        || { echo "САМОТЕСТ ПРОВАЛЕН: журнал секунд — не по строке на каждую из 3 проверок"; exit 1; }
+    # Проверка разработки харнеса без HARNESS_DEV_GATES=1 не идёт, не краснит и названа
+    # в итоге; с ключом 1 идёт как любая (копия bkb 14.11.2026: такие откатывали обновление).
+    HARNESS_DEV_GATES=0 проверка "разработки" bash -c 'echo "шла"; exit 1' > "$TRACE" 2>&1
+    [ "$RED" = 1 ] && ! grep -q 'шла' "$TRACE" \
+        || { echo "САМОТЕСТ ПРОВАЛЕН: проверка разработки шла без ключа"; cat "$TRACE"; exit 1; }
+    gates_dev_skipped_line | grep -q 'не идут: проверки разработки харнеса (1: разработки)' \
+        || { echo "САМОТЕСТ ПРОВАЛЕН: пропуск не назван в итоге: $(gates_dev_skipped_line)"; exit 1; }
+    HARNESS_DEV_GATES=1 проверка "разработки" bash -c 'echo "шла"; exit 0' > "$TRACE" 2>&1
+    [ "$GREEN" = 2 ] || { echo "САМОТЕСТ ПРОВАЛЕН: с ключом 1 проверка разработки не шла"; exit 1; }
 
-    echo "САМОТЕСТ ПРОЙДЕН: 7 путей (падение красное с выводом и кодом, успех зелёный одной строкой, жёлтая отдельно и целиком, журнал секунд)"
+    # Секунды каждой проверки — по строке на проверку в журнале прогона.
+    [ "$(grep -c '"event": "gate.check"' "$GATES_TIMING_DIR/gates-timing.jsonl" 2>/dev/null)" = 4 ] \
+        || { echo "САМОТЕСТ ПРОВАЛЕН: журнал секунд — не по строке на каждую из 4 проверок"; exit 1; }
+
+    echo "САМОТЕСТ ПРОЙДЕН: 9 путей (падение красное с выводом и кодом, успех зелёный одной строкой, жёлтая отдельно и целиком, проверка разработки по ключу, журнал секунд)"
     exit 0
 fi
 
@@ -593,6 +606,8 @@ done
 # в данных ЕСТЬ, и молчали о четырёх файлах проб (замер 27.10.2026).
 проверка "пробы без мутаций"     python3 scripts/check-probe-mutations.py
 проверка "проба ворот мутаций"   python3 scripts/test_check_probe_mutations.py
+# Очередь пачек мутаций: паспорт говорит «на воротах», а вызова не было — «кто зовёт» красный.
+проверка "очередь пачек"         python3 scripts/test_batch_queue.py
 проверка "события: проба записи" python3 scripts/test_events_lib.py
 проверка "события: проба разбора" python3 scripts/test_events_cli.py
 проверка "события: проба ворот" python3 scripts/test_events_gates.py
@@ -647,6 +662,11 @@ done
 проверка "хакатон: меню" bash scripts/test_hackathon_menu.sh
 проверка "маска секретов" bash scripts/test_check_secrets_mask.sh
 проверка "секреты под маской" python3 scripts/test_security_secrets_masked.py
+# Пачка «чистота и секреты» (опыт копии Content-Factory): режим --range как
+# инструмент, гейт чистоты по прозвищам продукта, прозвище от установщика.
+проверка "секреты по диапазону" bash scripts/test_check_secrets_range.sh
+проверка "харнес чист: прозвища продукта" python3 scripts/test_harness_clean_aliases.py
+проверка "установщик: прозвища продукта" bash scripts/test_installer_product_aliases.sh
 проверка "скорость: судья" python3 scripts/test_speed_mode.py
 проверка "скорость: сторож" bash scripts/test_warden_speed.sh
 проверка "сеть серверов: суд и дверь" python3 scripts/test_evolution_net.py
@@ -756,6 +776,11 @@ if [ "${1:-}" = "--всё" ]; then
     # Объявленный продукт выкатывается только через deploy.sh: отказ при пустой
     # секции STACK_*, тег и секреты по репозиторию продукта, откат при красном health.
     проверка "выкат продукта"   bash scripts/test_deploy_product.sh
+    # Дампы всех баз перед выкатом и права копий (опыт копии Content-Factory):
+    # backup.sh --базы-в, umask 077, ротация перед-выкатом; проба восстановления
+    # заливает в psql только дамп PostgreSQL.
+    проверка "дампы баз и права копий" bash scripts/test_backup_dumps_into.sh
+    проверка "проба восстановления берёт дамп PostgreSQL" bash scripts/test_restore_probe_pick_dump.sh
     # Пробы правок с соседней установки (18.10.2026): каждая судит свой механизм
     # на стенде, больной случай первым.
     проверка "дверь-демонов"    bash scripts/test_demon_channel_door.sh
@@ -855,6 +880,7 @@ fi
 gates_wait_all
 YELLOW_TAIL=""
 [ "$YELLOW" -gt 0 ] && YELLOW_TAIL=", жёлтых $YELLOW (обкатка)"
+gates_dev_skipped_line
 echo "=== итог: зелёных $GREEN, красных $RED$YELLOW_TAIL ==="
 # Суд карантина (scripts/gates-quarantine.py): красные известных поломок под
 # годной записью не краснят ворота, красны только новые и беды карантина.

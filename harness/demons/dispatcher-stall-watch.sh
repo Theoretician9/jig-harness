@@ -18,7 +18,8 @@
 #
 # Вторая работа — сверка квитанций «принял» (scripts/check-ack-receipts.py):
 # сообщение владельца старше минуты без удачной квитанции в журнале доставка —
-# тревога, не чаще раза в час. Ключ круга её не выключает, своё выключение —
+# тревога один раз на каждое новое неподтверждённое сообщение. Ключ круга её не
+# выключает, своё выключение —
 # DISPATCH_ACK_CHECK_ENABLED=0.
 #
 # Третья работа — страж ответа владельцу (OWNER_REPLY_WATCH_ENABLED, срок
@@ -87,21 +88,27 @@ pending_count() {
 # DISPATCH_ACK_CHECK_ENABLED=0.
 ACK_CHECK="${DISPATCH_ACK_CHECK:-$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../../scripts/check-ack-receipts.py}"
 ACK_TOLD_FILE="$LOG_DIR/dispatcher-ack.told"
+# Тревога — по новым сообщениям, а не по часам: в файле лежит набор уже названных
+# владельцу ts (первое поле строки прибора). Часовая пауза повторяла бы весть о
+# сообщении, на которое владелец уже ответил, а новое сообщение задерживала бы.
+# Набор усекается до найденных сейчас, поэтому файл не растёт; число-эпоха прежнего
+# формата ни с одним ts не совпадёт и при первой записи уйдёт. Запись — только после
+# удачной отправки: отказавший emergency оставляет сообщение неназванным.
 ack_receipts() {
-    local found now last
+    local found fresh
     [ "${DISPATCH_ACK_CHECK_ENABLED:-1}" = 1 ] || return 0
     found=$(python3 "$ACK_CHECK" --log-dir "$LOG_DIR" --hours "${DISPATCH_ACK_HOURS:-6}" \
             --grace "${DISPATCH_ACK_GRACE_S:-60}" 2>&1) && return 0
-    now=$(date +%s)
-    last=$(cat "$ACK_TOLD_FILE" 2>/dev/null || echo 0)
-    case "$last" in ''|*[!0-9]*) last=0 ;; esac
-    [ $(( now - last )) -ge $(( ${DISPATCH_ACK_TELL_MIN:-60} * 60 )) ] || return 0
-    if "$EMERGENCY" "владелец не получил «принял»" "сообщений без квитанции: $(printf '%s\n' "$found" | wc -l); первое: $(printf '%s' "$found" | head -1 | cut -c1-160)" >/dev/null 2>&1; then
-        echo "$now" > "$ACK_TOLD_FILE"
-        say "тревога о квитанциях отправлена: $(printf '%s' "$found" | head -1 | cut -c1-160)"
-    else
-        say "тревога о квитанциях НЕ ушла (emergency-send отказал)"
+    fresh=$(printf '%s\n' "$found" | awk -F': ' -v told="$(cat "$ACK_TOLD_FILE" 2>/dev/null)" \
+            'BEGIN { n = split(told, a, "\n"); for (i = 1; i <= n; i++) seen[a[i]] = 1 } !($1 in seen)')
+    if [ -n "$fresh" ]; then
+        if ! "$EMERGENCY" "владелец не получил «принял»" "новых сообщений без квитанции: $(printf '%s\n' "$fresh" | wc -l); первое: $(printf '%s' "$fresh" | head -1 | cut -c1-160)" >/dev/null 2>&1; then
+            say "тревога о квитанциях НЕ ушла (emergency-send отказал)"
+            return 0
+        fi
+        say "тревога о квитанциях отправлена: $(printf '%s' "$fresh" | head -1 | cut -c1-160)"
     fi
+    printf '%s\n' "$found" | awk -F': ' '{ print $1 }' > "$ACK_TOLD_FILE"
 }
 ack_receipts
 

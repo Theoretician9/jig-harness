@@ -443,7 +443,7 @@
     - s|KOD_LIMITA=77|KOD_LIMITA=1|
     - 's|    \[ -f "$OTKAZ_SKAZANO" \] && return      # об этом отказе уже сказано|    return|'
     # ветки 79 нет: код носителя разобран как обычный отказ (судья, «поток оборван», сообщение владельцу)
-    - 's@^KOD=\${PIPESTATUS\[0\]}$@&\n[ "$KOD" = 79 ] \&\& KOD=1@'
+    - 's@^    KOD=\${PIPESTATUS\[0\]}$@&\n    [ "$KOD" = 79 ] \&\& KOD=1@'
     мутация_случай:
     - на паузе владельца модель всё равно зовётся и владельцу пишут
     - отказ по лимиту отдаётся общим кодом 1 — демон не отличит его от неудачи
@@ -765,7 +765,7 @@
     - 's@\.rsplit(" ", 1)\[0\]@@'
     - 's@по_задачам.setdefault(з.get("задача", "-"), \[\])@по_задачам.setdefault(str(len(по_задачам)), [])@'
     - 's@^    return модуль.ГЛУБОКИЕ.sub(заменить, текст)@    return текст@'
-    - 's@    "$PROJECT_DIR/scripts/tg_send.sh" "$SUMMARY" && return 0@    "$PROJECT_DIR/scripts/tg_send.sh" "$SUMMARY" \&\& return 0; curl -s -m 20 https://api.telegram.org/sendMessage >/dev/null; return 0@'
+    - 's@^    \[ "$rc" = 0 \] && return 0$@    [ "$rc" = 0 ] \&\& return 0; curl -s -m 20 https://api.telegram.org/sendMessage >/dev/null; return 0@'
     - 's@    say "текстом не прошло — шлю вложением $doc"@    return 1@'
     - 's@        --caption "Утренняя сводка: МЁРТВЫХ $DEAD_N — список во вложении"@        --caption "Утренняя сводка: МЁРТВЫХ $DEAD_N — список во вложении" || true@'
     - 's@МЁРТВЫХ $DEAD_N — список во вложении@список во вложении@'
@@ -805,6 +805,20 @@
     - под держащимся лимитом и без передачи сессия меняется — передачу писать было нечем
     - принуждение без названной причины открывает дверь — запрет обходится молча
     - дверь написана, но не позвана перед разрушительным шагом тяжёлого пути
+  # server_hygiene_check.py: основа образа базы по Config.Env (PG_MAJOR/MYSQL_MAJOR/MARIADB_MAJOR).
+  # Ключ через scripts/: копия демона ищет scripts/lib/config.py вверх по дереву,
+  # и «из-копии» тогда кладёт рядом scripts/ вместе с harness/. «./» перед именем — чтобы путь
+  # механизма не был подстрокой доказательства: прибор подменяет его там первым.
+  scripts/../harness/demons/./server_hygiene_check.py:
+    механизм: harness/demons/server_hygiene_check.py
+    доказательство: python3 scripts/../harness/demons/./server_hygiene_check.py --selftest
+    подмена: из-копии
+    мутация:
+    - 's@основа_образа(образ, (к.get("Config") or {}).get("Env") or \[\])@основа_образа(образ, [])@'
+    - 's@        имя = строка.split("=", 1)\[0\]@        имя = next((k for k in ПРИЗНАК_БАЗЫ if k in строка), "")@'
+    мутация_случай:
+    - 'Config.Env не читается: pgvector и своя сборка с PG_MAJOR/MYSQL_MAJOR/MARIADB_MAJOR без потолка — находка'
+    - 'признак базы ищется подстрокой: PG_MAJOR в значении чужой переменной принят за базу'
   scripts/test_demon_channel_door.sh:
     механизм: harness/demons/server-hygiene.sh
     доказательство: bash scripts/test_demon_channel_door.sh
@@ -1208,6 +1222,11 @@
     - 's@tag -a "$TAG" -m "выкат $TAG" "$DEPLOY_SHA"@tag "$TAG" "$DEPLOY_SHA"@'
     - 's@ harness_event deploy-releases scripts/deploy.sh \\$@ true deploy-releases scripts/deploy.sh \\@'
     - 's@    GATE_SUBJECT=(--выкат "$PRODUCT_TREE" "$DEPLOY_SHA")@    GATE_SUBJECT=()@'
+    - 's/^elif \[ -n "${BACKUP_DBS:-}" \]; then$/elif false; then/'
+    - 's/2>\/dev\/null | wc -l)" -ge "$DB_COUNT" \]/2>\/dev\/null | wc -l)" -ge 1 ]/'
+    - 's/^    if \[ -z "${STACK_DB_DUMP_CMD:-}" \] \&\& \[ -n "${BACKUP_DBS:-}" \]; then$/    if false; then/'
+    - 's/ BACKUP_DIR BACKUP_DBS DB_ADMIN_USER / BACKUP_DIR DB_ADMIN_USER /'
+    - 's/^    elif \[ -d "$DB_DUMP" \]; then$/    elif false; then/'
     мутация_случай:
     - секреты и тег выката судят репозиторий ХАРНЕСА, а не продукта — секрет продукта уедет в прод
     - упавшее пересоздание служб не ведёт в откат — выкат, которого не было, назван успешным
@@ -1223,6 +1242,11 @@
     - 'Н-13 12) тег выката лёгкий, а не аннотированный'
     - 'Н-4 12) строка журнала выкатов не пишется — «Да» не гасится'
     - 'Н-3 14) deploy.sh не передаёт воротам --выкат <дерево> <sha>'
+    - '16б) STACK_DB_DUMP_CMD пуст — backup.sh --базы-в не зовётся, миграции без дампов баз'
+    - '16д) дампов меньше, чем баз, а выкат идёт в миграции'
+    - '16а) план не называет дамп всех баз через --базы-в'
+    - '16ж) BACKUP_DBS не в ключах двери — дверь берёт его из окружения и снимает дампы по среде'
+    - '16е) подсказка восстановления зовёт pg_restore --clean на каталог дампов'
   scripts/test_deploy_guard_consent.py:
     механизм: scripts/deploy_guard.py
     доказательство: python3 scripts/test_deploy_guard_consent.py
@@ -1398,8 +1422,8 @@
     - s/записать_версию(ответ\["коммит"\])/pass/
     - s/sorted(красные_после - красные_до)/sorted(красные_после)/
     - s/красные_до = проверить()/красные_до = красные_из_вывода("=== итог:")/
-    - s/if строка.startswith("  ПЛОХО · "):/if "ПЛОХО · " in строка:/
-    - s/re.split(r" \\(код | — ", имя, maxsplit=1)\[0\]/имя/
+    - s/if строка.startswith(КРАСНАЯ))$/if "ПЛОХО · " in строка)/
+    - s/return re.split(r" \\(код | — ", строка\[len(КРАСНАЯ):\], maxsplit=1)\[0\]/return строка[len(КРАСНАЯ):]/
     - s/^    return красные$/    return Counter(set(красные))/
     - s/копия_до_отката = _снять_копию(каталог)/копия_до_отката = None/
     # hr.update-rebuilds-all-derived-docs, круг 2: тексты «до» ниже — по договору
@@ -1569,7 +1593,7 @@
     # Ревью кода Ф-в R1-03, R1-06, R1-07 (D42–D44). Правила живут в модуле описи, дверь их
     # зовёт: мутации ломают ВЫЗОВ, мутации самого модуля — в блоке пробы модуля (M18–M21).
     - 's/verdict.kept_after(ready.removals.skipped),$/verdict.new_kept,/'
-    - 's/lift_only=prior.parsed.deferred, ours=ours)$/lift_only=None, ours=ours)/'
+    - 's/lift_only=prior.parsed.deferred, ours=ours,$/lift_only=None, ours=ours,/'
     - 's/verdict.deferred_after())$/())/'
     - 's/^    return manifest, verdict.summary_lines(removed - ready.removals.seeded, overwritten)$/    return manifest, verdict.summary_lines(removed - ready.removals.seeded, overwritten) + [f"ключ {LIMIT_KEY} не число: {verdict.percent}" for _ in "x" if verdict.percent and not verdict.percent.isdigit()]/'
     # Ф-д, затравка по истории пакета (Task 12): по мутации на случай DS1–DS10 и на
@@ -1587,7 +1611,7 @@
     - 's/^    if isinstance(consent, layout_history.Unreadable):$/    if False:/'
     - 's/(rel, verdict.seeded.get(rel) or row_blob(prior.parsed, rel))/(rel, row_blob(prior.parsed, rel))/'
     - 's/^        return disk if layout_history.ours(found, rel, disk) is True else None$/        return disk/'
-    - 's/lift, history_ours(history, project))$/lift, None)/'
+    - 's/lift, history_ours(history, project),$/lift, None,/'
     - 's/^    if selftest and not selftest_target_ok(Path(log_dir)):$/    if False:/'
     # D61. Зелёные на D61, не внесены: чтение без предела (размер отсекается по lstat
     # раньше чтения), lstat→stat. Снятая проверка размера краснит пик памяти D61
@@ -1750,7 +1774,7 @@
     - 's/"--raw", "--no-abbrev", "-z", "--format=%x01%H")/"--raw", "--no-abbrev", "--format=%x01%H")/'
     - 's/"--no-abbrev", "-z"/"--abbrev", "-z"/'
     - 's/"log", "HEAD", "--tags",/"log", "--all",/'
-    - 's/"HEAD", "--tags",/"HEAD",/'
+    - 's/"HEAD", "--tags", "--no-renames",/"HEAD", "--no-renames",/'
     - 's/"log", "HEAD", "--tags",/"log", "--branches", "--tags",/'
     - 's/^    if blob == EMPTY_BLOB:$/    if False:/'
     - 's/^    return blob in known$/    return True/'
@@ -1777,9 +1801,9 @@
     - 's/^    row = max(rows, key=lambda r: r\["_ts"\])$/    row = rows[-1]/'
     - 's/^    return _question(asked), asked$/    return _question(paths), asked/'
     - 's/^        if len(_question(asked + \[path\])) > ceiling:$/        if False:/'
-    - 's/^    if str(package_root) == "-":$/    if False:/'
-    - 's/^        return NoHistory(error.strerror or str(error))$/        raise/'
-    - 's/^    if proc.returncode != 0:$/    if False:/'
+    - 's/^    if str(package_root) == "-":$/    if False:/g'
+    - 's/^        return NoHistory(error.strerror or str(error))$/        raise/g'
+    - 's/^    if proc.returncode != 0:$/    if False:/g'
     - 's/^    history.shallow = shallow.stdout.strip() == b"true"$/    history.shallow = True/'
     - 's/            target.setdefault(dest, set()).add(blob)/            target[dest] = {blob}/'
     # Мусор на входе (H13–H16, вечер 24.10.2026). H13: экранирование при записи и
@@ -2501,9 +2525,9 @@
     подмена: из-копии
     мутация:
     - 's/^DOVODY=(--strict-mcp-config --output-format stream-json --verbose "${DOVODY\[@\]}")$/DOVODY=(--strict-mcp-config --output-format stream-json "${DOVODY[@]}")/'
-    - 's|^SBROS="$(python3 "$SUDYA" --в-потоке "$SUD_FAJL" 2>/dev/null)"$|SBROS="$(python3 "$SUDYA" --в-тексте "$SUD_FAJL" 2>/dev/null)"|'
-    - 's/^if \[ "$SUD_KOD" -eq 3 \]; then$/if [ "$SUD_KOD" -eq 3 ]; then SUD_KOD=0; fi; if false; then/'
-    - 's|^    cat "$SUD_FAJL.rashod" >>"$RASHOD"$|    :|'
+    - 's|^    SBROS="$(python3 "$SUDYA" --в-потоке "$SUD_FAJL" 2>/dev/null)"$|    SBROS="$(python3 "$SUDYA" --в-тексте "$SUD_FAJL" 2>/dev/null)"|'
+    - 's/^    if \[ "$SUD_KOD" -eq 3 \]; then$/    if [ "$SUD_KOD" -eq 3 ]; then SUD_KOD=0; fi; if false; then/'
+    - 's|^        cat "$SUD_FAJL.rashod" >>"$RASHOD"$|        :|'
     - 's@ | tee -a "$POTOK_KAT/$DEMON.jsonl" >"$VYVOD_FAJL"$@ >"$VYVOD_FAJL"@'
     - 's/^    if \[ "$IS_ERROR" = true \] && \[ "$KOD" -eq 0 \]; then KOD=1; fi$/    :/'
     мутация_случай:
@@ -3423,7 +3447,7 @@
     - 's/return Unknown(f"версия не той формы: {too_wide(latest)!r}")/pass/'
     - 's/SOURCE_SHAPE = {"apt": "debian"/SOURCE_SHAPE = {"apt": "semver"/'
     - 's/    if shape != "debian":/    if True:/'
-    - 's/if compare("debian", candidate, current, ctx) > 0 else/if compare("debian", candidate, current, ctx) >= 0 else/'
+    - 's/if compare("debian", candidate, base, ctx) > 0 else/if compare("debian", candidate, base, ctx) >= 0 else/'
     - 's/int(bool(newer) and pocket.endswith("-security"))/0/'
     - 's/latest.security > 0 and part.get("критичность") == "высокая"/latest.security > 0/'
     - 's/return latest.security > 0 and/return True and/'
@@ -3463,6 +3487,16 @@
     - 's/apt_lists_stamp=Path(os.environ.get("HARNESS_STACK_APT_LISTS_STAMP",/apt_lists_stamp=Path(os.environ.get("NO_SUCH_DOOR",/'
     - 's/^        return SOURCES\[part\["свежая"\]\["источник"\]\](part, current, ctx)$/        return stale_apt_lists(ctx) or SOURCES[part["свежая"]["источник"]](part, current, ctx)/'
     - 's@ and (conf or {}).get(door.get("ключ", ""), "") == "1"$@@'
+    - 's@if isinstance(version, str) and PRERELEASE.search(version):@if False:@'
+    - 's@installed_name(part\["свежая"\].get("стоит_как", \[\]), ctx) or @@'
+    - 's@^    if re.fullmatch(r"\[0-9\]\[0-9.\]\*", current):$@    if False:@'
+    - 's@candidate = re.sub(r"-\[^-\]\*$", "", re.sub(r"^\[0-9\]+:", "", candidate))@candidate = re.sub(r"-[^-]*$", "", candidate)@'
+    - 's@candidate = re.sub(r"-\[^-\]\*$", "", re.sub(r"^\[0-9\]+:", "", candidate))@candidate = re.sub(r"^[0-9]+:", "", candidate)@'
+    - 's@return out.strip() == "install ok installed"@return True@'
+    - 's@return unreadable or NotInstalled@return NotInstalled@'
+    - 's@    if True in states:@    if states[0] is True:@'
+    - 's@^        if installed:$@        if False:@'
+    - 's@return candidate, None if installed == "(none)" else installed, phased, pocket@return candidate, installed, phased, pocket@'
     мутация_случай:
     - 'версии сравниваются строкой: 22.10.0 не новее 22.9.0 (Б2)'
     - 'снят учёт security индекса nodejs.org (Б1)'
@@ -3519,6 +3553,16 @@
     - 'M5а: дверь HARNESS_STACK_APT_LISTS_STAMP не читается — судится штамп машины'
     - 'M5а: «списки apt старше суток» задевает и не-apt части'
     - 'Б-вне-номеров: при ключе 0 «встанет сама» вместо «решаешь ты»'
+    - 'пре-релиз индекса nodejs.org не отброшен: часть своей ветки «не той формы» (М-node)'
+    - 'стоит_как не читается: кандидат docker.io/containerd из реестра Ubuntu, а стоит docker-ce/containerd.io (М-docker-ce)'
+    - 'эпоха и ревизия кандидата не снимаются при текущей из команды: равная версия «отстала» (М-docker-ce-равно)'
+    - 'эпоха кандидата не снимается при стоящем без apt-пакета: 1:1.5.2 новее 1.5.2 (М-runc-в-containerd.io)'
+    - 'ревизия кандидата не снимается при стоящем без apt-пакета: 1.5.2-0ubuntu1 новее 1.5.2 (М-runc-в-containerd.io)'
+    - '«стоит» по коду dpkg-query, а не по Status: пакет «un» назван стоящим (М-dpkg-un)'
+    - 'поломка dpkg-query в есть_если теряется за «не стоит» (Б4б)'
+    - 'есть_если со списком судит только первое имя: docker из пакетов Ubuntu «не стоит» (М-docker-ubuntu)'
+    - 'кандидат сравнивается с урезанной версией команды, а не с Installed: обновление одной ревизии Ubuntu «свежая» (М-ubuntu-ревизия)'
+    - 'Installed: (none) принят за стоящую версию: runc внутри containerd.io не судится (М-runc-в-containerd.io)'
   scripts/./test_stack_freshness.py:
     # Гейт реестра стека: обе стороны сверки с установщиком, форма части, отказ на пустом, «установщика нет».
     механизм: scripts/check-stack-registry.py
@@ -4424,7 +4468,7 @@
     мутация:
     - 's@^    rotation_flag_put "$(rotation_flag_read этап)" "$JUDGE_HELPERS" "$ROTATION_WAITED_SEC"$@    :@'
     - 's@^        rotation_flag_put идёт "$JUDGE_HELPERS" "$ROTATION_WAITED_SEC" "$FORCE_ROTATE"$@        :@'
-    - 's@^        \[ "$NEED_ROTATE" = 1 \] || { NEED_ROTATE=1;@        false \&\& { NEED_ROTATE=1;@'
+    - 's@^        \[ "$NEED_ROTATE" = 1 \] || { NEED_ROTATE=1; REASON="$(rotation_flag_read причина)@        false \&\& { NEED_ROTATE=1; REASON="$(rotation_flag_read причина)@'
     мутация_случай:
     - 'С10 на паузе метка живости флага свежая (моложе 60 с)'
     - 'W9 событие rotation_flag_set с этапом «идёт» в rotation.jsonl'
@@ -4920,6 +4964,21 @@
     - 'правка после обновления не замечена'
     - 'J16: «уже не было» пишется и без готово'
     - 'J18: действие без готово засчитано в итог'
+  scripts/test_layout_journal.py#после-двери:
+    # Записи обновления мимо двери укладки — в журнал отката (копия bkb 14.11.2026).
+    механизм: scripts/lib/layout_after.py
+    доказательство: python3 scripts/test_layout_journal.py
+    подмена: из-копии
+    мутация:
+    - 's@^            changes.append(("перекрыт", own, disk, rel))$@            pass@'
+    - 's@^                    copy_from_git(project, was, before\[rel\]\[1\], final)$@                    pass@'
+    - 's@^        if disk in (own, left.get(rel, own)):$@        if disk == own:@'
+    - 's@^            write_line(fd, f"итог\\t-\\t-\\t{written}")$@            pass@'
+    мутация_случай:
+    - 'J20: правка CLAUDE.md и живых настроек после двери не в журнале — откат её оставит'
+    - 'J20: копии прежнего файла нет в архиве — откату нечего вернуть'
+    - 'J20: путь, который журнал уже знает, дописывается снова'
+    - 'J21: новый журнал без «итог» — откат счёл бы его оборванным'
   scripts/test_check_probe_mutations.py:
     # Проба ворот: дверь HARNESS_PROBE_COVERAGE_TOOL — путь носителя, копия под мутацией.
     механизм: scripts/check-probe-mutations.py
@@ -5228,9 +5287,10 @@
   # Ф0 hr.remove-message-interception-mechanism: дверь толчка о сообщении
   # владельца (пауза, ротация, лимит). Двери среды у пробы нет — «из-копии»;
   # три механизма — три ключа одной пробы (вариант пути через «./»).
+  # Дверь — свой случай: полный прогон (~170 с) упирается в предел запуска прибора.
   scripts/test_pane_door_pause.sh:
     механизм: scripts/lib/pane.sh
-    доказательство: bash scripts/test_pane_door_pause.sh
+    доказательство: bash scripts/test_pane_door_pause.sh --случай дверь
     подмена: из-копии
     мутация:
     - 's@then echo "пауза"@then :@'
@@ -6347,18 +6407,24 @@
     - 'е) без квитанции 90 с — нарушение'
     - 'е) квитанция с исходом error не считается'
   scripts/./test_dispatcher_stall_watch.sh:
-    # dispatcher-stall-watch.sh: сверка квитанций до ключа круга, окно повтора, свой ключ (sw1 sw2 sw3).
+    # dispatcher-stall-watch.sh: сверка квитанций до ключа круга, тревога раз на новое сообщение, свой ключ (sw1 sw2 sw3).
     механизм: harness/demons/dispatcher-stall-watch.sh
     доказательство: bash scripts/./test_dispatcher_stall_watch.sh
     подмена: из-копии
     мутация:
     - 's/^ack_receipts$/:/'
-    - 's/    \[ $(( now - last )) -ge $(( ${DISPATCH_ACK_TELL_MIN:-60} \* 60 )) \] || return 0/    :/'
     - 's/    \[ "${DISPATCH_ACK_CHECK_ENABLED:-1}" = 1 \] || return 0/    :/'
+    - 's@ !($1 in seen)@ 1@'
+    - 's@ }'' > "$ACK_TOLD_FILE"$@ }'' >> "$ACK_TOLD_FILE"@'
+    - 's@^            return 0$@            :@'
+    - 's@^    if \[ -n "$fresh" \]; then@    case "$(cat "$ACK_TOLD_FILE" 2>/dev/null)" in ""|*[!0-9]*) ;; *) return 0 ;; esac; if [ -n "$fresh" ]; then@'
     мутация_случай:
     - 'сообщение 90 с без квитанции, ключа круга нет — одна тревога'
-    - 'квитанции нет, повтор в окне — тишина'
     - 'DISPATCH_ACK_CHECK_ENABLED=0 — тишина'
+    - 'К2: вторая тревога называет B и молчит об A'
+    - 'К3: {A,B}, затем {B} — в файле только B'
+    - 'К5: emergency отказал — файл не записан'
+    - 'К4: старая эпоха — одна тревога'
   scripts/././test_dispatcher_stall_watch.sh:
     # lib/pane.sh: судья «агент в панели» у стража ответа, спека hr.alert-self-sensors-attention §8.2 (з).
     механизм: scripts/lib/pane.sh
@@ -7168,7 +7234,7 @@
     - 's@^            if "блокер:" not in м\["почему"\] or "провалила проверку" in м\["почему"\]\]$@            if True]@'
     - 's@^    return not (статус == "test" and not задача.get("провал_проверки")$@    return not (False and not задача.get("провал_проверки")@'
     - 's@^    return циклы$@    return {}@'
-    - 's@без_потолка=True)$@без_потолка=False)@'
+    - 's@^    ид_готовых = \[м\["id"\] for м in работа_из_порядка(места)\]$@    ид_готовых = [м["id"] for м in работа_из_порядка(места if напр else места[:наст["потолок_строк"]])]@'
     мутация_случай:
     - 'предшественник test/done/принято — готова'
     - 'несуществующий id не держит + «битая зависимость»'
@@ -7373,7 +7439,7 @@
     доказательство: python3 scripts/./././././././test_consent_buttons.py --случай виды-9
     подмена: из-копии
     мутация:
-    - 's@        код, итог = слово_вл.попросить_кнопку("удаление", os.path.realpath(путь), почему_удалить(путь), логи)@        код, итог = subprocess.call(["bash", str(КОРЕНЬ / "scripts" / "tg_send.sh"), почему_удалить(путь)]), ""@'
+    - 's@^        код, итог = слово_вл.попросить_кнопку("удаление", os.path.realpath(путь), почему_удалить(путь),$@        код, итог = subprocess.call(["bash", str(КОРЕНЬ / "scripts" / "tg_send.sh"), почему_удалить(путь)]), (lambda **_: "")(@'
     мутация_случай:
     - 'М25 в9б) подставной tg_send.sh не вызван'
   scripts/././././././././test_consent_buttons.py:
@@ -7381,7 +7447,7 @@
     доказательство: python3 scripts/././././././././test_consent_buttons.py --случай виды-11
     подмена: из-копии
     мутация:
-    - 's@^    проверить_правила "$CAPTION" || exit 1$@    true@'
+    - 's@^    \[ "${3:-}" = "--caption" \] && RULES_TEXT="${4:-}"$@    true@'
     мутация_случай:
     - 'М33 в11а) подпись с вопросом о «да» на пуш: код ≠ 0, API не вызван'
   scripts/test_consent_push.py:
@@ -7624,7 +7690,7 @@
     - 's@    if not без_срока and решение\["когда"\] < на - срок \* 60:@    if False:@'
     - 's@        if запись.get("вид", ВИД_ПО_УМОЛЧАНИЮ) != вид or запись.get("цель") != цель:@        if запись.get("вид", ВИД_ПО_УМОЛЧАНИЮ) != вид:@'
     - 's@    if решение\["событие"\] != "да":@    if False:@'
-    - 's@            причина = отзыв_после(вид, цель, решение\["когда"\], каталог_логов)@            причина = None@'
+    - 's@^            причина = отзыв_после(вид, цель, решение\["когда"\], держатель)$@            причина = None@'
     мутация_случай:
     - '4) судья не смотрит срок: «Да» старше срока открывает'
     - '5) судья не сверяет предмет: «Да» на другой предмет открывает'
@@ -7763,7 +7829,7 @@
     доказательство: python3 scripts/./test_protected_delete_word.py
     подмена: из-копии
     мутация:
-    - 's@    открыто, причина = слово_вл.судить_кнопкой("удаление", os.path.realpath(кандидат), логи)@    открыто, причина = True, "проба: суд снят"@'
+    - 's@^    открыто, причина = слово_вл.судить_кнопкой("удаление", os.path.realpath(кандидат))$@    открыто, причина = True, "проба: суд снят"@'
     - 's@^        след({"ts": time.strftime@        (lambda *_: None)({"ts": time.strftime@'
     мутация_случай:
     - '1) дверь не спрашивает судью — текст владельца удаляет файл'
@@ -8047,7 +8113,7 @@
     доказательство: python3 scripts/./././test_process_dispatcher.py
     подмена: HARNESS_COMPARE_WITH_PACKAGE
     мутация:
-    - 's/elif сравнимое(путь, цель.read_bytes()) != сравнимое(путь, содержимое):/elif цель.read_bytes() != содержимое:/'
+    - 's/^        elif сравнимое(путь, содержимое) not in {сравнимое(путь, э) for э in эталоны}:$/        elif содержимое not in эталоны:/'
     - 's/return вычищенная_библиотека(содержимое) if путь.endswith/return b"" if путь.endswith/'
     мутация_случай:
     - '11 compare-with-package без вычистки (разные числа замера красные)'
@@ -8096,8 +8162,8 @@
     доказательство: python3 scripts/./././test_process_dispatcher_v2.py
     подмена: HARNESS_CLAUDE_DEMON
     мутация:
-    - 's/^jq -nc --arg d "\$DEMON"/true || jq -nc --arg d "$DEMON"/'
-    - 's/^bash "\$PROJECT_DIR\/scripts\/claude-run.sh" --класс демон "\${DOVODY\[@\]}" 2>"\$OSHIBKI_FAJL"/( tail -n 1 "$RASHOD" >"$RASHOD.st"; head -n -1 "$RASHOD" >"$RASHOD.rest"; mv "$RASHOD.rest" "$RASHOD"; bash "$PROJECT_DIR\/scripts\/claude-run.sh" --класс демон "${DOVODY[@]}"; X=$?; cat "$RASHOD.st" >>"$RASHOD"; rm -f "$RASHOD.st"; exit $X ) 2>"$OSHIBKI_FAJL"/'
+    - 's/^    jq -nc --arg d "\$DEMON"/    true || jq -nc --arg d "$DEMON"/'
+    - 's/^    bash "\$PROJECT_DIR\/scripts\/claude-run.sh" --класс демон "\${ZAPUSK\[@\]}" 2>"\$OSHIBKI_FAJL"/    ( tail -n 1 "$RASHOD" >"$RASHOD.st"; head -n -1 "$RASHOD" >"$RASHOD.rest"; mv "$RASHOD.rest" "$RASHOD"; bash "$PROJECT_DIR\/scripts\/claude-run.sh" --класс демон "${ZAPUSK[@]}"; X=$?; cat "$RASHOD.st" >>"$RASHOD"; rm -f "$RASHOD.st"; exit $X ) 2>"$OSHIBKI_FAJL"/'
     - 's@SESSION_ID="\$(cat /proc/sys/kernel/random/uuid)"@SESSION_ID="00000000-0000-4000-8000-000000000000"@'
     мутация_случай:
     - '§В.3 п.2 строки demon.start нет'
@@ -9165,9 +9231,9 @@
     доказательство: python3 scripts/test_self_set.py
     подмена: SELF_SET_PY
     мутация:
-    - 's@^        opened = owner_word.согласие_кнопкой(KIND, subject, logdir)$@        opened = {}@'
+    - 's@^        opened = owner_word.согласие_кнопкой(KIND, subject)$@        opened = {}@'
     - 's@^        if decision and decision\["событие"\] == "нет":$@        if False:@'
-    - 's@^        opened = owner_word.согласие_кнопкой(KIND, subject, logdir)$@        opened = next((o for o in (owner_word.согласие_кнопкой(KIND, c, logdir) for c in {r.get("цель") for r in owner_word._решения_кнопок(logdir / "consent-buttons.jsonl")} if str(c).startswith(field + "=")) if o), None)@'
+    - 's@^        opened = owner_word.согласие_кнопкой(KIND, subject)$@        opened = next((o for o in (owner_word.согласие_кнопкой(KIND, c) for c in {r.get("цель") for r in owner_word._решения_кнопок(owner_word.носитель().папка / owner_word.ЖУРНАЛ_КНОПОК)} if str(c).startswith(field + "=")) if o), None)@'
     - 's@^    write_atomic(path, new)$@    write_atomic(path, yaml.safe_dump(yaml.safe_load(new), allow_unicode=True))@'
     - 's@, sha256=digest, поля=field_hashes@, поля=field_hashes@'
     - 's@^    if hashlib.sha256(path.read_bytes()).hexdigest() == last\["sha256"\]:$@    if True:@'
@@ -9252,6 +9318,18 @@
     мутация_случай:
     - 'предел: память 2 ГБ — доля ниже пола, берётся пол 2 500 000'
     - 'предел: память 32 ГБ — доля выше потолка, берётся потолок 6 000 000'
+  # Предел стенда пробы голоса: значения harness.conf стенда обязаны доходить до RLIMIT_AS.
+  # Мутация — в саму пробу (её стенд), краснеть обязан её же случай (б).
+  scripts/test_voice_worker.sh#stand-limit:
+    механизм: scripts/test_voice_worker.sh
+    доказательство: bash scripts/test_voice_worker.sh --случай диспетчер
+    подмена: '-'
+    мутация:
+    - 's@VOICE_VM_MAX_KB="2400000"@VOICE_VM_MAX_KB="2500000"@'
+    - 's@VOICE_VM_MEM_PERCENT="100"@VOICE_VM_MEM_PERCENT="1"@'
+    мутация_случай:
+    - '(б) расшифровка идёт под пределом памяти из harness.conf (RLIMIT_AS) — потолок стенда сменился'
+    - '(б) расшифровка идёт под пределом памяти из harness.conf (RLIMIT_AS) — доля 1 %: действует пол'
   # Дефекты обновления: случаи боевого объёма при малых журналах не судятся.
   # Мутация ставится в саму пробу; пустой источник журналов задаётся её дверью.
   scripts/test_events_cli.py#volume:
@@ -9818,7 +9896,7 @@
     подмена: DOOR_UNDER_TEST
     мутация:
     - 's@^GATE_OUT=\$(HARNESS_LOG_DIR="\$LOG_DIR" python3 -I "\$SCRIPT_DIR/deploy_guard\.py" --просить \$GATE_FORCE \${GATE_SUBJECT\[\@\]+"\${GATE_SUBJECT\[\@\]}"} 2>&1) || GATE_RC=\$?$@GATE_OUT=$(HARNESS_LOG_DIR="$LOG_DIR" python3 "$SCRIPT_DIR/deploy_guard.py" --просить $GATE_FORCE ${GATE_SUBJECT[\@]+"${GATE_SUBJECT[\@]}"} 2>\&1) || GATE_RC=$?@'  # стр. 253: I-deploy
-    - 's@^konf_zagruzit_dveri PROJECT_DIR LOG_DIR TMUX_SESSION SECRETS_DIR AGENT_START_CMD DOCKER_SWEEP_ENABLED BACKUP_DIR DB_ADMIN_USER DEVMAP_AUDIT_DAYS HARNESS_LOG_DIR PRODUCT_DIR PRODUCT_REPO STACK_BUILD_CMD STACK_BUILD_NOCACHE_CMD STACK_CRON_SRC STACK_DB_DUMP_CMD STACK_DB_RESTORE_HINT STACK_HEALTH_CMD STACK_HEALTH_URL STACK_IMAGES STACK_MANIFESTS STACK_MIGRATE_CMD STACK_PROXY_RELOAD_CMD STACK_RELEASE_CMD STACK_UP_CMD$@konf_zagruzit PROJECT_DIR LOG_DIR TMUX_SESSION SECRETS_DIR AGENT_START_CMD DOCKER_SWEEP_ENABLED BACKUP_DIR DB_ADMIN_USER DEVMAP_AUDIT_DAYS HARNESS_LOG_DIR PRODUCT_DIR PRODUCT_REPO STACK_BUILD_CMD STACK_BUILD_NOCACHE_CMD STACK_CRON_SRC STACK_DB_DUMP_CMD STACK_DB_RESTORE_HINT STACK_HEALTH_CMD STACK_HEALTH_URL STACK_IMAGES STACK_MANIFESTS STACK_MIGRATE_CMD STACK_PROXY_RELOAD_CMD STACK_RELEASE_CMD STACK_UP_CMD@'  # стр. 46: kz-deploy
+    - 's@^konf_zagruzit_dveri PROJECT_DIR LOG_DIR TMUX_SESSION SECRETS_DIR AGENT_START_CMD DOCKER_SWEEP_ENABLED BACKUP_DIR BACKUP_DBS DB_ADMIN_USER DEVMAP_AUDIT_DAYS HARNESS_LOG_DIR PRODUCT_DIR PRODUCT_REPO STACK_BUILD_CMD STACK_BUILD_NOCACHE_CMD STACK_CRON_SRC STACK_DB_DUMP_CMD STACK_DB_RESTORE_HINT STACK_HEALTH_CMD STACK_HEALTH_URL STACK_IMAGES STACK_MANIFESTS STACK_MIGRATE_CMD STACK_PROXY_RELOAD_CMD STACK_RELEASE_CMD STACK_UP_CMD$@konf_zagruzit PROJECT_DIR LOG_DIR TMUX_SESSION SECRETS_DIR AGENT_START_CMD DOCKER_SWEEP_ENABLED BACKUP_DIR BACKUP_DBS DB_ADMIN_USER DEVMAP_AUDIT_DAYS HARNESS_LOG_DIR PRODUCT_DIR PRODUCT_REPO STACK_BUILD_CMD STACK_BUILD_NOCACHE_CMD STACK_CRON_SRC STACK_DB_DUMP_CMD STACK_DB_RESTORE_HINT STACK_HEALTH_CMD STACK_HEALTH_URL STACK_IMAGES STACK_MANIFESTS STACK_MIGRATE_CMD STACK_PROXY_RELOAD_CMD STACK_RELEASE_CMD STACK_UP_CMD@'  # стр. 46: kz-deploy
     мутация_случай:
     - "П-12 deploy.sh: каждый зов python3 — с -I (разбор)"
     - "П-12 deploy.sh: конфиг — konf_zagruzit_dveri, не konf_zagruzit (разбор)"
@@ -9893,7 +9971,7 @@
     доказательство: python3 scripts/././././././././././././././././././././././././test_owner_word_carrier.py
     подмена: DOOR_UNDER_TEST
     мутация:
-    - 's@^konf_zagruzit_dveri PROJECT_DIR LOG_DIR TMUX_SESSION SECRETS_DIR AGENT_START_CMD DOCKER_SWEEP_ENABLED BACKUP_DIR DB_ADMIN_USER DEVMAP_AUDIT_DAYS HARNESS_LOG_DIR PRODUCT_DIR PRODUCT_REPO STACK_BUILD_CMD STACK_BUILD_NOCACHE_CMD STACK_CRON_SRC STACK_DB_DUMP_CMD STACK_DB_RESTORE_HINT STACK_HEALTH_CMD STACK_HEALTH_URL STACK_IMAGES STACK_MANIFESTS STACK_MIGRATE_CMD STACK_PROXY_RELOAD_CMD STACK_RELEASE_CMD STACK_UP_CMD$@konf_zagruzit_dveri PROJECT_DIR LOG_DIR TMUX_SESSION SECRETS_DIR AGENT_START_CMD DOCKER_SWEEP_ENABLED BACKUP_DIR DB_ADMIN_USER DEVMAP_AUDIT_DAYS HARNESS_LOG_DIR PRODUCT_DIR PRODUCT_REPO STACK_BUILD_CMD STACK_BUILD_NOCACHE_CMD STACK_CRON_SRC STACK_DB_DUMP_CMD STACK_DB_RESTORE_HINT STACK_HEALTH_CMD STACK_HEALTH_URL STACK_IMAGES STACK_MANIFESTS STACK_MIGRATE_CMD STACK_PROXY_RELOAD_CMD STACK_RELEASE_CMD@'  # стр. 46: deploy-stackup
+    - 's@^konf_zagruzit_dveri PROJECT_DIR LOG_DIR TMUX_SESSION SECRETS_DIR AGENT_START_CMD DOCKER_SWEEP_ENABLED BACKUP_DIR BACKUP_DBS DB_ADMIN_USER DEVMAP_AUDIT_DAYS HARNESS_LOG_DIR PRODUCT_DIR PRODUCT_REPO STACK_BUILD_CMD STACK_BUILD_NOCACHE_CMD STACK_CRON_SRC STACK_DB_DUMP_CMD STACK_DB_RESTORE_HINT STACK_HEALTH_CMD STACK_HEALTH_URL STACK_IMAGES STACK_MANIFESTS STACK_MIGRATE_CMD STACK_PROXY_RELOAD_CMD STACK_RELEASE_CMD STACK_UP_CMD$@konf_zagruzit_dveri PROJECT_DIR LOG_DIR TMUX_SESSION SECRETS_DIR AGENT_START_CMD DOCKER_SWEEP_ENABLED BACKUP_DIR BACKUP_DBS DB_ADMIN_USER DEVMAP_AUDIT_DAYS HARNESS_LOG_DIR PRODUCT_DIR PRODUCT_REPO STACK_BUILD_CMD STACK_BUILD_NOCACHE_CMD STACK_CRON_SRC STACK_DB_DUMP_CMD STACK_DB_RESTORE_HINT STACK_HEALTH_CMD STACK_HEALTH_URL STACK_IMAGES STACK_MANIFESTS STACK_MIGRATE_CMD STACK_PROXY_RELOAD_CMD STACK_RELEASE_CMD@'  # стр. 46: deploy-stackup
     мутация_случай:
     - "П-12 АР-4 deploy.sh: 31 ключей подлогом в окружении → после konf_zagruzit_dveri (паспорт стенда без ключей двери) значение файла или умолчание, не окружение"
   # АР-4: scripts/publish.sh — STARTER_DIR и PUBLIC_PASPORT выпали из доводов; паспорт сборщику и гейту чистоты от konf_koren (HARNESS_HOME окружения), не от паспорта двери.
@@ -10145,7 +10223,7 @@
     - 's@^        state\["carded"\]\[path\] = sha$@        pass@'
     - 's@ and p in state\["accepted"\]}$@}@'
     - 's@^    touch_mark()$@    pass@'
-    - '/^def _read_tick_code/,/^$/s@return refusal.code@return OK@'
+    - 's@^        return read_tick(cfg)$@        try:\n            return read_tick(cfg)\n        except Refusal as refusal:\n            print(refusal.text, file=sys.stderr)\n            return OK@'
     мутация_случай:
     - 'M1 Task 0: умолчание адреса в коде вместо отказа — «K1 пустой EVOLUTION_REMOTE_URL: код 4 без падения»'
     - 'Task 2: == "G" → != "B" — «J2 ключ y вне списка → отказ: U»'
@@ -10200,6 +10278,31 @@
     - 'м4 сверка без stripspace — «E штатная очистка: обёртка выходит 0: ждали 0, вышло 3»'
     - 'м5 код git проглочен — «F код обёртки = код голого git (1): ждали 1, вышло 3»'
     - 'м6 коммит после отказа замка — «L замок занят дольше предела: код 4», «L замок занят: коммита нет»'
+  # Обёртка коммита: индекс, собранный от ушедшего HEAD (код 5), --base и формы с путями.
+  scripts/test_git_commit_stale_index.sh:
+    механизм: scripts/git-commit-locked.sh
+    доказательство: bash scripts/test_git_commit_stale_index.sh
+    подмена: GIT_COMMIT_LOCKED_UNDER_TEST
+    мутация:
+    - 's@^        exit 5$@        :@'
+    - 's@^            --) \[ \$# -gt 0 \] && paths=1; @            --) @'
+    - 's@^            -i | --include) include=1; @            -i | --include) @'
+    - 's@^                base=\$1; shift ;;$@                shift ;;@'
+    - 's@^            --base=\*) base=\${a#--base=} ;;$@            --base=*) ;;@'
+    - 's@ || refuse "--base \$base" "не коммит"$@ || true@'
+    - 's@^    base=\$(git rev-parse -q --verify HEAD || true)$@    base=""@'
+    - 's@ && { \[ "\$paths" = 0 \] || \[ "\$include" = 1 \]; }; then$@; then@'
+    - 's@<(git diff --cached --no-renames --name-only "\$head_now" | sort)@<(git diff --cached --no-renames --name-only "$base" | sort)@'
+    мутация_случай:
+    - 'отказ без выхода — «S1 отказ кодом 5», «S1 правка соседа цела»'
+    - 'форма с путями не узнана — «C2 код 0»'
+    - '-i не узнан — «S3 отказ кодом 5», «S3 правка соседа цела»'
+    - '--base <sha> не читается — «S2 отказ кодом 5»'
+    - '--base=<sha> не читается — «S2б отказ кодом 5»'
+    - '--base не коммит проглочен — «S4 отказ кодом 2», «S4 коммита нет»'
+    - 'без --base нет базы — «S1 отказ кодом 5»'
+    - 'форма с путями тоже судится — «C2 код 0»'
+    - 'индекс сверяется с базой, а не с HEAD — «C3 код 0»'
   # Правило сторожа «коммит_мимо_обёртки»: личный индекс или пути — только обёрткой git-commit-locked.sh.
   scripts/hooks/test_guard_bash.py#commit-wrapper:
     механизм: scripts/hooks/guard_bash.py
@@ -10345,6 +10448,200 @@
     мутация_случай:
     - 'D40: STATE.md из прежней описи — «опись испорчена», а не «вынут, файл не тронут»'
     - 'D40: строки «из описи вынут (не дело раскладки), файл не тронут: STATE.md» нет'
+  # ── Пачка «чистота и секреты» (опыт копии Content-Factory), прогнаны 14.11.2026 на копиях ──
+  scripts/test_harness_clean_aliases.py:
+    # check-harness-clean.py: имя продукта — только PRODUCT_ALIASES, каталог не судится (опыт копии Content-Factory).
+    механизм: scripts/check-harness-clean.py
+    доказательство: python3 scripts/test_harness_clean_aliases.py
+    подмена: HARNESS_CLEAN_PY
+    мутация:
+    - 's@    имена = конфиг(путь).get("PRODUCT_ALIASES", "").split()@    имена = [конфиг(путь).get("PRODUCT_DIR", "").strip("/")] + конфиг(путь).get("PRODUCT_ALIASES", "").split()@'
+    - 's@    return sorted({и for и in имена if len(и) >= 3})@    return []@'
+    мутация_случай:
+    - 'гейт снова судит PRODUCT_DIR — 1 БОЛЬНОЙ СЛУЧАЙ: PRODUCT_DIR=html, прозвищ нет, «html» в харнесе — rc 0'
+    - 'прозвища не берутся — 2 прозвище из PRODUCT_ALIASES в харнесе — rc 1'
+  scripts/test_installer_product_aliases.sh:
+    # Установщик живёт в пакете (вне дерева проекта): одинокая копия, дверь USTANOVIT_UNDER_TEST.
+    механизм: ${STARTER_DIR}/USTANOVIT.sh
+    доказательство: bash scripts/test_installer_product_aliases.sh
+    подмена: USTANOVIT_UNDER_TEST
+    мутация:
+    - 's@  elif ! grep -q ''^PRODUCT_ALIASES='' "$conf"; then@  elif true; then@'
+    - 's@''$(basename "$PRODUCT_PATH")''@''$PRODUCT_PATH''@'
+    - 's@sed -i --follow-symlinks "s|^PRODUCT_ALIASES=@sed -i "s|^PRODUCT_ALIASES=@'
+    мутация_случай:
+    - 'заданные прозвища перекрываются дописанной строкой — заданные прозвища не затираются'
+    - 'полный путь вместо имени каталога — вызов: PRODUCT_PATH=/srv/www/shopxyz — прозвище «shopxyz»'
+    - 'ссылка harness.conf заменяется файлом — конфиг-ссылка: ссылка осталась ссылкой'
+  scripts/test_check_secrets_range.sh:
+    # check-secrets.sh --range: только добавленные строки диффа; заголовок — лишь вне ханка; NUL и байт не из UTF-8 не прячут.
+    механизм: scripts/check-secrets.sh
+    доказательство: bash scripts/test_check_secrets_range.sh
+    подмена: CHECK_SECRETS_SRC
+    мутация:
+    - 's@inhunk && /^\\+/ && !skip@inhunk \&\& /^[-+]/ \&\& !skip@'
+    - 's@        !inhunk && /^\\+\\+\\+ / {@        /^\\+\\+\\+ / {@'
+    - 's@range_added_lines "$repo" "$RANGE" || return 1@range_added_lines "$repo" "$RANGE" || { echo "check-secrets: чисто"; return 0; }@'
+    - 's@== \[!-\]\*\.\.?\* \]\]@== ?* ]]@'
+    - 's@grep -a -inE@grep -inE@'
+    - 's@hits=$(grep -av "$MARKER"@hits=$(grep -v "$MARKER"@'
+    - 's@if (f ~ /^"/) f = unquote(f); else @@'
+    - 's@else sub(/\\t\.\*\$/, "", f)@else f = f@'
+    - 's@    LC_ALL=C awk -v text@    awk -v text@'
+    мутация_случай:
+    - 'судятся и удалённые строки — удалённая строка с секретом — код 0'
+    - '«++ …» в ханке принята за заголовок — добавленная строка «++ token = …» — код 1'
+    - 'сбой git diff отвечает «чисто» — неверный диапазон — код 1'
+    - 'одна ревизия и довод на «-» приняты — одна ревизия без «..» — код не 0 и не «чисто»'
+    - 'строка с NUL делает текст двоичным — NUL в добавленной строке не прячет секрет — код 1'
+    - 'отсев находок роняет строку не из UTF-8 — байт не из UTF-8 не прячет секрет — код 1'
+    - 'имя в кавычках git не раскрыто — такое имя названо как есть, без кавычек git'
+    - 'хвостовая табуляция имени не срезана — имя с пробелом названо как есть'
+    - 'разбор диффа по локали — байт не из UTF-8: разбор без предупреждений о кодировке'
+  scripts/./test_check_secrets_range.sh:
+    # Страж той же пробы: выкат судит весь репо, режим диапазона на выкате — слово владельца (И-3).
+    механизм: scripts/deploy.sh
+    доказательство: bash scripts/./test_check_secrets_range.sh
+    подмена: DEPLOY_SH_SRC
+    мутация:
+    - 's@bash "$SCRIPT_DIR/check-secrets.sh" "$PRODUCT_TREE"@bash "$SCRIPT_DIR/check-secrets.sh" --range "$BASE..HEAD" "$PRODUCT_TREE"@'
+    мутация_случай:
+    - 'выкат зовёт --range — deploy.sh не содержит --range'
+  # Права копий, --базы-в и ротация перед-выкатом (backup.sh).
+  scripts/test_backup_dumps_into.sh:
+    механизм: harness/demons/backup.sh
+    доказательство: bash scripts/test_backup_dumps_into.sh
+    подмена: HARNESS_BACKUP_SH
+    мутация:
+    - 's/^umask 077$/: umask снят/'
+    - 's/^    \[ "$DB_FAILURES" = 0 \]$/    true/'
+    - 's/другой прогон дампит, дамп не снят"; exit 1; }/другой прогон дампит, дамп не снят"; exit 0; }/'
+    - 's/BACKUP_DBS пуст — снимать нечего, дамп не снят"; exit 1; }/BACKUP_DBS пуст — снимать нечего, дамп не снят"; exit 0; }/'
+    - 's/^    if \[ -s "$PRODUCT_POWER_STATE" \]; then$/    if false; then/'
+    - 's/| sort -r | tail -n +"$(($2 + 1))")/| sort -r | tail -n +"$(($2 + 2))")/'
+    - 's/-printf ''%f\\n'' 2>\/dev\/null | sort -r | tail/-printf ''%f\\n'' 2>\/dev\/null | sort | tail/'
+    - 's/-maxdepth 1 -type d -name "$PRE_DEPLOY_MASK"/-maxdepth 1 -type d/'
+    - 's/-maxdepth 1 -type d -name "$PRE_DEPLOY_MASK"/-maxdepth 1 -name "$PRE_DEPLOY_MASK"/'
+    - 's/=~ ^\[1-9\]\[0-9\]\*\$ \]\]/=~ ^-?[0-9]+$ ]]/'
+    - 's/ ! -name "$PRE_DEPLOY_DIR" 2>\/dev\/null | wc -l)/ 2>\/dev\/null | wc -l)/'
+    мутация_случай:
+    - 'БОЛЬНОЙ (а): ночная копия при umask 022 — каталоги 700, файлы 600 (bundle, tar, crontab, дампы)'
+    - 'БОЛЬНОЙ (в): команда базы beta упала — код ≠ 0, beta названа, ночного прогона нет'
+    - 'БОЛЬНОЙ (в): лок занят — код ≠ 0 и слово «лок», дампов 0'
+    - 'БОЛЬНОЙ (в): BACKUP_DBS пуст — код ≠ 0 и ключ назван, ночного прогона нет'
+    - '(в): продукт выключен — код ≠ 0 и слово «выключен», дампов и ночи нет'
+    - 'БОЛЬНОЙ (в): из 7 каталогов перед-выкатом остались 5 новейших по имени (держит 6 — off-by-one)'
+    - 'БОЛЬНОЙ (в): из 7 каталогов перед-выкатом остались 5 новейших по имени (убраны новейшие)'
+    - 'И-1 (в): файл с именем своего вида и каталоги чужого вида ротация не тронула (каталоги не того вида убраны)'
+    - 'И-1 (в): файл с именем своего вида и каталоги чужого вида ротация не тронула (файл своего вида убран)'
+    - 'БОЛЬНОЙ И-1 (в): BACKUP_PRE_DEPLOY_KEEP=0 — 7 из 7 на месте, ключ назван, код ≠ 0'
+    - '(в): старый «перед-выкатом» не чужой, x-чужой — по-прежнему чужой'
+  # Проба восстановления заливает в psql только дамп PostgreSQL (restore-probe.sh).
+  scripts/test_restore_probe_pick_dump.sh:
+    механизм: scripts/restore-probe.sh
+    доказательство: bash scripts/test_restore_probe_pick_dump.sh
+    подмена: HARNESS_RESTORE_PROBE_SH
+    мутация:
+    - 's/grep -qE ''^-- PostgreSQL database dump$''/grep -qE ''^-- ''/'
+    - 's/^             | sort -nr | cut -d'' '' -f2-)$/&\n    find "$1" -name ''db-*.dump'' -type f | head -1/'
+    - 's/^             | sort -nr | cut -d'' '' -f2-)$/             | sort -n | cut -d'' '' -f2-)/'
+    мутация_случай:
+    - 'БОЛЬНОЙ: рядом свежий MySQL-дамп — psql получил дамп PostgreSQL (берётся любой db-*.dump)'
+    - 'БОЛЬНОЙ: только MySQL-дамп — psql его не получил, «восстанавливается» не объявлено'
+    - 'БОЛЬНОЙ: два PG-дампа и свежее их MySQL и MariaDB — psql получил самый свежий PG'
+  # Закон пачек: заявки в окно или во время захода — один заход; падение или смерть захода — отказ каждой заявке в срок (слово владельца 14.11).
+  scripts/test_batch_queue.py:
+    механизм: scripts/lib/batch_queue.py
+    доказательство: python3 scripts/test_batch_queue.py
+    подмена: HARNESS_BATCH_QUEUE
+    мутация:
+    - 's@^        left = pending\[0\]\["с"\] + window - time.time()$@        left = 0@'
+    - 's@^            if tokens and len(ids) + len(fresh) > cap:$@            if False:@'
+    - 's@^        orphans = \[з\["знак"\] for з in state\["заявки"\] if з\["заход"\]\]$@        orphans = []@'
+    - 's@^    return code, lines$@    return 0, lines@'
+    - 's@^    withdraw(place, token)$@    pass@'
+    - 's@^    deadline = time.monotonic() + wait$@    deadline = time.monotonic() + wait * 100@'
+    - 's@^        for request in pending:$@        for request in pending[:1]:@'
+    - 's@^                _close(state, tokens, code, lines)$@                pass@'
+    мутация_случай:
+    - '1 два вызова подряд в окне — один заход с обоими id'
+    - '14 потолок пачки 2: три заявки — два захода, первый с двумя id'
+    - '9 исполнитель убит посреди захода — ждущая заявка получает отказ 75, не висит'
+    - '6 падение захода — обе заявки получают отказ с его кодом, а не 0'
+    - '13 отозванная заявка не гонится после ухода заявителя'
+    - '11 предел ожидания: заявка за долгим заходом уходит с отказом 75 в срок'
+    - '1 два вызова подряд в окне — один заход с обоими id'
+    - '3 обе заявки получили итог захода: код 0 и строку своего id'
+  scripts/test_mutations_step.py#закон-пачек:
+    # Шаг мутаций — заявка в очередь пачек: два вызова подряд в окне — один заход в срез, каждый видит свой итог (слово владельца 14.11).
+    механизм: scripts/acceptance.py
+    доказательство: python3 scripts/test_mutations_step.py
+    подмена: HARNESS_ACCEPTANCE
+    мутация:
+    - 's@^        float(настройки\["окно_сбора_сек"\]), int(настройки\["задач"\]),$@        0.0, int(настройки["задач"]),@'
+    - 's@^        if найдено and найдено\[1\] not in ids:$@        if False:@'
+    - 's@^    ids = \[ид for ид in ids if ид not in unread and ид not in fresh\]$@    ids = [] if unread else [ид for ид in ids if ид not in fresh]@'
+    - 's@^            return _queued_mutations(_batch_ids())$@            return _task_mutations(_batch_ids())@'
+    - 's@^            коды\[найдено\[1\]\] = (1 if int(дыр\[1\]) else 0) if дыр else (0 if "шаг пуст" in найдено\[2\] else 2)$@            коды[найдено[1]] = 0@'
+    - 's@^    без_итога = \[ид for ид in ids if ид not in коды\]$@    без_итога = []@'
+    мутация_случай:
+    - '22 закон пачек: два вызова подряд в окне — один заход в срез с обоими id'
+    - '24 закон пачек: каждый видит итог своей задачи, а не чужой'
+    - '25 закон пачек: нечитаемая чужая задача не отнимает прогон у остальных'
+    - '22 закон пачек: два вызова подряд в окне — один заход в срез с обоими id'
+    - '26 закон пачек: дыры своей задачи в общем заходе — код 1'
+    - '27 закон пачек: заход без итога своей задачи — код 2 и слово, а не тихий 0'
+  # Обрыв захода не теряет готовое: бумага по готовности, построчный ход, повтор — только недоделанное, мягкий срок (14.11: 240 мин, 0 бумаг).
+  scripts/test_mutations_step.py#обрыв:
+    механизм: scripts/acceptance.py
+    доказательство: python3 scripts/test_mutations_step.py
+    подмена: HARNESS_ACCEPTANCE
+    мутация:
+    - 's@^            if ид not in итог and all(м in прогоны for м in mechanisms):$@            if ид not in итог and len(прогоны) == len(чьи) and all(м in прогоны for м in mechanisms):@'
+    - 's@flush=True@flush=False@g'
+    - 's@^             and mutation_paper_debts(ид, КОРЕНЬ) == \[\]\]$@             and False]@'
+    - 's@^        _record_mechanism(файл, секунд, покраснели, дыр)$@        pass@'
+    - 's@^        if срок and time.time() >= срок:$@        if False:@'
+    - 's@key=lambda и: цена(по_задаче\[и\]))@key=lambda и: 0)@'
+    - 's@statistics.median(с\[-5:\])@0@'
+    - 's@^    short = \[ид for ид in ids if ид not in итог\]$@    short = []@'
+    - 's@float(os.environ\["MUTATION_DEADLINE_TS"\])@None@'
+    - 's@^        if not (найдено and найдено\[1\] not in ids):$@        if True:@'
+    - 's@if известные else 1.0@if известные else 0.0@'
+    мутация_случай:
+    - '28 обрыв: убитый заход оставил бумагу готовой задачи, недоделанной — нет'
+    - '29 обрыв: журнал запуска не пуст до смерти — строка механизма с длительностью и итог задачи'
+    - '30 повтор: прибор зван только для недоделанного, обе бумаги зелёные, код 0'
+    - '31 история длительностей пополняется по механизму'
+    - '32 срок: после срока новый механизм не начат, задача названа «не догнана», код 2'
+    - '28 обрыв: убитый заход оставил бумагу готовой задачи, недоделанной — нет'
+    - '28 обрыв: убитый заход оставил бумагу готовой задачи, недоделанной — нет'
+    - '32 срок: после срока новый механизм не начат, задача названа «не догнана», код 2'
+    - '32 срок: после срока новый механизм не начат, задача названа «не догнана», код 2'
+    - '24 закон пачек: каждый видит итог своей задачи, а не чужой'
+    - '33 план без истории: задача с меньшим числом механизмов — первой'
+  # Ход захода очереди пачек виден, пока заход идёт: строка — в журнал запуска и в заход.log сразу.
+  scripts/test_batch_queue.py#построчно:
+    механизм: scripts/lib/batch_queue.py
+    доказательство: python3 scripts/test_batch_queue.py
+    подмена: HARNESS_BATCH_QUEUE
+    мутация:
+    - 's@^            echo(line)$@            pass@'
+    - 's@^            run_log.flush()$@            pass@'
+    мутация_случай:
+    - '16 построчно: строка захода в журнале запуска и в заход.log, пока заход идёт'
+    - '16 построчно: строка захода в журнале запуска и в заход.log, пока заход идёт'
+  # Дверь среза ставит мягкий срок MUTATION_DEADLINE_TS до предела юнита: прибор и пачка успевают записать итог.
+  scripts/test_checks_slice_door.py#мягкий-срок:
+    механизм: scripts/run-in-checks-slice.sh
+    доказательство: python3 scripts/test_checks_slice_door.py
+    подмена: из-копии
+    мутация:
+    - 's@    || export MUTATION_DEADLINE_TS="$soft_ts"@    || :@'
+    - 's@^\[ "$margin" -le $(( RUN_MAX_MIN \* 30 )) \] || margin=$(( RUN_MAX_MIN \* 30 ))$@:@'
+    мутация_случай:
+    - 'G-04: мягкий срок MUTATION_DEADLINE_TS дошёл до юнита — за полпредела до RuntimeMaxSec'
+    - 'G-04: мягкий срок MUTATION_DEADLINE_TS дошёл до юнита — за полпредела до RuntimeMaxSec'
 без_мутаций:
   scripts/test_unified_fresh.py: 'мутация на копии невозможна: дверь UNIFIED_DIR — каталог глав, сборщика и выгрузки, а прибор подставляет в дверь путь одного файла; проба отвечает «нет сборщика» и красна на чистой копии. Красная на поломке доказана живьём: пакет 8da1ae2 — «ОТСТАЛА 323599 против 323861» (c266329, релиз 0.9.3)'
   scripts/test_layout_selftest_cleanup.py: 'мутация на копии невозможна (проверено прогоном 10.11): раскладчик пакета лежит вне дерева проекта, одинокая копия без соседних файлов пакета падает раньше обрыва по timeout — проба отвечает «обрыва не было (код 1)», чистая копия красна до мутации (hr.alert-disk-cleanup-full-2)'

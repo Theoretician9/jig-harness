@@ -104,10 +104,36 @@ _gates_init() {
     GATES_MECHANISMS="${GATES_MECHANISMS:-$GATES_ROOT/harness/config/mechanisms.yaml}"
     GATES_SERIAL_FILE="${GATES_SERIAL_FILE:-$GATES_ROOT/harness/config/gates-serial.yaml}"
     GATES_CACHE_FILE="${GATES_CACHE_FILE:-$LOG_DIR/gates-cache.tsv}"
+    GATES_DEV_FILE="${GATES_DEV_FILE:-$GATES_ROOT/harness/config/gates-harness-dev.yaml}"
     local py; py=$(_gates_helper)
     _gates_load_inputs "$py"
     _gates_load_serial "$py"
     _gates_load_cache "$py"
+    _gates_load_dev_only
+}
+
+# Проверки разработки самого харнеса — данные gates-harness-dev.yaml: на установке без
+# HARNESS_DEV_GATES=1 они не идут (копии судить там нечего, а её красная откатывала
+# каждое обновление — копия bkb, 14.11.2026). Пропуск считается и печатается в итоге.
+declare -A GATES_DEV_ONLY=()
+GATES_DEV_SKIPPED=()
+_gates_load_dev_only() {
+    local name
+    [ -f "$GATES_DEV_FILE" ] || return 0
+    while IFS= read -r -d '' name; do
+        GATES_DEV_ONLY[$name]=1
+    done < <(python3 -c 'import sys, yaml
+for item in (yaml.safe_load(open(sys.argv[1], encoding="utf-8")) or {}).get("проверки") or []:
+    sys.stdout.write(item["имя"] + "\0")' "$GATES_DEV_FILE")
+}
+
+# Строка итога о пропущенных: без неё «зелёных N» скрывало бы, что части проверок не было.
+gates_dev_skipped_line() {
+    [ "${#GATES_DEV_SKIPPED[@]}" -gt 0 ] || return 0
+    local names
+    names=$(printf '%s, ' "${GATES_DEV_SKIPPED[@]}")
+    printf '  не идут: проверки разработки харнеса (%d: %s) — ключ HARNESS_DEV_GATES не 1, gates-harness-dev.yaml\n' \
+        "${#GATES_DEV_SKIPPED[@]}" "${names%, }"
 }
 
 # ── ключ кэша ────────────────────────────────────────────────────────────────
@@ -326,6 +352,10 @@ _gates_run_inline() {  # имя, группа, команда...
     # Выборка (gates.sh --только): проверка вне списка не идёт и не считается.
     case "|${ONLY_CHECKS:-}|" in "||"|*"|$name|"*) ;; *) return ;; esac
     _gates_init
+    if [ -n "${GATES_DEV_ONLY[$name]+x}" ] && [ "${HARNESS_DEV_GATES:-0}" != 1 ]; then
+        GATES_DEV_SKIPPED+=("$name")
+        return
+    fi
     # Гейт без команды — самый опасный: он всегда зелёный и всегда молчит.
     # 11.09.2026 правка ворот текстом разорвала строку «указания», команда
     # уехала в хвост соседней, и гейт полсмены отчитывался «ок» ни о чём.

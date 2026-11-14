@@ -1105,6 +1105,12 @@
     класс: C2
   "scripts/test_check_secrets_mask.sh":
     класс: D
+  "scripts/test_check_secrets_range.sh":
+    класс: D
+  "scripts/test_harness_clean_aliases.py":
+    класс: D
+  "scripts/test_installer_product_aliases.sh":
+    класс: D
   "scripts/test_security_secrets_masked.py":
     класс: D
   "scripts/test_secret_in_logs_keys.py":

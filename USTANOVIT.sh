@@ -302,6 +302,21 @@ PULSE_PID=""
   PULSE_PID=""
 }
 
+# Прозвища продукта по умолчанию: гейт чистоты харнеса судит только
+# PRODUCT_ALIASES, не имя каталога (у копии каталог «html» — слово разметки).
+# Копии, где имя каталога и есть имя продукта, без этого потеряли бы проверку
+# молча. Заданные прозвища и пустое имя файл не меняют; повтор безвреден.
+# $1 — harness.conf (может быть ссылкой: правится цель), $2 — имя продукта.
+default_product_aliases() {
+  local conf="$1" name="$2"
+  [ -n "$name" ] || return 0
+  if grep -q '^PRODUCT_ALIASES=""$' "$conf"; then
+    sed -i --follow-symlinks "s|^PRODUCT_ALIASES=\"\"\$|PRODUCT_ALIASES=\"$name\"|" "$conf"
+  elif ! grep -q '^PRODUCT_ALIASES=' "$conf"; then
+    printf 'PRODUCT_ALIASES="%s"\n' "$name" >> "$conf"
+  fi
+}
+
 # Единственная дверь всех команд шагов: ввод закрыт, чтобы ни apt, ни чужая
 # обёртка не вставали на чтении терминала, как бы ни был запущен установщик.
 # Пульс останавливает финал, если команда упала и set -e вышел из функции.
@@ -1433,6 +1448,7 @@ EOF
   # каталог /etc/harness агенту не отдаётся, иначе он мог бы подменить и
   # install.conf с AUTONOMY.
   делай "mkdir -p /etc/harness/agent && chown $AGENT_USER:$AGENT_USER /etc/harness/agent && chmod 755 /etc/harness/agent; [ -L /etc/harness/harness.conf ] || { mv /etc/harness/harness.conf /etc/harness/agent/harness.conf && ln -s agent/harness.conf /etc/harness/harness.conf; }; chown $AGENT_USER:$AGENT_USER /etc/harness/agent/harness.conf"
+  [[ -z "$PRODUCT_PATH" ]] || делай "default_product_aliases /etc/harness/harness.conf '$(basename "$PRODUCT_PATH")'"
   проверка "$step" "harness.conf принадлежит агенту, /etc/harness — root" \
     "[ -L /etc/harness/harness.conf ] && sudo -u $AGENT_USER test -w /etc/harness/agent/harness.conf && [ \"\$(stat -c %U /etc/harness /etc/harness/install.conf | sort -u)\" = root ]" \
     "ls -la /etc/harness /etc/harness/agent"

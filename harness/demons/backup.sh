@@ -27,6 +27,9 @@
 #
 # Запуск: cron, ночью, от имени $AGENT_USER.
 set -euo pipefail
+# Копии несут данные покупателей: права ставит механизм, а не umask вызывающего
+# (cron и ручной запуск ходят с 022). Каталоги выйдут 700, файлы 600.
+umask 077
 
 # shellcheck disable=SC1091
 source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../../scripts/lib/config.sh"
@@ -104,13 +107,19 @@ OWN_COPY_MASK='20[0-9][0-9]-[01][0-9]-[0-3][0-9]_[0-2][0-9][0-5][0-9]'
 # масками retention.yaml: те писаны для файлов LOG_DIR, и «*.log» спрятал бы
 # чужой каталог x.log. Срок его хранения решает владелец (И-1), уборщика нет.
 LAYOUT_COPY_DIR="раскладка"
+# Каталог дампов двери выката (deploy.sh шаг 4б → `--базы-в`): внутри него
+# каталоги вида ГГГГММДД-ЧЧММСС-<sha8>. Ночной ротации по сроку он не подлежит и
+# чужим не считается: его ротирует ротация_перед_выкатом — по числу, не по дням.
+PRE_DEPLOY_DIR="перед-выкатом"
+PRE_DEPLOY_KEEP="${BACKUP_PRE_DEPLOY_KEEP:-5}"
+PRE_DEPLOY_MASK='[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]'
 чужие_каталоги_рядом() { # $1 = каталог копий, $2 = сколько дней хранить
     local skolko obyom
     skolko=$(find "$1" -mindepth 1 -maxdepth 1 -type d -mtime "+$2" \
-             ! -name "$OWN_COPY_MASK" ! -name "$LAYOUT_COPY_DIR" 2>/dev/null | wc -l)
+             ! -name "$OWN_COPY_MASK" ! -name "$LAYOUT_COPY_DIR" ! -name "$PRE_DEPLOY_DIR" 2>/dev/null | wc -l)
     [ "$skolko" = 0 ] && return 0
     obyom=$(du -sm $(find "$1" -mindepth 1 -maxdepth 1 -type d -mtime "+$2" \
-            ! -name "$OWN_COPY_MASK" ! -name "$LAYOUT_COPY_DIR" 2>/dev/null) 2>/dev/null \
+            ! -name "$OWN_COPY_MASK" ! -name "$LAYOUT_COPY_DIR" ! -name "$PRE_DEPLOY_DIR" 2>/dev/null) 2>/dev/null \
             | awk '{s+=$1} END {printf "%d МБ", s}')
     printf 'ротация: чужих каталогов старше %s дн. — %s (%s); убрать их может только владелец\n' \
         "$2" "$skolko" "${obyom:-0 МБ}"
@@ -149,6 +158,32 @@ LAYOUT_COPY_DIR="раскладка"
     # Код возврата — ПРИЗНАК отказа, а не счётчик: код берётся по модулю 256, и
     # ровно 256 неудалённых каталогов объявили бы прогон здоровым. Число
     # каталогов названо строкой выше.
+    [ "$ne_smog" = 0 ]
+}
+
+# Каталоги дампов выката: остаются PRE_DEPLOY_KEEP новейших ПО ИМЕНИ (оно
+# датировано; mtime подделывается копированием). Трогаются только каталоги вида
+# ГГГГММДД-ЧЧММСС-<sha8>: файл, положенный сюда руками, — решение владельца (И-1).
+ротация_перед_выкатом() { # $1 = каталог копий, $2 = сколько новейших держать
+    local katalog="$1/$PRE_DEPLOY_DIR" lishnij udaleno=0 ne_smog=0
+    [ -d "$katalog" ] || return 0
+    # Счёт идёт в арифметику bash: нечисло там — имя переменной (ноль), а «держать
+    # 0» снесло бы и дамп только что прошедшего выката. Не целое ≥ 1 — отказ (И-1).
+    [[ "$2" =~ ^[1-9][0-9]*$ ]] || {
+        printf 'ротация перед-выкатом: BACKUP_PRE_DEPLOY_KEEP=«%s» не целое ≥ 1 — не убрано ничего\n' "$2"
+        return 1
+    }
+    while IFS= read -r lishnij; do
+        [ -n "$lishnij" ] || continue
+        if rm -rf "$katalog/$lishnij" 2>/dev/null && [ ! -e "$katalog/$lishnij" ]; then
+            udaleno=$((udaleno + 1))
+        else
+            ne_smog=$((ne_smog + 1))
+            printf 'ротация перед-выкатом: НЕ УДАЛОСЬ убрать %s\n' "$katalog/$lishnij"
+        fi
+    done < <(find "$katalog" -mindepth 1 -maxdepth 1 -type d -name "$PRE_DEPLOY_MASK" \
+                 -printf '%f\n' 2>/dev/null | sort -r | tail -n +"$(($2 + 1))")
+    printf 'ротация перед-выкатом: удалено %s (держим %s новейших)\n' "$udaleno" "$2"
     [ "$ne_smog" = 0 ]
 }
 
@@ -421,11 +456,59 @@ CONF
     echo "SELFTEST: КРАСНЫЙ"; exit 1
 fi
 
+# Дампы всех баз из BACKUP_DBS в каталог $1: один цикл на ночной прогон и на
+# `--базы-в` (дверь выката). Формат BACKUP_DBS — «имя=команда», строка = запись
+# (см. шаг 5). Число неудач — в DB_FAILURES.
+дампы_баз() { # $1 = каталог, куда класть db-<имя>.dump
+    DB_FAILURES=0
+    local entry db_name db_cmd
+    while IFS= read -r entry; do
+        entry=$(printf '%s' "$entry" | sed 's/^ *//;s/ *$//')
+        [ -n "$entry" ] || continue
+        db_name="${entry%%=*}"; db_cmd="${entry#*=}"
+        # </dev/null: иначе команда дампа съела бы остальные строки списка.
+        if bash -c "$db_cmd" > "$1/db-$db_name.dump" 2>/dev/null </dev/null \
+           && дамп_дочитан "$1/db-$db_name.dump"; then
+            say "5. база $db_name: $(du -h "$1/db-$db_name.dump" | cut -f1) (маркер конца дампа на месте)"
+        elif [ -s "$1/db-$db_name.dump" ]; then
+            # Не удаляем: обрывок иногда всё, что осталось, — но имя обязано
+            # кричать, что восстанавливаться из него нельзя.
+            mv "$1/db-$db_name.dump" "$1/db-$db_name.dump.НЕПОЛНЫЙ"
+            say "5. база $db_name: дамп ОБОРВАН (нет маркера конца) — сохранён как .НЕПОЛНЫЙ, это НЕ бэкап"
+            DB_FAILURES=$((DB_FAILURES + 1))
+        else
+            say "5. база $db_name: дамп ПУСТ или команда упала — это НЕ бэкап"
+            rm -f "$1/db-$db_name.dump"
+            DB_FAILURES=$((DB_FAILURES + 1))
+        fi
+    done <<< "$BACKUP_DBS"
+}
+
+PRODUCT_POWER_STATE="${PRODUCT_POWER_STATE:-$PANEL_STATE_DIR/product-power.json}"
+
 # Один прогон за раз (Д-10, единый паттерн демонов): cron + ручной запуск не
 # должны дампить наперегонки. Лок — сервисный каталог (конвенция К-1б).
 LOCK_FILE="$LOG_DIR/locks/${SERVICE_LOCKS_SUBDIR:-services}/backup.lock"
 mkdir -p "$(dirname "$LOCK_FILE")"
 exec 9>>"$LOCK_FILE"
+# Дверь выката (`--базы-в`) без копии не идёт: «прогон уже идёт» для неё отказ, а не
+# нормальный выход 0, иначе миграция началась бы без дампа.
+if [ "${1:-}" = "--базы-в" ]; then
+    INTO="${2:-}"
+    [ -n "$INTO" ] || { say "backup: --базы-в требует каталог — дамп не снят"; exit 1; }
+    flock -n 9 || { say "backup: лок занят ($LOCK_FILE) — другой прогон дампит, дамп не снят"; exit 1; }
+    if [ -s "$PRODUCT_POWER_STATE" ]; then
+        say "backup: продукт выключен владельцем ($PRODUCT_POWER_STATE) — базы не работают, дамп не снят"
+        exit 1
+    fi
+    [ -n "${BACKUP_DBS:-}" ] || { say "backup: BACKUP_DBS пуст — снимать нечего, дамп не снят"; exit 1; }
+    mkdir -p "$INTO"
+    say "=== дампы баз → $INTO ==="
+    дампы_баз "$INTO"
+    say "=== дампы баз: отказов $DB_FAILURES ==="
+    [ "$DB_FAILURES" = 0 ]
+    exit
+fi
 flock -n 9 || { say "прогон уже идёт (лок $LOCK_FILE) — выхожу"; exit 0; }
 
 STAMP=$(date +"$COPY_NAME_FORMAT")
@@ -508,7 +591,6 @@ fi
 # механизм выглядит живым). Поэтому строка в журнале называет и состояние, и
 # дату выключения, и где лежит последний дамп — тот, что снял сам выключатель
 # перед остановкой.
-PRODUCT_POWER_STATE="${PRODUCT_POWER_STATE:-$PANEL_STATE_DIR/product-power.json}"
 if [ -s "$PRODUCT_POWER_STATE" ]; then
     KOGDA=$(python3 -c "
 import json, sys
@@ -524,26 +606,8 @@ except Exception:
     say "   Последний дамп: ${POSLEDNIJ:-не найден — это повод разобраться}"
     say "   Включить обратно: bash scripts/product-power.sh on"
 elif [ -n "${BACKUP_DBS:-}" ]; then
-    while IFS= read -r entry; do
-        entry=$(printf '%s' "$entry" | sed 's/^ *//;s/ *$//')
-        [ -n "$entry" ] || continue
-        db_name="${entry%%=*}"; db_cmd="${entry#*=}"
-        # </dev/null: иначе команда дампа съела бы остальные строки списка.
-        if bash -c "$db_cmd" > "$DEST/db-$db_name.dump" 2>/dev/null </dev/null \
-           && дамп_дочитан "$DEST/db-$db_name.dump"; then
-            say "5. база $db_name: $(du -h "$DEST/db-$db_name.dump" | cut -f1) (маркер конца дампа на месте)"
-        elif [ -s "$DEST/db-$db_name.dump" ]; then
-            # Не удаляем: обрывок иногда всё, что осталось, — но имя обязано
-            # кричать, что восстанавливаться из него нельзя.
-            mv "$DEST/db-$db_name.dump" "$DEST/db-$db_name.dump.НЕПОЛНЫЙ"
-            say "5. база $db_name: дамп ОБОРВАН (нет маркера конца) — сохранён как .НЕПОЛНЫЙ, это НЕ бэкап"
-            FAILURES=$((FAILURES + 1))
-        else
-            say "5. база $db_name: дамп ПУСТ или команда упала — это НЕ бэкап"
-            rm -f "$DEST/db-$db_name.dump"
-            FAILURES=$((FAILURES + 1))
-        fi
-    done <<< "$BACKUP_DBS"
+    дампы_баз "$DEST"
+    FAILURES=$((FAILURES + DB_FAILURES))
 else
     say "5. базы не заданы (BACKUP_DBS пуст) — продукт ещё не начат, место под дампы готово"
 fi
@@ -553,9 +617,13 @@ ROT_VYVOD=$(ротация_каталогов "$BACKUP_DIR" "$BACKUP_KEEP_DAYS")
 while IFS= read -r stroka; do
     [ -n "$stroka" ] && say "$stroka"
 done <<< "$ROT_VYVOD"
+PRE_VYVOD=$(ротация_перед_выкатом "$BACKUP_DIR" "$PRE_DEPLOY_KEEP") || PRE_OTKAZ=1
+while IFS= read -r stroka; do
+    [ -n "$stroka" ] && say "$stroka"
+done <<< "$PRE_VYVOD"
 STARYE_FAJLY=$(старые_файлы_рядом "$BACKUP_DIR" "$BACKUP_KEEP_DAYS")
 [ -n "$STARYE_FAJLY" ] && say "$STARYE_FAJLY"
-if [ "${ROT_OTKAZ:-0}" != 0 ]; then
+if [ "${ROT_OTKAZ:-0}" != 0 ] || [ "${PRE_OTKAZ:-0}" != 0 ]; then
     # Копии, которые не удаляются, — это заполняющийся диск и, значит, будущая
     # потеря копий: И-1. Метки не будет, сторож меток назовёт демона утром.
     # В счёт идёт ОДИН отказавший шаг: три неубранных каталога — это одна

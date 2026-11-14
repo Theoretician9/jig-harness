@@ -60,6 +60,8 @@ QUESTIONS_LOG = "stack-вопросы.jsonl"
 SHAPES = {"semver": re.compile(r"[0-9]+(\.[0-9]+){1,3}"),
           "debian": re.compile(r"([0-9]+:)?[0-9][A-Za-z0-9.+~-]*"),
           "kernel": re.compile(r"[0-9]+\.[0-9]+\.[0-9]+-[0-9]+")}
+# Индекс nodejs.org открывается пре-релизами (v27.0.0-alpha…): их форма не semver.
+PRERELEASE = re.compile(r"-(alpha|beta|rc|nightly)")
 SOURCE_SHAPE = {"apt": "debian", "apt-ждущие": "debian", "npm": "semver", "nodejs-dist": "semver",
                 "pypi": "semver", "перезагрузка": "kernel"}
 # Смена версии этих частей между замерами — не «мимо двери»: она ожидаема.
@@ -251,6 +253,8 @@ def source_nodejs_dist(part, current, ctx):
     entries = {}
     for entry in index:
         version = entry.get("version") if isinstance(entry, dict) else None
+        if isinstance(version, str) and PRERELEASE.search(version):
+            continue
         if not isinstance(version, str) or not valid_version("semver", version[1:]):
             return Unknown(f"версия не той формы: {too_wide(str(version))!r}")
         if version[1:].split(".")[0] == branch:
@@ -307,7 +311,8 @@ POLICY_SOURCE = re.compile(r"^\s+\d+ https?://\S+ (\S+?)/")
 
 
 def parse_policy(text, package):
-    """(кандидат, поэтапный, карман кандидата) из блока `apt-cache policy <пакет>`; None — блока нет."""
+    """(кандидат, стоящая, поэтапный, карман кандидата) из блока `apt-cache policy <пакет>`; None — блока нет.
+    Стоящая None — пакет не стоит (Installed: (none))."""
     lines = text.split("\n")
     try:
         start = lines.index(f"{package}:")
@@ -321,6 +326,7 @@ def parse_policy(text, package):
     candidate = next((l.split(":", 1)[1].strip() for l in block if l.strip().startswith("Candidate:")), None)
     if not candidate or candidate == "(none)":
         return None
+    installed = next((l.split(":", 1)[1].strip() for l in block if l.strip().startswith("Installed:")), "(none)")
     phased, pocket, inside = False, "", False
     for line in block:
         found = POLICY_VERSION.match(line)
@@ -331,7 +337,7 @@ def parse_policy(text, package):
         source = POLICY_SOURCE.match(line)
         if inside and source and not pocket:
             pocket = source.group(1)
-    return candidate, phased, pocket
+    return candidate, None if installed == "(none)" else installed, phased, pocket
 
 
 def stale_apt_lists(ctx):
@@ -347,17 +353,27 @@ def source_apt(part, current, ctx):
     stale = stale_apt_lists(ctx)
     if stale:
         return stale
-    package = part["свежая"]["пакет"]
+    package = installed_name(part["свежая"].get("стоит_как", []), ctx) or part["свежая"]["пакет"]
     text = recorded_or_live(ctx, "apt-cache-policy.txt", lambda: command_text(ctx, ["apt-cache", "policy", package]))
     if isinstance(text, Unknown):
         return text
     parsed = parse_policy(text, package)
     if parsed is None:
         return Unknown(f"apt-cache не назвал кандидата для {package}")
-    candidate, phased, pocket = parsed
+    candidate, installed, phased, pocket = parsed
     if not valid_version("debian", candidate):
         return Unknown(f"версия не той формы: {too_wide(candidate)!r}")
-    newer = [candidate] if compare("debian", candidate, current, ctx) > 0 else []
+    # Текущая из команды (`containerd --version`) без эпохи и ревизии, а Ubuntu выпускает
+    # исправления безопасности сменой одной ревизии: кандидат судится по полному номеру
+    # стоящего пакета. Пакета нет (runc внутри containerd.io) — полного номера тоже нет,
+    # и кандидат урезается до формы команды, иначе равная версия всегда «новее».
+    base = current
+    if re.fullmatch(r"[0-9][0-9.]*", current):
+        if installed:
+            base = installed
+        else:
+            candidate = re.sub(r"-[^-]*$", "", re.sub(r"^[0-9]+:", "", candidate))
+    newer = [candidate] if compare("debian", candidate, base, ctx) > 0 else []
     return Latest(candidate if newer else current, newer, int(bool(newer) and pocket.endswith("-security")),
                   None, phased and bool(newer))
 
@@ -413,13 +429,27 @@ def read_latest(part, current, ctx):
 
 
 # ── текущая версия ──────────────────────────────────────────────────────────
-def presence_package(value, ctx):
-    code, _, err = ctx.exec(["dpkg-query", "-W", "-f=${Version}", value])
+def package_state(name, ctx):
+    """True стоит | False нет | Unreadable. Код 0 без «install ok installed» — не «стоит»: у «un» он тоже 0."""
+    code, out, err = ctx.exec(["dpkg-query", "-W", "-f=${Status}", name])
     if code == 0:
-        return None
+        return out.strip() == "install ok installed"
     if code == 1 and "no packages found" in err:
-        return NotInstalled(f"пакета {value} нет")
+        return False
     return Unreadable(f"dpkg-query: код {code} {err.strip()[:60]}")
+
+
+def installed_name(names, ctx):
+    return next((n for n in names if package_state(n, ctx) is True), None)
+
+
+def presence_package(value, ctx):
+    names = [value] if isinstance(value, str) else value
+    states = [package_state(n, ctx) for n in names]
+    if True in states:
+        return None
+    unreadable = next((s for s in states if isinstance(s, Unreadable)), None)
+    return unreadable or NotInstalled(f"пакета {' или '.join(names)} нет")
 
 
 def presence_file(value, ctx):

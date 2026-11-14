@@ -13,7 +13,7 @@
 # Данные прода и стенда не трогаются: заливка идёт в НОВУЮ базу.
 #
 # Запуск: bash scripts/restore-probe.sh [дамп]
-#         (без аргумента берётся самый свежий db-*.dump из $BACKUP_DIR)
+#         (без аргумента берётся самый свежий дамп PostgreSQL db-*.dump из $BACKUP_DIR)
 set -uo pipefail
 # Ручной прогон не должен будить владельца: --без-отправки печатает вердикт в
 # stdout и дверь тревоги не зовёт. Флаг снимается из аргументов до разбора дампа.
@@ -629,11 +629,24 @@ STUB
 fi
 
 
+# Самый свежий дамп PostgreSQL: в psql заливается только он. BACKUP_DBS снимает
+# рядом и MySQL, и MariaDB; их дамп свежее, но в psql не льётся, и целую копию
+# проба объявляла невосстановимой. Вид — по той же шапке, что и DUMP_END_MARKERS
+# в backup.sh (первые 4 КБ).
+newest_pg_dump() { # $1 = каталог копий → путь или пусто
+    local f
+    while IFS= read -r f; do
+        if head -c 4096 "$f" 2>/dev/null | grep -qE '^-- PostgreSQL database dump$'; then
+            printf '%s\n' "$f"; return 0
+        fi
+    done < <(find "$1" -name 'db-*.dump' -type f -printf '%T@ %p\n' 2>/dev/null \
+             | sort -nr | cut -d' ' -f2-)
+}
+
 # Дамп выбирается ДО подъёма контейнера: образ своего контейнера зависит от
 # версии pg_dump в шапке этого дампа.
-DUMP="${1:-$(find "$BACKUP_DIR" -name 'db-*.dump' -type f -printf '%T@ %p\n' 2>/dev/null \
-      | sort -nr | head -1 | cut -d' ' -f2-)}"
-[ -n "$DUMP" ] && [ -s "$DUMP" ] || abort_not_run "дампа не нашлось в $BACKUP_DIR"
+DUMP="${1:-$(newest_pg_dump "$BACKUP_DIR")}"
+[ -n "$DUMP" ] && [ -s "$DUMP" ] || abort_not_run "дампа PostgreSQL не нашлось в $BACKUP_DIR"
 
 # Свой контейнер, если названного в конфиге нет: копии продукта существуют и
 # тогда, когда сам продукт погашен владельцем (замер 28.09.2026 — проба

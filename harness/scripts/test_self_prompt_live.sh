@@ -59,6 +59,11 @@ if [ -d "$CARDS" ]; then
 else
     python3 "$HERE/self-prompt.py" --карточки --в "$S/agents-dir/.claude/agents" >/dev/null 2>&1
 fi
+# Паспорт (PROJECT_DIR) входит в тело личности, а с ним в метку. Карточки собраны
+# под паспортом вызывающего, носители стенда ниже — под PROJECT_DIR=$ROOT: метку
+# помощника сборщик обязан считать под тем же паспортом, что и его карточку,
+# иначе в worktree и в копии мутаций проба красна до всякой поломки.
+CARDS_PROJECT_DIR="${PROJECT_DIR-}"
 cat > "$S/alert.py" <<EOF
 import json, sys
 with open("$S/signals", "a", encoding="utf-8") as fh:
@@ -130,8 +135,8 @@ print(next((n for n, c in (d.get("карточки") or {}).items() if c.get("к
 }
 
 # Метка, которую сейчас даёт сборщик: то, что модель обязана назвать.
-label_of() {
-    python3 "$HERE/self-prompt.py" --класс "$1" --в "$S/expected-$1.md" >/dev/null 2>&1
+label_of() { # $1 = класс, $2 = паспорт PROJECT_DIR (пусто у config.py — «не задано»)
+    PROJECT_DIR="$2" python3 "$HERE/self-prompt.py" --класс "$1" --в "$S/expected-$1.md" >/dev/null 2>&1
     head -1 "$S/expected-$1.md" 2>/dev/null | sed -n 's/^Метка сборки: //p'
 }
 
@@ -172,7 +177,9 @@ EOF
 named=0; total=0; ALL_LABELS=()
 for cls in "${CLASSES[@]}"; do
     total=$((total + 1))
-    want=$(label_of "$cls")
+    passport="$PROJECT_DIR"
+    case "$cls" in демон|прибор|оркестратор) ;; *) passport="$CARDS_PROJECT_DIR" ;; esac
+    want=$(label_of "$cls" "$passport")
     [ -n "$want" ] && ALL_LABELS+=("$want")
     case "$cls" in
         демон) answer=$(ask_demon) ;;

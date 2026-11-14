@@ -2808,7 +2808,25 @@ fi
 PLAN=$(mktemp)
 MARKS=""
 LIBTMP=$(mktemp -d)
-trap 'rm -f "$PLAN"; rm -rf "$LIBTMP"; [[ -z "$MARKS" ]] || rm -rf "$MARKS"' EXIT
+# Обновление пишет и мимо двери: живые настройки сливаются до неё, CLAUDE.md, карточки и
+# производные — после. Журнал отката обязан знать каждую запись (находка копии bkb
+# 14.11.2026: после отката остались дубль строки CLAUDE.md, ключ pipeline.yaml, новая
+# карточка). Снимок дерева — до первой записи, разница — в тот же журнал тем же форматом
+# строк: его читает откатчик любой версии (scripts/lib/layout_after.py).
+AFTER_SNAP=""
+record_after_door() {
+  [[ -n "$AFTER_SNAP" && -f "$AFTER_SNAP" ]] || return 0
+  python3 -B "$HERE/scripts/lib/layout_after.py" record "$PROJECT_DIR" "$HARNESS_LAYOUT_ARCHIVE" \
+      --snapshot "$AFTER_SNAP" \
+    || echo "ВНИМАНИЕ: шаги после двери не записаны в журнал отката — откат их не вернёт (причина выше)"
+  AFTER_SNAP=""
+}
+trap 'record_after_door; rm -f "$PLAN"; rm -rf "$LIBTMP"; [[ -z "$MARKS" ]] || rm -rf "$MARKS"' EXIT
+if [[ -n "${HARNESS_LAYOUT_ARCHIVE:-}" && ${#ROLLBACK_ARGS[@]} -eq 0 ]]; then
+  AFTER_SNAP="$LIBTMP/до-раскладки.tsv"
+  python3 -B "$HERE/scripts/lib/layout_after.py" snap "$PROJECT_DIR" "$AFTER_SNAP" \
+    || { echo "ВНИМАНИЕ: снимок до раскладки не снят — шаги после двери откат не вернёт"; AFTER_SNAP=""; }
+fi
 
 plan_add() {  # $1=группа  $2=источник  $3=путь в проекте
   printf '%s\t%s\t%s\0' "$1" "$2" "${3#"$PROJECT_DIR/"}" >> "$PLAN"
@@ -3341,4 +3359,5 @@ if [[ ${#ROLLBACK_ARGS[@]} -eq 0 ]]; then
   esac
 fi
 
+record_after_door
 echo "раскладка завершена: $PROJECT_DIR"

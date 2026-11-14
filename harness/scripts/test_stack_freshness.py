@@ -887,6 +887,256 @@ def г_хост():
         с.закрыть()
 
 
+# ── машина: пре-релизы node, docker из официального репозитория, статус dpkg ──
+@случай("М-node пре-релиз в индексе nodejs.org (чужой и своей ветки): отброшен, выбрана стабильная, код 0")
+def м_node_prerelease():
+    # Живой индекс открывается записью вида 'v27.0.0-alpha.0.0.0': её форма не semver.
+    for пре in ("v27.0.0-alpha.0.0.0", "v22.24.0-rc.1", "v22.24.0-nightly20261101abcdef", "v22.24.0-beta.2"):
+        с = Стенд()
+        try:
+            индекс = индекс_node()
+            индекс.insert(0, {"version": пре, "date": "2026-10-24", "security": True})
+            (с.src / "nodejs-dist-index.json").write_text(json.dumps(индекс), encoding="utf-8")
+            с.записать_реестр([node()])
+            код, вывод, _ = с.запустить("--замер", "--печать")
+            ряд = с.ряд("node")
+            проверить(код == 0 and ряд["состояние"] == "отстала_с_заплаткой" and ряд["свежая"] == "22.23.4"
+                      and ряд["выпусков_новее"] == 11 and ряд["безопасности"] == 5,
+                      f"{пре}: код {код}, {ряд}")
+        finally:
+            с.закрыть()
+
+
+# Машина с docker из download.docker.com: стоят docker-ce и containerd.io (runc внутри него),
+# а имена docker.io/containerd/runc dpkg знает как «un» — код 0, пустая версия.
+ПАКЕТЫ_DOCKER_CE = {"docker-ce": "5:29.9.3-1~ubuntu.24.04~noble",
+                    "docker-ce-cli": "5:29.9.3-1~ubuntu.24.04~noble",
+                    "containerd.io": "2.4.2-3~ubuntu.24.04~noble",
+                    "docker.io": None, "containerd": None, "runc": None}
+ВЫВОД_КОМАНД_DOCKER_CE = {
+    "docker": "Docker version 29.9.3, build 5457199",
+    "dockerd": "Docker version 29.9.3, build 5457199",
+    "containerd": "containerd containerd.io v2.4.2 b7a25261e029d68978bbf290df0a62fc819b3c51",
+    "runc": "runc version 1.5.2\ncommit: v1.5.2-0-g29dd3dc2\nspec: 1.3.0\ngo: go1.25.4",
+}
+
+
+def политика_docker_ce(docker_ce, containerd_io):
+    """Блоки apt-cache policy официального репозитория Docker и пустой docker.io Ubuntu."""
+    def блок(имя, стоит, кандидат):
+        строки = [f"{имя}:", f"  Installed: {стоит}", f"  Candidate: {кандидат}", "  Version table:"]
+        for версия in dict.fromkeys((кандидат, стоит)):
+            метка = " ***" if версия == стоит else "    "
+            строки += [f"{метка} {версия} 500",
+                       "        500 https://download.docker.com/linux/ubuntu noble/stable amd64 Packages"]
+            if версия == стоит:
+                строки.append("        100 /var/lib/dpkg/status")
+        return "\n".join(строки) + "\n"
+    ubuntu = ("docker.io:\n  Installed: (none)\n  Candidate: 29.1.3-0ubuntu3~24.04.2\n  Version table:\n"
+              "     29.1.3-0ubuntu3~24.04.2 500\n"
+              "        500 http://archive.ubuntu.com/ubuntu noble-updates/universe amd64 Packages\n")
+    return (блок("docker-ce", ПАКЕТЫ_DOCKER_CE["docker-ce"], docker_ce)
+            + блок("containerd.io", ПАКЕТЫ_DOCKER_CE["containerd.io"], containerd_io) + ubuntu)
+
+
+def заглушка_dpkg_query(с, пакеты):
+    """dpkg-query стенда по таблице: None — «un» (код 0, пустая версия), нет в таблице — no packages found."""
+    путь = с.bin / "dpkg-query"
+    путь.write_text(f"""#!{sys.executable}
+import sys
+ПАКЕТЫ = {пакеты!r}
+формат, имена = "${{Version}}\\n", []
+args = sys.argv[1:]
+for i, арг in enumerate(args):
+    if арг.startswith(("-f=", "--showformat=")):
+        формат = арг.split("=", 1)[1]
+    elif арг in ("-f", "--showformat"):
+        формат = args[i + 1]
+    elif not арг.startswith("-") and (i == 0 or args[i - 1] not in ("-f", "--showformat")):
+        имена.append(арг)
+код = 0
+for имя in имена:
+    if имя not in ПАКЕТЫ:
+        sys.stderr.write(f"dpkg-query: no packages found matching {{имя}}\\n")
+        код = 1
+        continue
+    версия = ПАКЕТЫ[имя]
+    поля = {{"${{Version}}": версия or "", "${{Package}}": имя, "${{binary:Package}}": имя,
+            "${{db:Status-Abbrev}}": "ii " if версия else "un ",
+            "${{db:Status-Status}}": "installed" if версия else "not-installed",
+            "${{Status}}": "install ok installed" if версия else "unknown ok not-installed"}}
+    строка = формат
+    for ключ, значение in поля.items():
+        строка = строка.replace(ключ, значение)
+    sys.stdout.write(строка.replace("\\\\n", "\\n"))
+sys.exit(код)
+""", encoding="utf-8")
+    путь.chmod(0o755)
+
+
+def заглушка_dpkg_сравнение(с):
+    """dpkg стенда: только --compare-versions (чистое вычисление); базу пакетов машины не читает."""
+    путь = с.bin / "dpkg"
+    путь.write_text(f'#!/bin/sh\nprintf "dpkg %s\\n" "$*" >> "{с.вызовы}"\n'
+                    '[ "$1" = "--compare-versions" ] && exec /usr/bin/dpkg "$@"\n'
+                    'echo "dpkg стенда: только --compare-versions" >&2\nexit 2\n', encoding="utf-8")
+    путь.chmod(0o755)
+
+
+def блок_ubuntu_не_стоит(текст, имя, кандидат=None):
+    """Блок `имя:` фикстуры apt-cache policy как на машине, где пакета нет: Installed (none)."""
+    начало = текст.index(f"\n{имя}:\n") + 1
+    конец = next(i for i in range(начало + len(имя) + 2, len(текст)) if текст[i - 1] == "\n" and not текст[i].isspace())
+    блок = текст[начало:конец]
+    стоит = блок.split("Installed: ", 1)[1].split("\n", 1)[0]
+    было = блок.split("Candidate: ", 1)[1].split("\n", 1)[0]
+    правка = (блок.replace(f"Installed: {стоит}", "Installed: (none)").replace(" *** ", "     ")
+              .replace("        100 /var/lib/dpkg/status\n", ""))
+    if кандидат:
+        правка = правка.replace(было, кандидат)
+    return текст[:начало] + правка + текст[конец:]
+
+
+def стенд_docker_ce(с, docker_ce, containerd_io, runc_ubuntu=None):
+    живые = yaml.safe_load(живой_реестр().read_text(encoding="utf-8"))["части"]
+    части = [ч for ч in живые if ч["имя"] in ("containerd", "runc", "docker.io")]
+    проверить(len(части) == 3, f"в живом реестре нет containerd/runc/docker.io: {[ч['имя'] for ч in части]}")
+    с.записать_реестр(части)
+    политика = с.src / "apt-cache-policy.txt"
+    текст = блок_ubuntu_не_стоит(политика.read_text(encoding="utf-8"), "containerd")
+    текст = блок_ubuntu_не_стоит(текст, "runc", runc_ubuntu)
+    политика.write_text(текст + политика_docker_ce(docker_ce, containerd_io), encoding="utf-8")
+    заглушка_dpkg_query(с, ПАКЕТЫ_DOCKER_CE)
+    заглушка_dpkg_сравнение(с)
+    for команда, вывод in ВЫВОД_КОМАНД_DOCKER_CE.items():
+        путь = с.bin / команда
+        путь.write_text(f"#!/bin/sh\ncat <<'EOF'\n{вывод}\nEOF\n", encoding="utf-8")
+        путь.chmod(0o755)
+
+
+@случай("М-docker-ce docker стоит пакетами docker-ce/containerd.io: текущая — стоящая, свежая — из docker-ce/containerd.io, код 0")
+def м_docker_ce():
+    с = Стенд()
+    try:
+        стенд_docker_ce(с, "5:29.10.0-1~ubuntu.24.04~noble", "2.4.3-1~ubuntu.24.04~noble")
+        код, вывод, ошибка = с.запустить("--замер", "--печать")
+        проверить(код == 0, f"код {код}: {вывод!r} {ошибка.strip()[-200:]!r}")
+        for имя, стоит, свежая in (("docker.io", "29.9.3", "29.10.0"), ("containerd", "2.4.2", "2.4.3"),
+                                   ("runc", "1.5.2", None)):
+            ряд = с.ряд(имя)
+            проверить(стоит in str(ряд.get("текущая")) and ряд["состояние"] != "не_узнать_текущую",
+                      f"{имя}: стоит {стоит}, а текущая {ряд.get('текущая')!r}, {ряд['состояние']}, "
+                      f"{ряд.get('причина')!r}")
+            if свежая:
+                проверить(ряд["состояние"] == "отстала" and свежая in str(ряд.get("свежая")),
+                          f"{имя}: кандидат {свежая} из официального репозитория не назван: {ряд}")
+    finally:
+        с.закрыть()
+
+
+@случай("М-docker-ce-равно кандидат docker-ce/containerd.io равен стоящему: части свежие, не «отстала»")
+def м_docker_ce_равно():
+    с = Стенд()
+    try:
+        стенд_docker_ce(с, ПАКЕТЫ_DOCKER_CE["docker-ce"], ПАКЕТЫ_DOCKER_CE["containerd.io"])
+        код, вывод, ошибка = с.запустить("--замер", "--печать")
+        проверить(код == 0, f"код {код}: {вывод!r} {ошибка.strip()[-200:]!r}")
+        for имя in ("docker.io", "containerd"):
+            ряд = с.ряд(имя)
+            проверить(ряд["состояние"] == "свежая", f"{имя}: стоит кандидат, а {ряд}")
+    finally:
+        с.закрыть()
+
+
+@случай("М-runc-в-containerd.io apt-пакет runc не стоит, кандидат Ubuntu той же версии с эпохой/ревизией: свежая, код 0")
+def м_runc_в_containerd_io():
+    # Полного apt-номера стоящего runc нет: сравнение идёт с выводом `runc --version`.
+    for кандидат in ("1.5.2-0ubuntu1~24.04.1", "1:1.5.2-0ubuntu1~24.04.1"):
+        с = Стенд()
+        try:
+            стенд_docker_ce(с, ПАКЕТЫ_DOCKER_CE["docker-ce"], ПАКЕТЫ_DOCKER_CE["containerd.io"], runc_ubuntu=кандидат)
+            код, вывод, ошибка = с.запустить("--замер", "--печать")
+            ряд = с.ряд("runc")
+            проверить(код == 0 and ряд["состояние"] == "свежая" and ряд.get("текущая") == "1.5.2",
+                      f"кандидат {кандидат}: код {код}, {ряд} {ошибка.strip()[-200:]!r}")
+        finally:
+            с.закрыть()
+
+
+@случай("М-dpkg-un пакет в dpkg «un» (код 0, пустая версия): не стоит с причиной, код 0")
+def м_dpkg_un():
+    с = Стенд()
+    try:
+        часть_нет = пакет_apt("nginx-стенд", "1.0", **{"есть_если": {"пакет": "nginx-стенд"}})
+        часть_нет["текущая"] = {"команда": ["dpkg-query", "-W", "-f=${Version}", "nginx-стенд"]}
+        с.записать_реестр([часть_нет])
+        заглушка_dpkg_query(с, {"nginx-стенд": None})
+        код, вывод, _ = с.запустить("--замер", "--печать")
+        проверить(код == 0 and "nginx-стенд не_стоит" in вывод, f"код {код}, вывод {вывод!r}")
+        проверить(с.ряд("nginx-стенд").get("причина"), "не стоит без причины")
+        # Узда: тот же пакет «ii» — стоит и мерится, а не «не стоит» на всё подряд.
+        заглушка_dpkg_query(с, {"nginx-стенд": "1.0"})
+        (с.log / "stack" / "замер.json").unlink()
+        код, вывод, _ = с.запустить("--замер", "--печать")
+        проверить("nginx-стенд не_стоит" not in вывод and с.ряд("nginx-стенд")["состояние"] != "не_узнать_текущую",
+                  f"стоящий пакет: код {код}, {вывод!r}")
+    finally:
+        с.закрыть()
+
+
+def стенд_docker_ubuntu(с):
+    """docker из пакетов Ubuntu: стоят docker.io/containerd/runc, текущая — из вывода команд."""
+    живые = yaml.safe_load(живой_реестр().read_text(encoding="utf-8"))["части"]
+    с.записать_реестр([ч for ч in живые if ч["имя"] in ("containerd", "runc", "docker.io")])
+    политика = с.src / "apt-cache-policy.txt"
+    политика.write_text(политика.read_text(encoding="utf-8")
+                        + "docker.io:\n  Installed: 29.1.2-0ubuntu3~24.04.1\n  Candidate: 29.1.3-0ubuntu3~24.04.2\n"
+                          "  Version table:\n     29.1.3-0ubuntu3~24.04.2 500\n"
+                          "        500 http://archive.ubuntu.com/ubuntu noble-updates/universe amd64 Packages\n",
+                        encoding="utf-8")
+    заглушка_dpkg_query(с, {"docker.io": "29.1.2-0ubuntu3~24.04.1", "containerd": "2.2.1-0ubuntu1~24.04.3",
+                            "runc": "1.3.3-0ubuntu1~24.04.3"})
+    заглушка_dpkg_сравнение(с)
+    for команда, вывод in (("docker", "29.1.2"), ("containerd", "containerd github.com/containerd/containerd/v2 2.2.1 "),
+                           ("runc", "runc version 1.3.3-0ubuntu1~24.04.3")):
+        с.заглушка(команда, вывод=вывод)
+
+
+@случай("М-docker-ubuntu docker из пакетов Ubuntu (docker-ce и containerd.io нет): части стоят и мерятся, код 0")
+def м_docker_ubuntu():
+    # есть_если перечисляет имена: стоит ЛЮБОЕ из них, а не первое по списку.
+    с = Стенд()
+    try:
+        стенд_docker_ubuntu(с)
+        код, вывод, ошибка = с.запустить("--замер", "--печать")
+        проверить(код == 0, f"код {код}: {вывод!r} {ошибка.strip()[-200:]!r}")
+        for имя, стоит, свежая in (("docker.io", "29.1.2", "29.1.3-0ubuntu3~24.04.2"), ("containerd", "2.2.1", None),
+                                   ("runc", "1.3.3", "1.3.4-0ubuntu1~24.04.1")):
+            ряд = с.ряд(имя)
+            проверить(ряд["состояние"] not in ("не_стоит", "не_узнать_текущую") and ряд.get("текущая") == стоит,
+                      f"{имя}: стоит {стоит}, а {ряд}")
+            if свежая:
+                проверить(ряд["состояние"] == "отстала" and ряд.get("свежая") == свежая, f"{имя}: {ряд}")
+    finally:
+        с.закрыть()
+
+
+@случай("М-ubuntu-ревизия containerd стоит ~24.04.3, кандидат ~24.04.4 (только ревизия Ubuntu): не «свежая», код 0")
+def м_ubuntu_ревизия():
+    # Так Ubuntu выпускает исправления безопасности: версия та же, меняется ревизия пакета,
+    # а `containerd --version` её не печатает. Кандидат фикстуры поэтапный.
+    с = Стенд()
+    try:
+        стенд_docker_ubuntu(с)
+        код, вывод, ошибка = с.запустить("--замер", "--печать")
+        ряд = с.ряд("containerd")
+        проверить(код == 0 and ряд["состояние"] == "поэтапно" and ряд.get("текущая") == "2.2.1"
+                  and ряд.get("свежая") == "2.2.1-0ubuntu1~24.04.4",
+                  f"код {код}: {ряд} {ошибка.strip()[-200:]!r}")
+    finally:
+        с.закрыть()
+
+
 def main() -> int:
     неудач = 0
     for имя, функция in СЛУЧАИ:

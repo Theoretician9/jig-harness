@@ -17,10 +17,12 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -254,7 +256,7 @@ def probe_command(cp, stand: Stand, tmp: Path) -> None:
         # Метка среза: на стенде нет двери run-in-checks-slice.sh, судим бумагу, а не дверь.
         env = {**os.environ, "HARNESS_MUTATION_PROBE": f"{sys.executable} {stub}",
                "HARNESS_IN_CHECKS_SLICE": "1",
-               "STUB_HOLES": holes, "STUB_ALERT_LOG": str(alerts)}
+               "STUB_HOLES": holes, "STUB_ALERT_LOG": str(alerts), "LOG_DIR": str(tmp / "cmd-logs")}
         return subprocess.run([sys.executable, str(scripts / "acceptance.py"),
                                "--мутации-задачи", "hr.cmd"], cwd=str(root), env=env,
                               capture_output=True, text=True, timeout=120).returncode
@@ -304,7 +306,7 @@ def probe_batch(cp, stand: Stand, tmp: Path) -> None:
     lines = {i: set((acc.task_changed_lines(i, root, MECHANISM) or "").split(","))
              for i in ("hr.a", "hr.b")}
     env = {**os.environ, "HARNESS_MUTATION_PROBE": f"{sys.executable} {stub}",
-           "STUB_CALLS": str(calls), "STUB_DOOR_LOG": str(door)}
+           "STUB_CALLS": str(calls), "STUB_DOOR_LOG": str(door), "LOG_DIR": str(tmp / "batch-logs")}
     env.pop("HARNESS_IN_CHECKS_SLICE", None)
     rc = subprocess.run([sys.executable, str(scripts / "acceptance.py"), "--мутации-задачи",
                          "hr.a,hr.b,hr.c"], cwd=str(root), env=env, capture_output=True,
@@ -332,6 +334,145 @@ def probe_batch(cp, stand: Stand, tmp: Path) -> None:
           (debts(cp, root, "hr.a"), debts(cp, root, "hr.b")))
 
 
+def probe_batch_law(stand: Stand, tmp: Path) -> None:
+    """Закон пачек (слово владельца 14.11): два вызова ПОДРЯД по одному id в окне
+    сбора — один заход в срез, бумага каждой задаче; очередь — в своём LOG_DIR."""
+    root = stand.root
+    scripts = root / "scripts"
+    shutil.copy(ACCEPTANCE, scripts / "acceptance.py")
+    (scripts / "lib").symlink_to(ACCEPTANCE.resolve().parent / "lib")
+    (scripts / "run-in-checks-slice.sh").write_text(BATCH_DOOR, encoding="utf-8")
+    (root / "harness" / "config" / "pipeline.yaml").write_text(
+        "пачка: {задач: 6, помощников: 3, окно_сбора_сек: 3, ждать_итога_мин: 2}\n", encoding="utf-8")
+    stub = tmp / "law-probe.py"
+    stub.write_text(BATCH_PROBE, encoding="utf-8")
+    calls, door = tmp / "law-calls.log", tmp / "law-door.log"
+    stand.commit("hr.a", MECHANISM)
+    stand.commit("hr.b", SECOND)
+    env = {**os.environ, "HARNESS_MUTATION_PROBE": f"{sys.executable} {stub}",
+           "STUB_CALLS": str(calls), "STUB_DOOR_LOG": str(door), "LOG_DIR": str(tmp / "law-logs")}
+    env.pop("HARNESS_IN_CHECKS_SLICE", None)
+
+    def call(task: str) -> subprocess.Popen:
+        return subprocess.Popen([sys.executable, str(scripts / "acceptance.py"), "--мутации-задачи", task],
+                                cwd=str(root), env=env, stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT, text=True)
+
+    first = call("hr.a")
+    time.sleep(0.5)
+    second = call("hr.b")
+    outs = [p.communicate(timeout=120)[0] for p in (first, second)]
+    entries = door.read_text(encoding="utf-8").splitlines() if door.is_file() else []
+    check("22 закон пачек: два вызова подряд в окне — один заход в срез с обоими id",
+          (1, True), (len(entries), bool(entries) and entries[0].endswith("hr.a,hr.b")))
+    check("23 закон пачек: бумага каждой задаче, код 0 обоим",
+          (True, True, 0, 0),
+          ((root / ".tasks" / "hr.a" / "мутации.log").is_file(),
+           (root / ".tasks" / "hr.b" / "мутации.log").is_file(), first.returncode, second.returncode))
+    check("24 закон пачек: каждый видит итог своей задачи, а не чужой", (True, False, True, False),
+          ("мутации задачи hr.a: дыр 0" in outs[0], "мутации задачи hr.b" in outs[0],
+           "мутации задачи hr.b: дыр 0" in outs[1], "мутации задачи hr.a" in outs[1]))
+    acc = load(scripts / "acceptance.py", "acceptance_law_stand")
+    ran = []
+    acc.механизмы_задачи = lambda ид, корень: None if ид == "hr.unread" else [MECHANISM]
+    acc.мутации_пачки = lambda ids, *rest, **kw: ran.append(ids) or dict.fromkeys(ids, 0)
+    # Не hr.a: её свежая зелёная бумага из 23 повтором не перегоняется.
+    check("25 закон пачек: нечитаемая чужая задача не отнимает прогон у остальных",
+          (2, [["hr.new"]]), (acc._task_mutations(["hr.new", "hr.unread"]), ran))
+    check("26 закон пачек: дыры своей задачи в общем заходе — код 1", 1,
+          acc._own_view(["hr.a"], 1, ["мутации задачи hr.b: дыр 0, бумага b",
+                                      "мутации задачи hr.a: дыр 2, бумага a"])[0])
+    code, seen = acc._own_view(["hr.a"], 0, ["мутации задачи hr.b: дыр 0, бумага b"])
+    check("27 закон пачек: заход без итога своей задачи — код 2 и слово, а не тихий 0",
+          (2, True), (code, any("не дал итога" in line for line in seen)))
+
+
+# Подставной прибор с задержкой: механизм из STUB_SLOW спит STUB_SLEEP с; каждый
+# вызов — строка «механизм|MUTATION_DEADLINE_TS» в журнал STUB_CALLS.
+SLOW_PROBE = '''#!/usr/bin/env python3
+import os, sys, time
+name = sys.argv[-1]
+with open(os.environ["STUB_CALLS"], "a", encoding="utf-8") as fh:
+    fh.write(name + "|" + os.environ.get("MUTATION_DEADLINE_TS", "") + "\\n")
+if name == os.environ.get("STUB_SLOW"):
+    time.sleep(float(os.environ.get("STUB_SLEEP", "60")))
+print("=== мутационная проба: покраснели как надо 2, дыр 0, из кэша 0 ===")
+'''
+
+
+def probe_resume(cp, stand: Stand, tmp: Path) -> None:
+    """Обрыв захода (14.11: 240 мин, 0 бумаг): готовое ложится по мере готовности,
+    вывод построчный, повтор гонит только недоделанное, срок — мягкая остановка."""
+    root = stand.root
+    scripts = root / "scripts"
+    shutil.copy(ACCEPTANCE, scripts / "acceptance.py")
+    (scripts / "lib").symlink_to(ACCEPTANCE.resolve().parent / "lib")
+    stub = tmp / "slow-probe.py"
+    stub.write_text(SLOW_PROBE, encoding="utf-8")
+    calls, logs = tmp / "resume-calls.log", tmp / "resume-logs"
+    logs.mkdir()
+    # История длительностей: SECOND долгий, MECHANISM быстрый — заход начинает с дешёвой задачи.
+    now = int(time.time())
+    (logs / "мутации-механизмов.tsv").write_text(
+        f"{now}\t{SECOND}\t900\t2\t0\t0\n{now}\t{MECHANISM}\t3\t2\t0\t0\n", encoding="utf-8")
+    stand.commit("hr.slow", SECOND)
+    stand.commit("hr.fast", MECHANISM)
+    env = {**os.environ, "HARNESS_MUTATION_PROBE": f"{sys.executable} {stub}",
+           "HARNESS_IN_CHECKS_SLICE": "1", "STUB_CALLS": str(calls), "LOG_DIR": str(logs),
+           "STUB_SLOW": SECOND, "STUB_SLEEP": "60"}
+    env.pop("MUTATION_DEADLINE_TS", None)
+    env.pop("PYTHONUNBUFFERED", None)
+    paper = {t: root / ".tasks" / t / "мутации.log" for t in ("hr.slow", "hr.fast")}
+    launch = tmp / "resume-launch.log"
+    with launch.open("w", encoding="utf-8") as out:
+        run = subprocess.Popen([sys.executable, str(scripts / "acceptance.py"), "--мутации-задачи",
+                                "hr.slow,hr.fast"], cwd=str(root), env=env, stdout=out,
+                               stderr=subprocess.STDOUT, start_new_session=True)
+        limit = time.monotonic() + 20
+        while time.monotonic() < limit and not paper["hr.fast"].is_file():
+            time.sleep(0.2)
+        time.sleep(1)
+        os.killpg(run.pid, 9)  # как systemd по RuntimeMaxSec: SIGKILL, без уборки
+        run.wait(timeout=10)
+    said = launch.read_text(encoding="utf-8", errors="replace")
+    check("28 обрыв: убитый заход оставил бумагу готовой задачи, недоделанной — нет",
+          (True, [], False),
+          (paper["hr.fast"].is_file(), debts(cp, root, "hr.fast") if paper["hr.fast"].is_file() else None,
+           paper["hr.slow"].is_file()))
+    check("29 обрыв: журнал запуска не пуст до смерти — строка механизма с длительностью и итог задачи",
+          (True, True),
+          (bool(re.search(rf"{re.escape(MECHANISM)}.*\d+ с", said)), "мутации задачи hr.fast: дыр 0" in said))
+    calls.unlink()
+    env["STUB_SLOW"] = ""
+    rc = subprocess.run([sys.executable, str(scripts / "acceptance.py"), "--мутации-задачи",
+                         "hr.slow,hr.fast"], cwd=str(root), env=env, capture_output=True,
+                        text=True, timeout=60).returncode
+    ran = [l.split("|")[0] for l in calls.read_text(encoding="utf-8").splitlines()] if calls.is_file() else []
+    check("30 повтор: прибор зван только для недоделанного, обе бумаги зелёные, код 0",
+          ([SECOND], [], [], 0), (ran, debts(cp, root, "hr.fast"), debts(cp, root, "hr.slow"), rc))
+    history = (logs / "мутации-механизмов.tsv").read_text(encoding="utf-8").splitlines()
+    check("31 история длительностей пополняется по механизму", True,
+          any(line.split("\t")[1:2] == [SECOND] and line.split("\t")[0] != str(now) for line in history))
+
+    # Мягкий срок захода: механизм, начатый у срока, кончается; следующий не начат.
+    stand.commit("hr.slow", SECOND)
+    stand.commit("hr.fast", MECHANISM)
+    calls.unlink()
+    deadline = str(int(time.time()) + 2)
+    env.update({"STUB_SLOW": MECHANISM, "STUB_SLEEP": "4", "MUTATION_DEADLINE_TS": deadline})
+    done = subprocess.run([sys.executable, str(scripts / "acceptance.py"), "--мутации-задачи",
+                           "hr.slow,hr.fast"], cwd=str(root), env=env, capture_output=True,
+                          text=True, timeout=60)
+    ran = [l.split("|") for l in calls.read_text(encoding="utf-8").splitlines()] if calls.is_file() else []
+    check("32 срок: после срока новый механизм не начат, задача названа «не догнана», код 2",
+          ([[MECHANISM, deadline]], True, 2),
+          (ran, "мутации задачи hr.slow: не догнана" in done.stdout, done.returncode))
+    acc = load(scripts / "acceptance.py", "acceptance_resume_stand")
+    check("33 план без истории: задача с меньшим числом механизмов — первой",
+          [SECOND, MECHANISM, PLAIN],
+          acc.batch_plan({"hr.big": [MECHANISM, PLAIN], "hr.small": [SECOND]}, {}))
+
+
 def probe_live(cp) -> None:
     live = cp._модуль_цены().конфиг()
     steps = live.get("шаги") or {}
@@ -356,6 +497,8 @@ def main() -> int:
                 ("без git", lambda: probe_no_git(acc, cp, tmp / "nogit")),
                 ("команда", lambda: probe_command(cp, Stand(tmp / "cmd"), tmp)),
                 ("пачка", lambda: probe_batch(cp, Stand(tmp / "batch"), tmp)),
+                ("закон пачек", lambda: probe_batch_law(Stand(tmp / "law"), tmp)),
+                ("обрыв захода", lambda: probe_resume(cp, Stand(tmp / "resume"), tmp)),
                 ("пульт", lambda: probe_live(cp))):
             try:
                 probe()

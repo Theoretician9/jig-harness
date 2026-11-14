@@ -11,9 +11,11 @@ mutation-probe.sh копией корня scripts/, и мутированный 
 Модуля нет — каждый случай красный «нет модуля», а не трасса и не зелень.
 Итог: «ЖУРНАЛ РАСКЛАДКИ: путей N, неудач M», код 0/1.
 """
+import hashlib
 import importlib.util
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -654,9 +656,147 @@ def case_j19() -> None:
         shutil.rmtree(root, ignore_errors=True)
 
 
+AFTER_PATH = (HERE / "lib" / "layout_after.py").absolute()
+
+
+def load_after():
+    """Модуль журнала шагов после двери; нет файла — случай красный «нет модуля»."""
+    if not AFTER_PATH.is_file():
+        raise FileNotFoundError(f"нет модуля {AFTER_PATH}")
+    spec = importlib.util.spec_from_file_location("layout_after", AFTER_PATH)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def run_after(*args) -> tuple:
+    done_run = subprocess.run([sys.executable, "-B", str(AFTER_PATH), *args],
+                              capture_output=True, text=True, timeout=120)
+    return done_run.returncode, done_run.stdout + done_run.stderr
+
+
+def git_blob_of(data: bytes) -> str:
+    return hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
+
+
+def after_stand(root: Path) -> tuple:
+    """Проект-репозиторий «до обновления» и архив прямого прогона, где дверь уже записала
+    своё: перекрыла scripts/x.sh и сняла карточку .claude/agents/old.md (копии в files/)."""
+    project = root / "proj"
+    files = {"CLAUDE.md": b"# rules\n@STATE.md\n", "harness/config/pipeline.yaml": b"a: 1\n",
+             ".claude/agents/old.md": b"old card\n", "scripts/x.sh": b"echo A\n",
+             "docs/keep.md": b"untouched\n"}
+    for rel, data in files.items():
+        (project / rel).parent.mkdir(parents=True, exist_ok=True)
+        (project / rel).write_bytes(data)
+    (project / "scripts" / "x.sh").chmod(0o700)
+    for args in (["init", "-q", "-b", "master"], ["add", "-A"],
+                 ["-c", "user.name=p", "-c", "user.email=p@p", "commit", "-q", "-m", "до"]):
+        subprocess.run(["git", "-C", str(project), *args], check=True, capture_output=True)
+    return project, files
+
+
+def case_j20() -> None:
+    """Шаги мимо двери попадают в журнал отката (находка bkb 14.11.2026): снимок до
+    раскладки → дверь пишет своё (x.sh перекрыт, old.md снят) → шаги после двери
+    дописывают строку в CLAUDE.md, ключ в pipeline.yaml, кладут новую карточку и
+    пересобирают old.md → record дописывает ровно четыре пути; решения отката по журналу
+    возвращают ВСЁ дерево к «до» байт в байт с режимами; второй record ничего не пишет.
+    Зелен на поломке? «журнал без снимка» — нет: CLAUDE.md обязан вернуться; «копия не
+    в архиве» — нет: возврат судит копию; «повтор дописывает снова» — нет: второй вызов."""
+    after = load_after()
+    root = Path(tempfile.mkdtemp(prefix="layout-journal-probe-"))
+    try:
+        project, files = after_stand(root)
+        snapshot = root / "снимок.tsv"
+        rc, out = run_after("snap", str(project), str(snapshot))
+        PROBE.check("J20", "snap: код 0, файлов 5", rc == 0 and "файлов 5" in out, f"код {rc}: {out}")
+        archive = root / "копии" / "раскладка" / "стенд-20261114-000000-1"
+        b_x = git_blob_of(b"echo B\n")
+        write_archive(archive.parent, archive.name, [
+            "# прогон 1 обновление план=2 перекрыть=1",
+            act("перекрыт", git_blob_of(files["scripts/x.sh"]), b_x, "scripts/x.sh"), done("scripts/x.sh"),
+            act("снят", git_blob_of(files[".claude/agents/old.md"]), "-", ".claude/agents/old.md"),
+            done(".claude/agents/old.md"), "итог\t-\t-\t2"],
+            [("scripts/x.sh", files["scripts/x.sh"]), (".claude/agents/old.md", files[".claude/agents/old.md"])])
+        (archive / "files" / "scripts" / "x.sh").chmod(0o700)
+        (project / "scripts" / "x.sh").write_bytes(b"echo B\n")
+        # шаги после двери
+        with open(project / "CLAUDE.md", "ab") as handle:
+            handle.write(b"\n<!-- harness -->\n@new.md\n")
+        (project / "harness/config/pipeline.yaml").write_bytes(b"a: 1\nbatch: 6\n")
+        (project / ".claude/agents/new.md").write_bytes(b"new card\n")
+        (project / ".claude/agents/old.md").write_bytes(b"rebuilt card\n")
+        rc, out = run_after("record", str(project), str(archive), "--snapshot", str(snapshot))
+        journal = LJ.parse_journal((archive / "journal.tsv").read_text(encoding="utf-8"))
+        extra = [(a.kind, a.path) for a in journal.actions[2:]]
+        PROBE.check("J20", "record: код 0, дописаны ровно 4 пути шагов после двери",
+                    rc == 0 and sorted(extra) == sorted([
+                        ("перекрыт", "CLAUDE.md"), ("перекрыт", "harness/config/pipeline.yaml"),
+                        ("положен-новый", ".claude/agents/new.md"), ("перекрыт", ".claude/agents/old.md")]),
+                    f"код {rc}: {out}; дописано {extra}")
+        PROBE.check("J20", "у каждого дописанного — «готово»", journal.undone == 0, f"без готово {journal.undone}")
+
+        size = (archive / "journal.tsv").stat().st_size
+        rc, out = run_after("record", str(project), str(archive))
+        PROBE.check("J20", "второй record до отката (снимок из архива) не дописывает ничего",
+                    rc == 0 and (archive / "journal.tsv").stat().st_size == size, f"код {rc}: {out}")
+
+        def disk(rel):
+            path = project / rel
+            return git_blob_of(path.read_bytes()) if path.is_file() else None
+
+        def copy(rel):
+            path = archive / "files" / rel
+            return git_blob_of(path.read_bytes()) if path.is_file() else None
+
+        found = LJ.rollback_decisions(journal, {}, disk, copy)
+        for rel in found.remove:
+            (project / rel).unlink()
+        for rel in found.restore:
+            shutil.copy2(archive / "files" / rel, project / rel)
+        now = {str(p.relative_to(project)): p.read_bytes() for p in project.rglob("*")
+               if p.is_file() and ".git" not in p.relative_to(project).parts}
+        PROBE.check("J20", "после решений отката дерево байт в байт «до»", now == files,
+                    f"лишнее {sorted(set(now) - set(files))}, иное "
+                    f"{sorted(r for r in files if now.get(r) != files[r])}")
+        mode = (project / "scripts" / "x.sh").stat().st_mode & 0o777
+        PROBE.check("J20", "режим возвращённого x.sh — 700, как до", mode == 0o700, f"{mode:o}")
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def case_j21() -> None:
+    """Архив без журнала (дверь его не открывала) и проект не git.
+    Зелен на поломке? «журнал без шапки» — нет: parse_journal обязан его прочесть; «итог
+    забыт» — нет: такой журнал считался бы оборванным; «не git → трасса» — нет: код 0."""
+    load_after()
+    root = Path(tempfile.mkdtemp(prefix="layout-journal-probe-"))
+    try:
+        project, _ = after_stand(root)
+        snapshot = root / "снимок.tsv"
+        run_after("snap", str(project), str(snapshot))
+        (project / "CLAUDE.md").write_bytes(b"other\n")
+        archive = root / "копии" / "раскладка" / "стенд-20261114-000000-2"
+        rc, out = run_after("record", str(project), str(archive), "--snapshot", str(snapshot))
+        journal, reason = LJ.read_journal(str(archive))
+        PROBE.check("J21", "новый журнал: шапка, «перекрыт CLAUDE.md», «итог»",
+                    rc == 0 and journal is not None and journal.has_total
+                    and [(a.kind, a.path) for a in journal.actions] == [("перекрыт", "CLAUDE.md")],
+                    f"код {rc}: {out}; {reason}")
+        plain = root / "plain"
+        plain.mkdir()
+        rc, out = run_after("snap", str(plain), str(root / "нет.tsv"))
+        PROBE.check("J21", "не git: код 0, сказано словами, снимка нет",
+                    rc == 0 and "не корень репозитория" in out and not (root / "нет.tsv").exists(),
+                    f"код {rc}: {out}")
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 CASES = (case_j1, case_j2, case_j3, case_j4, case_j4_mode, case_j_unbounded, case_j5, case_j6, case_j7, case_j8, case_j9,
          case_j10, case_j11, case_j12, case_j13, case_j14, case_j15, case_j16, case_j17,
-         case_j18, case_j19)
+         case_j18, case_j19, case_j20, case_j21)
 
 
 def main() -> int:

@@ -559,5 +559,141 @@ itog "sborka damp" "$(order)" "после сдвига ни миграций, н
 itog "да" "$(retagged)" "образ возвращён с :previous на :latest"
 itog "$SHA_DO" "$(git -C "$PRODUCT" rev-parse "$TEG^{commit}" 2>/dev/null)" "тег стоит на одобренном sha, не на новом HEAD"
 
+echo "── 16. D3: STACK_DB_DUMP_CMD пуст, BACKUP_DBS задан — дампы ВСЕХ баз через backup.sh --базы-в до миграций ──"
+# У продукта с несколькими базами одна команда STACK_DB_DUMP_CMD защищает одну;
+# остальные шли в миграцию без копии (И-1). Дверь зовёт backup.sh --базы-в, и
+# неудача любой базы останавливает выкат до миграций. backup.sh кладётся копией
+# по обоим путям, откуда дверь вправе его звать (от PROJECT_DIR паспорта и от
+# своего каталога): проба судит развилку, а не выбор пути. Дверь подмены —
+# HARNESS_BACKUP_SH (мутированная копия).
+BACKUP_SRC="${HARNESS_BACKUP_SH:-$HERE/../harness/demons/backup.sh}"
+polozhit_backup() {  # $1 = файл, который лечь как backup.sh стенда
+    local d
+    for d in "$STAND" "$HARNESS"; do
+        mkdir -p "$d/harness/demons" "$d/scripts/lib"
+        cp "$1" "$d/harness/demons/backup.sh"
+        [ -e "$d/scripts/lib/config.sh" ] || cp "$HERE/lib/config.sh" "$d/scripts/lib/config.sh"
+    done
+}
+polozhit_backup "$BACKUP_SRC"
+printf -- '--\n-- PostgreSQL database dump\n--\nCREATE TABLE x();\n--\n-- PostgreSQL database dump complete\n--\n' > "$STAND/pg.dump"
+BAZY_CONF="STACK_BUILD_CMD=\"echo sborka >> $STAND/poryadok\"
+STACK_BUILD_NOCACHE_CMD=\"echo sborka >> $STAND/poryadok\"
+STACK_UP_CMD=\"echo otkat >> $STAND/poryadok\"
+STACK_IMAGES=\"proba-api\"
+STACK_MIGRATE_CMD=\"echo migracii >> $STAND/poryadok\"
+STACK_RELEASE_CMD=\"echo peresozdanie >> $STAND/poryadok\"
+STACK_HEALTH_CMD=\"true\"
+STACK_DB_DUMP_CMD=\"\"
+DEVMAP_AUDIT_DAYS=0
+CONFIRM_RETRY_SEC=-1
+BACKUP_KEEP_DAYS=14"
+bazy_spisok() {  # $1 = команда базы beta → строки BACKUP_DBS стенда
+    printf 'alfa=echo damp-alfa >> %s/poryadok; cat %s/pg.dump\nbeta=%s' "$STAND" "$STAND" "$1"
+}
+# Имена баз — РАЗБОРОМ списка, тем же правилом «имя=команда», что у backup.sh.
+bazy_imena() { printf '%s\n' "$1" | sed 's/=.*//' | tr '\n' ' ' | sed 's/ $//'; }
+dampy_vykata() {  # имена db-*.dump в $BACKUP_DIR/перед-выкатом стенда и их права
+    find "$STAND/kopii/перед-выкатом" -name 'db-*.dump' -printf '%f:%m\n' 2>/dev/null | sort | tr '\n' ' ' | sed 's/ $//'
+}
+
+SPISOK=$(bazy_spisok "echo damp-beta >> $STAND/poryadok; cat $STAND/pg.dump")
+conf "$BAZY_CONF
+BACKUP_DBS=\"$SPISOK\""
+IMENA=$(bazy_imena "$SPISOK")
+itog "alfa beta" "$IMENA" "разбор BACKUP_DBS стенда дал список баз (пустой список — провал)"
+
+echo "── 16а. --план называет дамп всех баз через backup.sh --базы-в ──"
+run_deploy --план
+itog "0" "$RC" "план выходит нулём"
+itog "да" "$(printf '%s\n' "$VYVOD" | grep 'дамп базы' | grep -qF -- '--базы-в' && echo да || echo нет)" \
+     "строка плана «дамп базы» называет backup.sh --базы-в, а не «без дампа»"
+
+echo "── 16б. здоровый выкат: каждая база списка дала дамп 600 ДО миграций ──"
+: > "$STAND/docker.log"; : > "$STAND/poryadok"
+svezhee_da
+sleep 1
+run_copy "$SCRIPTS_COPY"
+itog "0" "$RC" "выкат с дампами всех баз выходит нулём"
+itog "sborka damp-alfa damp-beta migracii peresozdanie" "$(order)" \
+     "порядок: сборка → дамп каждой базы → миграции → пересоздание"
+itog "$(printf '%s\n' $IMENA | sed 's/.*/db-&.dump:600/' | sort | tr '\n' ' ' | sed 's/ $//')" "$(dampy_vykata)" \
+     "в перед-выкатом по дампу на каждую базу списка, права 600"
+
+echo "── 16в. БОЛЬНОЙ СЛУЧАЙ: дамп одной базы упал — выкат остановлен до миграций ──"
+rm -rf "$STAND/kopii/перед-выкатом"
+conf "$BAZY_CONF
+BACKUP_DBS=\"$(bazy_spisok "echo damp-beta >> $STAND/poryadok; false")\""
+: > "$STAND/docker.log"; : > "$STAND/poryadok"
+svezhee_da
+sleep 1
+run_copy "$SCRIPTS_COPY"
+itog "1" "$RC" "упавший дамп базы beta — код 1"
+itog "да" "$(has "$(order)" "damp-beta")" "дамп базы beta звался"
+itog "нет" "$(has "$(order)" "migracii")" "после упавшего дампа миграции не шли"
+itog "нет" "$(has "$(order)" "peresozdanie")" "после упавшего дампа службы не пересоздавались"
+
+echo "── 16г. БОЛЬНОЙ СЛУЧАЙ: backup.sh вышел нулём, а дампов нет — выкат остановлен ──"
+# Дверь судит не только код: «ноль без файлов» (чужой прогон, пустой список,
+# ранний выход) — это выкат без копии.
+printf '#!/usr/bin/env bash\nexit 0\n' > "$STAND/backup-pustoj.sh"
+polozhit_backup "$STAND/backup-pustoj.sh"
+rm -rf "$STAND/kopii/перед-выкатом"
+conf "$BAZY_CONF
+BACKUP_DBS=\"$SPISOK\""
+: > "$STAND/docker.log"; : > "$STAND/poryadok"
+svezhee_da
+sleep 1
+run_copy "$SCRIPTS_COPY"
+itog "1" "$RC" "backup.sh «0 без дампов» — код 1"
+itog "нет" "$(has "$(order)" "migracii")" "миграции не шли"
+
+echo "── 16д. БОЛЬНОЙ СЛУЧАЙ: backup.sh вышел нулём, а дампов меньше, чем баз — выкат остановлен ──"
+# Один дамп на две базы — вторая шла бы в миграцию без копии; «есть хоть один
+# файл» здесь не судья, судит число баз списка.
+printf '#!/usr/bin/env bash\nmkdir -p "$2" && cat %s/pg.dump > "$2/db-alfa.dump"\n' "$STAND" > "$STAND/backup-odin.sh"
+polozhit_backup "$STAND/backup-odin.sh"
+rm -rf "$STAND/kopii/перед-выкатом"
+: > "$STAND/docker.log"; : > "$STAND/poryadok"
+svezhee_da
+sleep 1
+run_copy "$SCRIPTS_COPY"
+itog "1" "$RC" "backup.sh «0 и один дамп на две базы» — код 1"
+itog "нет" "$(has "$(order)" "migracii")" "миграции не шли"
+polozhit_backup "$BACKUP_SRC"
+
+echo "── 16е. упавшие миграции после дампов всех баз: подсказка восстановления — для каталога дампов ──"
+# Дамп выката здесь — каталог db-<имя>.dump, а не файл: «pg_restore … --clean
+# <каталог>» владелец исполнил бы впустую. Подсказка называет файлы баз.
+rm -rf "$STAND/kopii/перед-выкатом"
+conf "$BAZY_CONF
+STACK_MIGRATE_CMD=\"echo migracii >> $STAND/poryadok; false\"
+BACKUP_DBS=\"$SPISOK\""
+: > "$STAND/docker.log"; : > "$STAND/poryadok"
+svezhee_da
+sleep 1
+run_copy "$SCRIPTS_COPY"
+PODSKAZKA=$(printf '%s\n' "$VYVOD" | grep 'восстановление руками' || true)
+itog "1" "$RC" "упавшие миграции — код 1"
+itog "нет" "$(has "$PODSKAZKA" "--clean")" "подсказка не зовёт pg_restore --clean на каталог"
+itog "да" "$(has "$PODSKAZKA" "db-alfa.dump")" "подсказка называет дамп каждой базы (alfa)"
+itog "да" "$(has "$PODSKAZKA" "db-beta.dump")" "подсказка называет дамп каждой базы (beta)"
+
+echo "── 16ж. BACKUP_DBS только в окружении — дверь его не берёт: дампов баз нет ──"
+# Ключ в файлах стенда дверь снимает и без своего списка; судит список только ключ,
+# пришедший окружением: дверь исполняет необратимое по паспорту, а не по среде.
+rm -rf "$STAND/kopii/перед-выкатом"
+conf "$BAZY_CONF"
+BACKUP_DBS="$SPISOK" run_deploy --план
+itog "да" "$(printf '%s\n' "$VYVOD" | grep 'дамп базы' | grep -q 'без дампа' && echo да || echo нет)" \
+     "план по BACKUP_DBS окружения называет «без дампа», а не --базы-в"
+: > "$STAND/docker.log"; : > "$STAND/poryadok"
+svezhee_da
+sleep 1
+BACKUP_DBS="$SPISOK" run_copy "$SCRIPTS_COPY"
+itog "0" "$RC" "выкат без дампов баз выходит нулём"
+itog "sborka migracii peresozdanie" "$(order)" "BACKUP_DBS окружения не дал дампов: сборка → миграции → пересоздание"
+itog "" "$(dampy_vykata)" "в перед-выкатом нет дампов баз"
+
 printf '\nВЫКАТ-ПРОДУКТА: путей %d, неудач %d\n' "$paths" "$fails"
 [ "$fails" -eq 0 ]

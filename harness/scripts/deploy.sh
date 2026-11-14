@@ -43,7 +43,7 @@ konf_dveri_puti "${BASH_SOURCE[0]}"
 # Путь берётся по РЕАЛЬНОМУ файлу (readlink -f): pre-commit подключён в
 # .git/hooks симлинком, и dirname дал бы .git/hooks, где библиотеки нет.
 # Поймано первым же коммитом после правки, 12.09.2026.
-konf_zagruzit_dveri PROJECT_DIR LOG_DIR TMUX_SESSION SECRETS_DIR AGENT_START_CMD DOCKER_SWEEP_ENABLED BACKUP_DIR DB_ADMIN_USER DEVMAP_AUDIT_DAYS HARNESS_LOG_DIR PRODUCT_DIR PRODUCT_REPO STACK_BUILD_CMD STACK_BUILD_NOCACHE_CMD STACK_CRON_SRC STACK_DB_DUMP_CMD STACK_DB_RESTORE_HINT STACK_HEALTH_CMD STACK_HEALTH_URL STACK_IMAGES STACK_MANIFESTS STACK_MIGRATE_CMD STACK_PROXY_RELOAD_CMD STACK_RELEASE_CMD STACK_UP_CMD
+konf_zagruzit_dveri PROJECT_DIR LOG_DIR TMUX_SESSION SECRETS_DIR AGENT_START_CMD DOCKER_SWEEP_ENABLED BACKUP_DIR BACKUP_DBS DB_ADMIN_USER DEVMAP_AUDIT_DAYS HARNESS_LOG_DIR PRODUCT_DIR PRODUCT_REPO STACK_BUILD_CMD STACK_BUILD_NOCACHE_CMD STACK_CRON_SRC STACK_DB_DUMP_CMD STACK_DB_RESTORE_HINT STACK_HEALTH_CMD STACK_HEALTH_URL STACK_IMAGES STACK_MANIFESTS STACK_MIGRATE_CMD STACK_PROXY_RELOAD_CMD STACK_RELEASE_CMD STACK_UP_CMD
 # harness.conf несёт секцию STACK_*; без него продукт заведомо не задан.
 : "${PROJECT_DIR:?в install.conf пуст PROJECT_DIR}" "${LOG_DIR:?пуст LOG_DIR}"
 
@@ -168,7 +168,11 @@ if [ "${1:-}" = "--план" ]; then
     say "  образы для снимка :previous: ${STACK_IMAGES:-<пусто — отката не будет>}"
     say "  сборка: $STACK_BUILD_CMD"
     say "  сборка --no-cache (смена манифестов): ${STACK_BUILD_NOCACHE_CMD:-<пусто — обычная сборка>}"
-    say "  дамп базы: ${STACK_DB_DUMP_CMD:-<пусто — без дампа>}"
+    if [ -z "${STACK_DB_DUMP_CMD:-}" ] && [ -n "${BACKUP_DBS:-}" ]; then
+        say "  дамп базы: все базы BACKUP_DBS через backup.sh --базы-в ${BACKUP_DIR:-/var/backups/harness}/перед-выкатом/<метка>-<sha8>"
+    else
+        say "  дамп базы: ${STACK_DB_DUMP_CMD:-<пусто — без дампа>}"
+    fi
     say "  миграции: ${STACK_MIGRATE_CMD:-<пусто>}"
     say "  пересоздание служб: ${STACK_RELEASE_CMD:-<пусто — службы поднимает сборка>}"
     say "  живость: ${STACK_HEALTH_CMD:-${STACK_HEALTH_URL:-<пусто — выкат откажет>}}"
@@ -368,6 +372,16 @@ if [ -n "${STACK_DB_DUMP_CMD:-}" ]; then
         say "дамп базы не снят — выкат остановлен (И-1): миграции необратимы, откатывать схему было бы нечем"
         exit 1
     fi
+elif [ -n "${BACKUP_DBS:-}" ]; then
+    # Баз несколько, а одна команда защищает одну: дампы всех снимает backup.sh
+    # (`--базы-в`). Код 0 без дампов — тоже отказ: «ноль без файлов» это выкат без копии.
+    DB_DUMP="${BACKUP_DIR:-/var/backups/harness}/перед-выкатом/${TAG#deploy-}-$(printf '%.8s' "${DEPLOY_SHA:-$(tree_head)}")"
+    DB_COUNT=$(printf '%s\n' "$BACKUP_DBS" | grep -c '[^[:space:]]' || true)
+    say "дампы всех баз: backup.sh --базы-в $DB_DUMP"
+    bash "$PROJECT_DIR/harness/demons/backup.sh" --базы-в "$DB_DUMP" >> "$DEPLOY_LOG" 2>&1 \
+        && [ "$(find "$DB_DUMP" -maxdepth 1 -name 'db-*.dump' 2>/dev/null | wc -l)" -ge "$DB_COUNT" ] \
+        || { say "дампы баз не сняты (журнал: $DEPLOY_LOG) — выкат остановлен (И-1): миграции необратимы, откатывать схему было бы нечем"; exit 1; }
+    say "дампы баз сняты: $DB_DUMP"
 else
     say "STACK_DB_DUMP_CMD пуст — дампа базы перед миграциями нет; если у продукта есть база, заполни ключ в harness.conf"
 fi
@@ -391,6 +405,9 @@ name_db_restore() {
     say "схема базы НЕ откачена автоматически; дамп до миграций: $DB_DUMP"
     if [ -n "${STACK_DB_RESTORE_HINT:-}" ]; then
         say "восстановление руками (решение владельца): $STACK_DB_RESTORE_HINT"
+    elif [ -d "$DB_DUMP" ]; then
+        # Дампы всех баз (`--базы-в`): у каждой свой движок, одной команды на каталог нет.
+        say "восстановление руками (решение владельца): каждую базу — её дампом, командой её движка (psql или mysql): $(cd "$DB_DUMP" && ls db-*.dump 2>/dev/null | tr '\n' ' ')"
     else
         say "восстановление руками (решение владельца): pg_restore -U ${DB_ADMIN_USER:-<DB_ADMIN_USER не задан>} -d ${DB_ADMIN_USER:-<DB_ADMIN_USER не задан>} --clean $DB_DUMP"
     fi

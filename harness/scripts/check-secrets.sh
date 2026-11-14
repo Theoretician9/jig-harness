@@ -20,6 +20,8 @@
 # Запуск:
 #   check-secrets.sh [каталог]     # все учтённые файлы (по умолчанию $PROJECT_DIR)
 #   check-secrets.sh --staged      # только staged-содержимое (для pre-commit)
+#   check-secrets.sh --range <база>..<голова> [каталог]
+#                                  # только строки, ДОБАВЛЕННЫЕ диффом диапазона
 #   check-secrets.sh --selftest    # больной + здоровый случай во временном репо
 #
 # Код возврата: 0 — чисто, 1 — найден похожий на секрет текст (или сбой git:
@@ -258,6 +260,44 @@ scan_tree() {  # $1 = каталог
     echo "check-secrets: $root — не git-репозиторий, файлы обойдены: чисто, НО точные значения из источников не сверялись"
 }
 
+# Добавленные диффом строки диапазона: текст — в $TMPD/added.text, «путь:номер»
+# (номер в файле головы) — в $TMPD/added.loc, строка в строку. Судятся только
+# «+»-строки внутри ханков: заголовок «+++ b/…» и удалённое — нет, а содержимое
+# «++ …» приходит как «+++ …» ВНУТРИ ханка и судится, поэтому заголовок узнаётся
+# лишь вне ханка. Удалённый файл («+++ /dev/null») добавленного не несёт.
+# Имя с табуляцией, кавычкой или обратной чертой git пишет в кавычках с
+# экранированием, имя с пробелом — с хвостовой табуляцией: место находки
+# называет файл так, как он лежит в репо. Разбор — побайтно (LC_ALL=C): байт
+# не из UTF-8 в содержимом не должен ни менять строку, ни сыпать предупреждения.
+range_added_lines() {  # $1 репо, $2 база..голова
+    if ! git --literal-pathspecs -C "$1" -c core.quotepath=false diff --no-color --no-ext-diff -U0 "$2" -- \
+            > "$TMPD/range.diff" 2>/dev/null; then
+        echo "check-secrets: git diff $2 упал — секреты НЕ проверены"
+        return 1
+    fi
+    LC_ALL=C awk -v text="$TMPD/added.text" -v loc="$TMPD/added.loc" '
+        function unquote(s,   o, i, c) {
+            s = substr(s, 2, length(s) - 2); o = ""
+            for (i = 1; i <= length(s); i++) {
+                c = substr(s, i, 1)
+                if (c == "\\") { c = substr(s, ++i, 1); if (c == "t") c = "\t"; else if (c == "n") c = "\n" }
+                o = o c
+            }
+            return o
+        }
+        /^diff --git / { inhunk = 0; f = ""; skip = 1; next }
+        !inhunk && /^\+\+\+ / {
+            f = substr($0, 5)
+            if (f ~ /^"/) f = unquote(f); else sub(/\t.*$/, "", f)
+            skip = (f == "/dev/null"); sub(/^b\//, "", f); next
+        }
+        !inhunk && /^@@ / { inhunk = 1 }
+        inhunk && /^@@ / { split($3, a, ","); n = substr(a[1], 2) + 0; next }
+        inhunk && /^\+/ && !skip { print substr($0, 2) > text; print f ":" n > loc; n++ }
+    ' "$TMPD/range.diff"
+    : >> "$TMPD/added.text"; : >> "$TMPD/added.loc"
+}
+
 run_scan_inner() {  # $1 = каталог репо, $2 = режим all|staged, $3 = каталог ключей (по умолчанию — из паспорта),
                 #  $4 = конфиг источников значений (по умолчанию secret-sources.yaml рядом)
     local repo="$1" mode="$2" fail=0 hits f rc
@@ -284,7 +324,9 @@ run_scan_inner() {  # $1 = каталог репо, $2 = режим all|staged, 
     # ради которого и заводился список файлов, ему не грозит.
     # --cached в обоих режимах: коммитится ИНДЕКС, его и читаем.
     local -a SCOPE=()
-    if [ "$mode" = "staged" ]; then
+    if [ "$mode" = "range" ]; then
+        range_added_lines "$repo" "$RANGE" || return 1
+    elif [ "$mode" = "staged" ]; then
         # Всё, кроме удалённых (d): изменённый M, переименованный R и сменивший
         # тип T несут новое содержимое не хуже добавленного. Имена — через NUL:
         # кавычка, обратная черта и табуляция в имени иначе приходят экранированными.
@@ -318,13 +360,25 @@ run_scan_inner() {  # $1 = каталог репо, $2 = режим all|staged, 
     local xtrace_hits=0
     case $- in *x*) xtrace_hits=1; set +x ;; esac
     hits=""; rc=0
-    git --literal-pathspecs -C "$repo" -c core.quotepath=false grep --cached -inI "$RE_FLAG" \
-        "${PATTERNS[@]}" "${SCOPE[@]}" > "$TMPD/patterns.out" 2>/dev/null || rc=$?
+    if [ "$mode" = "range" ]; then
+        # Добавленные строки — не файл индекса, git grep им не нужен: grep по
+        # тексту, номер строки заменяется на «путь:номер в файле головы».
+        # -a: одна строка с NUL или байтом не из UTF-8 иначе делает весь текст
+        # «двоичным», и grep молчит о совпадениях — секрет проходил бы «чисто».
+        grep -a -inE "${PATTERNS[@]}" "$TMPD/added.text" 2>/dev/null \
+            | awk -F: 'NR==FNR { loc[FNR] = $0; next } { i = $1; sub(/^[^:]*:/, ""); print loc[i] ":" $0 }' \
+                "$TMPD/added.loc" - > "$TMPD/patterns.out" || rc=${PIPESTATUS[0]}
+    else
+        git --literal-pathspecs -C "$repo" -c core.quotepath=false grep --cached -inI "$RE_FLAG" \
+            "${PATTERNS[@]}" "${SCOPE[@]}" > "$TMPD/patterns.out" 2>/dev/null || rc=$?
+    fi
     if [ "$rc" -gt 1 ]; then
         echo "check-secrets: git grep упал (код $rc) — секреты НЕ проверены"
         fail=1
     else
-        hits=$(grep -v "$MARKER" "$TMPD/patterns.out" | grep -vE "$VERSIYA" | grep -viE "$CHISLO" || true)
+        # -a: строка с байтом не из UTF-8 иначе делает находки «двоичными», и grep
+        # молча роняет их все — секрет проходил бы «чисто».
+        hits=$(grep -av "$MARKER" "$TMPD/patterns.out" | grep -avE "$VERSIYA" | grep -aviE "$CHISLO" || true)
     fi
     if [ -n "$hits" ]; then
         mask_findings <<< "$hits"
@@ -1117,8 +1171,14 @@ fi
 # ── боевой запуск ───────────────────────────────────────────────────────────
 MODE=all
 REPO=""
+RANGE=""
 if [ "${1:-}" = "--staged" ]; then
     MODE=staged; shift
+elif [ "${1:-}" = "--range" ]; then
+    # Одна ревизия git diff сравнил бы с рабочим деревом, а довод с «-» принял
+    # бы ключом (--output= уводит дифф в файл): судить было бы нечего — «чисто».
+    [[ "${2:-}" == [!-]*..?* ]] || { echo "check-secrets: --range <база>..<голова> [каталог]"; exit 2; }
+    MODE=range; RANGE="$2"; shift 2
 fi
 REPO="${1:-}"
 if [ -z "$REPO" ]; then

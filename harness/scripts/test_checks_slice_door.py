@@ -482,7 +482,13 @@ def g04(tmp: Path) -> None:
     finally:
         s.kill_all(a)
     s = SliceStand(tmp / "free", conf="CHECKS_RUN_MAX_MIN=7\nMUTATION_LOCK_WAIT_MIN=2\n")
+    called = int(time.time())
     rc, _, took = s.door_run("true", env=s.env())
+    soft = [int(a.split("=", 2)[2]) for c in s.systemd_run_calls()[-1:] for a in c
+            if a.startswith("--setenv=MUTATION_DEADLINE_TS=")]
+    # Предел 420 с: запас 15 мин больше половины предела — срок за 210 с до конца юнита.
+    check("G-04: мягкий срок MUTATION_DEADLINE_TS дошёл до юнита — за полпредела до RuntimeMaxSec",
+          [True], [called + 205 <= ts <= called + 215 + int(took) for ts in soft] or [False])
     calls = s.systemd_run_calls()
     joined = " ".join(calls[-1]) if calls else ""
     check("G-04: замок свободен — без ожидания, код 0", [0, True], [rc, took < 5])
@@ -581,8 +587,9 @@ def g13(tmp: Path) -> None:
 
 
 def probe_batch_guard(s: Stand) -> None:
-    """Сторож пачки: второй заход мутаций задач, пока первый ждёт или идёт, —
-    отказ кодом 75 с законным путём; прочие прогоны и заход после — свободны."""
+    """Сторож пачки: заход в дверь мимо очереди, пока первый ждёт или идёт, —
+    отказ кодом 75 с законным путём; заявка acceptance при живом заходе не
+    отказывается, а ждёт очереди пачек; прочие прогоны и заход после — свободны."""
     marker = s.tmp / "в-обёртке"
     slow = executable(s.tmp / "slow-wrapper.sh",
                       f"#!/usr/bin/env bash\ntouch {marker}\nsleep 8\nexec {s.wrapper} \"$@\"\n")
@@ -593,21 +600,28 @@ def probe_batch_guard(s: Stand) -> None:
     deadline = time.time() + 20
     while not marker.exists() and time.time() < deadline:
         time.sleep(0.1)
-    rc, out, recs = s.acceptance(s.env())
-    rc_probe, _, recs_probe = s.probe(s.env())
-    first_rc = first.wait(timeout=60)
-    check("пачка: второй заход мутаций задачи при живом первом — отказ 75, обёртка не звана",
-          (BUSY_RC, 0), (rc, len(recs)))
+    door = str(s.root / "scripts" / "run-in-checks-slice.sh")
+    rc, out, recs = s.run(["bash", door, sys.executable, str(s.root / "scripts" / "acceptance.py"),
+                           "--мутации-задачи", "hr.проба-среза"], s.env(), s.work)
+    own = [r for r in recs if "hr.проба-среза" in r]
+    check("пачка: второй заход в дверь мимо очереди при живом первом — отказ 75, обёртка не звана",
+          (BUSY_RC, 0), (rc, len(own)))
     check("пачка: отказ называет законный путь — свои id в пачку через запятую", True,
           "--мутации-задачи hr.проба-среза,<id2>" in out)
-    check("пачка: отказ называет держателя (pid и задачи первого)", True,
-          str(first.pid) in out and "hr.первая" in out)
+    check("пачка: отказ называет держателя (задачи первого)", True, "hr.первая" in out)
+    rc_probe, _, recs_probe = s.probe(s.env())
+    rc, out, recs = s.acceptance(s.env())
+    own = [r for r in recs if "hr.проба-среза" in r]
+    check("пачка: заявка acceptance при живом заходе не отказана, а дождалась своего захода",
+          (2, 1, False), (rc, len(own), "отказ" in out))
+    check("пачка: заявка видит итог своей задачи, а не первой", (True, False),
+          ("hr.проба-среза: история не прочитана" in out, "hr.первая" in out))
+    first_rc = first.wait(timeout=60)
     check("пачка: прибор механизма при живом заходе задач не режется", 1, len(recs_probe))
     check("пачка: первый заход дошёл сам (код 2 — история не прочитана)", 2, first_rc)
     rc, _, recs = s.acceptance(s.env())
     check("пачка: после конца первого заход свободен", (2, 1), (rc, len(recs)))
     # Фоновый потомок прогона переживает дверь; замок пачки ему не достаётся.
-    door = str(s.root / "scripts" / "run-in-checks-slice.sh")
     pidfile = s.tmp / "потомок.pid"
     s.run(["bash", door, "bash", "-c", f"sleep 30 >/dev/null 2>&1 & echo $! > {pidfile}",
            "--мутации-задачи", "hr.потомок"], s.env(), s.work)
