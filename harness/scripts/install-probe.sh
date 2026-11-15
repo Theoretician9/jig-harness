@@ -22,7 +22,8 @@
 #   setsid nohup bash scripts/install-probe.sh > /var/log/harness/установка-проба.log 2>&1 &
 #   bash scripts/install-probe.sh --selftest   # логика без docker
 # Код возврата: 0 — установка прошла, число провалов — если нет, 77 — мерить
-# нечем (нет docker, образа или пакета).
+# нечем (нет docker, образ не собрался или нет пакета). Образа нет — собирается
+# по рецепту recept_obraza (первый прогон дольше на минуты apt).
 set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
 # shellcheck disable=SC1091
@@ -161,11 +162,37 @@ light_run_names() {
 
 # Применимость: чем мерить. «Нет docker» и «нет образа» — разные ответы, и оба
 # не равны «установка сломана».
+#
+# Образа нет — он собирается здесь же по рецепту: рецепта не было нигде, и проба
+# годами отвечала «образа нет» на каждой машине, установку с нуля не проверял
+# никто. Рецепт — свежий Ubuntu с systemd: то, на чём установщик проверен, и
+# ничего из того, что ставит он сам.
+recept_obraza() {
+    cat <<'RECEPT'
+FROM ubuntu:24.04
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends systemd systemd-sysv dbus sudo \
+        ca-certificates curl cron python3 git \
+ && apt-get clean && rm -rf /var/lib/apt/lists/*
+STOPSIGNAL SIGRTMIN+3
+CMD ["/sbin/init"]
+RECEPT
+}
+
+sobrat_obraz() {  # stdout — вывод сборки; код — код docker build
+    recept_obraza | docker build -t "$OBRAZ" - 2>&1
+}
+
 pochemu_nelzya() {
+    local sborka
     command -v docker >/dev/null 2>&1 || { echo "docker не установлен"; return 0; }
     docker info >/dev/null 2>&1 || { echo "docker не отвечает"; return 0; }
-    docker image inspect "$OBRAZ" >/dev/null 2>&1 \
-        || { echo "образа чистой машины «$OBRAZ» нет (собери его или задай INSTALL_PROBE_IMAGE)"; return 0; }
+    if ! docker image inspect "$OBRAZ" >/dev/null 2>&1; then
+        sborka=$(sobrat_obraz) || {
+            echo "образа чистой машины «$OBRAZ» нет и он не собрался: $(printf '%s\n' "$sborka" | tail -1)"
+            return 0; }
+    fi
     [ -f "$PAKET/USTANOVIT.sh" ] || { echo "пакета нет: $PAKET/USTANOVIT.sh"; return 0; }
     return 1
 }
@@ -328,6 +355,36 @@ DOCKER
     done
     proba "каждому тяжёлому демону есть лёгкая работа в LIGHT_RUN установщика${BEZ_PARY:+ (нет:$BEZ_PARY)}" \
           "$([ -n "$HEAVY" ] && [ -z "$BEZ_PARY" ] && echo 1 || echo 0)"
+
+    # БОЛЬНОЙ СЛУЧАЙ (bkb 11.11.2026, и здесь — замер 15.11.2026: пять ночей
+    # подряд «образа нет»): рецепта образа не было нигде, и проба установки не
+    # проводилась ни на одной машине. Нет образа — он собирается по рецепту;
+    # не собрался — причина, а не тишина. Судится на подставном docker.
+    STUB=$(mktemp -d)
+    cat > "$STUB/docker" <<'DOCKER'
+#!/usr/bin/env bash
+case "$1 ${2:-}" in
+    "image inspect") [ -f "$STUB_DIR/sobran" ] && exit 0; exit 1 ;;
+    "build -t"*) cat > "$STUB_DIR/recept"; [ "$STUB_BUILD_RC" = 0 ] && : > "$STUB_DIR/sobran"
+                 echo "шаг сборки: стенд"; exit "$STUB_BUILD_RC" ;;
+esac
+exit 0
+DOCKER
+    chmod +x "$STUB/docker"
+    mkdir -p "$STUB/paket"; : > "$STUB/paket/USTANOVIT.sh"
+    PRICHINA_ST=$( (export PATH="$STUB:$PATH" STUB_DIR="$STUB" STUB_BUILD_RC=0
+                    OBRAZ="stend-obraz:0" PAKET="$STUB/paket"; pochemu_nelzya) ) && RC_ST=0 || RC_ST=$?
+    proba "образа нет — собран по рецепту, проба применима${PRICHINA_ST:+ (причина: $PRICHINA_ST)}" \
+          "$([ "$RC_ST" = 1 ] && [ -f "$STUB/sobran" ] && echo 1 || echo 0)"
+    proba "рецепт образа — Ubuntu с systemd и /sbin/init" \
+          "$(grep -q '^FROM ubuntu:24.04' "$STUB/recept" 2>/dev/null && grep -q 'systemd-sysv' "$STUB/recept" \
+             && echo 1 || echo 0)"
+    rm -f "$STUB/sobran"
+    PRICHINA_ST=$( (export PATH="$STUB:$PATH" STUB_DIR="$STUB" STUB_BUILD_RC=1
+                    OBRAZ="stend-obraz:0" PAKET="$STUB/paket"; pochemu_nelzya) ) && RC_ST=0 || RC_ST=$?
+    proba "образ не собрался — причина названа, проба не применима" \
+          "$([ "$RC_ST" = 0 ] && printf '%s' "$PRICHINA_ST" | grep -q 'не собрался' && echo 1 || echo 0)"
+    rm -rf "$STUB"
 
     if [ "$ST_OK" = 1 ]; then
         echo "SELFTEST: зелёный ($ST_N путей, первым — больной случай «паспорт стенда неполон»)"

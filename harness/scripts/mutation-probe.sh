@@ -890,6 +890,28 @@ echo "SELFTEST: КРАСНЫЙ"; exit 1
             "$(verdicts "$STAND/корни-читатель.txt" "$STAND/корни-демон.txt" "$STAND/корни-слепой.txt")"
         SELF_BAD=1
     fi
+    # Лишний корень записи: проба сборки скилов читает главы из UNIFIED/, а
+    # прибор копирует только корни механизма и пробы. Поле «корни:» записи
+    # обязано довезти третий каталог — без него чистая копия красна.
+    mkdir -p "$ROOTS/glavy"
+    printf 'glava\n' > "$ROOTS/glavy/glava.md"
+    cat > "$ROOTS/scripts/chitatel_glav.sh" <<'МЕХ'
+#!/usr/bin/env bash
+PRIZNAK=1
+[ -f "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../glavy/glava.md" ] || { echo "глав нет"; exit 1; }
+[ "$PRIZNAK" = 1 ]
+МЕХ
+    printf 'пробы:\n  scripts/chitatel_glav.sh:\n    механизм: scripts/chitatel_glav.sh\n    доказательство: bash scripts/chitatel_glav.sh\n    подмена: "-"\n    корни: [glavy]\n    мутация: "s/^PRIZNAK=1/PRIZNAK=0/"\n    мутация_случай: "читает третий корень"\n' \
+        > "$STAND/третий-корень.yaml"
+    OUT=$(MUT_CACHE_DAYS=0 LOG_DIR="$STAND" HARNESS_INVARIANTS="$STAND/пустая.yaml" \
+          HARNESS_PROBE_MUTATIONS="$STAND/третий-корень.yaml" \
+          bash "$ROOTS/scripts/mutation-probe.sh" --механизм scripts/chitatel_glav.sh 2>&1); RC=$?
+    if [ "$RC" = 0 ] && printf '%s' "$OUT" | grep -q "покраснели как надо 1, дыр 0"; then
+        printf '  ок    поле «корни:» везёт третий каталог в копию — чистая копия зелёная\n'
+    else
+        printf '  ПЛОХО поле «корни:» не довезло каталог: код %s, вывод «%s»\n' "$RC" "$OUT"
+        SELF_BAD=1
+    fi
 
     # БОЛЬНОЙ СЛУЧАЙ 27.10.2026: мутация записи самого прибора сняла отказ
     # пустого отбора, --selftest копии погнал таблицу, в которой есть запись о
@@ -1124,6 +1146,10 @@ for з in класс_d.values():
 # обязан быть в копии целиком — иначе зов упадёт раньше любой мутации.
 корни |= {проба.split("/")[0] for проба, з in класс_d.items()
           if (з or {}).get("мутация") and (з or {}).get("подмена") == "из-копии"}
+# Лишние корни, названные записью: каталог, который читает проба, но в котором
+# нет ни механизма, ни пробы (главы UNIFIED/ у сборки скилов).
+корни |= {root.split("/")[0] for з in класс_d.values() if (з or {}).get("мутация")
+          for root in (з or {}).get("корни") or []}
 # Проба и механизм из scripts/ читают harness/config, и наоборот: пара корней
 # ходит вместе, иначе выборка записей зависит от порядка в таблице.
 if "scripts" in корни or "harness" in корни:

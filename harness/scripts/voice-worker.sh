@@ -6,7 +6,12 @@
 # от памяти машины: доля MemTotal (VOICE_VM_MEM_PERCENT), не ниже пола
 # VOICE_VM_LIMIT_KB и не выше потолка VOICE_VM_MAX_KB. Замер 28.10: пол на машине
 # с 4 ядрами между 1 200 000 и 1 500 000 КБ; MKL берёт память по числу ядер, поэтому
-# одно число на все машины не годится.
+# одно число на все машины не годится. Поэтому пол ещё и замеряется на месте:
+# расшифровка упала нехваткой памяти — предел в полтора раза выше, до потолка, а
+# сработавший предел запоминается полом машины ($STATE_DIR/voice/vm-limit-kb).
+# Находка sample-26 10.11.2026: на 8 ГБ доля давала 3,2 млн КБ, расшифровке нужно 4 млн.
+# Модель качается ДО расшифровки и вне предела: под ним скачивание падает
+# (находка bkb 10.11.2026). `--selftest` — самотест расшифровки под тем же пределом.
 #
 # Очередь — $LOG_DIR/inbox/вложения/<message_id>.json; итог — <message_id>.done.
 # В inbox/, inbox.jsonl, панель и канал обработчик не пишет: итог подбирает
@@ -26,12 +31,18 @@ VOICE_VM_LIMIT_KB="${VOICE_VM_LIMIT_KB:-2500000}"
 VOICE_VM_MEM_PERCENT="${VOICE_VM_MEM_PERCENT:-40}"
 VOICE_VM_MAX_KB="${VOICE_VM_MAX_KB:-8000000}"
 SERVICE_LOCKS_SUBDIR="${SERVICE_LOCKS_SUBDIR:-services}"
+LEARNED_LIMIT_FILE="$STATE_DIR/voice/vm-limit-kb"
+TRANSCRIBE_PY="${HARNESS_TRANSCRIBE_PY:-$HERE/transcribe_voice.py}"
+MEMORY_FAILURE_RE='mkl_malloc|memory allocation of|MemoryError|Cannot allocate memory|bad_alloc'
 
 # Предел расшифровки, КБ, для памяти машины $1 (КБ). Память не прочиталась — пол.
+# Пол — наибольший из ключа конфига и замеренного на этой машине.
 voice_vm_limit_kb() {
-    local mem="${1:-0}" limit
+    local mem="${1:-0}" limit floor="$VOICE_VM_LIMIT_KB" learned
+    learned="$(cat "$LEARNED_LIMIT_FILE" 2>/dev/null || true)"
+    [[ "$learned" =~ ^[0-9]+$ ]] && [ "$learned" -gt "$floor" ] && floor="$learned"
     limit=$(( mem * VOICE_VM_MEM_PERCENT / 100 ))
-    [ "$limit" -ge "$VOICE_VM_LIMIT_KB" ] || limit="$VOICE_VM_LIMIT_KB"
+    [ "$limit" -ge "$floor" ] || limit="$floor"
     [ "$limit" -le "$VOICE_VM_MAX_KB" ] || limit="$VOICE_VM_MAX_KB"
     echo "$limit"
 }
@@ -42,13 +53,46 @@ if [ "${1:-}" = "--limit-for" ]; then
 fi
 VOICE_VM_EFFECTIVE_KB="$(voice_vm_limit_kb "$(awk '/^MemTotal:/{print $2}' /proc/meminfo 2>/dev/null)")"
 
+log() { printf '%s  voice-worker: %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"; }
+
+# transcribe_voice.py с доводами $@ под пределом; итог — RUN_RC и RUN_OUT.
+# Нехватка памяти поднимает предел в полтора раза, пока не упрётся в потолок.
+run_limited() {
+    local limit="$VOICE_VM_EFFECTIVE_KB"
+    while :; do
+        RUN_RC=0
+        RUN_OUT=$(bash -c 'ulimit -v "$1"; exec python3 "${@:2}"' _ "$limit" "$TRANSCRIBE_PY" "$@" 2>&1) || RUN_RC=$?
+        [ "$RUN_RC" != 0 ] && [ "$limit" -lt "$VOICE_VM_MAX_KB" ] && grep -qE "$MEMORY_FAILURE_RE" <<< "$RUN_OUT" || break
+        log "предела $limit КБ мало расшифровке — поднимаю"
+        limit=$(( limit * 3 / 2 ))
+        [ "$limit" -le "$VOICE_VM_MAX_KB" ] || limit="$VOICE_VM_MAX_KB"
+    done
+    if [ "$RUN_RC" = 0 ] && [ "$limit" != "$VOICE_VM_EFFECTIVE_KB" ]; then
+        mkdir -p "$(dirname "$LEARNED_LIMIT_FILE")"
+        echo "$limit" > "$LEARNED_LIMIT_FILE"
+        VOICE_VM_EFFECTIVE_KB="$limit"
+        log "предел $limit КБ запомнен полом машины: $LEARNED_LIMIT_FILE"
+    fi
+}
+
+# Модель — до расшифровки и без предела; в кэше — ответ сразу, без сети.
+fetch_model() { RUN_RC=0; RUN_OUT=$(python3 "$TRANSCRIBE_PY" --fetch-model 2>&1) || RUN_RC=$?; }
+
+if [ "${1:-}" = "--selftest" ]; then
+    fetch_model
+    [ "$RUN_RC" = 0 ] || { log "модель не загружена (rc=$RUN_RC): ${RUN_OUT: -300}"; exit 1; }
+    run_limited --selftest
+    printf '%s\n' "$RUN_OUT"
+    log "самотест под пределом $VOICE_VM_EFFECTIVE_KB КБ: rc=$RUN_RC"
+    [ "$RUN_RC" = 0 ] || exit 1
+    exit 0
+fi
+
 QUEUE="$LOG_DIR/inbox/вложения"
 LOCK_FILE="$LOG_DIR/locks/$SERVICE_LOCKS_SUBDIR/voice-worker.lock"
 mkdir -p "$(dirname "$LOCK_FILE")" "$QUEUE"
 exec 8>> "$LOCK_FILE"
 flock -n 8 || exit 0
-
-log() { printf '%s  voice-worker: %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"; }
 
 # Самое старое сообщение без итога; пусто — очередь пуста.
 next_job() {
@@ -75,9 +119,15 @@ process() {  # $1 = путь <id>.json
         write_done "$id" false "скачивание" "" "$audio" ""
         return 0
     fi
-    rc=0
-    text=$(bash -c 'ulimit -v "$1"; exec python3 "$2" "$3"' _ "$VOICE_VM_EFFECTIVE_KB" \
-               "${HARNESS_TRANSCRIBE_PY:-$HERE/transcribe_voice.py}" "$audio" 2>&1) || rc=$?
+    fetch_model
+    if [ "$RUN_RC" != 0 ]; then
+        log "$id: модель расшифровки не загружена (rc=$RUN_RC): ${RUN_OUT: -200}"
+        # Этап «расшифровка»: подбор диспетчера по нему зовёт чинить контур голосовых.
+        write_done "$id" false "расшифровка" "" "модель расшифровки не загружена: $RUN_OUT" "$audio"
+        return 0
+    fi
+    run_limited "$audio"
+    rc="$RUN_RC" text="$RUN_OUT"
     if [ "$rc" != 0 ] || [ -z "$text" ]; then
         log "$id: расшифровка не удалась (rc=$rc): ${text: -200}"
         write_done "$id" false "расшифровка" "" "$text" "$audio"

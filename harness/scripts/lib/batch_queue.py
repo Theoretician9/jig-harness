@@ -66,10 +66,11 @@ def _state(place: Path):
         tmp.replace(path)
 
 
-def submit(place: Path, ids: list[str]) -> str:
+def submit(place: Path, ids: list[str], command: list[str]) -> str:
     token = f"{os.getpid()}-{time.time_ns()}"
     with _state(place) as state:
-        state["заявки"].append({"знак": token, "ids": ids, "с": time.time(), "заход": None})
+        state["заявки"].append({"знак": token, "ids": ids, "команда": command,
+                                "с": time.time(), "заход": None})
     return token
 
 
@@ -99,10 +100,16 @@ def fail_orphans(place: Path) -> None:
                ["очередь: заход умер, не дописав итог — заявка не прогнана, подай её снова"])
 
 
-def take_batch(place: Path, window: float, cap: int) -> tuple[list[str], list[str]] | float:
-    """(знаки, id) пачки, взятой в заход; число — сколько ещё ждать окна."""
+def take_batch(place: Path, window: float, cap: int) -> tuple[list[str], list[str], list[str]] | float:
+    """(знаки, id, команда) пачки, взятой в заход; число — сколько ещё ждать окна.
+
+    Пачка — заявки ОДНОЙ команды: место очереди общее для всех деревьев, а
+    команда несёт дерево заявителя. Заявка главного дерева, прогнанная командой
+    worktree помощника, умирает, когда этот worktree сносят."""
     with _state(place) as state:
         pending = [з for з in state["заявки"] if з["заход"] is None]
+        if pending:
+            pending = [з for з in pending if з["команда"] == pending[0]["команда"]]
         if not pending:
             return 0.0
         left = pending[0]["с"] + window - time.time()
@@ -117,7 +124,7 @@ def take_batch(place: Path, window: float, cap: int) -> tuple[list[str], list[st
             tokens.append(request["знак"])
             ids += fresh
             request["заход"] = os.getpid()
-        return tokens, ids
+        return tokens, ids, pending[0]["команда"]
 
 
 def _to_stderr(line: str) -> None:
@@ -150,7 +157,7 @@ def execute(command: list[str], ids: list[str], place: Path, echo=_to_stderr) ->
     return code, lines
 
 
-def serve(place: Path, token: str, command: list[str], window: float, cap: int,
+def serve(place: Path, token: str, window: float, cap: int,
           deadline: float, echo=_to_stderr) -> dict | None:
     """Исполнитель: гонит пачки, пока своя заявка не получит итог или не выйдет срок."""
     fail_orphans(place)
@@ -162,7 +169,7 @@ def serve(place: Path, token: str, command: list[str], window: float, cap: int,
         if isinstance(batch, float):
             time.sleep(min(max(batch, 0.05), POLL_SEC))
             continue
-        tokens, ids = batch
+        tokens, ids, command = batch
         code, lines = BUSY_RC, ["очередь: исполнитель упал посреди захода"]
         try:
             code, lines = execute(command, ids, place, echo)
@@ -176,7 +183,7 @@ def request(ids: list[str], command: list[str], place: Path, window: float, cap:
             wait: float, echo=_to_stderr) -> tuple[int, list[str]]:
     """Заявка: (код захода, строки его вывода). Отказ по сроку — BUSY_RC.
     echo получает строки захода по мере вывода, если заход гонит этот заявитель."""
-    token = submit(place, ids)
+    token = submit(place, ids, command)
     print(f"очередь: заявка {','.join(ids)} подана; ход захода — {place / RUN_LOG}",
           file=sys.stderr, flush=True)
     deadline = time.monotonic() + wait
@@ -185,7 +192,7 @@ def request(ids: list[str], command: list[str], place: Path, window: float, cap:
         if result is None:
             with _locked(place, "исполнитель.lock", wait=False) as mine:
                 if mine:
-                    result = serve(place, token, command, window, cap, deadline, echo)
+                    result = serve(place, token, window, cap, deadline, echo)
         if result:
             return result["код"], result["строки"]
         time.sleep(POLL_SEC)

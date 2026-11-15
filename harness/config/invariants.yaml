@@ -500,8 +500,11 @@
     файл: scripts/check-context-hygiene.py
     доказательство: "python3 scripts/check-context-hygiene.py"
     журнал: gates.jsonl
-    признак: '"failed":"context_hygiene"'
-    срок_дней: 30
+    # Своего следа у гейта нет: pre-commit пишет ОДНУ строку на коммит, общую
+    # для всех гейтов внутри, а запись провала на здоровой установке не
+    # появляется никогда. Живость доказывает прибор (--приборы), а не журнал.
+    признак: '"gate":"pre-commit"'
+    срок_дней: 0
     мутация: "s/    if size > STATE_MAX:/    if False:/"
     мутация_случай: "потолок STATE.md перестал быть потолком"
     мутация_доказательство: "python3 scripts/check-context-hygiene.py --selftest"

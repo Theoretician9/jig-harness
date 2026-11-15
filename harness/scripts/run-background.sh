@@ -36,6 +36,9 @@ fi
 id="$1"; shift 2
 # id идёт в JSON строкой: лишнее заменяем, чтобы запись не ломалась.
 id_json="${id//[^A-Za-z0-9._-]/_}"
+# Журнал запусков судит сторож меток. Проба установки (шаг 13) гоняет демонов до
+# входа владельца, и их rc≠0 там стал бы ложным «демон падает»: ей — свой каталог.
+runs_dir="${HARNESS_RUNS_DIR:-$LOG_DIR}"
 
 conf_dir="$(konf_koren)"
 conf_file="${HARNESS_CONF:-$conf_dir/harness.conf}"
@@ -66,7 +69,7 @@ if [ "$state" = off ] && ! python3 -I "$HERE/lib/process_library.py" exempt "$id
         echo "[$id] выключено выключателем (BACKGROUND_PROCESSES=$value)"
     fi
     value_json="${value//[^A-Za-z0-9._?-]/_}"
-    HARNESS_TASK=- HARNESS_LOG_DIR="$LOG_DIR" harness_event process-runs scripts/run-background.sh process.skip skipped --json "{\"id\":\"$id_json\",\"значение\":\"$value_json\"}"
+    HARNESS_TASK=- HARNESS_LOG_DIR="$runs_dir" harness_event process-runs scripts/run-background.sh process.skip skipped --json "{\"id\":\"$id_json\",\"значение\":\"$value_json\"}"
     exit 0
 fi
 
@@ -85,7 +88,7 @@ trap forward TERM INT HUP
 sid="$(ps -o sid= -p $$ 2>/dev/null | tr -d ' ')"
 # Запись process.start идёт фоном параллельно ребёнку (она дорога: одна вилка
 # на запись); process.end ждёт её по pid, чтобы start в журнале стоял раньше end.
-HARNESS_TASK=- HARNESS_LOG_DIR="$LOG_DIR" harness_event process-runs scripts/run-background.sh process.start ok --json "{\"id\":\"$id_json\",\"pid\":$$,\"sid\":${sid:-0}}" &
+HARNESS_TASK=- HARNESS_LOG_DIR="$runs_dir" harness_event process-runs scripts/run-background.sh process.start ok --json "{\"id\":\"$id_json\",\"pid\":$$,\"sid\":${sid:-0}}" &
 start_pid=$!
 # CPU дождавшихся потомков берём разностью: запись process.start и ps тоже
 # числятся потомками, а сверка В1 ждёт только ребёнка. `times` пишем в файл, а не
@@ -134,5 +137,5 @@ elif [ "$rc" -gt 128 ] && [ "$rc" -le 192 ]; then
 fi
 outcome=ok; [ "$rc" -eq 0 ] || outcome=error
 extra=""; [ -z "$sig" ] || extra=",\"сигнал\":\"$sig\""
-HARNESS_TASK=- HARNESS_LOG_DIR="$LOG_DIR" harness_event process-runs scripts/run-background.sh process.end "$outcome" --json "{\"id\":\"$id_json\",\"pid\":$$,\"rc\":$rc,\"с\":$elapsed,\"cpu_с\":$cpu_s$extra}"
+HARNESS_TASK=- HARNESS_LOG_DIR="$runs_dir" harness_event process-runs scripts/run-background.sh process.end "$outcome" --json "{\"id\":\"$id_json\",\"pid\":$$,\"rc\":$rc,\"с\":$elapsed,\"cpu_с\":$cpu_s$extra}"
 exit "$rc"

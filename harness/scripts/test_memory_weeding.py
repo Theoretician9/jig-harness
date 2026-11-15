@@ -30,6 +30,10 @@
 
 Интерфейс гейта: `python3 scripts/check-memory-weeding.py`, база — HEAD~,
 сверяется с рабочим деревом; 0 — потерь нет, 1 — потеря (строка в выводе).
+`--staged` (pre-commit): база — HEAD, сверяется индекс коммита. Без него хук
+винил коммит за потерю ПРЕДЫДУЩЕГО (14.11 23:51: панель сократила строку
+ORDERS в 9244c9cb, а остановлен был следующий, чужой коммит памяти) и за
+чужую неиндексированную правку общего дерева.
 
 Прогон: python3 scripts/test_memory_weeding.py
 """
@@ -120,11 +124,11 @@ def make_repo(name: str) -> Path:
     return repo
 
 
-def run_gate(repo: Path, layers: Path | None = None) -> tuple[int, str]:
+def run_gate(repo: Path, layers: Path | None = None, *args: str) -> tuple[int, str]:
     env = dict(os.environ, MEMORY_WEEDING_ROOT=str(repo),
                MEMORY_LAYERS=str(layers or repo / "harness/config/memory-layers.yaml"))
     env.pop("MEMORY_WEEDING_PY", None)
-    done = subprocess.run([sys.executable, str(GATE)], capture_output=True, text=True,
+    done = subprocess.run([sys.executable, str(GATE), *args], capture_output=True, text=True,
                           timeout=60, cwd=str(repo), env=env)
     return done.returncode, done.stdout + done.stderr
 
@@ -229,6 +233,50 @@ def case_layers_from_file() -> None:
              [VERBATIM[2]], layers_text=only_verbatim)
 
 
+def staged_scenario(name: str, staged, unstaged, expect_rc: int, must_show: list[str] = (),
+                    committed=None) -> None:
+    """Режим --staged: судится индекс против HEAD. committed — правка, уже
+    ушедшая прошлым коммитом; staged — в индексе; unstaged — только на диске."""
+    repo = make_repo(f"s{cases:03d}")
+    for change, commit in ((committed, True), (staged, False)):
+        if change:
+            change(repo)
+            git(repo, "add", "-A")
+            if commit:
+                git(repo, "commit", "-q", "-m", "стенд: прошлый коммит")
+    if unstaged:
+        unstaged(repo)
+    rc, output = run_gate(repo, None, "--staged")
+    missing = [line for line in must_show if line.strip() not in output]
+    check(f"--staged: {name} — rc {expect_rc}" + (", строка в выводе" if must_show else ""),
+          rc == expect_rc and not missing,
+          f"rc={rc}, нет в выводе: {missing}; вывод: {output.strip()[-300:]!r}")
+
+
+def case_staged() -> None:
+    def drop3(repo: Path) -> None:
+        write(repo, "память/ORDERS.md", without(ORDERS, LINE3))
+
+    def keep(repo: Path) -> None:
+        write(repo, "память/ORDERS.md", ORDERS)
+
+    def archive3(repo: Path) -> None:
+        write(repo, "память/archive/ORDERS-2026-11.md", [LINE3])
+
+    def drop_and_archive(repo: Path) -> None:
+        drop3(repo)
+        archive3(repo)
+
+    staged_scenario("строка удалена в индексе без переноса", drop3, None, 1, [LINE3])
+    staged_scenario("потерю сделал прошлый коммит, индекс чист — этот коммит не виноват",
+                    None, None, 0, committed=drop3)
+    staged_scenario("чужая неиндексированная правка дерева не судится", None, drop3, 0)
+    staged_scenario("индекс удалил строку, диск её вернул — потеря в коммите", drop3, keep, 1,
+                    [LINE3])
+    staged_scenario("строка перенесена в архив в индексе", drop_and_archive, None, 0)
+    staged_scenario("архив только на диске, не в индексе — потеря", drop3, archive3, 1, [LINE3])
+
+
 def case_hooked_in_precommit() -> None:
     """Гейт без вызова — датчик без провода: pre-commit зовёт его строкой «гейт»."""
     text = PRECOMMIT.read_text(encoding="utf-8") if PRECOMMIT.is_file() else ""
@@ -236,6 +284,9 @@ def case_hooked_in_precommit() -> None:
              if re.match(r'^гейт\s+"[^"]+"\s.*\bcheck-memory-weeding\.py\b', line)]
     check("pre-commit-gate.sh зовёт check-memory-weeding.py гейтом (строка верхнего уровня)",
           len(wired) == 1, f"строк {len(wired)} в {PRECOMMIT}")
+    check("pre-commit зовёт гейт в режиме --staged на снимке индекса",
+          len(wired) == 1 and "--staged" in wired[0].split() and "на_снимке" in wired[0],
+          f"строка: {wired}")
 
 
 def main() -> int:
@@ -249,6 +300,7 @@ def main() -> int:
     case_renamed_and_deleted()
     case_harmless()
     case_layers_from_file()
+    case_staged()
     case_hooked_in_precommit()
     print(f"итог: случаев {cases}, неудач {failures}")
     return 1 if failures or not cases else 0

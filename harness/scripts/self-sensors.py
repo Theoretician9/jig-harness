@@ -91,8 +91,12 @@ class World:
         # доезжают задним числом, а токены пишутся сразу, и недописанный край
         # окна давал ложное «хуже» (13.11: в 00:05 закрыто 49, к 13:11 по тому
         # же окну — 58).
+        # Край окна — полночь владельца: дата карты без времени — полночь, и при
+        # крае в 00:05 закрытия первого дня текущего окна уходили в прошлое
+        # (15.11: 17 задач от 07.11).
         self.span = self.settings["окно_суток"] * DAY
-        self.end = at - self.settings["отставание_суток"] * DAY
+        edge = datetime.datetime.fromtimestamp(at - self.settings["отставание_суток"] * DAY, self.tz)
+        self.end = edge.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
         self.windows = {"сейчас": (self.end - self.span, self.end),
                         "прошлое": (self.end - 2 * self.span, self.end - self.span)}
 
@@ -160,8 +164,48 @@ def field_at(task: dict, path: str):
     return task
 
 
+TASK_ID = re.compile(r"^\s*- id:\s*['\"]?([^'\"\s]+)")
+TASK_STATUS = re.compile(r"^\s*status:\s*['\"]?([^'\"\s#]+)")
+
+
+def map_statuses(text: str) -> dict:
+    """id → статус по строкам карты. Не yaml: окна видят ~170 версий карты по
+    600 КБ, разбор yaml занял бы минуты; первый status: после «- id:» — статус
+    задачи, это совпадает с yaml на живой карте (333 из 333)."""
+    statuses, task = {}, None
+    for line in text.splitlines():
+        if found := TASK_ID.match(line):
+            task = found.group(1)
+        elif (found := TASK_STATUS.match(line)) and task and task not in statuses:
+            statuses[task] = found.group(1)
+    return statuses
+
+
+def closing_moments(world: World, closing: set) -> dict:
+    """id → секунда первого коммита живой карты в окнах, где статус задачи стал
+    закрытым. Задачи уходят в test пачкой карты без when.tested (14.11: 39
+    закрытых по датам против 93 по истории) — без этого их не видит ни одно окно.
+    Архив не смотрим: переезд принятой задачи туда — не закрытие. Нет git — пусто."""
+    path = world.maps[0]
+    git = ["git", "-C", str(path.parent)]
+    since = datetime.datetime.fromtimestamp(world.windows["прошлое"][0], datetime.timezone.utc)
+    log = subprocess.run([*git, "log", "--first-parent", "--format=%H %ct", f"--since={since.isoformat()}",
+                          "-G", rf"status:\s*['\"]?({'|'.join(map(re.escape, closing))})", "--", path.name],
+                         capture_output=True, text=True).stdout.split()
+    moments = {}
+    for commit, stamp in zip(log[::2], log[1::2]):
+        before, after = (map_statuses(subprocess.run([*git, "show", f"{rev}:./{path.name}"],
+                                                     capture_output=True, text=True).stdout)
+                         for rev in (f"{commit}^", commit))
+        for task, status in after.items():
+            if status in closing and before.get(task) not in closing:
+                moments[task] = min(int(stamp), moments.get(task, int(stamp)))
+    return moments
+
+
 def closed_counts(world: World) -> tuple[dict, int]:
-    """Закрыта = агент закончил (статус из конфига); дата — первое непустое поле.
+    """Закрыта = агент закончил (статус из конфига); дата — первое непустое поле,
+    без него — коммит карты, где статус стал закрытым.
     Дата агента первой: приёмка владельцем не двигает задачу между окнами."""
     rule = world.settings["закрыта"]
     tasks = {}
@@ -173,13 +217,15 @@ def closed_counts(world: World) -> tuple[dict, int]:
             for task in line.get("tasks") or []:
                 tasks.setdefault(task.get("id"), task)
     closed = [t for t in tasks.values() if t.get("status") in rule["статусы"]]
+    history = closing_moments(world, set(rule["статусы"]))
     counts = {w: 0 for w in world.windows}
     undated = 0
     for task in closed:
         value = next((v for v in (field_at(task, p) for p in rule["дата_из"]) if v), None)
-        window = world.window_of(world.moment(value))
+        moment = world.moment(value) if value is not None else history.get(task.get("id"))
+        window = world.window_of(moment)
         counts[window] = counts.get(window, 0) + 1
-        undated += value is None
+        undated += moment is None
     return {w: counts[w] for w in world.windows}, undated
 
 

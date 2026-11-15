@@ -384,7 +384,7 @@ def case_recursion(st: Stand) -> None:
 
 # ── (2) снимок под тем же замком ─────────────────────────────────────────────
 
-def build_snapshot_repo(base: Path) -> Path:
+def build_snapshot_repo(base: Path, gates_text: str = SNAP_GATES_SH) -> Path:
     repo = base / "снимок-стенд"
     lib = repo / "scripts/lib"
     lib.mkdir(parents=True)
@@ -397,7 +397,7 @@ def build_snapshot_repo(base: Path) -> Path:
     helper = Path(LIB).resolve().parent.parent / "gates_cache.py"
     (repo / "scripts/gates_cache.py").symlink_to(helper if helper.is_file() else ROOT / "scripts/gates_cache.py")
     shutil.copy(ROOT / "scripts/gates-snapshot.sh", repo / "scripts/gates-snapshot.sh")
-    (repo / "scripts/gates.sh").write_text(SNAP_GATES_SH, encoding="utf-8")
+    (repo / "scripts/gates.sh").write_text(gates_text, encoding="utf-8")
     (repo / "harness/config/gates-live.yaml").write_text("живое: []\n", encoding="utf-8")
     git = ["git", "-c", "user.name=проба", "-c", "user.email=probe@localhost", "-C", str(repo)]
     subprocess.run(["git", "init", "-q", str(repo)], check=True)
@@ -455,6 +455,61 @@ def case_snapshot_joins() -> None:
             shutil.rmtree(snaps, ignore_errors=True)
 
 
+# Ведущий: быстрая проверка, затем медленная с меткой «идёт». Присоединившийся обязан
+# показать строку быстрой, пока медленная ещё идёт: вывод фоном в журнал, а не в конце.
+STREAM_GATES_SH = SNAP_GATES_SH.replace(
+    'проверка "снимок-медленная" bash -c \'echo run >> "$MARKS/снимок"; sleep 3; echo готово\'',
+    'проверка "поток-быстрая" bash -c \'echo быстрая-готова\'\n'
+    'проверка "поток-медленная" bash -c \'echo run >> "$MARKS/снимок"; sleep 8; echo готово\'')
+
+
+def case_join_streams() -> None:
+    """(2б) Присоединившийся к ведущему прогону печатает его ход по мере хода.
+
+    Находка копии bkb 14.11.2026: самопроверка обновления фоном молчала до конца прогона;
+    присоединившиеся ворота держали весь вывод ведущего до его итога."""
+    with tempfile.TemporaryDirectory(prefix="gates-bounds-stream-") as tmp:
+        base = Path(tmp)
+        marks, log, home = base / "marks", base / "log", base / "дом"
+        for d in (marks, log, home):
+            d.mkdir()
+        repo = build_snapshot_repo(base, STREAM_GATES_SH)
+        # Байткод помощника ворот ведущий кладёт в дерево: без исключения у второго
+        # другой ключ дерева, и он вёл бы свой прогон вместо присоединения.
+        (repo / ".git/info/exclude").write_text("__pycache__/\n", encoding="utf-8")
+        env = {k: v for k, v in os.environ.items()
+               if not k.startswith(("GATES_", "HARNESS_", "GIT_")) and k not in ("LOG_DIR", "ROOT")}
+        env.update(HARNESS_HOME=str(home), LOG_DIR=str(log), MARKS=str(marks), LC_ALL="C.UTF-8")
+        outs = [base / "ведущий.out", base / "второй.out"]
+        procs = []
+        try:
+            for out in outs:
+                with open(out, "w", encoding="utf-8") as handle:
+                    procs.append(subprocess.Popen(["bash", str(repo / "scripts/gates.sh")], cwd=repo, env=env,
+                                                  stdout=handle, stderr=subprocess.STDOUT,
+                                                  stdin=subprocess.DEVNULL, start_new_session=True))
+                deadline = time.monotonic() + 15
+                while not (marks / "снимок").is_file() and time.monotonic() < deadline:
+                    time.sleep(0.1)
+            time.sleep(3)
+            middle = outs[1].read_text(encoding="utf-8")
+            leader_running = procs[0].poll() is None
+            for proc in procs:
+                proc.wait(timeout=60)
+            end = outs[1].read_text(encoding="utf-8")
+            case("(2б) присоединившийся: строка быстрой проверки ведущего видна, пока медленная идёт",
+                 leader_running and "присоединяюсь к прогону" in middle and "поток-быстрая" in middle,
+                 f"ведущий шёл: {leader_running}; середина: {middle[-300:]!r}; конец: {end[-300:]!r}")
+            case("(2б) присоединившийся: в конце весь вывод ведущего ровно один раз",
+                 end.count("поток-быстрая") == 1 and end.count("поток-медленная") == 1,
+                 f"быстрая {end.count('поток-быстрая')}, медленная {end.count('поток-медленная')}; {tail(end)}")
+        finally:
+            for proc in procs:
+                if proc.poll() is None:
+                    os.killpg(proc.pid, signal.SIGKILL)
+            sweep(marks)
+
+
 # ── (3) самотест publish.sh не зовёт живые ворота ────────────────────────────
 
 def case_publish_selftest_uses_stand() -> None:
@@ -493,7 +548,7 @@ def main() -> int:
             with_stand(checks, body, files)
         except Exception as exc:  # стенд упал — красный случай, а не тихий пропуск
             case(f"стенд {body.__name__}", False, f"{type(exc).__name__}: {exc}")
-    for body in (case_snapshot_joins, case_publish_selftest_uses_stand):
+    for body in (case_snapshot_joins, case_join_streams, case_publish_selftest_uses_stand):
         try:
             body()
         except Exception as exc:

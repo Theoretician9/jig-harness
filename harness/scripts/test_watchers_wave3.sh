@@ -9,8 +9,10 @@
 #   * зелёное → `--resolve`, после него `--is-green` 0; поднятое в этом же
 #     прогоне не гасится;
 #   * summary карточки несёт команду перезапуска сторожа;
-#   * текст вестей и код выхода ПОБАЙТНО как у эталона (`before-w3/`, копии
-#     сторожей с HEAD до правки), в том числе когда писателя нет или он отказал;
+#   * текст вестей и код выхода ПОБАЙТНО как у эталона
+#     (`fixtures/watchers-before/w3/`, копии сторожей с HEAD до правки; данными
+#     при пробе, а не в .tasks — каталог задач в сборку не уходит), в том
+#     числе когда писателя нет или он отказал;
 #   * боевая карта не тронута, прямой curl мимо двери не звался.
 #
 # Стенд — копия сторожа в своём дереве (оно же PROJECT_DIR), подставная дверь
@@ -68,7 +70,7 @@ if [ "${1:-}" = "--сторож" ]; then
     esac
 fi
 want() { [ -z "$ONLY" ] || [ "$ONLY" = "$1" ]; }
-BEFORE="${W3_BEFORE_DIR:-$ROOT/.tasks/hr.watchers-report-must-create-model-task/before-w3}"
+BEFORE="${W3_BEFORE_DIR:-$HERE/fixtures/watchers-before/w3}"
 LIVE_MAP="$ROOT/dev-map.yaml"
 LIVE_SHA=$(sha1sum "$LIVE_MAP" 2>/dev/null | cut -d' ' -f1)
 
@@ -654,10 +656,18 @@ scenario_session-warden() {
     stand_tmux "$s" kill-server 2>/dev/null
 }
 
+# Эталон лежит данными: первая строка — заголовок вместо шебанга, чтобы гейты
+# кода (писатели журналов судят файл по шебангу) не приняли его за живой
+# сторож; стенд получает прежние байты без неё.
+before_watcher() {  # $1 = имя сторожа → путь восстановленной копии эталона
+    tail -n +2 "$BEFORE/$1.sh.txt" > "$T/before-$1.sh"
+    printf '%s' "$T/before-$1.sh"
+}
+
 run_watcher() {  # $1 = имя
     local name="$1" kind src mode
     for kind in base cur absent refuse; do
-        src="${SRC[$name]}"; [ "$kind" = base ] && src="$BEFORE/$name.sh"
+        src="${SRC[$name]}"; [ "$kind" = base ] && src=$(before_watcher "$name")
         mode=real
         case "$kind" in absent) mode=absent ;; refuse) mode=refuse ;; esac
         build_stand "$T/$name-$kind" "$src" "$name" "$mode"
@@ -758,7 +768,7 @@ base_rcs() { local st; for st in $(steps_of "$1"); do cat "$T/$1-base/steps/$st.
 for name in $WATCHERS; do
     want "$name" || continue
     echo "── $name ──"
-    case_check "$name: эталон до правки есть" "да" "$([ -f "$BEFORE/$name.sh" ] && echo да || echo нет)"
+    case_check "$name: эталон до правки есть" "да" "$([ -f "$BEFORE/$name.sh.txt" ] && echo да || echo нет)"
     run_watcher "$name"
     case_check "$name: беда создана — эталон в шаге ${RED_STEP[$name]} позвал дверь" "да" \
         "$([ -s "$T/$name-base/steps/${RED_STEP[$name]}.door" ] && echo да || echo нет)"

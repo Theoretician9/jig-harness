@@ -288,6 +288,10 @@ def timer_enabled(unit: str) -> bool:
 # держит канал с владельцем, и его перезапуск обрывает разговор (находка C4).
 RESTARTED_UNITS = ("harness-panel.service", "harness-sentinel.timer", "harness-dispatcher.service")
 RIGHTS_FILES = ("harness-agent-readonly", "harness-agent-units")
+# Root-овые двери шага 1б установщика. Без двери среза прогоны помощников идут
+# мимо потолка harness-checks.slice, без читателя держателей уборка /tmp мертва —
+# и то и другое молча, пока обновление их не назовёт.
+ROOT_DOORS = ("/usr/local/sbin/harness-run-in-checks", "/usr/local/lib/harness/tmp-sweep-holders")
 
 
 def _rights_gaps(rights: Path) -> list[str]:
@@ -302,8 +306,10 @@ def _rights_gaps(rights: Path) -> list[str]:
               if f"# файл: /etc/sudoers.d/{name}" not in text]
     unruled = [unit for unit in RESTARTED_UNITS
                if not re.search(rf"systemctl restart {re.escape(unit)}(?![\w.-])", text)]
+    doorless = [door for door in ROOT_DOORS if not re.search(rf"NOPASSWD: .*{re.escape(door)}(?![\w.-])", text)]
     parts = ([f"файлы {', '.join(absent)}"] if absent else []) + \
-            ([f"restart юнитов: {', '.join(unruled)}"] if unruled else [])
+            ([f"restart юнитов: {', '.join(unruled)}"] if unruled else []) + \
+            ([f"дверей {', '.join(doorless)}"] if doorless else [])
     return [f"нет прав агента: {'; '.join(parts)}"] if parts else []
 
 
@@ -384,7 +390,7 @@ def _занят_выкат() -> bool:
 
 
 КРАСНАЯ = "  ПЛОХО · "
-СТРОК_ПРИЧИНЫ = 3
+СТРОК_ПРИЧИНЫ = 5
 
 
 class Красные(Counter):
@@ -411,7 +417,7 @@ def красные_из_вывода(текст: str) -> Counter | None:
 
 
 def причины_красных(текст: str) -> dict:
-    """Имя красной → до трёх последних строк её блока (строки глубже двух пробелов).
+    """Имя красной → до пяти последних строк её блока (строки глубже двух пробелов).
 
     Находка копии bkb 14.11.2026: вывод назвал пять имён и ни одной причины —
     чинится ли это данными копии или нужен пакет, судить было нечем."""

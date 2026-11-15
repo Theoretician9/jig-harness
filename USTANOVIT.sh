@@ -422,6 +422,12 @@ PY
   exit 1
 }
 
+журнал_агента() { # $1 = журнал, в который пишет root: заранее файл агента
+  # Root дописывает в чужой файл, не меняя владельца; файл, заведённый root-ом,
+  # агенту закрыт — ротация (su agent) и демоны падают на «Permission denied».
+  делай "touch '$1' && chown $AGENT_USER:$AGENT_USER '$1'"
+}
+
 записать_файл() { # записать_файл путь права владелец  (содержимое — stdin)
   local path="$1" mode="$2" owner="$3" content
   content="$(cat)"
@@ -1079,11 +1085,19 @@ $AGENT_USER ALL=(root) NOPASSWD: /usr/bin/chown -hR $AGENT_USER\:$AGENT_USER /ho
 $AGENT_USER ALL=(root) NOPASSWD: $checks_rules
 $AGENT_USER ALL=(root) NOPASSWD: /usr/local/sbin/harness-run-in-checks *
 $AGENT_USER ALL=(root) NOPASSWD: /usr/local/lib/harness/self-seal
+$AGENT_USER ALL=(root) NOPASSWD: /usr/local/lib/harness/tmp-sweep-holders --держатели
 EOF
   # Печать эталона личности: root-скрипт ставится root-владельцем, чтобы агент не мог
   # подменить то, что зовёт sudo. Правило sudoers выше — без доводов и без env_keep.
+  # Так же — читатель держателей уборки /tmp: чужие /proc/<pid>/fd видит только
+  # root, а дерево проекта пишет агент, поэтому под sudo идёт копия вне дерева.
   делай "install -d -o root -g root -m 0755 /usr/local/lib/harness"
   делай "install -o root -g root -m 0755 '$HARNESS_SRC/scripts/self-seal.sh' /usr/local/lib/harness/self-seal"
+  делай "install -o root -g root -m 0755 '$HARNESS_SRC/scripts/tmp-sweep.py' /usr/local/lib/harness/tmp-sweep-holders"
+  # Журналы, которые прежняя установка завела root-ом (юнит с StandardOutput=append,
+  # tee установщика), агенту закрыты: демон падает «Permission denied». Свой журнал
+  # установки (install.log, 640) остаётся root-овым — в нём весь вывод установки.
+  делай "[ ! -d '$LOG_DIR' ] || find '$LOG_DIR' -maxdepth 1 -name '*.log' ! -name install.log -user root -exec chown $AGENT_USER:$AGENT_USER {} +"
   проверка "$step" "sudoers корректен (visudo -cf)" \
     "visudo -cf /etc/sudoers.d/50-agent" \
     "visudo -cf /etc/sudoers.d/50-agent"
@@ -1185,6 +1199,8 @@ EOF
   # av 15+ ломает faster-whisper 1.2.x (на новом сервере встала av 19), поэтому потолок закреплён.
   # --only-binary=av: под Python 3.12 у новейшей av<15 (14.4.0) колеса нет, pip собирал её из
   # исходников и падал; с флагом берётся готовое колесо (14.2.0).
+  # Модель small качается здесь, вне предела памяти: иначе её качает первая
+  # расшифровка под ulimit -v обработчика и падает (находка bkb 10.11.2026).
   # Голосовые — не основа: отказ pip идёт в итог громко, без отметки шага (повтор
   # доставит venv), но установку не обрывает. Всё от имени агента: диспетчер и
   # расшифровка живут им, venv от root агенту не прочесть и не обновить.
@@ -1196,11 +1212,12 @@ EOF
   # строки venv агента не может создать voice/.
   if делай "install -d -o '$AGENT_USER' -g '$AGENT_USER' '$STATE_DIR/voice'" \
      && делай "sudo -u '$AGENT_USER' python3 -m venv '$venv'" \
-     && делай "sudo -u '$AGENT_USER' '$venv/bin/pip' install --only-binary=av faster-whisper 'av<15'"; then
-    DONE_LIST+=("голосовые: venv с faster-whisper в $venv от имени $AGENT_USER")
+     && делай "sudo -u '$AGENT_USER' '$venv/bin/pip' install --only-binary=av faster-whisper 'av<15'" \
+     && делай "sudo -u '$AGENT_USER' -H '$venv/bin/python' -c 'from faster_whisper import download_model; download_model(\"small\")'"; then
+    DONE_LIST+=("голосовые: venv с faster-whisper и моделью small в $venv от имени $AGENT_USER")
     отметить шаг_2в
   else
-    FAILED_LIST+=("голосовые: не вышло создать venv $venv или поставить в него faster-whisper через pip — проверьте сеть, доступ к pypi и пакет python3-venv; первое голосовое владельца не расшифруется; после починки — sudo bash $SELF --resume")
+    FAILED_LIST+=("голосовые: не вышло создать venv $venv, поставить в него faster-whisper через pip или скачать модель whisper — проверьте сеть, доступ к pypi и huggingface.co и пакет python3-venv; первое голосовое владельца не расшифруется; после починки — sudo bash $SELF --resume")
   fi
 }
 
@@ -1436,7 +1453,9 @@ EOF
   # Репозиторий нужен ДО раскладки: она подключает pre-commit симлинком только
   # когда .git уже есть, и без этого агенту оставался ручной git init.
   делай "[ -d '$PROJECT_DIR/.git' ] || sudo -u $AGENT_USER git -C '$PROJECT_DIR' init -q"
-  делай "mkdir -p '$LOG_DIR' && sudo -u $AGENT_USER bash '$rollout' | tee '$LOG_DIR/install-rollout.log'"
+  делай "mkdir -p '$LOG_DIR'"
+  журнал_агента "$LOG_DIR/install-rollout.log"
+  делай "sudo -u $AGENT_USER bash '$rollout' | tee '$LOG_DIR/install-rollout.log'"
   # Раскладчик говорит «эталон не напечатан» только в свой журнал; без этой строки
   # в сводке владелец узнал бы о пропавшем правиле sudo лишь из журнала.
   if (( ! DRY )) && grep -q 'эталон личности не напечатан' "$LOG_DIR/install-rollout.log" 2>/dev/null; then
@@ -1459,6 +1478,9 @@ EOF
     "[ -L /etc/harness/harness.conf ] && sudo -u $AGENT_USER test -w /etc/harness/agent/harness.conf && [ \"\$(stat -c %U /etc/harness /etc/harness/install.conf | sort -u)\" = root ]" \
     "ls -la /etc/harness /etc/harness/agent"
   [[ -z "$PRODUCT_PATH" ]] || делай "sed -i --follow-symlinks 's|^PRODUCT_PATH=\"\"\$|PRODUCT_PATH=\"$PRODUCT_PATH\"|' /etc/harness/harness.conf"
+  # Заготовка STACK_* из compose продукта — закомментированная: первый выкат не
+  # начинается с пустой секции, а включает её тот, кто сверил (находка копии bkb).
+  [[ -z "$PRODUCT_PATH" ]] || делай "python3 -I '$pkg_dst/harness/scripts/stack-template.py' '$PRODUCT_PATH' --в /etc/harness/harness.conf || true"
   # Раскладчик идёт от agent, и в /etc/logrotate.d и /etc/sysctl.d ему не
   # писать: эти две строки владелец первой установки 13.10.2026 получил отдельным
   # root-скриптом («мне как пользователю лишние действия»). Установщик — root,
@@ -1743,6 +1765,11 @@ EOF
   # первая установка 13.10.2026 встала на нём). Полный прогон — по расписанию.
   local -a LIGHT_RUN=("nightly-gates=NIGHTLY_GATES_PROBE_ONLY=1" "nightly-mutations=NIGHTLY_MUTATIONS_PROBE_ONLY=1" "project-revision=REVIZIA_ENABLED=0")
   local d rc light pair
+  # Демоны здесь идут до входа владельца, и их rc≠0 в рабочем журнале запусков
+  # сторож меток принял бы за падение (ложные карточки на копии bkb 10.11.2026).
+  local runs_dir="$LOG_DIR/install-demon-probe-runs"
+  делай "install -d -o $AGENT_USER -g $AGENT_USER '$runs_dir'"
+  журнал_агента "$LOG_DIR/install-demon-probe.log"
   for d in "${demons[@]}"; do
     light=""
     for pair in "${LIGHT_RUN[@]}"; do
@@ -1751,11 +1778,11 @@ EOF
     local script; script="$PROJECT_DIR/$(команда_скрипта "$spec_md" "$d")"
     # Через обёртку, как в crontab: при выключенном ключе прогон — это process.skip, exit 0.
     script="$PROJECT_DIR/scripts/run-background.sh $d -- $script"
-    скажи "  + sudo -u $AGENT_USER env -i HOME=/home/$AGENT_USER PATH=/usr/local/bin:/usr/bin:/bin /bin/sh -c '$script'; echo exit=\$?"
+    скажи "  + sudo -u $AGENT_USER env -i HOME=/home/$AGENT_USER PATH=/usr/local/bin:/usr/bin:/bin HARNESS_RUNS_DIR=$runs_dir /bin/sh -c '$script'; echo exit=\$?"
     if (( ! DRY )); then
       rc=0
       sudo -u "$AGENT_USER" env -i HOME="/home/$AGENT_USER" PATH=/usr/local/bin:/usr/bin:/bin \
-        ${light:+"$light"} \
+        HARNESS_RUNS_DIR="$runs_dir" ${light:+"$light"} \
         /bin/sh -c "$script" >>"$LOG_DIR/install-demon-probe.log" 2>&1 || rc=$?
       [[ -n "$light" ]] && скажи "    (проверка запускаемости: $light — полный прогон этого демона идёт по расписанию)"
       if (( rc == 0 )); then

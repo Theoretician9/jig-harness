@@ -843,6 +843,18 @@ def mirror_project(s: Stand) -> Path:
     return mirror
 
 
+# Подставной судья типовой копии (замок 6г) — та же дверь TYPICAL_COPY_CHECK, что у самотеста
+# publish.sh: настоящий стенд весит гигабайт и идёт своей пробой, а предмет здесь — согласие.
+# Код — из файла PROBA_TYPICAL_RC (нет файла — 0), доводы — в PROBA_TYPICAL_ARGS.
+TYPICAL_STUB = """import os, pathlib, sys
+pathlib.Path(os.environ["PROBA_TYPICAL_ARGS"]).write_text(" ".join(sys.argv[1:]), encoding="utf-8")
+rc_file = pathlib.Path(os.environ["PROBA_TYPICAL_RC"])
+rc = int(rc_file.read_text()) if rc_file.exists() else 0
+print("типовая копия: новая красная (подставной)" if rc else "типовая копия: новых красных нет (подставной)")
+sys.exit(rc)
+"""
+
+
 PUBLISH_FN = """set -uo pipefail
 say() { printf '%s\\n' "$*"; }
 eval "$(sed -n '/^опубликовать_сборку() {/,/^}/p' "$1")"
@@ -855,8 +867,12 @@ def probe_before_push(yard: Yard) -> None:
 
     def run(s: Stand, extra: dict) -> tuple[int | None, str, int]:
         mirror = mirror_project(s)
+        stub = s.root / "typical-stub.py"
+        stub.write_text(TYPICAL_STUB, encoding="utf-8")
         # Функция зовёт скрипты от места двери ($SCRIPTS_REAL, АР-2): место — зеркало с обёрткой.
         env = dict(s.env, PROJECT_DIR=str(mirror), SCRIPTS_REAL=str(mirror / "scripts"),
+                   TYPICAL_COPY_CHECK=str(stub), PROBA_TYPICAL_ARGS=str(s.root / "typical-args"),
+                   PROBA_TYPICAL_RC=str(s.root / "typical-rc"),
                    PROBA_REAL_CLEAN=str(SCRIPTS / LATE_NAME),
                    PROBA_LATE_COUNT=str(s.root / f"clean-calls-{time.time_ns()}"),
                    PACKAGE_DIR=str(s.pkg), PUBLIC_BUILD_DIR=str(s.build),
@@ -871,6 +887,18 @@ def probe_before_push(yard: Yard) -> None:
     head = git("rev-parse", "HEAD", cwd=s.pkg)
     rc, out, pushed = run(s, {"PAKET_SHA": head})
     check(f"7а) охранный: PAKET_SHA = HEAD пакета → отправлено [{short(out[-300:])}]", (0, 1), (rc, pushed))
+    judged = (s.root / "typical-args").read_text(encoding="utf-8") if (s.root / "typical-args").exists() else ""
+    check(f"7а2) замок 6г судил выпуск: судья типовой копии зван с --старое и --новое [{short(judged)}]",
+          (True, True), ("--старое" in judged, "--новое" in judged))
+
+    # БОЛЬНОЙ (замок 6г): подставной судья нашёл новую красную — выпуск не уходит. Без этого
+    # случая дверь стенда могла бы молча вырезать замок, и зелёные 7а–7в его не заметили бы.
+    s = yard.stand(publish=True)
+    publish_stand(s)
+    (s.root / "typical-rc").write_text("1", encoding="utf-8")
+    rc, out, pushed = run(s, {"PAKET_SHA": git("rev-parse", "HEAD", cwd=s.pkg)})
+    check(f"7г) замок 6г: типовая копия с новой красной → отказ, не отправлено [{short(out[-300:])}]",
+          (1, True, 0), (rc, "типовая чистая копия не обновилась" in out, pushed))
 
     s = yard.stand(publish=True)
     publish_stand(s)

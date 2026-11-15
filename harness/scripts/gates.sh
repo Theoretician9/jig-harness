@@ -501,6 +501,7 @@ done
 # Пробы, которых не звал никто: «население кода» 14.11.2026 — 8 без вызывающего
 # и на HEAD, и на копии. Все зелёные, вместе около минуты.
 проверка "сторож записи приказов" python3 scripts/hooks/test_orders_write_guard.py
+проверка "сторож файлов харнеса у копии" python3 scripts/hooks/test_harness_files_guard.py
 проверка "манифест эталона-проба" python3 scripts/test_check_self_manifest.py
 проверка "сверка с пакетом-проба" python3 scripts/test_compare_with_package.py
 проверка "обёртка коммита-проба" bash scripts/test_git_commit_locked.sh
@@ -568,6 +569,7 @@ done
 проверка "лок панели"      bash scripts/test_pane_lock_instant.sh
 проверка "метки доставки"  bash scripts/test_delivery_marks.sh
 проверка "голос отдельным обработчиком"  bash scripts/test_voice_worker.sh
+проверка "расшифровка голоса"  bash scripts/test_transcribe_voice.sh
 # Каждое принятое сообщение имеет конечную метку; «принял» не держит цикл приёма.
 проверка "след доставки (проба)"  bash scripts/test_delivery_trace.sh
 проверка "след доставки"  python3 scripts/delivery-latency.py --след --ворота
@@ -595,6 +597,7 @@ done
 проверка "данные сборки"  python3 scripts/test_public_build.py
 проверка "карантин установки" python3 scripts/test_quarantine_install_data.py
 проверка "живые настройки" python3 scripts/test_live_settings.py
+проверка "строки игнора проекта" python3 scripts/test_ignore_lines.py
 # Живая проверка механизмов (его задание 15.10): обёртка следа и разрез по
 # классам. Без вызова из ворот пробы не сторожат ничего.
 проверка "обёртка живой проверки" bash scripts/test_live_check_sh.sh
@@ -674,6 +677,8 @@ done
 проверка "секреты по диапазону" bash scripts/test_check_secrets_range.sh
 проверка "харнес чист: прозвища продукта" python3 scripts/test_harness_clean_aliases.py
 проверка "установщик: прозвища продукта" bash scripts/test_installer_product_aliases.sh
+# Пачка evo-deploy-door (находка копии bkb): заготовка STACK_* из compose продукта.
+проверка "заготовка STACK_* из compose" python3 scripts/test_stack_template.py
 проверка "скорость: судья" python3 scripts/test_speed_mode.py
 проверка "скорость: сторож" bash scripts/test_warden_speed.sh
 проверка "сеть серверов: суд и дверь" python3 scripts/test_evolution_net.py
@@ -761,6 +766,8 @@ if [ "${1:-}" = "--всё" ]; then
     # Сторож без транскриптов и журнал панели агента: свои tmux-сессии на стенде — за --всё.
     проверка "сторож без транскриптов" bash scripts/test_warden_no_transcripts.sh
     проверка "журнал панели агента" bash scripts/test_agent_pane_log.sh
+    # Отказ подписки (403): сторож сам говорит владельцу; своя tmux-сессия — за --всё.
+    проверка "отказ подписки" bash scripts/test_warden_access_refusal.sh
     # Уборка стендов проб диспетчера (04.11.2026): прерванная проба не оставляет
     # диспетчеров-сирот. Гоняет пять проб с настоящим диспетчером — минуты, за --всё.
     проверка "уборка стендов проб" bash scripts/test_probe_stand_sweep.sh
@@ -859,6 +866,8 @@ if [ "${1:-}" = "--всё" ]; then
     проверка "сводка сторожа меток" python3 scripts/test_heartbeat_held_line.py
     проверка "след вне репозитория" python3 scripts/test_live_check_trace_outside_repo.py
     проверка "карта: три исхода" python3 scripts/test_map_from_message_three_outcomes.py
+    проверка "карта: запасной путь" python3 scripts/test_map_from_message_fallback.py
+    проверка "типовая копия-проба" python3 scripts/test_typical_copy.py
     проверка "шаг мутаций"      python3 scripts/test_mutations_step.py
     проверка "показ диспетчера" python3 scripts/test_process_dispatcher_v2.py
     проверка "ревью спеки"      python3 scripts/test_spec_review.py

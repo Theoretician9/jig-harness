@@ -117,6 +117,11 @@ scripts/test_map_from_message_chapter.py.
             открытыми задачами: <план>: <задача>, <задача>…» (все открытые,
             закрытые не называются); код 0, текст без --json печатает её
             строкой «след: …».
+  групп без файлов — пока у частей нет файлов (частей нет вовсе), группы
+            считаются по частям плана задачи (.tasks/<id>/план.md): заголовок
+            любого уровня, чьё первое слово — из вывод_роли.
+            заголовки_частей_плана, — одна часть и одна группа (общих файлов
+            ещё не видно); след «групп по частям плана: N». Плана нет — 0.
   План задачи без блока план: — файл .tasks/<id>/план.md (как
             check-pipeline.py путь_бумаги(карточка, "план")): решение.план = его
             путь, состояние не «нужен_план_нет».
@@ -297,6 +302,7 @@ ROLES = {"вывод_роли": {
     "сложность": {"complexity": {"простая": "<=2", "средняя": 3, "высокая": ">=4"}},
     "правила": RULES,
     "план_нужен": {"шагов": 5, "групп": 2},
+    "заголовки_частей_плана": ["Часть", "Task", "Шаг", "Группа", "Фаза"],
     "предохранитель": {"жёсткий_верх": 5, "порог_нагрузки": 3, "окно_живых": 30},
     "верх_вложенности": 3,
     "порог_приживления": 0.5,
@@ -1165,6 +1171,35 @@ def case_cut_threshold_data(tmp: Path) -> None:
           get(s.decide("T")[1], "признаки", "сложность_режет"))
 
 
+def case_plan_groups_no_files(tmp: Path) -> None:
+    print("группы по частям плана, пока файлов нет")
+    need = ROLES["вывод_роли"]["план_нужен"]["шагов"]
+
+    def stand(name: str, parts: int) -> Stand:
+        s = Stand(tmp / f"части-плана-{name}", roles={"предохранитель.жёсткий_верх": 6})
+        s.card("T", complexity=4)
+        s.pretask("T", parts=None)
+        heads = "".join(f"### Часть {i}: шаг {i}\n\nтекст части.\n\n" for i in range(1, parts + 1))
+        plan_md = s.root / ".tasks" / "T" / "план.md"
+        plan_md.write_text(f"# План: T\n\n## Риски\n\nне часть.\n\n{heads}## Пробы\n",
+                           encoding="utf-8")
+        load(s)
+        s.write()
+        return s
+
+    code, d, _ = stand("много", need).decide("T")
+    check(f"части плана: файлов 0, план из {need} частей — групп {need}", (0, need),
+          (get(d, "признаки", "файлов"), get(d, "признаки", "групп")))
+    check(f"части плана: нагрузка, {need} частей — резка_под_нагрузкой_лид, lead, 3",
+          ("резка_под_нагрузкой_лид", LEAD, 3),
+          (d.get("правило"), d.get("роль"), d.get("исполнителей")))
+    check("части плана: след называет счёт по частям плана", True,
+          any(f"групп по частям плана: {need}" in line for line in d.get("след") or []))
+    code, d, _ = stand("одна", 1).decide("T")
+    check("части плана: нагрузка, план из 1 части — нагрузка, worker",
+          ("нагрузка", WORKER, 1), (d.get("правило"), d.get("роль"), get(d, "признаки", "групп")))
+
+
 def case_ceiling(tmp: Path) -> None:
     print("потолок: жёсткий_верх из данных, окно живых")
 
@@ -1914,7 +1949,7 @@ CASES = (case_trifle, case_parallel, case_chain, case_large, case_no_overlap, ca
          case_orphan, case_candidate, case_nesting_depth, case_attach, case_new_chapter,
          case_pin, case_simple, case_estimate, case_two_launches, case_load,
          case_cut_under_load, case_simple_under_load, case_cut_nothing,
-         case_cut_threshold_data, case_ceiling, case_live_sources, case_battle_tasks,
+         case_cut_threshold_data, case_plan_groups_no_files, case_ceiling, case_live_sources, case_battle_tasks,
          case_waiting_part, case_waiting_by_need, case_high_without_files,
          case_trifle_never_waits, case_closed_plan, case_deleted_chapter, case_renamed_plan,
          case_tasks_plan,

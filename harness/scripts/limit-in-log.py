@@ -13,6 +13,7 @@ CLI пишет в транскрипт запись с `"error": "rate_limit"` �
 Прогон:
     python3 scripts/limit-in-log.py <транскрипт>   # минуты с последнего 429
     python3 scripts/limit-in-log.py --сброс-числом <транскрипт>  # unix-время обновления
+    python3 scripts/limit-in-log.py --отказ-доступа <транскрипт>  # 403: подписка не пускает
     python3 scripts/limit-in-log.py --selftest
 Код возврата: 0 — отказ найден (минуты на stdout), 1 — записей нет.
 """
@@ -461,6 +462,43 @@ def действует(путь: str, экран: str = "", сейчас: float 
     return (None, None, "отказ" in новые) if новые else None
 
 
+# Отказ ДОСТУПА — не лимит. Находка копии bkb 11.11.2026: два часа все сессии
+# получали API 403 `oauth_org_not_allowed` («can't use your Claude subscription,
+# usually because a payment is past due»), а сторож пинал мёртвую смену словами
+# «признака лимита нет». Лимит кончается сам, отказ доступа — нет: нужен человек,
+# вход или оплата. Признак — поля самого CLI в синтетической записи об ошибке;
+# слова отказа в обычном ответе смены (я разбираю такие находки) — не отказ.
+def _отказ_доступа(запись: dict) -> bool:
+    return запись.get("isApiErrorMessage") is True and (
+        запись.get("apiErrorStatus") == 403 or запись.get("error") == "oauth_org_not_allowed")
+
+
+def отказ_доступа(путь: str, хвост: int = ХВОСТ_БАЙТ) -> str | None:
+    """Текст последнего отказа доступа, пока после него нет настоящего ответа; None — доступ есть.
+
+    OSError не глушится: звонящий отличает «не прочесть» от «отказа нет».
+    """
+    with open(путь, "rb") as файл:
+        файл.seek(0, os.SEEK_END)
+        файл.seek(max(0, файл.tell() - хвост))
+        куски = файл.read().decode("utf-8", errors="replace")
+    отказ = None
+    for строка in куски.splitlines():
+        if '"assistant"' not in строка:
+            continue
+        try:
+            запись = json.loads(строка)
+        except ValueError:
+            continue
+        if not isinstance(запись, dict) or запись.get("type") != "assistant":
+            continue
+        if _отказ_доступа(запись):
+            отказ = _текст_записи(запись).strip() or f"отказ доступа {запись.get('apiErrorStatus')}"
+        elif (запись.get("message") or {}).get("model") != "<synthetic>":
+            отказ = None
+    return отказ
+
+
 def стоит_в_лимите(путь: str) -> bool:
     """Стоит ли помощник в лимите: его последняя содержательная запись — отказ 429.
 
@@ -609,6 +647,46 @@ def _пробы_после_и_стоит(проба) -> None:
               стоит_в_лимите(журнал((900, вызов), (600, итог), (300, отказ))))
 
 
+def _пробы_отказа_доступа(проба) -> None:
+    """Отказ доступа 403 (находка bkb 11.11.2026): запись снята с живого транскрипта."""
+    import tempfile
+    отказ = {"type": "assistant", "isApiErrorMessage": True, "apiErrorStatus": 403,
+             "error": "oauth_org_not_allowed", "apiErrorCode": "oauth_not_allowed_for_organization",
+             "message": {"model": "<synthetic>", "content": [{"type": "text", "text":
+                         "Your organization has disabled Claude subscription access for Claude Code"
+                         " · Use an Anthropic API key instead, or ask your admin to enable access"}]}}
+    ответ = {"type": "assistant", "message": {"model": "m", "content": [{"type": "text", "text": "ок"}]}}
+    обсуждение = {"type": "assistant", "message": {"model": "m", "content": [{"type": "text", "text":
+                  "разбираю находку: 403 oauth_org_not_allowed, payment is past due"}]}}
+    пинок = {"type": "user", "message": {"role": "user", "content": "[сторож сессий] продолжай"}}
+
+    with tempfile.TemporaryDirectory() as врем:
+        def журнал(*записи: dict) -> str:
+            путь = os.path.join(врем, "ж.jsonl")
+            сейчас = time.time()
+            with open(путь, "w", encoding="utf-8") as ф:
+                for место, з in enumerate(записи):
+                    момент = datetime.datetime.fromtimestamp(
+                        сейчас - 60 * (len(записи) - место), datetime.timezone.utc).isoformat()
+                    ф.write(json.dumps({**з, "timestamp": момент}, ensure_ascii=False) + "\n")
+            return путь
+        текст = отказ_доступа(журнал(ответ, пинок, отказ))
+        проба("БОЛЬНОЙ СЛУЧАЙ 11.11: последняя запись — отказ 403 oauth_org_not_allowed, доступ отказан",
+              текст is not None and "disabled Claude subscription access" in текст)
+        проба("отказ доступа держится и после пинка, получившего новый 403",
+              отказ_доступа(журнал(ответ, отказ, пинок, отказ)) is not None)
+        проба("после отказа пришёл настоящий ответ — доступ вернулся",
+              отказ_доступа(журнал(отказ, пинок, ответ)) is None)
+        проба("слова отказа в обычном ответе смены — не отказ доступа",
+              отказ_доступа(журнал(ответ, обсуждение)) is None)
+        проба("отказ 429 — лимит, а не отказ доступа",
+              отказ_доступа(журнал(ответ, {"type": "assistant", "isApiErrorMessage": True,
+                                          "apiErrorStatus": 429, "error": "rate_limit",
+                                          "message": {"model": "<synthetic>"}})) is None)
+        проба("отказ доступа лимитом не объявляется",
+              действует(журнал(ответ, отказ), сейчас=time.time()) is None)
+
+
 def _selftest() -> int:
     import tempfile
     плохо = 0
@@ -697,8 +775,9 @@ def _selftest() -> int:
     _пробы_сброса(проба)
     _пробы_ответа_после_отказа(проба)
     _пробы_после_и_стоит(проба)
+    _пробы_отказа_доступа(проба)
 
-    print("САМОТЕСТ %s: 30 путей, первым — больной случай"
+    print("САМОТЕСТ %s: 36 путей, первым — больной случай"
           % ("ПРОВАЛЕН" if плохо else "ПРОЙДЕН"))
     return 1 if плохо else 0
 
@@ -723,6 +802,18 @@ def main(argv) -> int:
         # Четвёртое поле — только по просьбе: оно говорит, был ли ОТКАЗ 429, а не
         # одна заметка CLI (владельцу «упёрся» говорят после отказа).
         print("1\t%s\t%s" % срок + ("\t%d" % итог[2] if "--с-отказом" in argv else ""))
+        return 0
+    if "--отказ-доступа" in argv:
+        # Зовёт сторож сессий: 0 и первая строка ответа подписки — доступ отказан,
+        # 1 — доступ есть, 2 — транскрипт не прочитан.
+        try:
+            текст = отказ_доступа(argv[argv.index("--отказ-доступа") + 1])
+        except OSError as беда:
+            print(f"транскрипт не прочитан: {беда}", file=sys.stderr)
+            return 2
+        if текст is None:
+            return 1
+        print(текст.splitlines()[0][:ПОТОЛОК_СТРОКИ])
         return 0
     if "--стоит-в-лимите" in argv:
         # Зовёт сторож сессий по транскрипту помощника: 0 — стоит, 1 — нет, 2 — не прочесть.

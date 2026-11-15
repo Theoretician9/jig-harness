@@ -26,8 +26,10 @@
 """
 import importlib.util
 import json
+import os
 import re
 import sys
+import time
 from pathlib import Path
 
 import yaml
@@ -440,6 +442,53 @@ def журналов_нет(имена: list, каталог: Path) -> list:
             for имя in имена if not (каталог / имя).exists()]
 
 
+# Штамп шага установщика, который ставит crontab демонов: его время — момент, с
+# которого расписание вообще могло наступить. Путь — тот же, что STAMP_DIR в
+# USTANOVIT.sh (сверяет проба test_check_registry_logs.sh, случай 6); место —
+# из настроек, как у остальных мест состояния.
+CRONTAB_STAMP = "шаг_9.done"
+
+
+def момент_установки():
+    """Время штампа шага crontab или None: без штампа момента не знаем, и любое
+    отсутствие журнала остаётся претензией."""
+    sys.path.insert(0, str(КОРЕНЬ / "scripts" / "lib"))
+    from config import install_steps_dir
+    путь = Path(os.environ.get("HARNESS_INSTALL_STEPS_DIR") or install_steps_dir()) / CRONTAB_STAMP
+    try:
+        return путь.stat().st_mtime
+    except FileNotFoundError:
+        return None
+
+
+def ждут_первого_запуска(задания: list, отсутствуют: set, установлено, сейчас: float) -> set:
+    """Отсутствующие журналы, у всех заданий которых первый плановый момент после
+    установки ещё не наступил: ночной, недельный и месячный демон на свежей
+    машине журнала не имеет, и это не поломка. Расписание, которое не переводится
+    в календарь systemd, или сбой подсчёта — не «ждёт»: сомнение остаётся
+    претензией. Календарь считается только для отсутствующих: когда все журналы
+    на месте, systemd-analyze не зовётся вовсе."""
+    по_журналу = {}
+    for задание in задания:
+        if задание.get("журнал") in отсутствуют:
+            по_журналу.setdefault(задание["журнал"], []).append(задание)
+    if установлено is None or not по_журналу:
+        return set()
+    import process_library
+    import process_state
+    ждут = set()
+    for журнал, свои in по_журналу.items():
+        try:
+            календари = {з["имя"]: process_library.on_calendar(з["расписание"]) for з in свои}
+            моменты = [process_state.next_calendar({имя: выражение}, установлено)[имя]
+                       for имя, выражение in календари.items()]
+        except (KeyError, ValueError, process_state.SourceError):
+            continue
+        if all(момент is not None and момент > сейчас for момент in моменты):
+            ждут.add(журнал)
+    return ждут
+
+
 def документ_разошёлся(корень: Path) -> str | None:
     """Документ обязан быть ровно тем, что собирается из реестра."""
     спец = importlib.util.spec_from_file_location(
@@ -488,10 +537,16 @@ def main() -> int:
     # Каталог журналов спрашиваем у загрузчика: путь, вписанный строкой, не уважает окружение.
     sys.path.insert(0, str(КОРЕНЬ / "scripts" / "lib"))
     from config import log_dir
-    нет_журналов = журналов_нет(журналы_реестра(записи, задания_расписания(КОРЕНЬ)),
-                                Path(log_dir()))
+    задания = задания_расписания(КОРЕНЬ)
+    каталог = Path(log_dir())
+    имена = журналы_реестра(записи, задания)
+    отсутствуют = {имя for имя in имена if not (каталог / имя).exists()}
+    ждут = sorted(ждут_первого_запуска(задания, отсутствуют, момент_установки(), time.time()))
+    нет_журналов = журналов_нет([имя for имя in имена if имя not in ждут], каталог)
     претензии += нет_журналов
     print(f"журналов из реестра нет: {len(нет_журналов)}")
+    if ждут:
+        print(f"журналов ждут первого запуска: {len(ждут)} ({', '.join(ждут)})")
     расхождение = документ_разошёлся(КОРЕНЬ)
     if расхождение:
         претензии.append(расхождение)

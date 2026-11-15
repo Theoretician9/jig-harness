@@ -608,11 +608,13 @@ def limit_pass(prev: dict, now: float, data: dict, tasks: int, work_count: int) 
                           "сменён_ts": was.get("сменён_ts") if ceiling == old and was.get("сменён_ts")
                           else to_iso(now),
                           "прогноз": round(percent + speed * burn_now * hours_left, 1),
+                          "прогноз_выбранный": round(percent + speed * tasks * hours_left, 1),
                           "снижение_при": round(settings["порог_прогноза_pct"]
                                                 - speed * tasks * hours_left, 1)}
     if ceilings:
         result["потолок"] = min(ceilings)
         result["точность"] = "оценка" if inexact else "точно"
+        result["порог"] = settings["порог_прогноза_pct"]
     return result
 
 
@@ -848,9 +850,13 @@ def limit_text(eff: int, tasks: int, limit: dict, now: float) -> str:
     used = f"{guess}использовано {round(cell['процент'])} % лимита {WINDOW_FOR[window]}"
     if eff == 0:
         return f"Скорость: стою — {used}, {when}. После обновления продолжу сам."
-    ahead = "" if reset is None else f" к обновлению ({clock_phrase(reset, now)})"
-    return (f"Скорость: работаю по {tasks_dative(eff)} вместо {tasks} — {used}, при таком расходе"
-            f"{ahead} будет {round(cell['прогноз'])} %. После обновления верну сам.")
+    # Владелец читал прогноз ПОСЛЕ снижения как причину не снижать (bkb 11.11: «объясни в чём логика»):
+    # сначала то, что было бы при выбранном режиме, и порог, потом — при новом потолке.
+    ahead = "до конца окна" if reset is None else f"к обновлению ({clock_phrase(reset, now)})"
+    return (f"Скорость: работаю по {tasks_dative(eff)} вместо {tasks} — {used}. Если работать "
+            f"без перерыва {ahead}, по {tasks_dative(tasks)} было бы {round(cell['прогноз_выбранный'])} %, "
+            f"выше порога {round(limit['порог'])} %; по {tasks_dative(eff)} — {round(cell['прогноз'])} %. "
+            f"После обновления верну {tasks} сам.")
 
 
 def message_text(changes: int, old_blocker, eff: int, mode: str, data: dict, verdict: dict, now: float) -> str:

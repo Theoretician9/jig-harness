@@ -32,7 +32,8 @@ set -uo pipefail
 source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/lib/config.sh"
 # PUBLIC_PASPORT — путь паспорта для сборщика: только от паспорта двери (ниже), не из окружения;
 # самотест называет свой двор присваиванием уже ПОСЛЕ загрузки.
-konf_zagruzit_dveri STARTER_DIR PUBLIC_BRANCH PUBLIC_REMOTE PUBLIC_BUILD_DIR PUBLIC_COMMIT_EMAIL PUBLIC_PASPORT PAKET_SHA PREDMET_ZAMKA
+# Так же TYPICAL_COPY_CHECK — судья замка 6г: из окружения боевой запуск подменил бы его и прошёл замок.
+konf_zagruzit_dveri STARTER_DIR PUBLIC_BRANCH PUBLIC_REMOTE PUBLIC_BUILD_DIR PUBLIC_COMMIT_EMAIL PUBLIC_PASPORT PAKET_SHA PREDMET_ZAMKA TYPICAL_COPY_CHECK
 
 # Судья слова владельца — рядом с этим скриптом, а не по окружению: путь от реального файла.
 SCRIPTS_REAL="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
@@ -277,6 +278,28 @@ ids_iz_istorii() { # $1=момент ISO (пусто — вся история) 
             return 1
         fi
         say "замок 6в · заметки выпуска простым языком есть"
+    fi
+
+    # Замок 6г: типовая чистая копия — прошлый выпуск обновляется до этого сборкой
+    # копии (не наш пользователь, не наш tmux, без HARNESS_DEV_GATES), самопроверка без
+    # новых красных. Копия bkb 14.11.2026 откатывала 0.12.1 на двух красных, которых
+    # наша машина не видела. Первой публикации сравнивать не с чем.
+    # TYPICAL_COPY_CHECK — дверь самотеста: подставной судья вместо стенда на гигабайт; загрузчик
+    # двери снял его из окружения, назвать его может только присваивание после загрузки.
+    if git -C "$sborka" rev-parse --verify --quiet "$PUBLIC_REMOTE/$PUBLIC_BRANCH^{commit}" >/dev/null; then
+        local proshloe
+        proshloe=$(mktemp -d -t proba-typical-release-XXXXXX)
+        git -C "$sborka" archive "$PUBLIC_REMOTE/$PUBLIC_BRANCH" | tar -x -C "$proshloe"
+        if ! vyvod=$(python3 -I "${TYPICAL_COPY_CHECK:-$SCRIPTS_REAL/check-typical-copy.py}" --старое "$proshloe" --новое "$sborka" 2>&1); then
+            rm -rf "$proshloe"
+            say "ОТКАЗ: типовая чистая копия не обновилась без новых красных — публикация отменена"
+            printf '%s\n' "$vyvod" | sed 's/^/  /'
+            return 1
+        fi
+        rm -rf "$proshloe"
+        say "замок 6г · ${vyvod##*$'\n'}"
+    else
+        say "замок 6г · прошлого выпуска нет — типовой копии обновляться не с чего"
     fi
 
     # Сухой прогон доходит ровно досюда: замки 4-6 ПРОГНАНЫ, а ничего не
@@ -693,6 +716,10 @@ if [ "${1:-}" = "--selftest" ]; then
             "$PROJECT_DIR" "$dvor" > "$dvor/паспорт.conf"
         printf 'PUBLIC_REMOTE="jig"\nPUBLIC_BRANCH="master"\nPUBLIC_BUILD_DIR="%s"\nPUBLIC_COMMIT_NAME="проба-харнес"\nPUBLIC_COMMIT_EMAIL="proba@harness.local"\n' \
             "$dvor/сборка" > "$dvor/харнес.conf"
+        # Подставной судья типовой копии (замок 6г): код — из файла typical-rc двора,
+        # доводы — в typical-args; настоящий стенд весит гигабайт и идёт своей пробой.
+        printf '#!/usr/bin/env python3\nimport sys, pathlib\nd = pathlib.Path(%s)\n(d / "typical-args").write_text(" ".join(sys.argv[1:]) + " | прошлое: " + ",".join(sorted(p.name for p in pathlib.Path(sys.argv[2]).iterdir())))\nrc = int((d / "typical-rc").read_text()) if (d / "typical-rc").exists() else 0\nprint("типовая копия: новая красная «изоляция tmux»: свой файл копии" if rc else "типовая копия: новых красных нет (подставной)")\nsys.exit(rc)\n' \
+            "'$dvor'" > "$dvor/typical-stub.py"
     }
     proba_zapis() {  # $1=двор $2=название: новая запись простым языком СВЕРХУ заметок
         local fajl="$1/пакет/ЧТО-НОВОГО.md" staroe
@@ -709,7 +736,7 @@ if [ "${1:-}" = "--selftest" ]; then
             PACKAGE_DIR="$dvor/пакет" PUBLIC_BUILD_DIR="$dvor/сборка" \
             PUBLIC_REMOTE=jig PUBLIC_BRANCH=master \
             PUBLIC_COMMIT_NAME="проба-харнес" PUBLIC_COMMIT_EMAIL="proba@harness.local" \
-            PUBLIC_PASPORT="$dvor/паспорт.conf" \
+            PUBLIC_PASPORT="$dvor/паспорт.conf" TYPICAL_COPY_CHECK="$dvor/typical-stub.py" \
             PROJECT_DIR="$PROJECT_DIR" опубликовать_сборку 2>&1
         )
     }
@@ -875,6 +902,25 @@ if [ "${1:-}" = "--selftest" ]; then
         echo "  ПЛОХО второй релиз: код $RC, версия «$VERS2», теги «$TEGI2», секций $SEKCIJ"; ok=0
     fi
     TEGI="$TEGI2"
+
+    # БОЛЬНОЙ (замок 6г): типовая чистая копия нашла новую красную — выпуск не уходит,
+    # в отказе имя проверки и причина; судье дан прошлый выпуск с удалённого.
+    printf 'ещё механизм\n' > "$T/здоровый/пакет/harness/demons/третий.sh"
+    proba_zapis "$T/здоровый" "Выпуск с красной копии"
+    git -C "$T/здоровый/пакет" add -A
+    git -C "$T/здоровый/пакет" -c user.name=t -c user.email=t@t commit -qm "красная копии"
+    BYLO=$(kommitov "$T/здоровый/удалённый.git")
+    echo 1 > "$T/здоровый/typical-rc"
+    OUT=$(proba_publ "$T/здоровый"); RC=$?
+    rm -f "$T/здоровый/typical-rc"
+    if [ "$RC" != 0 ] && printf '%s' "$OUT" | grep -q 'типовая чистая копия' \
+       && printf '%s' "$OUT" | grep -q 'новая красная «изоляция tmux»: свой файл копии' \
+       && grep -q 'VERSION' "$T/здоровый/typical-args" \
+       && [ "$(kommitov "$T/здоровый/удалённый.git")" = "$BYLO" ]; then
+        echo "  ок    БОЛЬНОЙ СЛУЧАЙ: новая красная типовой копии — отказ с именем и причиной, push не звался"
+    else
+        echo "  ПЛОХО красная типовой копии не остановила выпуск: код $RC, $(cut -c1-120 "$T/здоровый/typical-args" 2>/dev/null), ${OUT: -160}"; ok=0
+    fi
 
     # БОЛЬНОЙ: удалённый ушёл вперёд чужим коммитом — отказ без force.
     CHUZHOJ=$(mktemp -d)

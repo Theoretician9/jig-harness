@@ -248,7 +248,10 @@ rm -rf "$T"
 T=$(mktemp -d); stand "$T"; touch "$T/state/installed" "$T/state/active"
 OUT=$(STUB_USERMOD_NOOP=1 run_step "$T"); RC=$?
 check "БОЛЬНОЙ: usermod без эффекта — rc 1" "1" "$RC"
-check "БОЛЬНОЙ: usermod без эффекта — ОТКАЗ словом" "да" "$(printf '%s' "$OUT" | grep -q 'ОТКАЗ docker' && echo да || echo нет)"
+# Дословно СВОЙ отказ: «ОТКАЗ docker» и код 1 даёт и соседняя проверка ниже
+# (docker info от имени агента), и случай зеленел без своей.
+check "БОЛЬНОЙ: usermod без эффекта — ОТКАЗ своей проверки" "да" \
+      "$(printf '%s' "$OUT" | grep -q "ОТКАЗ docker: usermod прошёл, а $AGENT в группе docker нет" && echo да || echo нет)"
 rm -rf "$T"
 
 # ── 6. БОЛЬНОЙ: apt отказал — громкий отказ, не тихий пропуск ─────────────

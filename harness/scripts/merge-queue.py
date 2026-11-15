@@ -28,7 +28,10 @@ import subprocess
 import sys
 import tempfile
 import time
+from collections import Counter
 from pathlib import Path
+
+import yaml
 
 HERE = Path(__file__).resolve().parent
 LIB_DIR = HERE / "lib"
@@ -301,7 +304,7 @@ def contents_equal(compare, path: str, left: bytes | None, right: bytes | None) 
 
 def package_plan(ctx: Context, tip: str, changes: list[tuple[str, str]]) -> tuple[list, list]:
     """Сверка ДО слияния: (файлы к записи в пакет [(путь, цель)], удалённые в ветке).
-    Рабочий файл пакета обязан равняться версии master или вершины — иначе код 7."""
+    Правка рабочего файла пакета к master обязана входить в правку вершины — иначе код 7."""
     compare = _load("compare_with_package", HERE / "compare-with-package.py")
     skills = compare.скилы_наборов(ctx.package) if ctx.package.is_dir() else set()
     write, deleted, diverged = [], [], []
@@ -317,19 +320,80 @@ def package_plan(ctx: Context, tip: str, changes: list[tuple[str, str]]) -> tupl
         wanted = blob(ctx.project, tip, path)
         if contents_equal(compare, path, current, wanted):
             continue
-        if contents_equal(compare, path, current, blob(ctx.project, "master", path)):
-            write.append((path, target))
+        versions = (blob(ctx.project, "master", path), current, wanted)
+        extras = package_extras(path, *(compare.сравнимое(path, v or b"") for v in versions))
+        if extras:
+            diverged.append((path, target, current, wanted, extras))
         else:
-            diverged.append((path, target, current, wanted))
+            write.append((path, target))
     if diverged:
         raise Stop(7, diverged_report(diverged))
     return write, deleted
 
 
+def package_extras(path: str, master: bytes, package: bytes, tip: bytes) -> list[str]:
+    """Что пакет изменил к master, а вершина нет; пусто — вершина включает пакет.
+    Помощники вставляют блоки в общий пакет у одних якорей, и порядок вставок у пакета и у
+    сведённой вершины разный: равенство байтов отказывало бы в законном слиянии."""
+    texts = [v.decode("utf-8", "replace") for v in (master, package, tip)]
+    if not path.endswith((".yaml", ".yml")):
+        return line_extras(*(t.splitlines() for t in texts))
+    # Комментарии YAML разбор теряет — их судят строками, записи — по значению.
+    comments = [[l for l in t.splitlines() if l.lstrip().startswith("#")] for t in texts]
+    return record_extras(*texts) + line_extras(*comments)
+
+
+def line_extras(master: list, package: list, tip: list) -> list[str]:
+    """Строки, добавленные (+) или удалённые (-) пакетом и не так же в вершине. Счёт без
+    выравнивания diff: при другом порядке вставок diff сдвигает общие строки блоков."""
+    before, ours, theirs = Counter(master), Counter(package), Counter(tip)
+    extras = [f"+ {line}" for line in ((ours - before) - (theirs - before)).elements()]
+    return extras + [f"- {line}" for line in ((before - ours) - (before - theirs)).elements()]
+
+
+ABSENT = object()
+
+
+def record_extras(master: str, package: str, tip: str) -> list[str]:
+    try:
+        before, ours, theirs = (records(yaml.safe_load(t)) for t in (master, package, tip))
+    except yaml.YAMLError as exc:
+        return [f"YAML не разобран: {str(exc).splitlines()[0]}"]
+    extras = []
+    for key in [k for k in ours if ours[k] != before.get(k, ABSENT)] + \
+            [k for k in before if k not in ours]:
+        value = ours.get(key, ABSENT)
+        if theirs.get(key, ABSENT) != value:
+            gone = " (удалена в пакете)" if value is ABSENT else ""
+            extras.append(f"запись {' → '.join(key)}{gone}")
+    return extras
+
+
+def records(doc) -> dict:
+    """Записи реестра: под ключом верхнего уровня — ключ словаря или элемент списка
+    (элемент со словом «файл», как в mechanisms.yaml, — по нему)."""
+    found: dict = {}
+    for top, value in (doc.items() if isinstance(doc, dict) else [("", doc)]):
+        if isinstance(value, dict):
+            found.update({(str(top), str(k)): v for k, v in value.items()})
+        elif isinstance(value, list):
+            found.update({(str(top), record_id(v)): v for v in value})
+        else:
+            found[(str(top),)] = value
+    return found
+
+
+def record_id(item) -> str:
+    if isinstance(item, dict) and "файл" in item:
+        return str(item["файл"])
+    return json.dumps(item, ensure_ascii=False, sort_keys=True, default=str)
+
+
 def diverged_report(diverged: list) -> str:
-    lines = ["пакет разошёлся с master и вершиной ветки, ничего не тронуто:"]
-    for path, target, current, wanted in diverged:
+    lines = ["в пакете есть правки, которых нет в вершине ветки, ничего не тронуто:"]
+    for path, target, current, wanted, extras in diverged:
         lines.append(f"  {path} ↔ {target}")
+        lines += [f"    {extra}" for extra in extras[:40]]
         old = (current or b"").decode("utf-8", "replace").splitlines()
         new = (wanted or b"").decode("utf-8", "replace").splitlines()
         lines += list(difflib.unified_diff(old, new, "пакет", "вершина", lineterm=""))[:40]

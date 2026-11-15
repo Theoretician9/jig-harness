@@ -396,9 +396,17 @@ _gates_flush() {  # [force]
 # `wait` — без перенаправления: сигнал посреди него оставил бы сохранённую копию
 # канала tee открытой, и ловушка выхода ведущего ждала бы tee до предела.
 gates_wait_all() {
-    local n
-    for n in "${!GATES_PIDS[@]}"; do
-        wait "${GATES_PIDS[$n]}" || true
+    local n pid pids=()
+    # Готовое печатается по мере готовности: длинная проверка в хвосте иначе держала
+    # весь вывод до конца прогона (журнал самопроверки копии bkb пуст до итога, 14.11.2026).
+    # Ждём в порядке блоков (ключи массива порядка не держат) и по снятому списку:
+    # допечатка, дошедшая до конца, обнуляет GATES_PIDS.
+    for n in $(printf '%s\n' "${!GATES_PIDS[@]}" | sort -n); do
+        pids+=("${GATES_PIDS[$n]}")
+    done
+    for pid in ${pids[@]+"${pids[@]}"}; do
+        wait "$pid" || true
+        _gates_flush
     done
     _gates_flush force
     if [ $((GATES_STAT_HIT + GATES_STAT_RUN + GATES_STAT_NONE)) -gt 0 ]; then
@@ -581,18 +589,30 @@ _gates_join_decide() {  # → 0 вести, 1 присоединиться
     return 0
 }
 
+_gates_join_show() {  # вывод ведущего с байта GATES_JOIN_SHOWN до нынешнего конца файла
+    local size
+    size=$(stat -c %s "$GATES_JOIN_BASE.out" 2>/dev/null) || return 0
+    [ "$size" -gt "$GATES_JOIN_SHOWN" ] || return 0
+    tail -c +"$((GATES_JOIN_SHOWN + 1))" "$GATES_JOIN_BASE.out" | head -c "$((size - GATES_JOIN_SHOWN))"
+    GATES_JOIN_SHOWN=$size
+}
+
 # Опрос раз в секунду, не flock: замок, унаследованный фоновыми детьми проверок,
 # держался бы дольше прогона. 0 — итог получен и напечатан (выходить), 1 — ведущий оборвался.
 _gates_join_wait() {
     printf 'присоединяюсь к прогону %s (то же состояние дерева)\n' "$GATES_LEADER"
+    # Вывод ведущего — по мере хода, с места, до которого уже показан: присоединившаяся
+    # самопроверка обновления копии иначе молчала до итога (копия bkb 14.11.2026).
+    GATES_JOIN_SHOWN=0
     while [ ! -f "$GATES_JOIN_BASE.rc" ]; do
         if ! kill -0 "$GATES_LEADER" 2>/dev/null && [ ! -f "$GATES_JOIN_BASE.rc" ]; then
             echo "ведущий прогон оборвался без итога — веду сам"
             return 1
         fi
+        _gates_join_show
         sleep 1
     done
-    cat "$GATES_JOIN_BASE.out"
+    _gates_join_show
     GATES_JOIN_RC=$(< "$GATES_JOIN_BASE.rc")
     return 0
 }

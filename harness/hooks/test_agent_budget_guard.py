@@ -71,6 +71,7 @@ JOURNAL_NAME = "вызовы-агентов.jsonl"
 SRC = "scripts/hooks/agent_budget_guard.py"
 LAUNCH_EVENT = "agent.launch"
 RESUME_EVENT = "agent.resume"
+FINISH_SRC = "scripts/hooks/agent_finish_log.py"
 LIGHT_TYPE = "harness-worker"
 EXPLORER_TYPE = "harness-explorer"
 BUILDER = ROOT / "scripts" / "self-prompt.py"
@@ -188,12 +189,21 @@ class Stand:
         return path
 
     def child(self, lead: str, name: str, idle_s: int, session: str = "проба") -> None:
-        """Исполнитель управляющего; idle_s — сколько секунд его транскрипт молчит."""
-        meta = self.write_meta(session, name, {"spawnDepth": 2, "parentAgentId": lead})
+        """Исполнитель управляющего; idle_s — сколько секунд его транскрипт молчит.
+        Вызов исполнителя (toolUseId) — «вызов-<name>»: по нему его конец в журнале."""
+        meta = self.write_meta(session, name, {"spawnDepth": 2, "parentAgentId": lead,
+                                               "toolUseId": f"вызов-{name}"})
         log = meta.with_name(f"agent-{name}.jsonl")
         log.write_text("{}\n", encoding="utf-8")
         stamp = time.time() - idle_s
         os.utime(log, (stamp, stamp))
+
+    def journal_event(self, event: str, call: str, src: str) -> None:
+        """Строка конца (agent.finish) или продолжения (agent.resume) вызова в журнале."""
+        row = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "src": src, "event": event,
+               "outcome": "ok", "data": {"вызов": call}}
+        with (self.logs / JOURNAL_NAME).open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(row, ensure_ascii=False) + "\n")
 
     def launch_typed(self, subagent_type: str | None):
         """(код, текст для модели из additionalContext) запуска помощника типа."""
@@ -491,6 +501,25 @@ def judge_lead(tmp: Path) -> None:
         stand.child("Л1", f"старый{number}", idle_s=3600)
     check("давно замолчавшие исполнители живыми не считаются", 0,
           stand.launch(lead="Л1", subagent_type=LIGHT_TYPE)[0])
+
+    # Находка копии bkb 11.11: кончившийся исполнитель
+    # ещё LIVE_WINDOW_S секунд считался живым, и управляющий упирался в потолок сразу
+    # после завершений. Конец — строка agent.finish с его вызовом; продолжение после
+    # конца (agent.resume) делает его снова живым.
+    stand = Stand(tmp / "параллельно-кончились", {LEAD_LEVEL: {"всего": 0}})
+    stand.set_map([])
+    for number in range(LEAD_PARALLEL):
+        stand.child("Л1", f"кончился{number}", idle_s=5)
+        stand.journal_event("agent.finish", f"вызов-кончился{number}", FINISH_SRC)
+    check("БОЛЬНОЙ: только что кончившиеся исполнители живыми не считаются", 0,
+          stand.launch(lead="Л1", subagent_type=LIGHT_TYPE)[0])
+    stand.journal_event("agent.resume", "вызов-кончился0", SRC)
+    stand.journal_event("agent.finish", "вызов-кончился0", "чужой/писатель.py")
+    for number in range(LEAD_PARALLEL, LEAD_PARALLEL + 2):
+        stand.child("Л1", f"кончился{number}", idle_s=5)
+    code, text = stand.launch(lead="Л1", subagent_type=LIGHT_TYPE)
+    check("продолженный после конца снова живой; конец от чужого писателя не считается",
+          (2, True), (code, "параллельно" in text))
 
 
 def judge_types(tmp: Path) -> None:

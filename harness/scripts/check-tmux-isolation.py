@@ -46,13 +46,19 @@ from __future__ import annotations
 
 import re
 import sys
+import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
+import config  # noqa: E402
+import layout_manifest  # noqa: E402
 from selftest_cases import Cases  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 SCAN_DIRS = ("scripts", "harness")
+MANIFEST = layout_manifest.MANIFEST_NAME
+# Жёлтый код ворот (scripts/lib/gates_check.sh): находка видна, обновление не откатывает.
+YELLOW = 77
 
 # Сам tmux — отдельное слово (own_tmux и $REAL_TMUX — не он), дальше до
 # действия на сервер в той же команде. Комментарии не судим.
@@ -187,32 +193,68 @@ def tree_files(root: Path) -> list[Path]:
     return sorted(files)
 
 
-def check(files: list[Path]) -> int:
+def harness_laid(root: Path) -> set[str] | None:
+    """Пути, которые положила раскладка (опись <root>/.layout-manifest, тело и «оставлено»);
+    None — чей файл, не знать (описи нет или она битая): тогда судится всё."""
+    try:
+        manifest = layout_manifest.parse_bytes((root / MANIFEST).read_bytes())
+    except OSError:
+        return None
+    if isinstance(manifest, layout_manifest.ManifestBroken):
+        return None
+    return set(manifest.body) | set(manifest.kept)
+
+
+def dev_install() -> bool:
+    return config.конфиг(config.путь_harness_conf()).get("HARNESS_DEV_GATES") == "1"
+
+
+def check(files: list[Path], root: Path = ROOT, dev: bool | None = None) -> int:
+    """Красный — находка в файле харнеса; на копии находка только в её своих файлах — жёлтый.
+
+    Файлы харнеса судит и пакет у себя, на копии они те же. Свой .sh копии (её продукт,
+    вне описи раскладки) новое правило обновления краснило бы впервые и откатывало бы
+    каждое обновление (копия bkb 14.11.2026: «изоляция tmux» — новая красная)."""
     if not files:
         print("[изоляция tmux] ОТКАЗ: судить нечего — список файлов пуст")
         return 1
-    bad, own, marked = [], [], []
+    laid = None if (dev_install() if dev is None else dev) else harness_laid(root)
+
+    def of_copy(path: Path) -> bool:
+        return laid is not None and path.is_relative_to(root) and path.relative_to(root).as_posix() not in laid
+
+    cleanup, battle, marked, copy_own = [], [], [], []
     for path in files:
         text = path.read_text(encoding="utf-8", errors="replace")
-        shown = path.relative_to(ROOT) if path.is_relative_to(ROOT) else path
-        bad += [f"{shown}:{n}" for n in findings(text)]
+        shown = path.relative_to(root) if path.is_relative_to(root) else path
+        places = [(f"{shown}:{n}", cleanup) for n in findings(text)]
         for number, verdict in new_session_verdicts(text).items():
-            (own if verdict == "bad" else marked).append(f"{shown}:{number}")
-    if bad:
-        print(f"[изоляция tmux] УБОРКА МИМО СВОЕГО СЕРВЕРА: {len(bad)}")
-        for place in bad:
+            places.append((f"{shown}:{number}", battle if verdict == "bad" else marked))
+        for place, kind in places:
+            (copy_own if of_copy(path) and kind is not marked else kind).append(place)
+    if cleanup:
+        print(f"[изоляция tmux] УБОРКА МИМО СВОЕГО СЕРВЕРА: {len(cleanup)}")
+        for place in cleanup:
             print(f"  ✗ {place}")
         print("  Починка: `unset TMUX TMUX_PANE` в начале файла или явный сервер — "
               "`env -u TMUX tmux -S <сокет стенда> kill-server`")
-    if own:
-        print(f"[изоляция tmux] new-session НА БОЕВОМ СЕРВЕРЕ: {len(own)}")
-        for place in sorted(own):
+    if battle:
+        print(f"[изоляция tmux] new-session НА БОЕВОМ СЕРВЕРЕ: {len(battle)}")
+        for place in sorted(battle):
             print(f"  ✗ {place}")
+    if battle or copy_own:
         print("  Починка: `unset TMUX TMUX_PANE` и `export TMUX_TMPDIR=<каталог стенда>` "
               "наверху файла, либо `tmux -L <имя> new-session`; осознанный боевой "
               "сервер — метка `# tmux-боевой: <причина>` над вызовом")
-    if bad or own:
+    if copy_own:
+        print(f"[изоляция tmux] свои файлы копии (их нет в описи раскладки): {len(copy_own)} — "
+              "чинить копии, обновление харнеса они не откатывают")
+        for place in sorted(copy_own):
+            print(f"  ! {place}")
+    if cleanup or battle:
         return 1
+    if copy_own:
+        return YELLOW
     print(f"[изоляция tmux] чисто: файлов {len(files)}, tmux бьёт только в свой сервер"
           f" (с меткой «боевой»: {len(marked)})")
     return 0
@@ -307,6 +349,25 @@ def selftest() -> int:
             own_server_findings('# tmux-боевой: так живёт агент\n' + bare))
     c.check("БОЛЬНОЙ: метка не над вызовом, а выше через строку", [3],
             own_server_findings('# tmux-боевой: x\ntrue\n' + bare))
+    # ── чей файл: на копии свой файл копии не откатывает обновление (находка bkb 14.11) ──
+    with tempfile.TemporaryDirectory(prefix="proba-tmux-own-") as stand:
+        root = Path(stand)
+        (root / "scripts").mkdir()
+        laid, own = root / "scripts" / "laid.sh", root / "scripts" / "own.sh"
+        own.write_text(bare, encoding="utf-8")
+        laid.write_text("true\n", encoding="utf-8")
+        (root / MANIFEST).write_text(f"# layout-manifest 2\n# пакет -\n{'0' * 40}\tscripts\tscripts/laid.sh\n# оставлено\n",
+                                     encoding="utf-8")
+        files = [laid, own]
+        c.check("копия: new-session только в своём файле копии → жёлтый", YELLOW,
+                check(files, root, dev=False))
+        c.check("установка разработки: тот же файл → красный", 1, check(files, root, dev=True))
+        laid.write_text(bare, encoding="utf-8")
+        c.check("копия: new-session в файле харнеса (в описи) → красный", 1, check(files, root, dev=False))
+        laid.write_text("true\n", encoding="utf-8")
+        (root / MANIFEST).unlink()
+        c.check("копия без описи: чей файл — не знать, судится всё → красный", 1,
+                check(files, root, dev=False))
     print(f"[изоляция tmux] самотест: путей {c.paths}, неудач {c.failures}")
     return 0 if c.ok else 1
 

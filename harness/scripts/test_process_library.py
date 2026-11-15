@@ -24,6 +24,7 @@ import json
 import os
 import re
 import sys
+import subprocess
 import tempfile
 from pathlib import Path
 
@@ -415,6 +416,58 @@ with tempfile.TemporaryDirectory(prefix="pl-layer-") as layer_dir:
             os.environ.pop("HARNESS_PROCESS_LIBRARY_LOCAL")
         else:
             os.environ["HARNESS_PROCESS_LIBRARY_LOCAL"] = saved_door
+
+print("── 12б. раскладка: свои записи копии уходят в слой установки, а не пропадают ──")
+# Находка копии bkb 14.11.2026: своя запись копии в process-library.json раскладка снимала
+# («записей, которых в пакете нет, не переносим»), и самопроверка обновления краснела.
+# Своя — нет ни в пакете, ни в прежней сборке пакета; запись прежней сборки — снята пакетом.
+CARRY = HERE / "lib" / "process_library.py"
+
+
+def carried(work: Path, baseline, env_extra=None) -> tuple:
+    env = {**os.environ, "HARNESS_PROCESS_LIBRARY_LOCAL": str(work / "layer.json"), **(env_extra or {})}
+    env = {k: v for k, v in env.items() if v is not None}
+    done = subprocess.run([sys.executable, str(CARRY), "carry-own", str(work / "old.json"),
+                           str(work / "pkg.json"), str(baseline)],
+                          capture_output=True, text=True, timeout=60, env=env, stdin=subprocess.DEVNULL)
+    return done.returncode, done.stdout + done.stderr
+
+
+def layer_ids(path: Path) -> list:
+    return [r["id"] for r in json.loads(path.read_text(encoding="utf-8"))["процессы"]] if path.exists() else []
+
+
+with tempfile.TemporaryDirectory(prefix="pl-carry-") as carry_dir:
+    work = Path(carry_dir)
+    rec = lambda ident, **extra: {"id": ident, "название": ident, "запуск": "крон", **extra}  # noqa: E731
+    (work / "pkg.json").write_text(json.dumps({"процессы": [rec("pkg-a")]}), encoding="utf-8")
+    (work / "base.json").write_text(json.dumps({"процессы": [rec("pkg-a"), rec("retired")]}), encoding="utf-8")
+    (work / "old.json").write_text(json.dumps({"процессы": [
+        rec("pkg-a"), rec("retired"), rec("own"), rec("own-gone", статус="снят 10.11")]}, ensure_ascii=False),
+        encoding="utf-8")
+    rc, said = carried(work, work / "base.json")
+    report(rc == 0 and layer_ids(work / "layer.json") == ["own"] and "own" in said and str(work / "layer.json") in said,
+           "своя запись → в слой; снятая пакетом и «снят …» — нет; строка называет id и слой",
+           [f"rc={rc}", f"слой {layer_ids(work / 'layer.json')}", said.strip()[-200:]])
+    before = (work / "layer.json").read_bytes() if (work / "layer.json").exists() else b""
+    rc, said = carried(work, work / "base.json")
+    report(rc == 0 and (work / "layer.json").read_bytes() == before,
+           "повторная раскладка: слой не меняется, дублей нет", [f"rc={rc}", said.strip()[-200:]])
+    (work / "layer.json").unlink(missing_ok=True)
+    rc, said = carried(work, "-")
+    report(rc == 0 and not (work / "layer.json").exists() and "own" in said and "retired" in said,
+           "прежней сборки нет: слой не пишется, снятые записи названы", [f"rc={rc}", said.strip()[-200:]])
+    conf_layer = work / "conf-layer.json"
+    (work / "harness.conf").write_text(f'PROCESS_LIBRARY_LOCAL="{conf_layer}"\n', encoding="utf-8")
+    rc, said = carried(work, work / "base.json", {"HARNESS_SELFTEST": "1", "HARNESS_CONF": str(work / "harness.conf"),
+                                                  "HARNESS_PROCESS_LIBRARY_LOCAL": None})
+    report(not conf_layer.exists() and "own" in said,
+           "стенд (HARNESS_SELFTEST=1) без своей двери слоя: слой из конфига не пишется, запись названа",
+           [f"rc={rc}", f"слой из конфига есть: {conf_layer.exists()}", said.strip()[-200:]])
+    (work / "layer.json").write_text("{битый", encoding="utf-8")
+    rc, said = carried(work, work / "base.json")
+    report(rc == 1 and (work / "layer.json").read_text(encoding="utf-8") == "{битый" and str(work / "layer.json") in said,
+           "битый слой: код 1, байты слоя целы, путь назван", [f"rc={rc}", said.strip()[-200:]])
 
 print("── 13. судья поля «состояние_из» (§3.5) ──")
 # Поле говорит разрешителю состояния, откуда брать живость записи вне соглашения harness-<id>.*;

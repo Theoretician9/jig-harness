@@ -37,16 +37,19 @@ SEPARATORS = {";", "&&", "||", "|", "&", "(", ")"}
 ANY_ARG_WRITERS = {"tee", "truncate", "rm", "shred"}
 DEST_LAST_WRITERS = {"cp", "mv", "install"}
 PYTHON_WRITE = re.compile(r"""open\(\s*[^,)]+,\s*['"][^'"]*[wax+]|write_text|write_bytes""")
-QUOTED_ORDERS = re.compile(r"""['"]([^'"]*ORDERS\.md)['"]""")
+QUOTED_PATH = re.compile(r"""['"]([^'"]+)['"]""")
 DENY = ("Запись в память/ORDERS.md закрыта для агентов демонов. Указание из ORDERS.md "
         "снимает только владелец; переписанный файл теряет его слова (так пропали указания 12.11). "
         "Законная дверь: заведи карточку в dev-map.yaml или скажи оркестратору — он передаст владельцу. "
         "Прополка файла идёт скриптом scripts/weed-the-orders.py, а не ручной правкой.")
 
 
-def is_orders(path: str, cwd: str) -> bool:
-    absolute = path if os.path.isabs(path) else os.path.join(cwd, path)
-    return os.path.realpath(absolute) == ORDERS
+def is_orders(path: str) -> bool:
+    return os.path.realpath(path) == ORDERS
+
+
+def absolute(path: str, cwd: str) -> str:
+    return path if os.path.isabs(path) else os.path.join(cwd, path)
 
 
 def strip_heredocs(command: str) -> str:
@@ -94,62 +97,65 @@ def split_redirects(tokens: list) -> tuple:
     return words, targets
 
 
-def python_writes(code: str, cwd: str) -> bool:
-    return bool(PYTHON_WRITE.search(code)) and any(is_orders(p, cwd) for p in QUOTED_ORDERS.findall(code))
+def python_targets(code: str, cwd: str) -> list:
+    return [absolute(p, cwd) for p in QUOTED_PATH.findall(code)] if PYTHON_WRITE.search(code) else []
 
 
-def command_writes(words: list, cwd: str) -> bool:
+def command_targets(words: list, cwd: str) -> list:
+    """Пути, в которые пишет одна команда; не пишет — пустой список."""
     name = os.path.basename(words[0])
     args = words[1:]
+    operands = [absolute(a, cwd) for a in args if not a.startswith("-")]
     if name in ANY_ARG_WRITERS:
-        return any(is_orders(a, cwd) for a in args if not a.startswith("-"))
+        return operands
     if name == "sed" and any(a.startswith("-i") or a == "--in-place" or a.startswith("--in-place=")
                              for a in args):
-        return any(is_orders(a, cwd) for a in args if not a.startswith("-"))
+        return operands
     if name in DEST_LAST_WRITERS:
-        operands = [a for a in args if not a.startswith("-")]
-        return bool(operands) and (is_orders(operands[-1], cwd)
-                                   or (name == "mv" and any(is_orders(a, cwd) for a in operands)))
+        return operands if name == "mv" else operands[-1:]
     if name == "dd":
-        return any(a.startswith("of=") and is_orders(a[3:], cwd) for a in args)
+        return [absolute(a[3:], cwd) for a in args if a.startswith("of=")]
     if name.startswith("python"):
-        return any(python_writes(a, cwd) for a in args)
+        return [t for a in args for t in python_targets(a, cwd)]
     if name in ("bash", "sh") and "-c" in args:
-        return bash_writes(args[args.index("-c") + 1], cwd) if args.index("-c") + 1 < len(args) else False
-    return False
+        at = args.index("-c") + 1
+        return bash_targets(args[at], cwd) if at < len(args) else []
+    return []
 
 
-def bash_writes(command: str, cwd: str) -> bool:
+def bash_targets(command: str, cwd: str) -> list:
+    targets = []
     for tokens in split_segments(command):
         words, redirects = split_redirects(tokens)
-        if any(is_orders(t, cwd) for t in redirects):
-            return True
+        targets += [absolute(t, cwd) for t in redirects]
         if not words:
             continue
         if words[0] == "cd" and len(words) > 1:
-            cwd = words[1] if os.path.isabs(words[1]) else os.path.join(cwd, words[1])
-        elif command_writes(words, cwd):
-            return True
-    return False
+            cwd = absolute(words[1], cwd)
+        else:
+            targets += command_targets(words, cwd)
+    return targets
 
 
-def writes_orders(event: dict) -> bool:
+def write_targets(event: dict) -> list:
+    """Пути записи вызова инструмента, абсолютные; их судит вызывающий.
+    Общий разбор: им же судит запись файлов харнеса harness_files_guard.py."""
     tool, inp = event.get("tool_name"), event.get("tool_input")
     if not isinstance(inp, dict):
-        return False
+        return []
     cwd = event.get("cwd") or os.getcwd()
     if tool in FILE_TOOLS:
-        return any(inp.get(k) and is_orders(inp[k], cwd) for k in PATH_KEYS)
+        return [absolute(inp[k], cwd) for k in PATH_KEYS if inp.get(k)]
     if tool == "Bash":
-        return bash_writes(inp.get("command") or "", cwd)
-    return False
+        return bash_targets(inp.get("command") or "", cwd)
+    return []
 
 
 def main() -> int:
     if not os.environ.get("HARNESS_DEMON"):
         return 0
     try:
-        denied = writes_orders(json.loads(sys.stdin.read()))
+        denied = any(is_orders(t) for t in write_targets(json.loads(sys.stdin.read())))
     except Exception as error:  # noqa: BLE001 — сбой хука не запрещает работу
         print(f"orders_write_guard: пропуск, хук не разобрал вход: {type(error).__name__}: {error}",
               file=sys.stderr)

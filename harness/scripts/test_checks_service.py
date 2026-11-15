@@ -251,8 +251,9 @@ def judge_units(label: str, out: Path, ids: list, library_yaml: dict, records: d
         bad_service += [f"{pid}: {k}={s.get(k)}" for k, v in want.items() if s.get(k) != [v]]
         if not any(wrapper in v for v in s.get("ExecStart", [])):
             bad_service.append(f"{pid}: ExecStart не через run-background.sh {pid} (ждали «{wrapper}»)")
-        if not any(v == f"append:{logs}/{entry.get('журнал')}" for v in s.get("StandardOutput", [])):
-            bad_service.append(f"{pid}: StandardOutput не append:{logs}/{entry.get('журнал')}")
+        # Журнал задания открывает оболочка агента (не systemd: тот завёл бы файл root-ом).
+        if not any(v.endswith(f" >>{logs}/{entry.get('журнал')} 2>&1'") for v in s.get("ExecStart", [])):
+            bad_service.append(f"{pid}: ExecStart не дописывает журнал задания {logs}/{entry.get('журнал')}")
         t = unit_keys(timer)
         if t.get("Persistent") != ["false"]:
             bad_timer.append(f"{pid}: Persistent={t.get('Persistent')}")

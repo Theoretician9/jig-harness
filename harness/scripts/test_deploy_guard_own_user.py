@@ -50,19 +50,19 @@ def назван_занятым(pid: int, ответ: str) -> bool:
 
 
 def стендовый_конфиг(двор: pathlib.Path) -> pathlib.Path:
-    """Живой harness.conf плюс PUSH_NEEDS_OWNER=0 последней строкой (последняя
+    """Живой harness.conf плюс обе ручки согласия в 0 последними строками (последняя
     побеждает): ответ ворот «можно» иначе зависит от ручки согласия машины, и
-    проба на установке с PUSH_NEEDS_OWNER=1 краснела бы не от своего правила."""
+    проба на установке с PUSH/DEPLOY_NEEDS_OWNER=1 краснела бы не от своего правила."""
     sys.path.insert(0, str(КОРЕНЬ / "scripts" / "lib"))
     import config as конф
     живой = pathlib.Path(конф.путь_harness_conf())
     текст = живой.read_text(encoding="utf-8") if живой.is_file() else ""
     свой = двор / "harness.conf"
-    свой.write_text(текст + "\nPUSH_NEEDS_OWNER=0\n", encoding="utf-8")
+    свой.write_text(текст + "\nPUSH_NEEDS_OWNER=0\nDEPLOY_NEEDS_OWNER=0\n", encoding="utf-8")
     return свой
 
 
-def ворота(двор: pathlib.Path, свой_uid: str | None = None) -> tuple[int, str]:
+def ворота(двор: pathlib.Path, свой_uid: str | None = None, действие: str = "deploy") -> tuple[int, str]:
     """(код, ответ) ворот. Код судится вместе со словом: незнакомый ключ
     отвечает rc 2 без слова «занято», и случай «чужой не держит» зеленел на
     отказе разбора."""
@@ -70,7 +70,7 @@ def ворота(двор: pathlib.Path, свой_uid: str | None = None) -> tup
                  HARNESS_CONF=str(стендовый_конфиг(двор)))
     if свой_uid is not None:
         среда["HARNESS_OWN_UID"] = свой_uid
-    готово = subprocess.run([sys.executable, str(ПРИБОР), "--действие", "push"],
+    готово = subprocess.run([sys.executable, str(ПРИБОР), "--действие", действие],
                             capture_output=True, text=True, env=среда, check=False)
     return готово.returncode, готово.stdout + готово.stderr
 
@@ -101,6 +101,14 @@ with tempfile.TemporaryDirectory() as врем:
     код, свой = ворота(двор)
     судить("БОЛЬНОЙ СЛУЧАЙ: своя долгая работа claude — это занятость (rc 1)",
            (код, назван_занятым(чужой.pid, свой)), (1, True))
+
+    # БОЛЬНОЙ СЛУЧАЙ 15.11.2026: та же своя долгая работа (демон claude, 29 мин)
+    # отказала пушу в origin master словами «Выкат перезапускает стек…» — шесть
+    # коммитов и автопуш стояли час. Пуш стек не перезапускает и чужую работу не
+    # убивает: занятость судит только выкат.
+    код, пушу = ворота(двор, действие="push")
+    судить("БОЛЬНОЙ СЛУЧАЙ: пуш при своей занятости демоном пропущен (rc 0, без отказа «занято:»)",
+           (код, "занято:" in пушу, назван_занятым(чужой.pid, пушу)), (0, False, False))
 
     # Тот же живой процесс, но ворота считают своим ДРУГОГО владельца — значит
     # этот процесс для них чужой, как агент второй установки.

@@ -17,13 +17,15 @@
 #      корне входящих нет, пауза, предел одного обработчика, убитый обработчик,
 #      дубль message_id, отказ скачивания и расшифровки, секрет в расшифровке;
 #   2. прибор: голос не судится в К-1 (его задержка — расшифровка);
-#   3. код: ключ предела памяти в harness.conf пакета.
+#   3. код: ключ предела памяти в harness.conf пакета;
+#   4. предел: модель качается вне предела, нехватка памяти поднимает предел и
+#      запоминает его полом машины, самотест идёт под тем же пределом.
 #
 # Стенд: свой LOG_DIR и каталог паузы, Bot API на своём порту, tmux — подделка первой
 # в PATH, наружный https закрыт (https_proxy в никуда): ни Telegram, ни whisper не
 # зовутся. Процессы стенда находятся по пути стенда в окружении и убиваются по нему.
 #
-#   bash scripts/test_voice_worker.sh [--случай диспетчер|прибор|код]
+#   bash scripts/test_voice_worker.sh [--случай диспетчер|прибор|код|предел]
 # Код возврата: 0 — зелёная, 1 — красная. Последняя строка — итог с числом путей.
 # Механизмы берутся от места самой пробы (../ от scripts/): мутации идут «из-копии».
 #
@@ -43,7 +45,7 @@ done
 ONLY=""
 if [ "${1:-}" = "--случай" ]; then
     ONLY="${2:-}"
-    case "$ONLY" in диспетчер|прибор|код) ;; *) echo "ПРОБА: неизвестный случай «$ONLY» (диспетчер|прибор|код)"; exit 1 ;; esac
+    case "$ONLY" in диспетчер|прибор|код|предел) ;; *) echo "ПРОБА: неизвестный случай «$ONLY» (диспетчер|прибор|код|предел)"; exit 1 ;; esac
 elif [ -n "${1:-}" ]; then
     echo "ПРОБА: неизвестный ключ «$1»"; exit 1
 fi
@@ -142,6 +144,8 @@ print(path)
 PYEOF
 cat > "$T/tr.py" <<'PYEOF'
 import os, resource, sys, time
+if sys.argv[1] == "--fetch-model":
+    sys.exit(0)   # загрузку модели судит путь 4
 log = os.environ["PROBA_TR_LOG"]; stand = os.path.dirname(log)
 name = os.path.basename(sys.argv[1])
 soft = resource.getrlimit(resource.RLIMIT_AS)[0]
@@ -155,6 +159,8 @@ def read(n, d=""):
     except OSError:
         return d
 time.sleep(float(read("tr-sleep", "0") or 0))
+while os.path.exists(os.path.join(stand, "tr-hold")) and not os.path.exists(os.path.join(stand, "tr-release")):
+    time.sleep(0.05)
 put(f"end {time.time():.3f} {os.getpid()} {name}")
 if os.path.exists(os.path.join(stand, "tr-fail")):
     print("расшифровка упала: " + "х" * 350 + " RuntimeError: проба")
@@ -299,6 +305,7 @@ TG_CHAT_ID="777000"
 TG_TOKEN_FILE="$S/token"
 AGENT_USER="$(id -un)"
 PANEL_STATE_DIR="$S/panel"
+STATE_DIR="$S/state"
 EOF
         # Предел памяти стенда отличен от умолчания пакета: заглушка видит, чей он.
         # Пол ниже потолка, доля 100%: действующий предел — потолок, и подмена
@@ -335,7 +342,6 @@ EOF
     kicked() { [ "$(mk covered "$DJ" kick_sent "$(mk ts_of "$DJ" "$1")")" -ge 1 ] 2>/dev/null; }  # $1 = message_id
     started() { grep -q '^start' "$S/tr-log" 2>/dev/null; }
     root_txt() { find "$S/log/inbox" -maxdepth 1 -name "$1.txt" 2>/dev/null | grep -c .; }
-    served_at() { awk -v id="$1" '$1 == id {print $2; exit}' "$S/served"; }
     max_overlap() {
         python3 - "$S/tr-log" <<'PYEOF'
 import sys
@@ -351,18 +357,23 @@ print(best)
 PYEOF
     }
 
-    # (а) БОЛЬНОЙ К-4/П-2: голос с расшифровкой 15 с, следом текст.
+    # (а) БОЛЬНОЙ К-4/П-2: расшифровка голоса держится, пока проба не увидит толчок
+    # текста, пришедшего следом (предел 60 с). Судится порядок, а не секунды от
+    # прихода (спека К-4: ≤ 3 с): под нагрузкой машины здоровый толчок шёл 6,9 с —
+    # бюджет мерил машину. Синхронный обработчик толкает текст только после конца
+    # расшифровки, сколько бы ни шли часы.
     echo "— (а) голосовое, следом текст: текст не ждёт расшифровки"
-    mkdir -p "$T/disp-a"; echo 15 > "$T/disp-a/tr-sleep"
+    mkdir -p "$T/disp-a"; : > "$T/disp-a/tr-hold"
     d_start a "$(upd '101:101:voice::0' '102:102:text:почини кнопку обновления:2')"
-    wait_for 60 kicked 101 || d_bad "голос не толкнут за 60 с"
-    wait_for 10 kicked 102 || d_bad "текст не толкнут"
+    wait_for 60 kicked 102 || true
+    : > "$S/tr-release"
+    wait_for 60 kicked 101 || d_bad "голос не толкнут за 60 с после конца расшифровки"
     TS_V=$(mk ts_of "$DJ" 101); TS_T=$(mk ts_of "$DJ" 102)
-    K_T=$(mk kick_when "$DJ" "$TS_T"); A_T=$(served_at 102)
-    case_check "БОЛЬНОЙ К-4: толчок текста ≤ 3 с от его прихода на машину (голос ещё расшифровывается)" "да" \
+    K_T=$(mk kick_when "$DJ" "$TS_T"); E_V=$(awk '$1 == "end" {print $2; exit}' "$S/tr-log")
+    case_check "БОЛЬНОЙ К-4: толчок текста отдан, пока голос ещё расшифровывается" "да" \
         "$(python3 -c 'import sys
-try: print("да" if float(sys.argv[1]) - float(sys.argv[2]) <= 3 else f"через {float(sys.argv[1]) - float(sys.argv[2]):.1f} с")
-except ValueError: print(f"нет метки (толчок {sys.argv[1]}, приход {sys.argv[2]})")' "$K_T" "${A_T:-нет}")"
+try: print("да" if float(sys.argv[1]) < float(sys.argv[2]) else f"после конца на {float(sys.argv[1]) - float(sys.argv[2]):.1f} с")
+except ValueError: print(f"нет метки (толчок {sys.argv[1]}, конец расшифровки {sys.argv[2]})")' "$K_T" "${E_V:-нет}")"
     case_check "(а) голос толкнут после итога расшифровки (kick_sent на ts приёма голоса)" "1" "$(mk covered "$DJ" kick_sent "$TS_V")"
     case_check "(а) расшифровка лежит в inbox/<ts приёма голоса>.txt" "расшифровка voice-F101.oga" \
         "$(cat "$S/log/inbox/$TS_V.txt" 2>/dev/null || echo нет файла)"
@@ -556,7 +567,7 @@ if want код; then
     # Одно число на все машины убило расшифровку на чужой (MKL берёт память по числу
     # ядер); вычисление судится на стендовых значениях MemTotal, а не на этой машине.
     VL="$T/vmlimit"; mkdir -p "$VL/log"
-    printf 'PROJECT_DIR="%s"\nLOG_DIR="%s/log"\n' "$VL" "$VL" > "$VL/install.conf"
+    printf 'PROJECT_DIR="%s"\nLOG_DIR="%s/log"\nSTATE_DIR="%s/state"\n' "$VL" "$VL" "$VL" > "$VL/install.conf"
     printf 'VOICE_VM_LIMIT_KB="2500000"\nVOICE_VM_MEM_PERCENT="40"\nVOICE_VM_MAX_KB="6000000"\n' > "$VL/harness.conf"
     limit_for() {  # $1 = MemTotal стенда, КБ
         env -u VOICE_VM_LIMIT_KB HARNESS_INSTALL_CONF="$VL/install.conf" HARNESS_CONF="$VL/harness.conf" \
@@ -568,6 +579,99 @@ if want код; then
     case_check "предел: память не прочиталась (0) — пол, а не ноль" "2500000" "$(limit_for 0)"
     case_check "harness.conf пакета: есть ключи доли и потолка предела расшифровки" "да" \
         "$(grep -q '^VOICE_VM_MEM_PERCENT=' "$CONF_SEED" && grep -q '^VOICE_VM_MAX_KB=' "$CONF_SEED" && echo да || echo нет)"
+fi
+
+# ═══ 4. ПРЕДЕЛ ═════════════════════════════════════════════════════════════
+# Находки копий 10.11.2026. bkb: модель whisper качалась при первой расшифровке
+# под ulimit -v и падала «memory allocation … failed». sample-26: на 8 ГБ предел 2,5
+# млн КБ мал (нужно 4 млн), а самотест шёл без предела и был зелёным. Обработчик
+# зовётся напрямую на своём стенде; расшифровка — заглушка, которая падает
+# нехваткой памяти, пока RLIMIT_AS ниже «нужного» стенду.
+if want предел; then
+    PATHS_JUDGED=$((PATHS_JUDGED + 1))
+    echo "═══ путь 4: загрузка модели вне предела и предел по замеру машины"
+    cat > "$T/trw.py" <<'PYEOF'
+import os, resource, sys
+st = os.environ["PROBA_W_STAND"]
+soft = resource.getrlimit(resource.RLIMIT_AS)[0]
+lim = "нет" if soft == resource.RLIM_INFINITY else str(soft // 1024)
+mode = sys.argv[1] if sys.argv[1].startswith("--") else "transcribe"
+with open(os.path.join(st, "calls"), "a") as fh:
+    fh.write(f"{mode} {lim}\n")
+if mode == "--fetch-model":
+    if os.path.exists(os.path.join(st, "fetch-fail")):
+        print("сеть недоступна (проба)"); sys.exit(2)
+    sys.exit(0)
+need = int(open(os.path.join(st, "need-kb")).read())
+if lim != "нет" and int(lim) < need:
+    print("RuntimeError: mkl_malloc: failed to allocate memory"); sys.exit(2)
+if os.path.exists(os.path.join(st, "other-fail")):
+    print("расшифровка упала: файл битый (проба)"); sys.exit(2)
+print("САМОТЕСТ ПРОЙДЕН" if mode == "--selftest" else "текст пробы")
+PYEOF
+    cat > "$T/dlw.py" <<'PYEOF'
+import os, sys
+path = os.path.join(os.environ["PROBA_W_STAND"], "voice.oga")
+open(path, "w").close()
+print(path)
+PYEOF
+    w_stand() {  # $1 = имя стенда, $2 = нужная расшифровке память, КБ
+        W="$T/w-$1"; mkdir -p "$W/log/inbox/вложения" "$W/log/locks/services"
+        printf 'PROJECT_DIR="%s"\nLOG_DIR="%s/log"\nSTATE_DIR="%s/state"\n' "$W" "$W" "$W" > "$W/install.conf"
+        # Доля 1%: действующий предел — пол на любой машине до 250 ГБ.
+        printf 'SERVICE_LOCKS_SUBDIR="services"\nVOICE_VM_LIMIT_KB="2500000"\nVOICE_VM_MEM_PERCENT="1"\nVOICE_VM_MAX_KB="6000000"\n' > "$W/harness.conf"
+        echo "$2" > "$W/need-kb"; : > "$W/calls"
+    }
+    w_run() {  # $@ = доводы обработчика
+        env -u VOICE_VM_LIMIT_KB -u VOICE_VM_MEM_PERCENT -u VOICE_VM_MAX_KB -u STATE_DIR -u LOG_DIR \
+            PROBA_W_STAND="$W" HARNESS_INSTALL_CONF="$W/install.conf" HARNESS_CONF="$W/harness.conf" \
+            HARNESS_DOWNLOAD_PY="$T/dlw.py" HARNESS_TRANSCRIBE_PY="$T/trw.py" \
+            timeout 60 bash "$KOREN/scripts/voice-worker.sh" "$@" > "$W/out" 2>&1
+        echo $?
+    }
+    w_job() { echo '{}' > "$W/log/inbox/вложения/$1.json"; w_run > /dev/null; }  # $1 = message_id
+    w_done() { jq -r --arg k "$2" '.[$k] | tostring' "$W/log/inbox/вложения/$1.done" 2>/dev/null || echo "нет итога"; }  # $1 = id, $2 = поле
+    w_tries() { grep -c '^transcribe' "$W/calls"; }
+    w_limits() { awk '$1 == "transcribe" {printf "%s%s", s, $2; s=" "}' "$W/calls"; }
+    w_learned() { cat "$W/state/voice/vm-limit-kb" 2>/dev/null || echo "нет файла"; }
+
+    echo "— предел пола мал: нужно 4 000 000 КБ, пол 2 500 000, потолок 6 000 000"
+    w_stand climb 4000000; w_job 901
+    case_check "БОЛЬНОЙ sample-26: предел пола мал — голосовое всё же расшифровано" "true" "$(w_done 901 ok)"
+    case_check "БОЛЬНОЙ bkb: модель качается до расшифровки и без предела памяти" "--fetch-model нет" "$(head -1 "$W/calls")"
+    case_check "нехватка памяти поднимает предел в полтора раза до удачи: 2500000, 3750000, 5625000" \
+        "2500000 3750000 5625000" "$(w_limits)"
+    case_check "БОЛЬНОЙ: сработавший предел запомнен полом этой машины" "5625000" "$(w_learned)"
+    case_check "запомненный пол — предел следующих расшифровок (--limit-for)" "5625000" \
+        "$(w_run --limit-for 0 >/dev/null; tail -1 "$W/out")"
+    : > "$W/calls"; w_job 902
+    case_check "следующее голосовое — сразу под запомненным пределом, без подъёма" "5625000" "$(w_limits)"
+
+    echo "— нужно больше потолка"
+    w_stand cap 9000000; w_job 903
+    case_check "выше потолка подъёма нет: голосовое не расшифровано" "false расшифровка" "$(w_done 903 ok) $(w_done 903 этап)"
+    case_check "подъём остановлен потолком: 2500000, 3750000, 5625000, 6000000" \
+        "2500000 3750000 5625000 6000000" "$(w_limits)"
+    case_check "неудача пол не запоминает" "нет файла" "$(w_learned)"
+
+    echo "— падение не от памяти"
+    w_stand other 1000; : > "$W/other-fail"; w_job 904
+    case_check "падение не от памяти предел не поднимает: попытка одна" "1" "$(w_tries)"
+
+    echo "— загрузка модели не удалась"
+    w_stand fetch 1000; : > "$W/fetch-fail"; w_job 905
+    case_check "БОЛЬНОЙ bkb: модель не скачалась — отказ расшифровки называет модель, расшифровка не звана" \
+        "false расшифровка да 0" \
+        "$(w_done 905 ok) $(w_done 905 этап) $(w_done 905 причина | grep -q '^модель расшифровки не загружена' && echo да || echo нет) $(w_tries)"
+
+    echo "— самотест обработчика"
+    w_stand self 4000000
+    case_check "БОЛЬНОЙ sample-26: самотест обработчика идёт под его пределом и поднимает его до удачи (код 0)" "0" "$(w_run --selftest)"
+    case_check "самотест: модель загружена вне предела, расшифровка пробы — под пределом" \
+        "--fetch-model нет|--selftest 2500000" "$(sed -n 1p "$W/calls")|$(sed -n 2p "$W/calls")"
+    case_check "самотест запомнил сработавший предел полом машины" "5625000" "$(w_learned)"
+    w_stand self-cap 9000000
+    case_check "БОЛЬНОЙ: предела не хватает и под потолком — самотест обработчика красный" "1" "$(w_run --selftest)"
 fi
 
 echo "судимых путей: $PATHS_JUDGED"

@@ -31,15 +31,15 @@ def судить(зачем: str, вышло, ждём) -> None:
 
 
 def стендовый_конфиг(двор: pathlib.Path) -> pathlib.Path:
-    """Живой harness.conf плюс PUSH_NEEDS_OWNER=0 последней строкой (последняя
+    """Живой harness.conf плюс DEPLOY_NEEDS_OWNER=0 последней строкой (последняя
     побеждает): ответ ворот «можно» иначе зависит от ручки согласия машины, и
-    проба на установке с PUSH_NEEDS_OWNER=1 краснела бы не от своего правила."""
+    проба на установке с DEPLOY_NEEDS_OWNER=1 краснела бы не от своего правила."""
     sys.path.insert(0, str(КОРЕНЬ / "scripts" / "lib"))
     import config as конф
     живой = pathlib.Path(конф.путь_harness_conf())
     текст = живой.read_text(encoding="utf-8") if живой.is_file() else ""
     свой = двор / "harness.conf"
-    свой.write_text(текст + '\nPUSH_NEEDS_OWNER=0\nPRODUCT_PATH=""\nPRODUCT_DIR=""\n', encoding="utf-8")
+    свой.write_text(текст + '\nDEPLOY_NEEDS_OWNER=0\nPRODUCT_PATH=""\nPRODUCT_DIR=""\n', encoding="utf-8")
     return свой
 
 
@@ -83,7 +83,8 @@ def ворота(двор: pathlib.Path) -> tuple[int, str]:
                  HARNESS_INSTALL_CONF=str(стендовый_install(двор, пусто)),
                  HARNESS_OWN_UID=str(ничей_uid()), AGENT_PROC_ROOT=str(пусто),
                  DEPLOY_BUSY_MIN_SEC="0")
-    готово = subprocess.run([sys.executable, str(ПРИБОР), "--действие", "push"],
+    # Действие — выкат: занятость судит только его (пуш стек не перезапускает).
+    готово = subprocess.run([sys.executable, str(ПРИБОР), "--действие", "deploy"],
                             capture_output=True, text=True, env=среда, check=False)
     return готово.returncode, готово.stdout + готово.stderr
 

@@ -22,6 +22,7 @@ ROOT = "/tmp"
 QUARANTINE = ".уборка-карантин"
 HERE = Path(__file__).resolve().parent
 HOLDER_ENV = ("TMPDIR", "TMP", "TEMP")
+HOLDERS_READER = "/usr/local/lib/harness/tmp-sweep-holders"
 DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 # Обход рекурсивен: предел питона 1000 кадров, а одна глубокая запись в /tmp иначе
 # роняла бы весь ход каждую ночь. Глубже — отказ этой записи, ход идёт дальше.
@@ -184,7 +185,11 @@ def collect_holders() -> dict:
 
 def read_holders():
     # Чужие /proc/<pid>/fd читает только root; уборщик сам без root (см. sweep).
-    cmd = ["sudo", "-n", sys.executable, "-I", "-B", str(Path(__file__).resolve()), "--держатели"]
+    # Под sudo — root-овая копия этого файла вне дерева агента и ровно та команда,
+    # что разрешена правилом шага 1б установщика. Дверь HARNESS_HOLDERS_READER —
+    # пробе: читатель судимого дерева; права она не даёт, их решает sudo.
+    reader = os.environ.get("HARNESS_HOLDERS_READER") or HOLDERS_READER
+    cmd = ["sudo", "-n", reader, "--держатели"]
     try:
         result = subprocess.run(cmd, capture_output=True, timeout=120)
     except (OSError, subprocess.TimeoutExpired) as exc:

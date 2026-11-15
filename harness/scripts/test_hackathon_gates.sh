@@ -57,7 +57,8 @@ SRC="$(cd "${HACKATHON_PROBE_SRC:-$HERE/..}" && pwd)"
 source "$HERE/lib/selftest_cases.sh"
 
 STAND=$(mktemp -d -t proba-hackathon-gates-XXXXXX)
-trap 'rm -rf "$STAND"' EXIT
+DECOY=""
+trap '[ -n "$DECOY" ] && kill "$DECOY" 2>/dev/null; rm -rf "$STAND"' EXIT
 TODAY=$(date +%F)
 
 # ── часть 1: состав быстрых ворот — разбором yaml ────────────────────────────
@@ -256,6 +257,20 @@ printf 'vorota %s\n' "$*" >> "$ORDER_FILE"
 exit "${STUB_GATES_RC:-0}"
 SH
 
+# Стенд отрезан от процессов машины, как в test_deploy_guard.py: «свой» uid —
+# ничей, корень процессов для подсчёта смен — пустой. Без отреза выкат стенда
+# отменял любой долгий claude машины (улика 15.11.2026: публикация 0.12.3
+# красная — демон-строитель жил 80 минут). Порог долготы 0, а приманка —
+# своя: если отрез снимут, её увидят сразу, а не через две минуты и не
+# только когда на машине кто-то случайно работает.
+mkdir -p "$STAND/proc-pusto"
+NOBODY_UID=60000
+while [ -n "$(find /proc -maxdepth 1 -user "$NOBODY_UID" -print -quit 2>/dev/null)" ]; do
+    NOBODY_UID=$((NOBODY_UID + 1))
+done
+bash -c 'exec -a claude python3 -c "import time; time.sleep(3600)" демон.md' &
+DECOY=$!
+sleep 1   # возраст приманки > 0 — при пороге 0 она «долгая»
 DEAD_URL="http://127.0.0.1:9/nikogo"
 conf() {  # $1 — строка ручки живости
     cat > "$STAND/harness.conf" <<CONF
@@ -299,6 +314,8 @@ deploy() {  # $1 — код заглушки режима, $2 — код заг�
             STUB_MODE_RC="$1" STUB_GATES_RC="$2" \
             HARNESS_INSTALL_CONF="$STAND/install.conf" HARNESS_CONF="$STAND/harness.conf" \
             HARNESS_DOOR_STAND_HOME="$STAND" \
+            DEPLOY_BUSY_MIN_SEC=0 AGENT_PROC_ROOT="$STAND/proc-pusto" \
+            HARNESS_OWN_UID="$NOBODY_UID" \
             timeout 300 bash "$COPY/deploy.sh" 2>&1)
     RC=$?
     printf '%s\n' "$VYVOD" | sed 's/^/      /' | tail -3
@@ -308,6 +325,14 @@ has() { printf '%s' "$VYVOD" | grep -qF -- "$1" && echo да || echo нет; }
 
 echo "── 4. выкат в режиме: быстрые ворота зелёные — выкат идёт, ворота до сборки ──"
 conf 'STACK_HEALTH_CMD="true"'
+# Условие создано: без отреза суд занятости видит приманку — иначе случаи ниже
+# зеленели бы и без отреза, и мутация его снятия не краснела бы.
+case_check "приманка «claude … демон.md» видна суду занятости без отреза" "да" \
+    "$(HARNESS_INSTALL_CONF="$STAND/install.conf" HARNESS_CONF="$STAND/harness.conf" \
+       HARNESS_LOG_DIR="$STAND/zhurnal" DEPLOY_BUSY_MIN_SEC=0 \
+       python3 -I -c 'import sys; sys.path.insert(0, sys.argv[1]); import deploy_guard as g
+print("да" if any(f"процесс {sys.argv[2]}:" in z for z in g.долгие_процессы()) else "нет")' \
+       "$COPY" "$DECOY" 2>/dev/null | tail -1)"
 deploy 0 0
 case_check "deploy спросил режим: --активен --карта <PROJECT_DIR>/dev-map.yaml" \
     "--активен --карта $HARNESS/dev-map.yaml" "$(head -1 "$STAND/mode.log")"

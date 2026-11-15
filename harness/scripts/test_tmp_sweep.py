@@ -22,6 +22,8 @@
   «осталось» при частичном удалении; первая строка отказа записи — её причина;
 * `Report.decisions` — {имя записи: Decision(.action ∈ удалить|карантин|оставить|отказ)};
 * `read_holders()` зовёт `sudo -n` ПО ИМЕНИ из PATH; `--держатели` печатает JSON;
+  читатель — `HARNESS_HOLDERS_READER` (проба ставит судимый файл), иначе root-овая
+  копия установки;
 * `--selftest-full` пишет в файл `TMP_SWEEP_SELFTEST_NOTE` (если задан) первой
   строкой путь своего стенда, второй — «удалено N»;
 * `--сверить-журнал` судит «путь внутри /tmp», не «прямой ребёнок /tmp».
@@ -1852,6 +1854,9 @@ def cleanup_case() -> None:
 
 def main(argv: list[str]) -> int:
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
+    # Держателей читает судимый файл, а не root-овая копия установки: иначе проба
+    # судила бы копию, поставленную когда-то шагом 1б.
+    os.environ.setdefault("HARNESS_HOLDERS_READER", str(MECHANISM))
     chosen = set(argv[1:])
     unknown = chosen - {cid for cid, _ in CASES}
     if unknown:

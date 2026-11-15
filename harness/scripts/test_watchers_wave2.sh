@@ -12,7 +12,11 @@
 #     ключ, поднятый в этом же прогоне, не гасится;
 #   * summary карточки несёт команду перезапуска сторожа;
 #   * текст вести владельцу и код выхода сторожа ПОБАЙТНО прежние: эталон —
-#     копии сторожей до правки (`before-w2/`), прогнанные на таком же стенде;
+#     копии сторожей до правки (`fixtures/watchers-before/w2/`), прогнанные
+#     на таком же стенде; лежат данными при пробе, а не в .tasks: каталог
+#     задач в сборку не уходит, и у копии проба краснела без предмета.
+#     Имя `<сторож>.sh.txt`: эталон — данные, гейты кода (изоляция tmux,
+#     писатели журналов, устройство) судят живые .sh и не должны судить его;
 #   * писателя нет или он отказал — сторож не падает: код и вести как у эталона;
 #   * боевая карта не тронута (sha1 до и после).
 #
@@ -60,7 +64,7 @@ if [ "${1:-}" = "--сторож" ]; then
     esac
 fi
 want() { [ -z "$ONLY" ] || [ "$ONLY" = "$1" ]; }
-BEFORE="${W2_BEFORE_DIR:-$ROOT/.tasks/hr.watchers-report-must-create-model-task/before-w2}"
+BEFORE="${W2_BEFORE_DIR:-$HERE/fixtures/watchers-before/w2}"
 LIVE_MAP="$ROOT/dev-map.yaml"
 LIVE_SHA=$(sha1sum "$LIVE_MAP" 2>/dev/null | cut -d' ' -f1)
 
@@ -460,12 +464,20 @@ print("молчу: весть уже ушла"); sys.exit(3)
 REPORT
 }
 
+# Эталон лежит данными: первая строка — заголовок вместо шебанга, чтобы гейты
+# кода (писатели журналов судят файл по шебангу) не приняли его за живой
+# сторож; стенд получает прежние байты без неё.
+before_watcher() {  # $1 = имя сторожа → путь восстановленной копии эталона
+    tail -n +2 "$BEFORE/$1.sh.txt" > "$T/before-$1.sh"
+    printf '%s' "$T/before-$1.sh"
+}
+
 # Прогон сценария сторожа в четырёх стендах: эталон, проверяемый, без писателя,
 # писатель отказывает.
 run_watcher() {  # $1 = имя сторожа
     local name="$1" kind src
     for kind in base cur absent refuse; do
-        src="${SRC[$name]}"; [ "$kind" = base ] && src="$BEFORE/$name.sh"
+        src="${SRC[$name]}"; [ "$kind" = base ] && src=$(before_watcher "$name")
         local mode=real
         case "$kind" in absent) mode=absent ;; refuse) mode=refuse ;; esac
         build_stand "$T/$name-$kind" "$src" "$name" "$mode"
@@ -550,7 +562,7 @@ base_rcs() { local st; for st in $(steps_of "$1"); do cat "$T/$1-base/steps/$st.
 for name in nightly-gates disk-cleanup heartbeat-watch memory-commit server-hygiene; do
     want "$name" || continue
     echo "── $name ──"
-    case_check "$name: эталон до правки есть" "да" "$([ -f "$BEFORE/$name.sh" ] && echo да || echo нет)"
+    case_check "$name: эталон до правки есть" "да" "$([ -f "$BEFORE/$name.sh.txt" ] && echo да || echo нет)"
     run_watcher "$name"
     case_check "$name: беда создана — эталон в шаге ${RED_STEP[$name]} позвал дверь" "да" \
         "$([ -s "$T/$name-base/steps/${RED_STEP[$name]}.door" ] && echo да || echo нет)"

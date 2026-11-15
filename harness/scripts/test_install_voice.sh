@@ -172,6 +172,10 @@ if [ "$STEP_PRESENT" = да ]; then
           "$(yes_if grep -qx -- "-u $AGENT python3 -m venv $VENV" "$T/state/calls")"
     check "БОЛЬНОЙ: faster-whisper ставит pip ЭТОГО venv от имени агента" "да" \
           "$(yes_if grep -qE -- "^-u $AGENT $VENV/bin/(pip|python3?) .*install.*faster-whisper" "$T/state/calls")"
+    # Находка bkb 10.11: без этого модель качалась при первом голосовом под ulimit -v
+    # обработчика и падала «memory allocation … failed».
+    check "БОЛЬНОЙ bkb: модель whisper скачана шагом заранее, от имени агента, после pip" "да" \
+          "$(yes_if awk -v a="-u $AGENT $VENV/bin/python " 'index($0, a) == 1 && /download_model/ {m = NR} /install.*faster-whisper/ {p = NR} END {exit !(m && p && m > p)}' "$T/state/calls")"
     check "venv от root не создавался" "нет" \
           "$(yes_if grep -q -- '^-u root python3 -m venv' "$T/state/calls")"
     check "шаг прошёл — отказов нет" "да" "$(yes_if grep -qx 'FAILED=0' <<<"$OUT")"

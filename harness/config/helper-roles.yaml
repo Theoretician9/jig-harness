@@ -20,15 +20,18 @@
     пишет_только: ["журнал.md"]
     # Bash управляющего: первое слово каждой команды — из списка; git — только
     # перечисленные подкоманды; перенаправление — только в пишет_только.
-    команды: [ls, cat, head, tail, grep, rg, wc, date, sleep, test, echo, printf, stat, find, sort, uniq, cut, true, pwd]
+    # cd ничего не пишет: «cd корень && скрипт» — обычный ход управляющего в своём дереве.
+    команды: [ls, cat, head, tail, grep, rg, wc, date, sleep, test, echo, printf, stat, find, sort, uniq, cut, true, pwd, cd]
     # Запись «путь --флаг …» пускает скрипт только с перечисленными флагами (любой другой в argv —
     # отказ): launch-plan.py читает план, который требует launch_plan_guard, а --прижить,
     # --закрепить, --отметить пишут в карту; spec_approval.py --состояние читает, --отправить пишет
-    # владельцу. Запись без флагов пускает любые.
+    # владельцу. Запись без флагов пускает любые. Двери сторожей запуска — только с --door:
+    # отказ сторожа называет её законным ходом, и управляющему она должна быть достижима.
     скрипты: ["scripts/who-writes.py", "scripts/gates-snapshot.sh", "scripts/model-for.sh",
              "scripts/launch-plan.py --json --строка --нужен-план --проверить-план --метрики --сутки --карта --планы",
              "scripts/spec_approval.py --состояние",
-             "scripts/merge-queue.py", "scripts/commit-friction.py"]
+             "scripts/merge-queue.py", "scripts/commit-friction.py",
+             "scripts/hooks/launch_plan_guard.py --door", "scripts/hooks/agent_budget_guard.py --door"]
     git: [status, log, diff, show, branch, rev-parse, ls-files]
 
 # Вывод роли и потолка исполнителей кодом (launch-plan.py). Первая подошедшая
@@ -60,6 +63,9 @@
     - {имя: прочее,    если: {},                                                роль: harness-worker, исполнителей: 1,       глубина: 1}
   # Когда задаче нужен свой план: шагов или независимых групп не меньше.
   план_нужен: {шагов: 5, групп: 2}
+  # Пока файлов нет, группы считаются по частям .tasks/<id>/план.md: заголовок
+  # любого уровня, чьё первое слово отсюда, — одна часть и одна группа.
+  заголовки_частей_плана: [Часть, Task, Шаг, Группа, Фаза]
   # Предел вызова launch-plan.py из хука, секунд: меньше timeout хука в
   # .claude/settings.json (15 с), чтобы сбой был виден как «таймаут», а не как обрыв.
   таймаут_плана_с: 8

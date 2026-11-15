@@ -367,7 +367,8 @@ def stand_env(stand: Path, conf: str = "harness.conf") -> dict:
     env = {k: v for k, v in os.environ.items()
            if k not in ("CLAUDE_CODE_SESSION_ID", "HARNESS_REPORT", "HARNESS_TG_FORCE")}
     env.update(HARNESS_CONF=str(stand / conf), LOG_DIR=str(stand / "log"),
-               PROJECT_DIR=str(stand / "project"), HARNESS_HOME=str(stand))
+               PROJECT_DIR=str(stand / "project"), HARNESS_HOME=str(stand),
+               CLAUDE_PROJECTS_DIR=str(stand / "projects"))
     return env
 
 
@@ -918,6 +919,9 @@ def case_collapsed_signed(stand: Path) -> None:
 # ── сделано без повторов ────────────────────────────────────────────────────
 MARK_NAME = "status-report.last"
 NOTHING_NEW = "нового нет; последний помощник кончил"
+# Находка bkb 12.11: «нового нет» при живых помощниках читалось как «стоим».
+STILL_WORKING = "ничего не сдано, работа идёт"
+CONTINUED = "оборван, работу продолжили"
 QUEUE_EMPTY = "очередь пуста"
 DONE_ONCE = (STAND_CARDS["hr.demo-cleanup"],)
 
@@ -1049,14 +1053,16 @@ def case_lead_before_mark(stand: Path) -> None:
 def case_nothing_new(stand: Path) -> None:
     conf = mode_conf(stand, "1")
     journal = write_journal(stand, lead_rows())
-    set_mark(stand, at(0))
+    mark = at(0)
+    set_mark(stand, mark)
     out, done, doing = report_since(stand, journal, conf)
-    PROBE.check(f"нет нового — в СДЕЛАНО строка «{NOTHING_NEW}»",
-                any(NOTHING_NEW in l for l in done), done)
+    expect = f"с {clock(mark)} {STILL_WORKING}"
+    PROBE.check(f"БОЛЬНОЙ: нет нового, но помощник работает — СДЕЛАНО ровно «{expect}», без «{NOTHING_NEW}»",
+                done == [expect], done)
     leaked = [f for f in DONE_ONCE if f in "\n".join(done)]
     PROBE.check("в СДЕЛАНО нет законченного до метки", not leaked, leaked)
-    PROBE.check(f"«{NOTHING_NEW}» не в ДЕЛАЕТСЯ, идущая задача там",
-                not any(NOTHING_NEW in l for l in doing) and bool(task_of(doing, FORMAT)), doing)
+    PROBE.check(f"«{STILL_WORKING}» не в ДЕЛАЕТСЯ, идущая задача там",
+                not any(STILL_WORKING in l for l in doing) and bool(task_of(doing, FORMAT)), doing)
 
 
 def case_window_mode(stand: Path) -> None:
@@ -1359,9 +1365,11 @@ def case_commits_panel(stand: Path) -> None:
 def case_idle_phrase(stand: Path) -> None:
     conf = mode_conf(stand, "1")
     # Самый поздний конец — у чужой сессии: время «последний» берётся по всему журналу.
+    # Живой помощник — не простой: W2 и L1 кончают до метки, иначе фраза была бы «работа идёт».
     rows = lead_rows() + [launch("c-P", "Работа прошлой сессии", "harness-worker", "sonnet",
                                  ts=at(40), session="proshlaya"),
-                          finish("c-P", ts=at(30), session="proshlaya")]
+                          finish("c-P", ts=at(30), session="proshlaya"),
+                          finish("c-W2", ts=at(45)), finish("c-L1", ts=at(44))]
     journal = write_journal(stand, rows)
     mark = at(5)
     set_mark(stand, mark)
@@ -1371,7 +1379,9 @@ def case_idle_phrase(stand: Path) -> None:
     PROBE.check(f"ни помощников, ни коммитов — СДЕЛАНО ровно «{expect}»", done == [expect],
                 done or out)
     PROBE.check("примечания о коммитах нет без коммитов", not has_commit_note(out), out)
-    journal = write_journal(stand, [r for r in rows if r["event"] != "agent.finish"])
+    # Концов нет совсем: один давний запуск без конца — оборванный, а не живой помощник.
+    journal = write_journal(stand, [launch("c-O", "Давняя работа", "harness-worker", "sonnet",
+                                           ts=at(600))])
     _, done, _ = report_since(stand, journal, conf)
     PROBE.check(f"концов в журнале нет совсем — СДЕЛАНО ровно «{NOTHING_AT_ALL}»",
                 done == [NOTHING_AT_ALL], done)
@@ -1484,6 +1494,11 @@ def lost_report(stand: Path, rows: list, conf: str = "harness.conf") -> tuple:
     return out, blocks(out)
 
 
+def bullets(lines: list) -> list:
+    """Пункты блока ⚠ — строки «•»; примечание «оборван, работу продолжили» пунктом не считается."""
+    return [l for l in lines if l.startswith("•")]
+
+
 def heads_order(text: str) -> list:
     return [h for line in text.splitlines()
             for h in HEADERS + (LOST_HEADER,) if line.startswith(h)]
@@ -1548,11 +1563,13 @@ def case_lost_real(stand: Path) -> None:
     lost = got.get(LOST_HEADER, [])
     line = line_with(lost, STAND_CARDS["hr.demo-guard"])
     PROBE.check(f"потерянный ребёнок в ⚠ задачей словами, с моделью и временем {clock(lost_at)}",
-                len(lost) == 1 and clock(lost_at) in line and LABELS["sonnet"] in line, lost or out)
+                len(bullets(lost)) == 1 and clock(lost_at) in line and LABELS["sonnet"] in line, lost or out)
+    PROBE.check(f"после него задачу продолжил R2 — под пунктом «{CONTINUED}»",
+                lost[1:] == ["   " + CONTINUED], lost or out)
     pairs = who_pairs(field(guard, "делали"))
     PROBE.check("в «делали»: оркестратор и законченное продолжение",
                 pairs == [(LABELS["sonnet"], "вёл"), (LABELS["sonnet"], "код")], doing)
-    PROBE.check("оркестратор в ⚠ не попал: там одна строка, не две", len(lost) == 1, lost or out)
+    PROBE.check("оркестратор в ⚠ не попал: там один пункт, не два", len(bullets(lost)) == 1, lost or out)
 
 
 def case_lost_sibling(stand: Path) -> None:
@@ -1574,7 +1591,7 @@ def case_lost_sibling(stand: Path) -> None:
     line = line_with(lost, STAND_CARDS["hr.demo-chapters"])
     PROBE.check(f"потерянный ребёнок в ⚠ задачей словами, с временем {clock(lost_at)}",
                 bool(line) and clock(lost_at) in line, lost or out)
-    PROBE.check("живой оркестратор в ⚠ не попал: там одна строка", len(lost) == 1, lost or out)
+    PROBE.check("живой оркестратор в ⚠ не попал: там один пункт", len(bullets(lost)) == 1, lost or out)
 
 
 def case_lost_descendant_finish(stand: Path) -> None:
@@ -1787,7 +1804,7 @@ def case_lost_root_done_child(stand: Path) -> None:
     ]
     out, got = lost_report(stand, rows)
     PROBE.check("потерянный корень — в ⚠ задачей словами, одной строкой",
-                len(got.get(LOST_HEADER, [])) == 1
+                len(bullets(got.get(LOST_HEADER, []))) == 1
                 and STAND_CARDS["hr.demo-oldclean"] in joined(got, LOST_HEADER), out)
     doing = got.get(HEADERS[1], [])
     oldclean = STAND_CARDS["hr.demo-oldclean"]
@@ -2430,6 +2447,50 @@ def case_title_word_cut(stand: Path) -> None:
                     bool(kept) and title[len(kept):len(kept) + 1] in (" ", ",", ";", ":"), line)
 
 
+def transcript(stand: Path, call: str, minutes_ago: float) -> Path:
+    """Транскрипт помощника, как его кладёт Claude Code: meta с toolUseId и jsonl рядом; время — mtime."""
+    folder = stand / "projects" / str(stand / "project").replace("/", "-") / SESSION / "subagents"
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / f"agent-{call}.meta.json").write_text(json.dumps({"toolUseId": call}), encoding="utf-8")
+    body = folder / f"agent-{call}.jsonl"
+    body.write_text("{}\n", encoding="utf-8")
+    moment = time.time() - minutes_ago * 60
+    os.utime(body, (moment, moment))
+    return body
+
+
+def case_lost_transcript_alive(stand: Path) -> None:
+    # Находка bkb 12.11 (7): долгий регресс молчит в журнале вызовов дольше порога, но помощник жив.
+    rows = [launch("c-R", "Код", "harness-worker", "sonnet", ts=at(200), part="Часть: hr.demo-young#1")]
+    transcript(stand, "c-R", 1)
+    out, got = lost_report(stand, rows)
+    PROBE.check("БОЛЬНОЙ: транскрипт писался минуту назад — не в ⚠", LOST_HEADER not in out, out)
+    task = task_of(got.get(HEADERS[1], []), STAND_CARDS["hr.demo-young"])
+    PROBE.check("его задача в ДЕЛАЕТСЯ с «делают»", bool(field(task, "делают")), task or out)
+    transcript(stand, "c-R", 200)
+    out, got = lost_report(stand, rows)
+    PROBE.check("транскрипт старше порога — в ⚠", bool(line_with(got.get(LOST_HEADER, []),
+                                                                 STAND_CARDS["hr.demo-young"])), out)
+
+
+def case_lost_work_continued(stand: Path) -> None:
+    # Находка bkb 12.11 (3): оборванного ротацией доделал другой помощник той же задачи.
+    cut = [launch("c-A", "Код", "harness-worker", "sonnet", ts=at(200), part="Часть: hr.demo-young#1")]
+    out, got = lost_report(stand, cut)
+    PROBE.check("условие: один оборванный — в ⚠", bool(line_with(got.get(LOST_HEADER, []),
+                                                                 STAND_CARDS["hr.demo-young"])), out)
+    rows = cut + [launch("c-B", "Код", "harness-worker", "sonnet", ts=at(60), part="Часть: hr.demo-young#2"),
+                  finish("c-B", ts=at(20))]
+    out, got = lost_report(stand, rows)
+    line = line_with(got.get(LOST_HEADER, []), STAND_CARDS["hr.demo-young"])
+    lost = got.get(LOST_HEADER, [])
+    PROBE.check(f"БОЛЬНОЙ: после него в задаче был новый запуск — под пунктом «{CONTINUED}», не голое «потерян»",
+                clock(at(200)) in line and lost[lost.index(line) + 1:][:1] == ["   " + CONTINUED] if line else False,
+                lost or out)
+    PROBE.check("у одиночного оборванного приписки нет", CONTINUED not in "\n".join(
+        lost_report(stand, cut)[1].get(LOST_HEADER, [])), out)
+
+
 def case_lost_task_done(stand: Path) -> None:
     # Задача уже сдана (карточка test или коммит с её Dev-Map после запуска) — потерянный помощник не тревога.
     with (stand / "dev-map.yaml").open("a", encoding="utf-8") as out_file:
@@ -2816,7 +2877,7 @@ def case_lies_nocard_lost(stand: Path) -> None:
             launch("c-B", "Сверка журнала смены", "harness-worker", "sonnet", ts=at(200), part=part("hr.lie-nocard"))]
     out, got = lies_report(stand, family(), rows)
     PROBE.check("условие: задача без карточки в СДЕЛАНО", bool(titles_in(got, HEADERS[0])), out)
-    PROBE.check("D: её потерянный запуск — в ⚠", len(got.get(LOST_HEADER, [])) == 1, got.get(LOST_HEADER) or out)
+    PROBE.check("D: её потерянный запуск — в ⚠", len(bullets(got.get(LOST_HEADER, []))) == 1, got.get(LOST_HEADER) or out)
 
 def case_lies_lost_no_stub(stand: Path) -> None:
     # Живой отчёт 12.11 23:58: «• Живая проверка …: не самотестом, а…, Opus 5.5, с 21:56» — ⚠ резал
@@ -2960,6 +3021,10 @@ CASES = (
     ("(92 F) название в ⚠ урезано по слову, без «а…»", case_lies_lost_no_stub),
     ("(93) тема коммита без id — без пустых скобок «()»", case_lies_commit_no_empty_brackets),
     ("(94 D) зонтик работал позже ребёнка — строка семьи ребёнка", case_lies_family_child_over_umbrella),
+    ("(95) БОЛЬНОЙ: живой помощник с тихим журналом, но свежим транскриптом — не в ⚠",
+     case_lost_transcript_alive),
+    ("(96) БОЛЬНОЙ: оборванный, после которого задачу продолжили, — «оборван, работу продолжили»",
+     case_lost_work_continued),
 )
 
 

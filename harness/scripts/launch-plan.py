@@ -18,6 +18,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 import uuid
@@ -232,6 +233,12 @@ def task_plan(ctx: Ctx, g: dict, task: str):
     return own if own.is_file() else None
 
 
+def plan_part_count(path, words: list) -> int:
+    """Части плана: заголовки любого уровня, чьё первое слово — из words."""
+    heading = re.compile(r"^#+\s+(?:%s)\b" % "|".join(map(re.escape, words)), re.M)
+    return len(heading.findall(Path(path).read_text(encoding="utf-8")))
+
+
 def hackathon_lines(ctx: Ctx, g: dict, task: str) -> list:
     on = hackathon.active(conf_path=ctx.conf_path)
     mode = f"включён до {hackathon.until_text(ctx.conf_path)}" if on else "выключен"
@@ -287,6 +294,13 @@ def decide(ctx: Ctx, task: str) -> dict:
     live = {**live, "задач_в_работе": in_work}
     held = lib.held_paths(g["claims"], task)
     struct = g["structure"]
+    plan_file = task_plan(ctx, g, task)
+    groups_trace = []
+    # Пока файлов нет, общих файлов не видно: каждая часть плана — своя группа, иначе
+    # многошаговая задача под нагрузкой всегда шла одному исполнителю.
+    if not struct["файлов"] and plan_file:
+        struct = {**struct, "групп": plan_part_count(plan_file, roles["заголовки_частей_плана"])}
+        groups_trace = [f"групп по частям плана: {struct['групп']} (файлов ещё нет)"]
     waiting = {p["n"] for p in g["parts"] if held & set(p["файлы"])}
     blocked = {struct["группа"][n] for n in waiting}
     needed = struct["групп"] - len(blocked)
@@ -306,7 +320,6 @@ def decide(ctx: Ctx, task: str) -> dict:
                else f"{plural(count)} ({rule['имя']}, групп {struct['групп']})")
     label = f"Часть: {g['chapter']}/{task}" if g["chapter"] else f"Часть: {task}"
     source = g["source"]
-    plan_file = task_plan(ctx, g, task)
     models = {}
     if rule["роль"] == lib.LEAD_ROLE:
         models["управляющий"] = model_for("управляющий")
@@ -338,7 +351,7 @@ def decide(ctx: Ctx, task: str) -> dict:
         "строка_ёмкости": capacity_line(live, safety, cx, verdict),
         "модели": models, "подсказка": hints,
         "строки_хакатона": hackathon_lines(ctx, g, task),
-        "след": cx["след"] + outcome_trace + closed_plan_trace(g),
+        "след": cx["след"] + outcome_trace + groups_trace + closed_plan_trace(g),
         "хеш_плана": lib.file_hash(source["файл"]) if source["файл"] else None,
         "_решение": verdict,
     }

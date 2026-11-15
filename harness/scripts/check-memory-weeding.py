@@ -12,6 +12,13 @@
 Сокращённая строка — это уход прежнего текста: без архива он потерян.
 
     python3 scripts/check-memory-weeding.py     0 — потерь нет; 1 — потеря, строки в выводе
+    python3 scripts/check-memory-weeding.py --staged   то же для pre-commit: HEAD против индекса
+
+Без --staged (ворота после коммита) база — HEAD~, а сверяется рабочее дерево: так
+видна потеря последнего коммита. В pre-commit та же мерка отстаёт на коммит и смотрит
+в общее дерево: 14.11 23:51 панель сократила строку ORDERS коммитом 9244c9cb, а
+остановлен был СЛЕДУЮЩИЙ коммит памяти — и чужая неиндексированная правка тоже
+краснила бы чужой коммит. Поэтому хук судит индекс против HEAD: только свою потерю.
 
 Двери проб: MEMORY_WEEDING_ROOT (корень репозитория), MEMORY_LAYERS (файл слоёв).
 """
@@ -27,7 +34,8 @@ import yaml
 
 ROOT = Path(os.environ.get("MEMORY_WEEDING_ROOT") or Path(__file__).resolve().parent.parent)
 LAYERS = Path(os.environ.get("MEMORY_LAYERS") or ROOT / "harness" / "config" / "memory-layers.yaml")
-BASE = "HEAD~"
+STAGED = "--staged" in sys.argv[1:]
+BASE = "HEAD" if STAGED else "HEAD~"
 SHOWN_LIMIT = 20
 
 
@@ -49,12 +57,22 @@ def base_text(name: str) -> str:
     return git("show", f"{BASE}:{name}").stdout.decode("utf-8")
 
 
+def index_text(name: str) -> str:
+    done = git("show", f":{name}")
+    return done.stdout.decode("utf-8", errors="replace") if done.returncode == 0 else ""
+
+
 def tree_lines(name: str) -> set[str]:
+    if STAGED:
+        return lines_of(index_text(name))
     path = ROOT / name
     return lines_of(path.read_text(encoding="utf-8")) if path.is_file() else set()
 
 
 def archived_lines(archive: str) -> set[str]:
+    if STAGED:
+        names = git("ls-files", "-z", "--", archive).stdout.decode("utf-8").split("\0")
+        return set().union(*(lines_of(index_text(n)) for n in names if n))
     folder = ROOT / archive
     found: set[str] = set()
     for path in sorted(folder.rglob("*")) if folder.is_dir() else []:

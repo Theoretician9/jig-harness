@@ -1501,6 +1501,33 @@ def limit_read_exact():
 
 
 @case
+def limit_text_explains():
+    """Находка bkb 11.11: текст лимита — прогноз при выбранном режиме, порог и прогноз при новом потолке."""
+    with limit_stand() as s:
+        now = BASE
+        r5, rw = now + 3 * HOUR, now + 48 * HOUR
+        s.seed_points(linear_points(now, 2, 20, 2.0, r5, 60, 0.3, rw))
+        s.limits(now, five=(20, r5), week=(60, rw))
+        st = s.measure(now)
+        lim = st.get("лимит") or {}
+        tasks, eff = lim.get("выбранный_задач"), st.get("эффективный")
+        speed = window_field(st, "неделя", "скорость_на_задачу") or 0
+        chosen = window_field(st, "неделя", "прогноз_выбранный")
+        want = round(60 + speed * tasks * 48, 1) if isinstance(tasks, int) else None
+        check(f"неделя: прогноз при выбранных {tasks} — {want} %", chosen == want, chosen)
+        check("порог прогноза в состоянии лимита — 95", lim.get("порог") == 95, lim.get("порог"))
+        text = s.call("limit_text", eff, tasks, lim, now)
+        at_ceiling = round(window_field(st, "неделя", "прогноз") or 0)
+        check("в тексте: прогноз при выбранном режиме и что он выше порога 95 %",
+              f"по {tasks} задач" in text and f"{round(want or 0)} %" in text and "порога 95 %" in text, text)
+        check(f"в тексте: прогноз при новом потолке {eff} — {at_ceiling} %",
+              f"по {eff} задачи — {at_ceiling} %" in text, text)
+        check("в тексте сказано, что прогноз — при работе без перерыва", "без перерыва" in text, text)
+        check("прогноз выбранного назван раньше прогноза потолка",
+              text.find(f"{round(want or 0)} %") < text.find(f"{at_ceiling} %"), text)
+
+
+@case
 def limit_worse_five_hours():
     """16б: 5 часов хуже недели — берётся меньшее."""
     with limit_stand() as s:

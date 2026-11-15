@@ -183,13 +183,36 @@ def probe_stream(tmp: Path) -> None:
           (rc, "итог задачи hr.a" in launch.read_text(encoding="utf-8")))
 
 
+def probe_own_tree(tmp: Path) -> None:
+    """Заявка гонится командой СВОЕГО дерева: очередь общая для всех деревьев,
+    а исполнитель — любой заявитель. Чужое дерево (worktree помощника) сносят
+    посреди захода — заявка главного дерева не должна жить в нём (14.11 22:57)."""
+    s = Stand(tmp)
+    other = tmp / "дерево-помощника"
+    other.mkdir()
+    other_executor = other / "executor.py"
+    other_executor.write_text(EXECUTOR.replace('sys.argv[-1] + "\\n"', '"чужое:" + sys.argv[-1] + "\\n"'),
+                              encoding="utf-8")
+    a = subprocess.Popen(
+        [sys.executable, str(QUEUE), "--место", str(s.place), "--окно", "1.5", "--потолок", "6",
+         "--ждать", "30", "hr.a", "--", sys.executable, str(other_executor)],
+        env=s.env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    time.sleep(0.4)
+    b = s.start("hr.b", window=1.5)
+    (rc_a, _), (rc_b, _) = finish(a), finish(b)
+    check("18 заявки двух деревьев — каждая своей командой, не одной пачкой",
+          ["чужое:hr.a", "hr.b"], s.runs())
+    check("19 обе заявки получили код 0", (0, 0), (rc_a, rc_b))
+
+
 def main() -> int:
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
         for name, probe in (("окно", probe_window), ("после окна", probe_after_window),
                             ("падение", probe_failure), ("убит", probe_runner_killed),
                             ("предел", probe_deadline), ("потолок", probe_cap),
-                            ("построчно", probe_stream)):
+                            ("построчно", probe_stream),
+                            ("своё дерево", probe_own_tree)):
             try:
                 probe(tmp / name)
             except Exception as error:  # упавший стенд — красный путь, а не трассировка

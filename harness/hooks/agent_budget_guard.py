@@ -42,7 +42,9 @@ agent_skill_guard.py, не состоится — его решение спра
 управляющего» — pipeline.yaml → помощники.управляющий; «параллельно» —
 helper-roles.yaml → роли.harness-lead.параллельно_максимум. Конца запуска
 хук не видит, поэтому живым считается исполнитель управляющего (parentAgentId в
-meta.json), чей транскрипт писался не позже LIVE_WINDOW_S секунд назад.
+meta.json), чей транскрипт писался не позже LIVE_WINDOW_S секунд назад и чей
+вызов (toolUseId) не закрыт строкой agent.finish хука agent_finish_log.py
+(продолжение agent.resume открывает его снова).
 
 Глубина вложенности: в входе хука её нет, есть только `agent_id` зовущего
 помощника. Глубину хранит `<каталог транскрипта>/<session_id>/subagents/
@@ -91,6 +93,9 @@ JOURNAL = "вызовы-агентов"
 SRC = "scripts/hooks/agent_budget_guard.py"
 LAUNCH_EVENT = "agent.launch"
 RESUME_EVENT = "agent.resume"
+# Конец помощника пишет хук SubagentStop; чужие строки того же события концом не считаются.
+FINISH_SRC = "scripts/hooks/agent_finish_log.py"
+FINISH_EVENT = "agent.finish"
 DOOR_NAME = "agent-budget.door"
 LOCK_NAME = "agent-budget.lock"
 DOOR_TTL_S = 15 * 60
@@ -243,15 +248,41 @@ def speed_mode_on() -> bool:
     return bool(config.из_файла(config.путь_harness_conf()).get("SPEED_MODE"))
 
 
+def finished_calls() -> set:
+    """Вызовы, чей последний след в журнале — конец (agent.finish), а не продолжение.
+
+    Без этого кончившийся исполнитель ещё LIVE_WINDOW_S секунд шёл в живые, и
+    управляющий упирался в потолок сразу после завершений (находка копии bkb 11.11).
+    """
+    try:
+        lines = journal_path().read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return set()
+    done: set = set()
+    for line in lines:
+        try:
+            row = json.loads(line)
+            call = (row.get("data") or {}).get("вызов")
+        except (ValueError, AttributeError):
+            continue
+        if row.get("src") == FINISH_SRC and row.get("event") == FINISH_EVENT:
+            done.add(call)
+        elif row.get("src") == SRC and row.get("event") == RESUME_EVENT:
+            done.discard(call)
+    return done
+
+
 def live_children(payload: dict, lead: str) -> int:
-    """Сколько исполнителей управляющего `lead` писали в транскрипт недавно."""
+    """Сколько исполнителей управляющего `lead` не кончились и писали в транскрипт недавно."""
     folder = (Path(str(payload.get("transcript_path") or "")).parent
               / str(payload.get("session_id") or "") / "subagents")
     now = time.time()
+    finished = finished_calls()
     live = 0
     for meta in folder.glob("agent-*.meta.json"):
         try:
-            if json.loads(meta.read_text(encoding="utf-8")).get("parentAgentId") != lead:
+            data = json.loads(meta.read_text(encoding="utf-8"))
+            if data.get("parentAgentId") != lead or data.get("toolUseId") in finished:
                 continue
             log = meta.with_name(meta.name.removesuffix(".meta.json") + ".jsonl")
             live += now - log.stat().st_mtime <= LIVE_WINDOW_S

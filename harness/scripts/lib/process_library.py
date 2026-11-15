@@ -17,6 +17,8 @@ CLI:
   process_library.py wrap-crontab [--вход <файл>] [--выход <файл>]
       переписывает СВОИ необёрнутые строки crontab в обёрнутые; без --вход
       читает и пишет живой crontab (копия до правки — в $LOG_DIR или /tmp).
+  process_library.py carry-own <прежний json проекта> <json пакета> <json прежней сборки | ->
+      свои записи копии — в слой установки (зовёт раскладка до замены файла)
 
 Слой установки: записи, которые принадлежат машине, а не пакету (чужие
 контейнеры и т.п.), лежат в JSON того же вида по пути ключа PROCESS_LIBRARY_LOCAL
@@ -112,6 +114,71 @@ def layer_records(документ) -> list:
     if not isinstance(документ, dict) or not isinstance(документ.get("процессы") or [], list):
         raise ValueError("верхний уровень — не объект с «процессы»-списком")
     return документ.get("процессы") or []
+
+
+def own_records(old: dict, package: dict, baseline: dict) -> list:
+    """Записи прежнего файла проекта, которых нет ни в пакете, ни в прежней сборке пакета, —
+    свои процессы копии: её агент вносит их туда по слову судьи. Запись прежней сборки,
+    которой нет в новой, пакет снял; «снят …» не переносится — её процесса уже нет."""
+    known = {r["id"] for r in (package.get("процессы") or []) + (baseline.get("процессы") or [])}
+    return [r for r in old.get("процессы") or []
+            if r.get("id") not in known and not str(r.get("статус", "")).startswith("снят")]
+
+
+def add_to_local_layer(records: list, path: Path) -> list:
+    """Дописать в слой установки записи, которых в нём нет по id → id дописанных.
+    Битый слой не переписывается: ValueError (его правит человек, байты его)."""
+    import json
+    try:
+        документ = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        документ = {"процессы": []}
+    стоят = {запись["id"] for запись in layer_records(документ)}
+    новые = [запись for запись in records if запись["id"] not in стоят]
+    if новые:
+        документ["процессы"] = (документ.get("процессы") or []) + новые
+        path.parent.mkdir(parents=True, exist_ok=True)
+        черновик = path.with_name(path.name + ".layout-tmp")
+        черновик.write_text(json.dumps(документ, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        os.replace(черновик, path)
+    return [запись["id"] for запись in новые]
+
+
+def _cli_carry_own(old_path: str, package_path: str, baseline_path: str) -> int:
+    """Раскладка кладёт пакетный process-library.json поверх проектного: свои записи копии
+    переезжают в слой установки до замены. Прежней сборки нет (пакет не в git) — своя запись
+    неотличима от снятой пакетом: слой не пишется, снятые записи названы строкой."""
+    import json
+    try:
+        old = json.loads(Path(old_path).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return 0
+    package = json.loads(Path(package_path).read_text(encoding="utf-8"))
+    путь = local_layer_path()
+    if baseline_path == "-":
+        чужие = own_records(old, package, {})
+        if чужие:
+            print(f"  process-library.json: записи не из пакета сняты ({', '.join(r['id'] for r in чужие)}) — "
+                  f"прежней сборки пакета нет, своя запись неотличима от снятой; копия файла — в архиве "
+                  f"раскладки, свои процессы держите в слое установки {путь}")
+        return 0
+    свои = own_records(old, package, json.loads(Path(baseline_path).read_text(encoding="utf-8")))
+    if not свои:
+        return 0
+    # Стенд с образцом harness.conf назвал бы слой живой машины: без своей двери слой не пишется.
+    if os.environ.get("HARNESS_SELFTEST") == "1" and not os.environ.get("HARNESS_PROCESS_LIBRARY_LOCAL"):
+        print(f"  process-library.json: свои записи ({', '.join(r['id'] for r in свои)}) не перенесены — "
+              "стенд без двери HARNESS_PROCESS_LIBRARY_LOCAL")
+        return 0
+    try:
+        дописаны = add_to_local_layer(свои, путь)
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as беда:
+        print(f"ВНИМАНИЕ: свои записи библиотеки процессов ({', '.join(r['id'] for r in свои)}) не перенесены "
+              f"в слой установки {путь}: {type(беда).__name__}: {беда}")
+        return 1
+    print(f"  свои записи библиотеки процессов — в слое установки {путь}: "
+          f"{', '.join(r['id'] for r in свои)} (дописано {len(дописаны)})")
+    return 0
 
 
 def registry(path=None) -> dict:
@@ -264,9 +331,11 @@ def checks_units(project: str, logs: str, user: str, conf=None) -> dict:
             f"[Unit]\nDescription=Харнес: {pid} (поток проверок)\n\n"
             "[Service]\nType=oneshot\n"
             f"User={user}\nSlice={CHECKS_SLICE}\n"
-            f"ExecStart={project}/{WRAPPER} {pid} -- {project}/{запись['команда']}\n"
-            f"StandardOutput=append:{logs}/{запись['журнал']}\n"
-            "StandardError=inherit\n")
+            # Журнал открывает оболочка агента, а не systemd: StandardOutput=append
+            # открывался до смены пользователя, и новый файл выходил root:root —
+            # демон, пишущий в него по имени, падал «Permission denied».
+            f"ExecStart=/bin/sh -c 'exec {project}/{WRAPPER} {pid} -- {project}/{запись['команда']}"
+            f" >>{logs}/{запись['журнал']} 2>&1'\n")
         units[f"harness-{pid}.timer"] = (
             f"[Unit]\nDescription=Харнес: расписание {pid}\n\n"
             f"[Timer]\nOnCalendar={calendar}\n"
@@ -401,8 +470,11 @@ def main(argv: list) -> int:
         return 0
     if argv and argv[0] == "wrap-crontab":
         return _cli_wrap(argv[1:])
+    if len(argv) == 4 and argv[0] == "carry-own":
+        return _cli_carry_own(*argv[1:])
     print("process_library.py exempt <id> | cron-lines <реестр> <проект> <журналы> | checks-service <id> | "
-          "checks-ids | checks-units <каталог> <проект> <журналы> <пользователь> | wrap-crontab [--вход Ф] [--выход Ф]",
+          "checks-ids | checks-units <каталог> <проект> <журналы> <пользователь> | wrap-crontab [--вход Ф] [--выход Ф] | "
+          "carry-own <прежний> <пакет> <прежняя сборка|->",
           file=sys.stderr)
     return 2
 

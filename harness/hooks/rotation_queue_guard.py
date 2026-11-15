@@ -9,7 +9,9 @@ scripts/lib/rotation_flag.py); пока флаг живой и принадле�
 
 Без флага выход сразу: хук стоит на КАЖДОМ запуске помощника.
 Пропуски со следом: флаг другой сессии, флаг протухший (сторож давно его не
-освежал), запуск из управляющего harness-lead — часть уже идущей задачи.
+освежал), SendMessage управляющего harness-lead своему исполнителю — доведение
+идущей задачи, служебное «[ротация] доведи и остановись» смены идущему помощнику
+(одно на помощника). Новый запуск управляющего — отказ и очередь, как у смены.
 
 Ключи:
     --where           печатает каталог флага и очереди
@@ -44,7 +46,16 @@ REFUSAL = (
     "Запуск помощника отложен: смена ждёт ротации, пока закончат идущие помощники ({n}). "
     "Задача в очереди — преемник получит её списком; не повторяй запуск, не делай задачу сам "
     "и не вписывай её в передачу. Перезапуск делает смена сама, после конца помощников. "
-    "Идущих помощников не трогаю. Сообщения владельца это не касается: отвечай ему в канал как обычно.")
+    "Идущих помощников не трогаю; идущему помощнику можно один раз послать SendMessage, "
+    "начатое словами «{stop}». Сообщения владельца это не касается: отвечай ему в канал как обычно.")
+# Управляющий, начатый до ротации, запускал новых исполнителей, и «идущих помощников»
+# всегда было ≥ 1: смена ждала ротацию 69+ мин (находка копии bkb 12.11.2026).
+LEAD_REFUSAL = (
+    "Запуск исполнителя отложен: смена ждёт ротации. Поручение в очереди преемника. "
+    "Новых не запускай — доведи уже идущих исполнителей, отчитайся смене и остановись.")
+# Служебная дверь смены к идущему помощнику: сказать «доведи и остановись» смена
+# иначе не могла — её SendMessage держит этот же хук. Одна на помощника за ожидание.
+STOP_PREFIX = "[ротация] доведи и остановись"
 
 
 def log_event(event: str, outcome: str, session: str, detail: str) -> None:
@@ -96,6 +107,18 @@ class Queue:
                 return
             row["номер"] = max((r.get("номер", 0) for r in rows), default=0) + 1
             self.write([*rows, row])
+
+    def pass_stop(self, row: dict, since) -> bool:
+        """Служебное сообщение помощнику — одно на помощника за ожидание (`since` — «с» флага).
+        След — строка, сразу помеченная выпущенной: преемнику она не уходит."""
+        with self.locked():
+            rows = self.rows()
+            if any(r.get("служебное") and r.get("to") == row["to"] and r.get("с_флага") == since for r in rows):
+                return False
+            row.update({"служебное": True, "с_флага": since, "выпущено": int(time.time()),
+                        "номер": max((r.get("номер", 0) for r in rows), default=0) + 1})
+            self.write([*rows, row])
+            return True
 
     def mark(self, numbers: set[int]) -> None:
         with self.locked():
@@ -149,13 +172,35 @@ def hook(payload: dict) -> int:
         log_event("rotation_flag_foreign", "skipped", session, f"флаг сессии {flag['сессия']}")
         return 0
     if payload.get("agent_id") and payload.get("agent_type") == LEAD_TYPE:
-        description = (payload.get("tool_input") or {}).get("description") or ""
-        log_event("rotation_queue_lead_pass", "ok", session, f"{payload['agent_id']}: {description}")
-        return 0
+        return lead_hook(payload, session)
     row = queue_row(payload)
+    if is_stop_message(payload) and Queue().pass_stop(row, flag.get("с")):
+        log_event("rotation_stop_message", "ok", session, f"SendMessage {row['to']}: служебное «{STOP_PREFIX}»")
+        return 0
     Queue().add(row)
     log_event("rotation_queued", "refused", session, f"{payload.get('tool_name')}: {row.get('часть') or '—'}")
-    print(REFUSAL.format(n=flag.get("помощников", "?")), file=sys.stderr)
+    print(REFUSAL.format(n=flag.get("помощников", "?"), stop=STOP_PREFIX), file=sys.stderr)
+    return 2
+
+
+def is_stop_message(payload: dict) -> bool:
+    """Служебное слово смены идущему помощнику: SendMessage из главной, начатое STOP_PREFIX."""
+    message = str((payload.get("tool_input") or {}).get("message") or "")
+    return payload.get("tool_name") == "SendMessage" and not payload.get("agent_id") \
+        and message.startswith(STOP_PREFIX)
+
+
+def lead_hook(payload: dict, session: str) -> int:
+    """Управляющий доводит идущих исполнителей (SendMessage проходит), новых не запускает."""
+    agent = payload["agent_id"]
+    if payload.get("tool_name") == "SendMessage":
+        target = (payload.get("tool_input") or {}).get("to") or ""
+        log_event("rotation_queue_lead_pass", "ok", session, f"{agent}: SendMessage {target}")
+        return 0
+    row = {**queue_row(payload), "от": agent}
+    Queue().add(row)
+    log_event("rotation_queue_lead_refused", "refused", session, f"{agent}: {row.get('часть') or '—'}")
+    print(LEAD_REFUSAL, file=sys.stderr)
     return 2
 
 

@@ -8,6 +8,8 @@
   механизм не в реестре -> «нет механизма»;
   команда задания крона без бита исполнения -> «не исполняется».
 Запись со статусом «снят …» судья не трогает: её файлов и расписания уже нет.
+Записи слоя установки (PROCESS_LIBRARY_LOCAL — свои процессы машины) судятся вместе с пакетными;
+расписания в process-library.yaml пакета у своих записей нет, его судья у них не требует.
 
 Применение:
   check-process-library.py [--root R] [--crontab FILE] [--units FILE] [--project-dir P]
@@ -31,6 +33,7 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
 import config  # noqa: E402
+import process_library  # noqa: E402
 
 # Слово командной строки либо разделитель команд: пути судятся по словам, а не по подстроке.
 CRON_TOKEN = re.compile(r"[;&|]+|[^\s;&|]+")
@@ -136,7 +139,11 @@ def state_source_flaw(source, all_units: set):
 
 def judge(root: Path, cron_lines: list, unit_lines: list, project_dir: str) -> tuple:
     cfg = config_dir(root)
-    records = json.loads((cfg / "process-library.json").read_text(encoding="utf-8"))["процессы"]
+    package = json.loads((cfg / "process-library.json").read_text(encoding="utf-8"))
+    # Свои процессы копии раскладка из файла пакета снимает; их место — слой установки
+    # (копия bkb 14.11.2026: без слоя своя строка крона краснела «без записи» после обновления).
+    records = process_library.with_local_layer(package)["процессы"]
+    package_ids = {r["id"] for r in package["процессы"]}
     schedule = (yaml.safe_load((cfg / "process-library.yaml").read_text(encoding="utf-8")) or {}).get("процессы") or {}
     mech_file = cfg / "mechanisms.yaml"
     mechanisms = {m.get("файл") for m in (yaml.safe_load(mech_file.read_text(encoding="utf-8")) or {}).get("механизмы") or []} \
@@ -207,7 +214,8 @@ def judge(root: Path, cron_lines: list, unit_lines: list, project_dir: str) -> t
 
     # Записи → источники.
     for rec in active:
-        if rec.get("запуск") in ("крон", "служба-проверок") and rec["id"] not in schedule:
+        if rec.get("запуск") in ("крон", "служба-проверок") and rec["id"] in package_ids \
+                and rec["id"] not in schedule:
             violation("мёртвая запись", "process-library.json", rec["id"])
         for rel in rec.get("файлы", []):
             if not rel.startswith("/") and not (root / rel).exists():

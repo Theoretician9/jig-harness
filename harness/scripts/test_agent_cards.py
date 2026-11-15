@@ -39,11 +39,12 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
 sys.path.insert(0, str(HERE / "lib"))
 from selftest_cases import Cases  # noqa: E402
+from config import katalog_paketa  # noqa: E402
 
 COLLECTOR = Path(os.environ.get("SELF_PROMPT_PY") or HERE / "self-prompt.py")
 LIVE_POLICY = ROOT / "harness" / "config" / "launch-policy.yaml"
 LIVE_CARDS = ROOT / ".claude" / "agents"
-PACKAGE_CARDS = Path("/home/user/starter/STARTER-PACKAGE/harness/agents")
+PACKAGE_CARDS = katalog_paketa() / "harness" / "agents"
 DOORS = ("SELF_PROMPT_PY", "SELF_ETALON_DIR", "SELF_TREE_DIR", "LAUNCH_POLICY", "SELF_CARDS_DIR")
 CLASS_OF = {"harness-worker": "исполнитель", "harness-lead": "управляющий",
             "harness-explorer": "разведчик"}

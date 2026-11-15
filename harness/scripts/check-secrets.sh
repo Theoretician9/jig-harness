@@ -39,6 +39,15 @@ set -euo pipefail
 #   TG_TOKEN_FILE="/etc/.../token" — законно;
 #   токены Telegram/AWS/Google/GitHub/Slack по их фиксированным форматам;
 #   приватные ключи по заголовку PEM. Регистронезависимо, KEY= и key= равны.
+#
+# Пароль в адресе базы (схема://пользователь:пароль@хост) — без говорящего имени
+# рядом. Пароль обязан нести и букву, и цифру: «user:password@» из документации и
+# «host:6379» — не секреты (пароль из одних букв или цифр пропускается — названная
+# цена). Разбитый на два соседних литерала адрес («…://u:пароль" "@хост…», в том
+# числе через перевод строки) узнаётся по литералу, который кончается сразу после
+# пароля: построчный поиск склеить литералы не может, а такой обрубок адресом без
+# хоста не бывает.
+DSN='[A-Za-z][A-Za-z0-9+.-]*://[^:/@[:space:]"'"'"']+:([^$/{<@[:space:]"'"'"'*;][^@/[:space:]"'"'"';]*)?([A-Za-z][^@/[:space:]"'"'"';]*[0-9]|[0-9][^@/[:space:]"'"'"';]*[A-Za-z])[^@/[:space:]"'"'"';]*(@|["'"'"'])'
 PATTERNS=(
     -e '(token|secret|passwd|password|api_?key)[A-Za-z0-9_]*[[:space:]]*[:=][[:space:]]*["'"'"'][^"'"'"'$/{<[:space:]][^"'"'"'[:space:]]{5,}'
     -e '(token|secret|passwd|password|api_?key)[A-Za-z0-9_]*[[:space:]]*[:=][[:space:]]*[^"'"'"'$/{<+([:space:]-][^()[:space:]]{3,}[0-9][^()[:space:]]*([[:space:]]|$)'
@@ -55,6 +64,7 @@ PATTERNS=(
     # «ПРОПУСК»: кириллическое имя мимо шаблонов выше, и сторож молчал.
     # Замер по всему репозиторию перед включением: находок 0.
     -e '=[[:space:]]*["'"'"'][A-Za-z0-9_-]{43}["'"'"']'
+    -e "$DSN"
 )
 MARKER='не-секрет'
 # Номер версии — не секрет. Секрет узнаётся по ФОРМЕ значения
@@ -72,6 +82,13 @@ VERSIYA='(token|secret|passwd|password|api_?key)[A-Za-z0-9_-]*[[:space:]]*[:=][[
 # Сравнение без учёта регистра (имена в .env заглавные), поэтому -i у вызова.
 CHISLO='^[^:]*:[0-9]+:[[:space:]]*(export[[:space:]]+)?["'"'"']?[A-Za-z0-9_.-]*(tokens|(token|secret|passwd|password|api_?key)[A-Za-z0-9_-]*_(limit|max|min|size|count|ttl|len|timeout))["'"'"']?[[:space:]]*[:=][[:space:]]*"?[0-9]+"?[[:space:]]*$'
 
+# Обращение к настройкам — не секрет: `secret_key=settings.secret_key,`
+# присваивает ИМЯ, а не значение. Отсев — только строка из одного такого
+# присваивания (соседний токен в той же строке остаётся красным), первое звено —
+# строчными (JWT «eyJ….….…» тоже с точками, но в смешанном регистре; пароль из
+# строчных букв с точкой пропускается — названная цена). Регистр важен: без -i.
+OBRASHCHENIE='^[^:]*:[0-9]+:[[:space:]]*(export[[:space:]]+)?[A-Za-z_][A-Za-z0-9_.]*[[:space:]]*[:=][[:space:]]*[a-z_][a-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)+[,;)]*[[:space:]]*$'
+
 # Находка печатается как «СЕКРЕТ? путь:строка: вид [скрыто]» — значение в вывод
 # не идёт: вывод гейта оседает в журналах ворот, в выводе publish.sh и в
 # транскрипте сессии, а напечатанный секрет и есть утечка (И-3). Вид узнаётся
@@ -84,6 +101,7 @@ KINDS=(
     'github|ghp_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{20,}'
     'slack|xox[baprs]-[0-9A-Za-z-]{10,}'
     'pem|-----BEGIN [A-Z ]*PRIVATE KEY-----'
+    "dsn|$DSN"
     'форма-43|=[[:space:]]*["'"'"'][A-Za-z0-9_-]{43}["'"'"']'
 )
 mask_findings() {  # stdin: строки git grep «путь:номер:текст»
@@ -250,7 +268,7 @@ scan_tree() {  # $1 = каталог
         [ "$xtrace_hits" = 0 ] || set -x
         return 1
     fi
-    hits=$(sed 's|^\./||' "$TMPD/tree.out" | grep -v "$MARKER" | grep -vE "$VERSIYA" | grep -viE "$CHISLO" || true)
+    hits=$(sed 's|^\./||' "$TMPD/tree.out" | grep -v "$MARKER" | grep -vE "$VERSIYA" | grep -viE "$CHISLO" | grep -vE "$OBRASHCHENIE" || true)
     [ -z "$hits" ] || mask_findings <<< "$hits"
     [ "$xtrace_hits" = 0 ] || set -x
     if [ -n "$hits" ]; then
@@ -378,7 +396,7 @@ run_scan_inner() {  # $1 = каталог репо, $2 = режим all|staged, 
     else
         # -a: строка с байтом не из UTF-8 иначе делает находки «двоичными», и grep
         # молча роняет их все — секрет проходил бы «чисто».
-        hits=$(grep -av "$MARKER" "$TMPD/patterns.out" | grep -avE "$VERSIYA" | grep -aviE "$CHISLO" || true)
+        hits=$(grep -av "$MARKER" "$TMPD/patterns.out" | grep -avE "$VERSIYA" | grep -aviE "$CHISLO" | grep -avE "$OBRASHCHENIE" || true)
     fi
     if [ -n "$hits" ]; then
         mask_findings <<< "$hits"
@@ -1109,6 +1127,62 @@ SHIM
         [ "$kod3" = 1 ] || { echo "  свой список отсева не заменил вшитый (код $kod3)"; return 1; }
     }
 
+    # Случай 32. Обращение к настройкам (`ключ=settings.имя`) — не литерал,
+    # а соседний настоящий токен и JWT с точками — красные. Судятся обе ветки:
+    # индекс и каталог без git.
+    sluchai_obrashchenie_k_nastrojkam() {
+        local K vyvod_git vyvod_tree
+        {
+            printf '    aws_secret_access_key=settings.s3_secret_access_key,\n'  # не-секрет: стенд
+            printf 'api_key = config.api_key_v2\n'  # не-секрет: стенд
+            printf 'token=eyJhbGciOi1J9.eyJzdWIiOi2.SflKxw3\n'  # не-секрет: стенд
+            printf 'secret=settings.k1_2, token=ab12cd34ef\n'  # не-секрет: стенд
+            printf 'token=ab12cd34ef secret=settings.k1_2\n'  # не-секрет: стенд
+        } > "$T/nastrojki.py"
+        git -C "$T" add nastrojki.py >/dev/null 2>&1
+        vyvod_git=$(run_scan "$T" all "" "$KONF_PUSTOJ" 2>&1 || true)
+        git -C "$T" rm -q --cached nastrojki.py
+        K=$(mktemp -d -t proba-check-secrets-XXXXXX); mv "$T/nastrojki.py" "$K/"
+        vyvod_tree=$(HARNESS_CONF="$C/skip-pusto.conf" HARNESS_INSTALL_CONF=/dev/null \
+            run_scan "$K" all "" "$KONF_PUSTOJ" 2>&1 || true)
+        rm -rf "$K"
+        local vetka vyvod
+        for vetka in git tree; do
+            [ "$vetka" = git ] && vyvod="$vyvod_git" || vyvod="$vyvod_tree"
+            if printf %s "$vyvod" | grep -qE 'nastrojki.py:[12]:'; then
+                echo "  $vetka: обращение к настройкам принято за секрет"; return 1
+            fi
+            printf %s "$vyvod" | grep -q 'nastrojki.py:3:' || { echo "  $vetka: JWT с точками погашен отсевом"; return 1; }
+            printf %s "$vyvod" | grep -q 'nastrojki.py:4:' || { echo "  $vetka: токен после настройки погашен"; return 1; }
+            printf %s "$vyvod" | grep -q 'nastrojki.py:5:' || { echo "  $vetka: токен перед настройкой погашен"; return 1; }
+        done
+    }
+
+    # Случай 33. Пароль в адресе базы — красный: целиком, разбитый на два
+    # соседних литерала в строке и через перевод строки. Подстановка, порт без
+    # пароля и пароль без цифры (заглушка из документации) — зелёные.
+    sluchai_parol_v_adrese_bazy() {
+        {
+            printf 'URL = "postgresql://app:Hunt3rPass77@db:5432/app"\n'  # не-секрет: стенд
+            printf 'URL = "postgresql://app:Hunt3rPass77" "@db:5432/app"\n'  # не-секрет: стенд
+            printf 'URL = ("postgresql://app:Hunt3rPass77"\n'  # не-секрет: стенд
+            printf '       "@db:5432/app")\n'
+            printf 'URL = "postgresql://app:${DB_PASSWORD}@db:5432/app"\n'
+            printf 'REDIS = "redis://redis:6379/0"\n'
+            printf 'API = "http://localhost:8080"\n'
+            printf 'URL = "postgresql://user:password@localhost/db"\n'  # не-секрет: стенд
+        } > "$T/baza.py"
+        git -C "$T" add baza.py >/dev/null 2>&1
+        local vyvod n; vyvod=$(run_scan "$T" all "" "$KONF_PUSTOJ" 2>&1 || true)
+        rm -f "$T/baza.py"; git -C "$T" rm -q --cached baza.py
+        for n in 1 2 3; do
+            printf %s "$vyvod" | grep -q "baza.py:$n: dsn" || { echo "  пароль адреса базы в строке $n не пойман"; return 1; }
+        done
+        if printf %s "$vyvod" | grep -qE 'baza.py:[45678]:'; then
+            echo "  адрес без пароля принят за секрет"; return 1
+        fi
+    }
+
     # ТАБЛИЦА СЛУЧАЕВ. Число печатается из её длины: рукописное «N/7» уже
     # разъезжалось с действительностью, и заметить это было некому.
     SLUCHAI=(
@@ -1143,6 +1217,8 @@ SHIM
         "числовой лимит TOKENS не секрет, токены рядом — красные:sluchai_chislovoj_limit"
         "секрет в каталоге без git — красный, без значения в выводе:sluchai_bez_git_sekret"
         "каталог без git, node_modules не судится, список отсева — данные:sluchai_bez_git_otsev"
+        "обращение к настройкам не секрет, JWT и токен рядом — красные:sluchai_obrashchenie_k_nastrojkam"
+        "пароль в адресе базы — красный, и разбитый на два литерала:sluchai_parol_v_adrese_bazy"
     )
 
     vsego=${#SLUCHAI[@]}

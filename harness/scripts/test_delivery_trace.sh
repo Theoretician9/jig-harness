@@ -136,26 +136,42 @@ def kick_delay(path, uid):
         return "нет"
     return f"{min(kicks) - rec:.2f}"
 
+def kick_before(path, uid, ends):
+    """Толчок раньше, чем кончилось первое обращение «принял» к Bot API стенда
+    (ответ или обрыв по таймауту curl): моменты концов — строки файла ends."""
+    ts = rec_ts(path, uid)
+    kicks = [float(d["когда"]) for d in rows(path, "kick_sent")
+             if ts in str(d.get("ts_список") or "").split(",")]
+    try:
+        ended = min(float(x) for x in open(ends, encoding="utf-8").read().split())
+    except (OSError, ValueError):
+        return "нет (обращение «принял» не кончилось)"
+    if not kicks:
+        return "нет (толчка нет)"
+    lag = min(kicks) - ended
+    return "да" if lag < 0 else f"нет (толчок через {lag:.2f} с после конца «принял»)"
+
 def kicks(path):
     return str(len(rows(path, "kick_sent")))
 
 cmd, args = sys.argv[1], sys.argv[2:]
-print({"rec_when": rec_when, "rec_ts": rec_ts, "kick_delay": kick_delay, "kicks": kicks}[cmd](*args))
+print({"rec_when": rec_when, "rec_ts": rec_ts, "kick_delay": kick_delay,
+       "kick_before": kick_before, "kicks": kicks}[cmd](*args))
 PYEOF
 mk() { python3 "$T/marks.py" "$@"; }
-# Имя случая постоянное (по нему мутация находит случай), значение — в ответе «нет (…)».
-le() { python3 -c 'import sys; a=sys.argv[1]; print("да" if a != "нет" and float(a) <= float(sys.argv[2]) else f"нет ({a})")' "$1" "$2"; }
 
 # ═══ 1. ДИСПЕТЧЕР: целым циклом, Bot API с задержкой «принял» ════════════════
 if want диспетчер; then
     PATHS_JUDGED=$((PATHS_JUDGED + 1))
     echo "═══ путь 1: tg-dispatcher.sh целым циклом — «принял» фоном"
-    # sendMessage: «sleep» — ответ через заданные секунды, «drop» — связь рвётся без
+    # sendMessage: «sleep» — ответ через заданные секунды, «hold» — ответ, когда проба
+    # положит файл release рядом с acks (конец обращения — ответ или уход клиента —
+    # пишется в acks-end), «drop» — связь рвётся без
     # ответа (curl падает, как при лежащей сети). Каждое обращение пишется С МОМЕНТОМ
     # ПРИХОДА: так судится, что «принял» ушло ≤ 30 с, а не только что дошло.
     # Сервер многопоточный: висящий sendMessage не держит getUpdates.
     cat > "$T/api.py" <<'PYEOF'
-import json, sys, time, urllib.parse
+import json, os, select, socket, sys, time, urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 port, acks, ready, upd, mode, delay = int(sys.argv[1]), sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5], float(sys.argv[6])
 UPDATES = json.load(open(upd, encoding="utf-8"))
@@ -180,6 +196,13 @@ class H(BaseHTTPRequestHandler):
             fh.write(f"{time.time():.3f} " + (form.get("text") or [""])[0].replace("\n", " ") + "\n")
         if mode == "drop":
             self.close_connection = True; return
+        if mode == "hold":
+            while not os.path.exists(os.path.join(os.path.dirname(acks), "release")):
+                ready_, _, _ = select.select([self.connection], [], [], 0.05)
+                if ready_ and not self.connection.recv(1, socket.MSG_PEEK):
+                    break  # curl ушёл по своему таймауту
+            with open(os.path.join(os.path.dirname(acks), "acks-end"), "a") as fh:
+                fh.write(f"{time.time():.3f}\n")
         time.sleep(delay)
         self.reply({"ok": True, "result": {"message_id": 1}})
     do_GET = do_POST
@@ -195,7 +218,7 @@ PYEOF
     kicks_are() { [ "$(mk kicks "$1")" -ge "$2" ] 2>/dev/null; }
     lock_free() { flock -n "$1" true 2>/dev/null; }
 
-    # $1 = имя, $2 = «id:текст;…», $3 = sleep|drop, $4 = задержка sendMessage, $5 = pause|"".
+    # $1 = имя, $2 = «id:текст;…», $3 = sleep|hold|drop, $4 = задержка sendMessage, $5 = pause|"".
     # Диспетчер остаётся жить: остановка — d_stop (случаю (в) нужен живой «принял»).
     d_start() {
         local name="$1" spec="$2" mode="$3" delay="$4" flag="${5:-}" port
@@ -257,15 +280,21 @@ EOF
     }
     d_reached() { case_check "СТЕНД ($1): диспетчер разобрал все сообщения" "0" "$D_STAND_BAD"; }
 
-    # (а) БОЛЬНОЙ: «принял» висит 8 с — толчок каждого из двух сообщений ≤ 4 с от
-    # его received (спека К-1: максимум 4 с). Синхронный «принял» даёт ≥ 8 с.
-    echo "— (а) sendMessage отвечает через 8 с, два текста одним пакетом"
-    d_start slow "901:первое сообщение пробы про карту;902:второе сообщение пробы про панель" sleep 8
+    # (а) БОЛЬНОЙ: Bot API не отвечает на «принял», пока проба не увидит оба толчка
+    # (предел 40 с), — толчок каждого из двух сообщений раньше конца первого «принял».
+    # Синхронный «принял» толкает только после конца: ответа или своего таймаута
+    # curl. Судится порядок, а не секунды от received
+    # (спека К-1: максимум 4 с): под нагрузкой машины здоровый толчок второго шёл
+    # 8 с — бюджет мерил машину, а не код.
+    echo "— (а) sendMessage не отвечает до толчков, два текста одним пакетом"
+    d_start slow "901:первое сообщение пробы про карту;902:второе сообщение пробы про панель" hold 0
     wait_for 40 kicks_are "$DJ" 2 || true
+    : > "$DS/release"
     d_finish 40; d_reached "медленный «принял»"
-    D901=$(mk kick_delay "$DJ" 901); D902=$(mk kick_delay "$DJ" 902)
-    case_check "БОЛЬНОЙ (а): received→kick_sent первого ≤ 4 с при «принял» 8 с" "да" "$(le "$D901" 4)"
-    case_check "БОЛЬНОЙ (а): received→kick_sent второго ≤ 4 с при «принял» 8 с" "да" "$(le "$D902" 4)"
+    case_check "БОЛЬНОЙ (а): толчок первого отдан, пока «принял» ждёт ответа" "да" \
+        "$(mk kick_before "$DJ" 901 "$DS/acks-end")"
+    case_check "БОЛЬНОЙ (а): толчок второго отдан, пока «принял» ждёт ответа" "да" \
+        "$(mk kick_before "$DJ" 902 "$DS/acks-end")"
     # (б) «принял» всё равно уходит, и не позже 30 с от приёма (правило канала 1).
     for pair in "901:первое сообщение пробы" "902:второе сообщение пробы"; do
         uid="${pair%%:*}"; words="${pair#*:}"
@@ -306,7 +335,9 @@ PYEOF
     echo "— (г) sendMessage рвёт связь"
     d_start drop "921:сообщение пробы при лежащем канале" drop 0
     d_finish 30; d_reached "лежащий канал"
-    case_check "(г) толчок отдан, хотя «принял» не ушёл" "да" "$(le "$(mk kick_delay "$DJ" 921)" 4)"
+    # Судится сам толчок: секунды до него под нагрузкой машины доходили до 4,7 с.
+    case_check "(г) толчок отдан, хотя «принял» не ушёл" "да" \
+        "$(D=$(mk kick_delay "$DJ" 921); [ "$D" != нет ] && echo да || echo "нет (толчка нет)")"
     case_check "(г) в журнале диспетчера «квитанция на … не ушла»" "да" \
         "$(grep -qE 'квитанция на [^ ]+ не ушла: ' "$DS/log/tg-dispatcher.log" 2>/dev/null && echo да || echo нет)"
 

@@ -68,6 +68,9 @@ SECRET = "ZZSECRET" + uuid.uuid4().hex[:12]  # не-секрет: подстав
 TMP = Path(tempfile.mkdtemp(prefix="proba-process-library-gate-"))
 ALERT_KEY = "process-dispatcher:не-разобрано"
 TIMEOUT = 120
+# Судья читает слой установки (PROCESS_LIBRARY_LOCAL): без своей двери стенд судил бы
+# вместе с записями живой машины. Файла нет — слоя нет; свой слой ставит случай 19в.
+os.environ["HARNESS_PROCESS_LIBRARY_LOCAL"] = str(TMP / "слоя-нет.json")
 
 paths = failures = 0
 
@@ -404,6 +407,36 @@ def case_cron_not_executable() -> None:
     judged_red("команда alpha без +x", stand, "не исполняется", "harness/demons/alpha.sh", "alpha")
 
 
+def case_installation_layer() -> None:
+    print("── 19в. свои процессы копии живут в слое установки — судья его читает ──")
+    # Находка копии bkb 14.11.2026: своя строка крона копии с записью в process-library.json
+    # была зелёной; раскладка обновления сняла запись (в пакете её нет), а судья слоя
+    # PROCESS_LIBRARY_LOCAL не читал — «без записи: crontab :: bkb-backup», откат.
+    stand = Stand("layer")
+    stand.touch("scripts/own.sh")
+    stand.cron.append(f"0 4 * * * {stand.root}/scripts/run-background.sh own -- "
+                      f"{stand.root}/scripts/own.sh >>/tmp/own.log 2>&1")
+    layer = stand.root.parent / "layer-own.json"
+    own = record("own", "крон", ["scripts/own.sh"])
+    layer.write_text(json.dumps({"процессы": [own]}, ensure_ascii=False), encoding="utf-8")
+    env = dict(os.environ, HARNESS_PROCESS_LIBRARY_LOCAL=str(layer))
+    rc, out, found = stand.judge(env)
+    wanted = len(stand.library["процессы"]) + 1
+    tail = out.splitlines()[-1] if out else ""
+    report(rc == 0 and not found and tail == f"check-process-library: чисто, записей {wanted}",
+           f"своя строка крона, запись в слое, расписания в пакете нет → чисто, записей {wanted}",
+           [f"rc={rc}", f"нарушения {found[:3]}", f"хвост «{tail[:200]}»"])
+    # Слой судится, а не оправдывает: его запись без файла и без строки крона — мёртвая.
+    layer.write_text(json.dumps({"процессы": [own, record("ghost", "крон", ["scripts/ghost.sh"])]},
+                                ensure_ascii=False), encoding="utf-8")
+    rc, out, found = stand.judge(env)
+    wanted_lines = {"НАРУШЕНИЕ мёртвая запись: ghost :: scripts/ghost.sh",
+                    "НАРУШЕНИЕ мёртвая запись: ghost :: crontab"}
+    report(rc == 1 and set(found) == wanted_lines,
+           "запись слоя без файла и строки крона → два «мёртвая запись: ghost», без «нет расписания»",
+           [f"rc={rc}", f"нарушения {found[:4]}"])
+
+
 def case_sources_unavailable() -> None:
     print("── 20. crontab / systemctl недоступны → код 3 вслух, не «чисто» ──")
     variants = [("crontab нет", dict(crontab=False), "crontab"),
@@ -598,7 +631,8 @@ def main() -> int:
         for fn in (case_clean, case_new_demon, case_record_without_source, case_cron_wrapped, case_cron_bare,
                    case_hook, case_ghost_mechanism, case_removed_demon, case_unit, case_schedule,
                    case_empty_root, case_wiring, case_precommit_live_prefix, case_cron_bypasses,
-                   case_dead_sources, case_gate_key_live_conf, case_cron_not_executable, case_sources_unavailable, case_live_machine_wording):
+                   case_dead_sources, case_gate_key_live_conf, case_cron_not_executable, case_installation_layer,
+                   case_sources_unavailable, case_live_machine_wording):
             try:
                 fn()
             except Exception as error:  # noqa: BLE001 — проба называет, а не падает

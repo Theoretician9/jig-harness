@@ -27,7 +27,7 @@
   # (checks-stream: каждые 20 минут) либо период и сутки запаса (nightly-mutations:
   # по вторникам 09:00, период 10080).
   # Пишет не в журнал юнита (агенту journalctl его строк не показывает), а в
-  # файл: StandardOutput=append:/var/log/harness/checks-stream.log. Признак —
+  # файл: оболочка ExecStart дописывает /var/log/harness/checks-stream.log. Признак —
   # её приставка «checks-stream:»; строки обёртки («[checks-stream] …») не в счёт.
   harness/demons/checks-stream.sh:
     юнит: harness-checks-stream.service

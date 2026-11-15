@@ -42,6 +42,8 @@ HINT = "Запиши это через исполнителя: Agent с subagent
 WRAPPERS = ("setsid", "nohup")
 NULL_SINKS = ("/dev/null", "&1", "&2")
 LOG_DIR_PREFIX = config.log_dir().rstrip("/") + "/"
+# Цель перенаправления кончается на разделителе команд: «2>&1; date» пишет в &1, а не в «&1;».
+REDIRECT = r"\d*>>?\s*(&?[^\s;|&]+)"
 
 
 def roles_path() -> Path:
@@ -68,7 +70,7 @@ def strip_heredocs(command: str) -> str:
 
 
 def redirect_targets(command: str) -> list:
-    targets = re.findall(r"\d*>>?\s*(&?\S+)", command)
+    targets = re.findall(REDIRECT, command)
     return [t.strip("'\"") for t in targets]
 
 
@@ -94,6 +96,19 @@ def git_subcommand(args: list) -> str:
         elif not word.startswith("-"):
             return word
     return ""
+
+
+def project_relative(path: str) -> str:
+    """Абсолютный путь внутри проекта — относительным, как его пишет список «скрипты».
+
+    Управляющий зовёт предписанные скрипты и полным путём; без этого отказ ловил
+    who-writes.py, model-for.sh и launch-plan.py (находка копии bkb 11.11). Путь
+    сначала нормализуется: «корень/../x» внутрь проекта не попадает.
+    """
+    if not path.startswith("/"):
+        return path
+    clean = os.path.normpath(path)
+    return clean[len(str(ROOT)) + 1:] if clean.startswith(str(ROOT) + "/") else path
 
 
 def script_allowed(call: list, role: dict) -> bool:
@@ -125,6 +140,8 @@ def segment_verdict(words: list, role: dict) -> str:
     if name in ("python3", "bash", "sh"):
         script_at = next((i for i, w in enumerate(words) if i and not w.startswith("-")), 0)
         call = words[script_at:]
+        if call:
+            call = [project_relative(call[0])] + call[1:]
         script = call[0] if call else ""
         return "" if script_allowed(call, role) else f"{name} {script[:40]}: скрипт вне списка"
     return "" if name in role.get("команды", []) else f"{name}: команда вне списка чтения"
@@ -137,7 +154,7 @@ def bash_verdict(command: str, role: dict) -> str:
     for target in redirect_targets(text):
         if not target_ok(target, role):
             return f"перенаправление в {target} — запись вне журнала решений"
-    text = re.sub(r"\d*>>?\s*&?\S+", " ", text)
+    text = re.sub(REDIRECT, " ", text)
     text = re.sub(r"<\s*\S+", " ", text)
     for part in re.split(r"\|\||&&|[;|&\n]", text):
         try:

@@ -29,6 +29,8 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 GUARD = Path(os.environ.get("HARNESS_LEAD_ROLE_GUARD") or HERE / "lead_role_guard.py")
 ROLES = HERE.parent.parent / "harness" / "config" / "helper-roles.yaml"
+# Корень проекта сторожа: абсолютный путь скрипта судится против него.
+ROOT = GUARD.resolve().parent.parent.parent
 JOURNAL = "роли-помощников.jsonl"
 # Каталог журналов установки — у общего загрузчика, как у сторожа: зашитый
 # /var/log/harness краснил пробу на копии с другим LOG_DIR (стенд 14.11.2026).
@@ -116,6 +118,25 @@ with tempfile.TemporaryDirectory() as tmp:
                 "git --config-env=core.pager=X log", "git --exec-path=/tmp/e status", "git -C /tmp/x -c core.pager=x log",
                 "git -C /tmp/x commit -m x", "git -C /tmp/x push", "git -c core.x=y reset --hard"]:
         check(f"отказ: {cmd[:50]}", 2, code(bash(LEAD, cmd)))
+
+    # Находка копии bkb 11.11: управляющий не доходил до
+    # скриптов, которые роль ему предписывает, — абсолютный путь, «cd корень &&», «2>&1;»
+    # и дверь launch_plan_guard вне списка. Журнал ролей сервера: 202 таких отказа.
+    # Поломка, что оставила бы зелёной: пускать любой абсолютный путь — ловят отказы ниже.
+    print("управляющий: предписанные скрипты")
+    for cmd in [f"python3 {ROOT}/scripts/who-writes.py", f"bash {ROOT}/scripts/model-for.sh код",
+                f"python3 {ROOT}/scripts/launch-plan.py hr.x --json",
+                f"cd {ROOT} && python3 scripts/who-writes.py",
+                "python3 scripts/who-writes.py 2>&1; date", "ls /tmp > /dev/null; date",
+                "python3 scripts/hooks/launch_plan_guard.py --door 'план устарел, режу сам'",
+                f"python3 {ROOT}/scripts/hooks/launch_plan_guard.py --door 'план устарел'",
+                "python3 scripts/hooks/agent_budget_guard.py --door 'исполнители уже кончились'"]:
+        check(f"можно: {cmd[:60]}", 0, code(bash(LEAD, cmd)))
+    for cmd in ["python3 /tmp/evil/scripts/who-writes.py", f"python3 {ROOT}/../scripts/who-writes.py",
+                f"python3 {ROOT}/scripts/launch-plan.py --прижить hr.x a/b",
+                "python3 scripts/hooks/launch_plan_guard.py --door x --selftest",
+                "cd /tmp && rm -rf x", "python3 scripts/who-writes.py 2>&1; rm x"]:
+        check(f"отказ: {cmd[:60]}", 2, code(bash(LEAD, cmd)))
 
     print("управляющий: Agent")
     check("harness-worker с моделью — можно", 0,

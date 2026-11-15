@@ -71,9 +71,10 @@ EOF
   # LAYOUT_LOCK_WAIT_SEC= пустыми — окружение смены не перебивает каталог копий,
   # замки и ожидание стенда (пустое значит «не задано»). С LOG_DIR из окружения
   # стенд брал бы ЖИВОЙ <LOG_DIR>/locks: живой layout.lock и живой update.lock.
+  # Слой библиотеки процессов — свой у стенда: образец harness.conf называет слой живой машины.
   run_stand() {  # $1=install.conf $2=harness.conf, дальше VAR=знач
     env HARNESS_SELFTEST=1 HARNESS_INSTALL_CONF="$1" HARNESS_CONF="$2" BACKUP_DIR= LOG_DIR= \
-      LAYOUT_LOCK_WAIT_SEC= "${@:3}" bash "$0"
+      LAYOUT_LOCK_WAIT_SEC= HARNESS_PROCESS_LIBRARY_LOCAL="$T/слой-процессов.json" "${@:3}" bash "$0"
   }
   run_stand "$T/install.conf" "$T/harness.conf" || { echo "SELFTEST: раскладка упала"; exit 1; }
   ok_flag=1
@@ -105,6 +106,8 @@ EOF
   # Перенос «замер» библиотеки процессов: у живого файла замер заполнен у a и b
   # и есть лишняя запись c, у a ещё и правлено «название». После раскладки замер a, b
   # прежний, c нет, «название» — пакетное. Больной вид: замер сброшен в «не измерено».
+  # c нет ни в пакете, ни в прежней сборке (опись стенда — HEAD пакета): своя запись
+  # копии, она обязана лечь в слой установки стенда, а не пропасть.
   LIB="$T/proj/harness/config/process-library.json"
   python3 -B - "$LIB" <<'PY'
 import json, sys
@@ -114,7 +117,9 @@ recs = [r for r in lib["процессы"] if "доля_нагрузки" in r]
 for r in recs[:2]:
     r["доля_нагрузки"]["замер"] = {"дата": "2026-01-01", "неделя": {"id": r["id"]}}
 recs[0]["название"] = "СТАРОЕ"
-extra = json.loads(json.dumps(recs[0])); extra["id"] = "c-extra"
+# Статус живой нарочно: копия первой записи унаследовала бы её «снят …», а снятую
+# раскладка верно не переносит — проба судила бы не тот случай.
+extra = json.loads(json.dumps(recs[0])); extra["id"] = "c-extra"; extra["статус"] = "работает"
 lib["процессы"].append(extra)
 open(path, "w", encoding="utf-8").write(json.dumps(lib, indent=2, ensure_ascii=False) + "\n")
 PY
@@ -123,10 +128,11 @@ PY
   run_stand "$T/install.conf" "$T/harness.conf" >/dev/null || true
   python3 -B "$T/proj/scripts/build-live-check-list.py" --проверить >/dev/null 2>&1 \
     || { echo "SELFTEST: после раскладки производный документ не сошёлся с --проверить"; ok_flag=0; }
-  lib_verdict=$(python3 -B - "$LIB" "$HERE/config/process-library.json" <<'PY'
-import json, sys
+  lib_verdict=$(python3 -B - "$LIB" "$HERE/config/process-library.json" "$T/слой-процессов.json" <<'PY'
+import json, os, sys
 new = json.load(open(sys.argv[1], encoding="utf-8"))
 pkg = json.load(open(sys.argv[2], encoding="utf-8"))
+layer = json.load(open(sys.argv[3], encoding="utf-8"))["процессы"] if os.path.exists(sys.argv[3]) else []
 recs = [r for r in pkg["процессы"] if "доля_нагрузки" in r]
 by_id = {r["id"]: r for r in new["процессы"]}
 bad = []
@@ -140,11 +146,13 @@ if by_id[recs[0]["id"]]["название"] != recs[0]["название"]:
     bad.append("«название» не пакетное")
 if len(new["процессы"]) != len(pkg["процессы"]):
     bad.append("число записей не равно пакетному")
+if [r["id"] for r in layer] != ["c-extra"]:
+    bad.append(f"своя запись c-extra не в слое установки стенда: слой {[r['id'] for r in layer]}")
 print("; ".join(bad))
 PY
 )
   if [[ -z "$lib_verdict" ]]; then
-    echo "  ок    замер process-library.json перенесён по id, лишняя запись снята, поля пакета на месте"
+    echo "  ок    замер process-library.json перенесён по id, своя запись — в слое установки, поля пакета на месте"
   else
     echo "  ПЛОХО замер process-library.json: $lib_verdict"; ok_flag=0
   fi
@@ -275,6 +283,25 @@ PY
     echo "  ПЛОХО слияние с продуктом: $merge_verdict"; ok_flag=0
   fi
   grep -q "живой gitignore" "$T/proj/.gitignore" || { echo "SELFTEST: затёрт живой .gitignore"; ok_flag=0; }
+  # Живой .gitignore без строк харнеса прошёл три раскладки: каждая строка
+  # харнеса (и .tasks/*/живьём находки bkb) стоит ровно один раз.
+  ignore_verdict=$(python3 -B - "$HERE/scripts/lib/ignore_lines.py" "$T/proj/.gitignore" <<'PY'
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("ignore_lines", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+rows = open(sys.argv[2], encoding="utf-8").read().split("\n")
+wrong = {line: rows.count(line) for line in module.LINES if rows.count(line) != 1}
+if ".tasks/*/живьём" not in module.LINES or not module.LINES:
+    wrong["перечень"] = "без .tasks/*/живьём"
+print(wrong or "")
+PY
+)
+  if [[ -z "$ignore_verdict" ]]; then
+    echo "  ок    живой .gitignore после трёх раскладок: строки харнеса дописаны по разу"
+  else
+    echo "  ПЛОХО живой .gitignore: строки харнеса не по разу: $ignore_verdict"; ok_flag=0
+  fi
 
   # ── БОЛЬНОЙ СЛУЧАЙ: образец harness.conf в проекте ────────────────────────
   # Гейт ключей образца по умолчанию судит <проект>/harness/config/harness.conf,
@@ -2904,6 +2931,16 @@ for f in "$HERE"/config/*; do
     # dispatcher'а (indent=2), поэтому идёт через шаг и на чистой установке: иначе
     # вторая раскладка «перекрывала» бы его одним переформатированием.
     # Не вышло — кладём пакетный файл как раньше.
+    # Свои записи копии (нет ни в пакете, ни в прежней сборке из описи) до замены
+    # файла уходят в слой установки: копия bkb 14.11.2026 теряла их каждым обновлением,
+    # и самопроверка краснела «без записи» на её же строке крона.
+    prev_pkg=$(sed -n '2s/^# пакет \([0-9a-f]\{40\}\)$/\1/p' "$PROJECT_DIR/.layout-manifest" 2>/dev/null || true)
+    baseline=-
+    if [[ -n "$prev_pkg" ]] && git -C "$HERE/.." show "$prev_pkg:harness/config/$name" \
+        > "$LIBTMP/$name.baseline" 2>/dev/null; then
+      baseline="$LIBTMP/$name.baseline"
+    fi
+    python3 -B "$HERE/scripts/lib/process_library.py" carry-own "$PROJECT_DIR/harness/config/$name" "$f" "$baseline" || true
     if python3 -B - "$PROJECT_DIR/harness/config/$name" "$f" "$LIBTMP/$name" <<'PY'
 import json, sys
 old_path, pkg_path, out_path = sys.argv[1:4]
@@ -3209,23 +3246,13 @@ fi
 [[ -f "$PROJECT_DIR/dev-map.yaml" ]] || cp "$HERE/dev-map.yaml" "$PROJECT_DIR/dev-map.yaml"
 [[ -d "$PROJECT_DIR/память"      ]] || cp -r "$HERE/память"    "$PROJECT_DIR/память"
 
-# .gitignore — создаётся только при отсутствии, живой принадлежит агенту и не
-# трогается. Причина: IDE-файлы и python-байткод не должны попадать в пакет/репо
-# (улика: __pycache__ однажды уехал вместе с пакетом).
-if [[ ! -f "$PROJECT_DIR/.gitignore" ]]; then
-  cat > "$PROJECT_DIR/.gitignore" <<'EOF'
-# Создан razlozhit-harnes.sh: IDE-файлы и байткод не должны попадать в пакет/репо.
-__pycache__/
-*.pyc
-.env
-.cursor/
-.cursorrules
-.vscode/
-.idea/
-docs/handover/*.tmp
-EOF
-  echo ".gitignore создан"
-fi
+# .gitignore: IDE-файлы, байткод и следы механизмов харнеса не должны попадать
+# в репо (улика: __pycache__ однажды уехал вместе с пакетом). Живой файл
+# принадлежит проекту: строки харнеса только дописываются, если их нет, — иначе
+# установленный раньше проект не получал строк новых механизмов (bkb, 11.11.2026).
+# Файлы уже легли: отказ записи не должен ронять раскладку под set -e.
+python3 -B "$HERE/scripts/lib/ignore_lines.py" "$PROJECT_DIR/.gitignore" \
+  || echo "ВНИМАНИЕ: .gitignore не сверен — python3 -B $HERE/scripts/lib/ignore_lines.py $PROJECT_DIR/.gitignore (причина выше)"
 
 # конфиг порогов — не затирать живой. В селфтесте шаг пропускается ВОВСЕ
 # (П-11): селфтест не трогает /etc никогда — под root он клал бы боевой конфиг

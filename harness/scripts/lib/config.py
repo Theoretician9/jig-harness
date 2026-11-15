@@ -51,6 +51,7 @@ def _места(корень_установки: str, state: str = "") -> dict:
         "STATE_DIR": state,
         "HEARTBEAT_DIR": f"{state}/heartbeat",
         "PANEL_STATE_DIR": f"{state}/panel-state",
+        "INSTALL_STEPS_DIR": f"{state}/install-steps",
         "SECRETS_DIR": f"{state}/secrets",
     }
 
@@ -234,6 +235,10 @@ def live_check_task_dir(состояние) -> Path:
 
 def heartbeat_dir() -> str:
     return конфиг()["HEARTBEAT_DIR"]
+
+
+def install_steps_dir() -> str:
+    return конфиг()["INSTALL_STEPS_DIR"]
 
 
 def secrets_dir() -> str:

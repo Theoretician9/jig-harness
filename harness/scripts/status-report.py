@@ -50,8 +50,11 @@ STATUS_DONE_SINCE_LAST — «1»: СДЕЛАНО судится по концу 
 статуса (явный --с главнее метки; метки нет — окно 12 ч); «0»/нет ключа — окно,
 STATUS_LOST_HOURS — часы тишины, после которых запуск без agent.finish потерян (нет ключа или мусор — 2).
 Потерянный: самая поздняя запись его жизни (свой launch, запись с data.вызов = его вызов или
-data.родитель = его вызов, launch и finish потомков любой глубины) старше порога. Он не в ДЕЛАЕТСЯ,
-а в блоке «⚠ ПОТЕРЯН»; задача, где остались только потерянные запуски и законченные, — законченная.
+data.родитель = его вызов, launch и finish потомков любой глубины, запись его транскрипта) старше
+порога. Он не в ДЕЛАЕТСЯ, а в блоке «⚠ ПОТЕРЯН»; был после него запуск той же задачи — под его строкой
+«оборван, работу продолжили». Задача, где остались только потерянные запуски и законченные, — законченная.
+В СДЕЛАНО при STATUS_DONE_SINCE_LAST=1 и пустом блоке: живы помощники — «с HH:MM ничего не сдано, работа
+идёт», иначе — «с HH:MM нового нет; последний помощник кончил HH:MM».
 Этапы берутся из $PROJECT_DIR/.tasks/<id>/ (журнал.md, harness-code-review.md, мутации.log) и
 из git (коммиты со строкой «Dev-Map: <id>»). Вывод в stdout, код 0.
 """
@@ -79,6 +82,8 @@ NOTHING = "пока ничего"
 NOTHING_NEW = "пока нового нет"
 # Простой виден как простой: с какого часа тихо и когда кончил последний помощник журнала.
 IDLE_SINCE = "с {since} нового нет; последний помощник кончил {last}"
+# Помощники живы — «нового нет» читается как «стоим» (находка bkb 12.11): сказать, что работа идёт.
+STILL_WORKING = "с {since} ничего не сдано, работа идёт"
 COMMITS_NOTE = "коммитов {count}, последний: {subject}"
 NOBODY_NOTE = "сейчас никто не работает"
 GIT_TIMEOUT = 30
@@ -90,6 +95,9 @@ LOST_MAX = 3
 # Блок потерянных: по строке на запуск, остаток одной строкой.
 LOST_HEADER = "⚠ ПОТЕРЯН"
 LOST_LINE = "• {title}, {model}, с {clock}"
+# После оборванного в той же задаче был новый запуск: работа не брошена, её доделывает другой.
+# Своей строкой под пунктом: в строке пункта приписка съедала название задачи до «…».
+CONTINUED_NOTE = "   оборван, работу продолжили"
 LOST_UNNAMED = "работа без названия"
 LOST_MORE = "и ещё {count}"
 MARK_NAME = "status-report.last"
@@ -137,6 +145,7 @@ class Launch:
         mark = TASK_MARK.search(f"{data.get('часть') or ''} {raw}")
         self.task = mark.group(1) if mark else ""
         self.call = data["вызов"]
+        self.session = str(row.get("session") or "")
         self.parent = data.get("родитель") or ""
         self.ts = parse_time(row.get("ts"))
         self.desc = clean_desc(raw)
@@ -306,11 +315,37 @@ def parse_launches(rows, session: str, cut: Cut, lost_after: timedelta) -> dict:
     return launches
 
 
-def split_lost(launches: dict, rows: list, cut: Cut, lost_after: timedelta) -> tuple:
-    """(потерянные для показа, их вызовы): без конца и без жизни дольше порога. С меткой потерянный
-    показывается, если запущен в окне или жил после метки, иначе не показывается нигде."""
+def transcript_heard(project: str, silent: list) -> dict:
+    """Вызов → последняя запись транскрипта помощника (mtime jsonl рядом с meta по toolUseId).
+    Долгий прогон помощника молчит в журнале вызовов часами, а транскрипт пишется, пока он жив."""
+    if not project or not silent:
+        return {}
+    base = Path(os.environ.get("CLAUDE_PROJECTS_DIR") or Path.home() / ".claude" / "projects")
+    # То же кодирование пути проекта, что у сторожей (stall-in-log.py project_transcripts).
+    folders = {base / project.replace("/", "-"), base / re.sub(r"[^a-zA-Z0-9]", "-", project)}
+    wanted = {n.call for n in silent}
+    heard = {}
+    for folder in folders:
+        for session in {n.session for n in silent if n.session}:
+            for meta in (folder / session / "subagents").glob("agent-*.meta.json"):
+                try:
+                    call = json.loads(meta.read_text(encoding="utf-8")).get("toolUseId")
+                    body = meta.with_name(meta.name.replace(".meta.json", ".jsonl"))
+                    if call in wanted:
+                        heard[call] = datetime.fromtimestamp(body.stat().st_mtime, timezone.utc)
+                except (OSError, ValueError, AttributeError):
+                    continue
+    return heard
+
+
+def split_lost(launches: dict, rows: list, cut: Cut, lost_after: timedelta, project: str) -> tuple:
+    """(потерянные для показа, их вызовы): без конца и без жизни дольше порога — ни в журнале, ни в
+    транскрипте. С меткой потерянный показывается, если запущен в окне или жил после метки."""
     alive = last_alive(rows)
     now = datetime.now(timezone.utc)
+    silent = [n for c, n in launches.items() if not n.done and now - alive.get(c, n.ts) > lost_after]
+    for call, moment in transcript_heard(project, silent).items():
+        alive[call] = max(alive.get(call, moment), moment)
     gone = {c for c, n in launches.items() if not n.done and now - alive.get(c, n.ts) > lost_after}
     shown = [launches[c] for c in gone
              if launches[c].ts >= cut.since or (cut.mark is not None and alive.get(c, launches[c].ts) > cut.mark)]
@@ -598,16 +633,19 @@ class LostItem(NamedTuple):
     title: str
     model: str
     ts: datetime
+    continued: bool
 
 
-def lost_items(lost: list, titles: dict, labels: dict, finished) -> list:
+def lost_items(lost: list, titles: dict, labels: dict, finished, continued) -> list:
     """По строке на задачу (самый ранний потерянный запуск); без задачи — по строке на запуск.
-    Сделанная задача строкой не показывается: finished(запуск) — судья «уже сделана»."""
+    Сделанная задача строкой не показывается: finished(запуск) — судья «уже сделана»;
+    continued(запуск) — после него в задаче был новый запуск, строка говорит «работу продолжили»."""
     firsts = {}
     for launch in lost:
         if not finished(launch):
             firsts.setdefault(launch.key or launch.call, launch)
-    return [LostItem(titles.get(n.key, LOST_UNNAMED), label_of(labels, n.model), n.ts) for n in firsts.values()]
+    return [LostItem(titles.get(n.key, LOST_UNNAMED), label_of(labels, n.model), n.ts,
+                     continued(n)) for n in firsts.values()]
 
 
 def lost_lines(lost: list, shown: int, width: int) -> list:
@@ -621,7 +659,7 @@ def lost_lines(lost: list, shown: int, width: int) -> list:
         if len(line) > width:
             room = width - len(LOST_LINE.format(title="…", **fields))
             line = LOST_LINE.format(title=clip(item.title, max(room, 1) + 1), **fields)
-        lines.append(line)
+        lines += [line] + ([CONTINUED_NOTE] if item.continued else [])
     if len(lost) > shown:
         lines.append(LOST_MORE.format(count=len(lost) - shown))
     return lines
@@ -741,11 +779,14 @@ def last_finish(rows: list) -> datetime | None:
     return max(moments, default=None)
 
 
-def idle_phrase(quiet_from: datetime, finished: datetime | None) -> str:
-    """«Нового нет» с часами; в журнале нет ни одного конца — прежняя фраза."""
+def idle_phrase(quiet_from: datetime, finished: datetime | None, working: bool) -> str:
+    """«Нового нет» с часами; помощники живы — «ничего не сдано, работа идёт»; в журнале нет ни одного
+    конца — прежняя фраза."""
+    clock = lambda moment: moment.astimezone().strftime("%H:%M")
+    if working:
+        return STILL_WORKING.format(since=clock(quiet_from))
     if finished is None:
         return NOTHING_NEW
-    clock = lambda moment: moment.astimezone().strftime("%H:%M")
     return IDLE_SINCE.format(since=clock(quiet_from), last=clock(finished))
 
 
@@ -828,7 +869,7 @@ def main() -> int:
     launches = parse_launches(rows, session, cut, lost_after)
     assign_keys(launches)
     containers = container_keys(launches)
-    lost, gone = split_lost(launches, rows, cut, lost_after)
+    lost, gone = split_lost(launches, rows, cut, lost_after, project)
     lost = [n for n in lost if n.call not in containers]
     tasks, loose = group_by_task(launches, containers)
     quiet_from = mark or since
@@ -842,7 +883,8 @@ def main() -> int:
     shown_roots = {family_root(t.key, cards) for t in shown}
     taken = {cid for cid in cards if family_root(cid, cards) in shown_roots}
     upcoming = next_cards(queue_text, dev_map, taken) if queue_text is not None else []
-    done_empty = idle_phrase(quiet_from, last_finish(rows)) if since_last else NOTHING
+    working = any(not n.done and n.call not in gone for n in launches.values())
+    done_empty = idle_phrase(quiet_from, last_finish(rows), working) if since_last else NOTHING
     fresh_loose = [n for n in loose if n.fresh and n.call not in gone]
     commits_of = lambda t: family_commits(family_root(t.key, cards), cards, commits)
     sections = [
@@ -853,7 +895,9 @@ def main() -> int:
     fallback = QUEUE_EMPTY if queue_text is not None else QUEUE_UNAVAILABLE
     umbrellas_done = {root for t in done if (root := family_root(t.key, cards)) != t.key}
     finished = lambda n: task_finished(n, cards, project, umbrellas_done)
-    print(assemble(Report(sections, lost_items(lost, titles, labels, finished), upcoming, fallback), ceiling))
+    continued = lambda n: bool(n.key) and any(m.key == n.key and m.ts > n.ts for m in launches.values())
+    print(assemble(Report(sections, lost_items(lost, titles, labels, finished, continued), upcoming, fallback),
+                   ceiling))
     write_atomic(Path(log_dir) / PENDING_NAME, json.dumps(sections[0].hidden_keys(), ensure_ascii=False))
     return 0
 

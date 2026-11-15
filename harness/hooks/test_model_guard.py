@@ -312,6 +312,24 @@ def позвать_bash(команда: str, модель: str, сам: bool = T
 код, _ = позвать_bash("cat > STATE.md <<'EOF'\nтекст\nEOF", "claude-sonnet-5-5")
 случай("состояние смены пишется оболочкой — это работа смены, пропускает", 0, код)
 
+print("── ЗАПИСЬ ИЗ PYTHON В ОБОЛОЧКЕ ──")
+# Находка копии bkb 11.11: исполнители на sonnet трижды
+# писали пробы heredoc'ом python — путь стоит ДО .write_text( или в переменной, и
+# окно «после вызова» его не видело. Поломка, что оставила бы зелёной: собирать
+# пути только после вызова — ловят случаи ниже; собирать любые пути — ловит чтение.
+for команда in [
+        "python3 - <<'EOF'\nfrom pathlib import Path\nPath('scripts/test_obhod.py').write_text('x')\nEOF",
+        'python3 -c "import pathlib; pathlib.Path(\'scripts/hooks/test_obhod.py\').write_bytes(b\'x\')"',
+        "python3 - <<'EOF'\nfrom pathlib import Path\nцель = Path('scripts/test_obhod.py')\nцель.write_text('x')\nEOF",
+        "python3 - <<'EOF'\nпуть = 'scripts/test_obhod.py'\nwith open(путь, 'w') as f:\n    f.write('x')\nEOF",
+        "python3 - <<'EOF'\nfrom pathlib import Path\nwith Path('scripts/test_obhod.py').open('w') as f:\n    f.write('x')\nEOF"]:
+    код, текст = позвать_bash(команда, "claude-sonnet-5-5", сам=False)
+    случай(f"БОЛЬНОЙ: помощник sonnet пишет пробу из python — отказ: {команда.splitlines()[-2 if 'EOF' in команда else 0][:40]}",
+           True, отказал(код, текст))
+код, _ = позвать_bash("python3 - <<'EOF'\nfrom pathlib import Path\nтекст = Path('scripts/test_obhod.py').read_text()\n"
+                      "Path('/tmp/итог.txt').write_text(текст)\nEOF", "claude-sonnet-5-5", сам=False)
+случай("python читает пробу и пишет вне артефактов — пропускает", 0, код)
+
 print("── ЖИВАЯ ФОРМА ВХОДА: помощника видно по входу, не по транскрипту ──")
 # Транскрипт во входе помощника — ОСНОВНОЙ сессии, и в нём isSidechain=false:
 # суждение по транскрипту принимало каждого помощника за смену.

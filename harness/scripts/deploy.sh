@@ -43,7 +43,7 @@ konf_dveri_puti "${BASH_SOURCE[0]}"
 # Путь берётся по РЕАЛЬНОМУ файлу (readlink -f): pre-commit подключён в
 # .git/hooks симлинком, и dirname дал бы .git/hooks, где библиотеки нет.
 # Поймано первым же коммитом после правки, 12.09.2026.
-konf_zagruzit_dveri PROJECT_DIR LOG_DIR TMUX_SESSION SECRETS_DIR AGENT_START_CMD DOCKER_SWEEP_ENABLED BACKUP_DIR BACKUP_DBS DB_ADMIN_USER DEVMAP_AUDIT_DAYS HARNESS_LOG_DIR PRODUCT_DIR PRODUCT_REPO STACK_BUILD_CMD STACK_BUILD_NOCACHE_CMD STACK_CRON_SRC STACK_DB_DUMP_CMD STACK_DB_RESTORE_HINT STACK_HEALTH_CMD STACK_HEALTH_URL STACK_IMAGES STACK_MANIFESTS STACK_MIGRATE_CMD STACK_PROXY_RELOAD_CMD STACK_RELEASE_CMD STACK_UP_CMD
+konf_zagruzit_dveri PROJECT_DIR LOG_DIR TMUX_SESSION SECRETS_DIR AGENT_START_CMD DOCKER_SWEEP_ENABLED BACKUP_DIR BACKUP_DBS DB_ADMIN_USER DEVMAP_AUDIT_DAYS HARNESS_LOG_DIR PRODUCT_DIR PRODUCT_REPO STACK_BUILD_CMD STACK_BUILD_NOCACHE_CMD STACK_CRON_SRC STACK_DB_DUMP_CMD STACK_DB_RESTORE_HINT STACK_HEALTH_CMD STACK_HEALTH_URL STACK_IMAGES STACK_MANIFESTS STACK_MIGRATE_CMD STACK_PROXY_RELOAD_CMD STACK_RELEASE_CMD STACK_UP_CMD PRODUCT_PATH
 # harness.conf несёт секцию STACK_*; без него продукт заведомо не задан.
 : "${PROJECT_DIR:?в install.conf пуст PROJECT_DIR}" "${LOG_DIR:?пуст LOG_DIR}"
 
@@ -69,8 +69,10 @@ cd "$PRODUCT_TREE"
 # раньше первой строки кода продукта, и этот случай — штатный, не ошибка.
 # Но продукт, ОБЪЯВЛЕННЫЙ в harness.conf, при пустой секции — не «нечего», а
 # выкат мимо ворот: нуль здесь читался как «выкачено» (И-2).
-if [ -z "${STACK_BUILD_CMD:-}" ] && [ -n "${PRODUCT_DIR:-}${PRODUCT_REPO:-}" ]; then
-    say "ОШИБКА: продукт объявлен (PRODUCT_DIR=${PRODUCT_DIR:-}, PRODUCT_REPO=${PRODUCT_REPO:-}), а STACK_BUILD_CMD в $HARNESS_CONF пуст — заполни секцию STACK_*, деплой вслепую не выкатывает"
+# PRODUCT_PATH — тоже объявление: установщик кладёт только его (находка копии bkb 10.11.2026).
+if [ -z "${STACK_BUILD_CMD:-}" ] && [ -n "${PRODUCT_DIR:-}${PRODUCT_REPO:-}${PRODUCT_PATH:-}" ]; then
+    say "ОШИБКА: продукт объявлен (PRODUCT_DIR=${PRODUCT_DIR:-}, PRODUCT_REPO=${PRODUCT_REPO:-}, PRODUCT_PATH=${PRODUCT_PATH:-}), а STACK_BUILD_CMD в $HARNESS_CONF пуст — заполни секцию STACK_*, деплой вслепую не выкатывает"
+    say "  заготовка секции из compose продукта: python3 $SCRIPT_DIR/stack-template.py '${PRODUCT_PATH:-<каталог продукта>}' --в $HARNESS_CONF"
     exit 1
 fi
 if [ -z "${STACK_BUILD_CMD:-}" ] && [ ! -f "$PROJECT_DIR/docker-compose.yml" ]; then

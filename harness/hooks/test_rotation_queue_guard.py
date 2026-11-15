@@ -19,7 +19,9 @@ pause.py, свой LOG_DIR, конфиг установки — пустой):
   * битый, но живой флаг — флаг стоит;
   * флага нет / флаг чужой сессии (R-4) / протухший флаг (R-5) — пропуск, у
     двух последних — след в журнале;
-  * управляющий (harness-lead) — пропуск со следом; иной помощник — в очередь (R-16);
+  * управляющий (harness-lead): новый запуск — отказ и очередь, SendMessage своему
+    исполнителю — пропуск со следом; иной помощник — в очередь (R-16, находка bkb 12.11);
+  * служебное «[ротация] доведи и остановись» смены помощнику — пропуск, одно на помощника;
   * SendMessage — в очередь (R-6); чужой инструмент — пропуск;
   * --release печатает и НЕ помечает, --mark помечает, после — пусто (R-13);
   * восемь параллельных запусков при выпуске — восемь строк (R-17);
@@ -231,18 +233,60 @@ def main() -> int:
     check("протухший флаг записан в guard_exceptions.log (log_fail_open)", True,
           fail_open.exists() and "протух" in fail_open.read_text(encoding="utf-8"))
 
-    print("── R-16: изнутри помощника — только управляющий ──")
+    print("── БОЛЬНОЙ СЛУЧАЙ bkb 12.11.2026: управляющий, начатый до ротации, запускает исполнителей ──")
+    # Смена ждала ротацию 69+ мин: управляющий проходил хук и запускал новых
+    # исполнителей, «идущих помощников» всегда было ≥ 1. Новые запуски при флаге
+    # отказаны и ему; идущих он доводит (SendMessage своему исполнителю проходит).
     before = len(queue(st))
     got = run(st, launch("исполнитель-управляющего", agent_id="a0c57aae0ddba1100"))
-    check("запуск из управляющего при флаге — пропуск", 0, got.returncode)
-    check("запуск из управляющего в очередь не лёг (очередь до него не пуста)", (True, before),
-          (before > 0, len(queue(st))))
+    check("БОЛЬНОЙ СЛУЧАЙ: запуск из управляющего при флаге — отказ кодом 2", 2, got.returncode)
+    check("отказ управляющему велит довести идущее и остановиться", True,
+          "доведи" in got.stderr and "остановись" in got.stderr)
+    check("запуск управляющего лёг строкой в очередь преемника", before + 1, len(queue(st)))
+    check("строка управляющего называет, от кого она", "a0c57aae0ddba1100",
+          (queue(st)[-1] if queue(st) else {}).get("от"))
+    check("отказ управляющему оставил след rotation_queue_lead_refused с outcome «refused»", True,
+          traced(st, "rotation_queue_lead_refused", "refused"))
+    lead_msg = {**send_message("a77e0c0de0000001", "продолжай с шага 3"),
+                "agent_id": "a0c57aae0ddba1100", "agent_type": "harness-lead"}
+    before = len(queue(st))
+    got = run(st, lead_msg)
+    check("SendMessage управляющего своему исполнителю — пропуск (идущее доводится), очередь не растёт",
+          (0, before), (got.returncode, len(queue(st))))
     check("пропуск управляющего оставил след rotation_queue_lead_pass", True,
           traced(st, "rotation_queue_lead_pass"))
     check("след rotation_queue_lead_pass — с outcome «ok»", True, traced(st, "rotation_queue_lead_pass", "ok"))
+    worker_msg = {**send_message("a77e0c0de0000002", "сделай ещё"),
+                  "agent_id": "a1511aa2c0ffee001", "agent_type": "harness-worker"}
+    got = run(st, worker_msg)
+    check("SendMessage из исполнителя при флаге — отказ и строка", (2, before + 1),
+          (got.returncode, len(queue(st))))
+    before = len(queue(st))
     got = run(st, launch("запуск-исполнителя", agent_id="a1511aa2c0ffee001", agent_type="harness-worker"))
     check("запуск из помощника другого типа при флаге — отказ и строка", (2, before + 1),
           (got.returncode, len(queue(st))))
+
+    print("── находка bkb 12.11 (б): смена говорит идущему помощнику «доведи и остановись» ──")
+    st10 = stand()
+    put_flag(st10)
+    got = run(st10, send_message("lead-abc", "что-то новое"))
+    check("отказ смене называет служебную дверь «[ротация] доведи и остановись»", (2, True),
+          (got.returncode, "[ротация] доведи и остановись" in got.stderr))
+    queued = len(queue(st10))
+    got = run(st10, send_message("lead-abc", "[ротация] доведи и остановись: новых не запускай, отчитайся"))
+    check("служебное «[ротация] доведи и остановись» помощнику — пропуск", 0, got.returncode)
+    check("служебное сообщение не лежит невыпущенным в очереди преемника", (1, 0),
+          (len(queue(st10)) - queued,
+           sum(1 for r in queue(st10) if not r.get("выпущено") and str(r.get("message", "")).startswith("[ротация]"))))
+    check("служебное сообщение оставило след rotation_stop_message", True,
+          traced(st10, "rotation_stop_message", "ok"))
+    got = run(st10, send_message("lead-abc", "[ротация] доведи и остановись — и ещё вот это сделай"))
+    check("второе служебное тому же помощнику — отказ и строка (дверь одна на помощника)",
+          (2, queued + 2), (got.returncode, len(queue(st10))))
+    got = run(st10, send_message("lead-def", "[ротация] доведи и остановись"))
+    check("служебное другому помощнику — пропуск", 0, got.returncode)
+    got = run(st10, send_message("lead-xyz", "Пожалуйста: [ротация] доведи и остановись"))
+    check("слова двери не в начале сообщения — не служебное, отказ", 2, got.returncode)
 
     before = len(queue(st))
     got = run(st, {"hook_event_name": "PreToolUse", "tool_name": "Bash", "session_id": SID,

@@ -372,6 +372,61 @@ def case_h_package(tmp: Path) -> None:
           (code, s.read(library, s.pkg)))
 
 
+def case_p_package_superset(tmp: Path) -> None:
+    # Поломка: пакет = master + блоки помощников, вершина ⊇ пакета — отказ 7 вместо записи
+    # вершины; или наоборот: лишнее пакета молча затёрто вершиной.
+    print("п) вершина включает пакет")
+
+    def stand(name: str, rel: str, master: str, package: str, tip: str) -> tuple:
+        s = Stand(tmp / name)
+        s.change(s.proj, rel, master)
+        s.change(s.pkg, "harness/" + rel, master)
+        s.write(s.pkg, "harness/" + rel, package)  # правка помощника в пакете, не закоммичена
+        branch, wt = s.tree(name)
+        s.change(wt, rel, tip)
+        before = s.sha()
+        code, _, out = s.queue(branch)
+        return code, out, s.read("harness/" + rel, s.pkg), before, s.sha()
+
+    text = "scripts/reg.sh"
+    master = "один\nдва\nтри\n"
+    tip = "один\nблок-A\nдва\nблок-B\nтри\n"
+    code, _, pkg, _, _ = stand("п-а", text, master, "один\nблок-A\nдва\nтри\n", tip)
+    check("п(а): пакет = master + A, вершина = master + A + B — код 0, в пакете вершина",
+          (0, tip), (code, pkg))
+    code, out, pkg, before, after = stand("п-б", text, master, "один\nблок-A\nдва\nблок-C\nтри\n", tip)
+    check("п(б): пакет = master + A + C — код 7, пакет и master не тронуты",
+          (7, "один\nблок-A\nдва\nблок-C\nтри\n", before), (code, pkg, after))
+    check("п(б): отказ называет строку C, не только путь", (True, False),
+          ("+ блок-C" in out, "+ блок-A" in out))
+    code, out, _, _, _ = stand("п-б2", text, master, "один\nтри\n", "один\nдва\nблок-B\nтри\n")
+    check("п(б): удалённое в пакете, но живое в вершине — код 7, строка названа",
+          (7, True), (code, "- два" in out))
+
+    reg = "scripts/reg.yaml"
+    master = "# реестр\nпробы:\n  x:\n    м: 1\nмеханизмы:\n- файл: f0\n  имя: ноль\n"
+    package = ("# реестр\nпробы:\n  b:\n    м: 'бэ'\n  a:\n    м: 'а'\n  x:\n    м: 1\n"
+               "механизмы:\n- имя: ку\n  файл: q\n- файл: f0\n  имя: ноль\n")
+    tip = ("# реестр\nпробы:\n  a:\n    м: а\n  b:\n    м: бэ\n  x:\n    м: 1\n  d:\n    м: дэ\n"
+           "механизмы:\n- файл: f0\n  имя: ноль\n- файл: q\n  имя: ку\n- файл: r\n  имя: эр\n")
+    code, _, pkg, _, _ = stand("п-в", reg, master, package, tip)
+    check("п(в): yaml, другой порядок и оформление вставок — код 0, в пакете вершина",
+          (0, tip), (code, pkg))
+    code, out, pkg, _, _ = stand("п-в2", reg, master, package.replace("имя: ку", "имя: другое")
+                                 .replace("  x:\n", "  c:\n    м: це\n  x:\n"), tip)
+    check("п(в): yaml, лишняя запись и иной механизм — код 7, названы c и файл q",
+          (7, True, True, False), (code, "пробы → c" in out, "механизмы → q" in out,
+                                   "пробы → a" in out))
+    code, out, _, _, _ = stand("п-в3", reg, master, package.replace("# реестр\n",
+                               "# реестр\n# поправка пакета\n"), tip)
+    check("п(в): yaml, комментарий только в пакете — код 7, строка названа",
+          (7, True), (code, "+ # поправка пакета" in out))
+    code, out, _, _, _ = stand("п-в4", reg, master, master.replace("  x:\n    м: 1\n", "  e: 0\n"),
+                               master.replace("  x:\n", "  d:\n    м: дэ\n  x:\n"))
+    check("п(в): yaml, запись удалена в пакете, жива в вершине — код 7, запись названа",
+          (7, True), (code, "пробы → x (удалена в пакете)" in out))
+
+
 def case_i_two_queues(tmp: Path) -> None:
     # Поломка: нет flock — вторая очередь мешает первой (код ≠ 0 или правка потеряна).
     print("и) две очереди разом")
@@ -512,6 +567,7 @@ def case_bad_call(tmp: Path) -> None:
 
 CASES = (case_a_fast_forward, case_b_master_moved, case_c_conflict, case_d_red_gate,
          case_e_dirty_helper, case_f_dirty_main, case_g_locked, case_h_package,
+         case_p_package_superset,
          case_i_two_queues, case_j_union, case_k_heal_hook, case_l_retries, case_m_cleanup,
          case_n_rollback, case_bad_call)
 

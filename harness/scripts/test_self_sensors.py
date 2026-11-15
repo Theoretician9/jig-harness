@@ -4,8 +4,12 @@
 Спека .tasks/hr.self-configuration-environment/spec.md, ред. 2, §7 (случаи 1–11).
 Каждый случай играет на СВОЁМ стенде: свой LOG_DIR (он же HARNESS_LOG_DIR),
 паспорт, harness.conf, проект с картой и архивом, копия self-sensors.yaml.
-CLAUDE_CODE_SESSION_ID снят: иначе alert-task ответит 6 и случаи 7–8 судят
-пустоту. В конце — боевые карта и журналы не изменились.
+Код идёт из копии в стенде, рядом с которой лежит подменный alert-task.py:
+он пишет зов в журнал зовов стенда и отвечает кодом из файла стенда. Живой
+alert-task из сессии claude отвечает 6 (его родословную не снять), и проба
+судила бы пустоту; карточки и «повтор» — договор alert-task, их судит его
+проба. Поэтому проба одинакова из сессии и вне её. В конце — боевые карта и
+журналы не изменились.
 
     python3 scripts/test_self_sensors.py
 
@@ -24,7 +28,7 @@ CLAUDE_CODE_SESSION_ID снят: иначе alert-task ответит 6 и сл�
         attention {напоминания, идеи} · autonomy {сообщения, закрыто} ·
         efficiency {токены — целое, контекст+вывод; закрыто} · creation {создано, сломано}
     --record  раз в сутки строка sensors.daily в $LOG_DIR/self-sensors.jsonl,
-        карточки и --resolve через alert-task.py; второй зов за сутки — код 0, «уже есть».
+        --key/--resolve через alert-task.py рядом с собой; второй зов за сутки — код 0, «уже есть».
 Последняя строка: `self-sensors проба: случаев N, падений F`.
 """
 from __future__ import annotations
@@ -157,6 +161,17 @@ def archive_text(tasks: str = "") -> str:
             + task_block("hr.stand-ancient", "принято", accepted="2026-01-10") + tasks)
 
 
+# Подменный alert-task стенда: зов — строкой в журнал зовов, код — из файла стенда.
+FAKE_ALERT_TASK = """import json, sys
+from pathlib import Path
+here = Path(__file__).resolve().parent
+with (here / "alert-calls.jsonl").open("a", encoding="utf-8") as fh:
+    fh.write(json.dumps(sys.argv[1:], ensure_ascii=False) + "\\n")
+answer = here / "alert-code"
+sys.exit(int(answer.read_text()) if answer.is_file() else 0)
+"""
+
+
 class Stand:
     """Свой мир одного случая."""
 
@@ -168,10 +183,14 @@ class Stand:
         self.map = self.project / "dev-map.yaml"
         self.archive = self.project / "docs" / "dev-map-archive.yaml"
         self.config = base / "self-sensors.yaml"
+        self.bin = base / "bin"
         self.serial = 0
         for d in (self.project / "docs", self.log / "locks" / "services", base / "secrets",
-                  base / "panel", base / "home", base / "heartbeat", base / "state"):
+                  base / "panel", base / "home", base / "heartbeat", base / "state", self.bin):
             d.mkdir(parents=True, exist_ok=True)
+        shutil.copy(SENSORS, self.bin / "self-sensors.py")
+        (self.bin / "lib").symlink_to(HERE / "lib")
+        (self.bin / "alert-task.py").write_text(FAKE_ALERT_TASK, encoding="utf-8")
         self.map.write_text(map_text(tasks), encoding="utf-8")
         self.archive.write_text(archive_text(archived), encoding="utf-8")
         settings = yaml.safe_load(CONFIG_SOURCE.read_text(encoding="utf-8"))
@@ -192,7 +211,6 @@ class Stand:
 
     def env(self) -> dict:
         env = dict(os.environ)
-        env.pop("CLAUDE_CODE_SESSION_ID", None)
         env.pop("HARNESS_REPORT", None)
         env.update({
             "PYTHONDONTWRITEBYTECODE": "1",
@@ -213,7 +231,7 @@ class Stand:
 
     def run(self, *args: str) -> tuple[int, str, str]:
         try:
-            done = subprocess.run([sys.executable, str(SENSORS), *args], env=self.env(),
+            done = subprocess.run([sys.executable, str(self.bin / "self-sensors.py"), *args], env=self.env(),
                                   capture_output=True, text=True, timeout=120, cwd=str(self.base))
         except subprocess.TimeoutExpired:
             return -9, "", "предел 120 с истёк"
@@ -266,13 +284,16 @@ class Stand:
         with (self.log / "пропуски.jsonl").open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(row, ensure_ascii=False) + "\n")
 
-    def cards(self, key: str) -> list[dict]:
-        data = yaml.safe_load(self.map.read_text(encoding="utf-8")) or {}
-        return [t for line in data.get("lines") or [] for t in line.get("tasks") or []
-                if t.get("источник") == f"тревога:{key}"]
+    def answer(self, code: int) -> None:
+        """Чем ответит подменный alert-task."""
+        (self.bin / "alert-code").write_text(str(code), encoding="utf-8")
 
-    def alert_events(self, key: str) -> list[str]:
-        return [r.get("событие") for r in jsonl_rows(self.log / ALERT_JOURNAL) if r.get("ключ") == key]
+    def calls(self, key: str) -> list[list[str]]:
+        """Зовы alert-task с ключом key: argv без имени скрипта."""
+        return [c for c in jsonl_rows(self.bin / "alert-calls.jsonl") if isinstance(c, list) and key in c]
+
+    def verbs(self, key: str) -> list[str]:
+        return [c[0] for c in self.calls(key)]
 
     def daily_rows(self) -> list[dict]:
         return [r for r in jsonl_rows(self.log / SENSORS_JOURNAL) if r.get("event") == "sensors.daily"]
@@ -298,20 +319,6 @@ def find_key(data, name: str):
             if found is not None:
                 return found
     return None
-
-
-def ancestors_named(name: str) -> list[int]:
-    found, pid = [], os.getppid()
-    while pid > 1:
-        try:
-            status = Path(f"/proc/{pid}/status").read_text(encoding="utf-8")
-        except OSError:
-            break
-        fields = dict(line.split(":\t", 1) for line in status.splitlines() if ":\t" in line)
-        if fields.get("Name", "").strip() == name:
-            found.append(pid)
-        pid = int(fields.get("PPid", "0").strip() or 0)
-    return found
 
 
 def classify(base: Path, text: str, marker: str | None = None, quoted: str | None = None) -> str:
@@ -416,8 +423,7 @@ def case_minimum(tmp: Path) -> None:
           isinstance(sensor(data, "attention").get("прошлое"), (int, float)))
     rc, out = st.record()
     check(f"--record код 0 ({out[-80:]})" if rc else "--record код 0", 0, rc)
-    check("карточки нет", [], st.cards("self-sensors:attention"))
-    check("в журнале тревог нет «заведена»", [], st.alert_events("self-sensors:attention"))
+    check("alert-task не звали: тревоги нет", [], st.verbs("self-sensors:attention"))
 
 
 def case_record_once(tmp: Path) -> None:
@@ -441,26 +447,25 @@ def case_worse(tmp: Path) -> None:
     check("внимание 0.17 → 0.67: вердикт «хуже»", "хуже", sensor(data, "attention").get("вердикт"))
     rc, out = st.record()
     check(f"--record код 0 ({out[-80:]})" if rc else "--record код 0", 0, rc)
-    cards = st.cards("self-sensors:attention")
-    check("одна карточка источник: тревога:self-sensors:attention", 1, len(cards))
-    check("заголовок «… ушёл не туда …»", True,
-          bool(cards) and "ушёл не туда" in str(cards[0].get("title")))
-    check("другие датчики (знаменатель 0) карточек не завели", [],
-          [k for k in KEYS[1:] if st.cards(f"self-sensors:{k}")])
+    calls = st.calls("self-sensors:attention")
+    check("один зов alert-task --key self-sensors:attention", ["--key"], [c[0] for c in calls])
+    title = calls[0][calls[0].index("--title") + 1] if calls and "--title" in calls[0][:-1] else ""
+    check("заголовок «… ушёл не туда …»", True, "ушёл не туда" in title)
+    check("другие датчики (знаменатель 0) alert-task не звали", [],
+          [k for k in KEYS[1:] if st.calls(f"self-sensors:{k}")])
+    check("строка дня записана после ответа 0", 1, len(st.daily_rows()))
     st.next_day()
     rc, out = st.record()
     check("второй прогон код 0", 0, rc)
-    check("второй прогон: в журнале тревог «повтор»", True,
-          "повтор" in st.alert_events("self-sensors:attention"))
-    check("карточка по-прежнему одна", 1, len(st.cards("self-sensors:attention")))
+    check("второй прогон снова зовёт --key (повтор решает alert-task)", ["--key", "--key"],
+          st.verbs("self-sensors:attention"))
 
 
 def case_resolve(tmp: Path) -> None:
     print("── 8. возврат в порог → --resolve ──")
     st = attention_stand(tmp, current_reminders=4, current_ideas=2)
     st.record()
-    check("до возврата тревога заведена", True,
-          "заведена" in st.alert_events("self-sensors:attention"))
+    check("до возврата alert-task звали --key", ["--key"], st.verbs("self-sensors:attention"))
     for i in range(18):
         st.message(IN_CURRENT + 7200 + i * 60, "предлагаю новый раздел")
     rc, data, why = st.show()
@@ -469,9 +474,9 @@ def case_resolve(tmp: Path) -> None:
     st.next_day()
     rc, out = st.record()
     check(f"--record код 0 ({out[-80:]})" if rc else "--record код 0", 0, rc)
-    events = st.alert_events("self-sensors:attention")
-    check("последнее событие тревоги — «зелёное» (--resolve)", "зелёное",
-          events[-1] if events else "нет событий")
+    check("последний зов alert-task — --resolve self-sensors:attention",
+          ["--resolve", "self-sensors:attention"],
+          (st.calls("self-sensors:attention") or [["нет зовов"]])[-1])
 
 
 def case_empty(tmp: Path) -> None:
@@ -515,16 +520,12 @@ def case_own_alerts(tmp: Path) -> None:
 def case_alert_refused(tmp: Path) -> None:
     print("── 12. alert-task отказал → строки дня нет ──")
     st = attention_stand(tmp, current_reminders=4, current_ideas=2)
-    copy = tmp / "copy"
-    copy.mkdir(parents=True)
-    shutil.copy(SENSORS, copy / "self-sensors.py")
-    (copy / "lib").symlink_to(HERE / "lib")
-    (copy / "alert-task.py").write_text("import sys\nsys.exit(6)\n", encoding="utf-8")
-    rc, out, err = run_copy(st, copy / "self-sensors.py")
-    check(f"alert-task ответил 6: --record код 0 ({(out + err)[-80:]})" if rc else "--record код 0", 0, rc)
+    st.answer(6)
+    rc, out = st.record()
+    check(f"alert-task ответил 6: --record код 0 ({out[-80:]})" if rc else "--record код 0", 0, rc)
     check("alert-task ответил 6: строки дня в журнале нет", [], st.daily_rows())
-    (copy / "alert-task.py").write_text("import sys\nsys.exit(0)\n", encoding="utf-8")
-    run_copy(st, copy / "self-sensors.py")
+    st.answer(0)
+    st.record()
     check("alert-task ответил 0: строка дня записана", 1, len(st.daily_rows()))
 
 
@@ -557,15 +558,71 @@ def case_closed_window(tmp: Path) -> None:
           [sensor(after, k).get("счёты") for k in ("autonomy", "efficiency")])
 
 
-def run_copy(st: "Stand", script: Path) -> tuple[int, str, str]:
-    done = subprocess.run([sys.executable, str(script), "--record"], env=st.env(),
-                          capture_output=True, text=True, timeout=120, cwd=str(st.base))
-    return done.returncode, done.stdout, done.stderr
+def commit_map(st: "Stand", tasks: str, moment: float, archived: str = "") -> None:
+    """Коммит карты и архива стенда с датой коммита moment."""
+    st.map.write_text(map_text(tasks), encoding="utf-8")
+    st.archive.write_text(archive_text(archived), encoding="utf-8")
+    stamp = f"{int(moment)} +0500"
+    env = {**os.environ, "GIT_AUTHOR_NAME": "stand", "GIT_AUTHOR_EMAIL": "stand@stand",
+           "GIT_COMMITTER_NAME": "stand", "GIT_COMMITTER_EMAIL": "stand@stand",
+           "GIT_AUTHOR_DATE": stamp, "GIT_COMMITTER_DATE": stamp}
+    git = ["git", "-C", str(st.project)]
+    subprocess.run([*git, "add", "-A"], env=env, check=True, capture_output=True)
+    subprocess.run([*git, "commit", "-q", "-m", "карта стенда"], env=env, check=True, capture_output=True)
+
+
+def case_closed_by_history(tmp: Path) -> None:
+    print("── 14. закрытие без даты датируется коммитом карты, где статус стал закрытым ──")
+    # 14.11 задачи шли в test пачкой карты (ad015bf8: 9 карточек) с when.tested: null —
+    # датчик их не видел: 39 закрытых против 93 по истории карты, ложное «хуже».
+    st = Stand(tmp)
+    subprocess.run(["git", "init", "-q", str(st.project)], check=True, capture_output=True)
+    ids = ("hr.flip-past", "hr.flip-now", "hr.flip-dated", "hr.flip-ancient")
+    def tasks(**status) -> str:
+        return "".join(task_block(i, status.get(i.replace("hr.flip-", ""), "plan"),
+                                  tested_at=iso_of(IN_PAST) if i == "hr.flip-dated" else None)
+                       for i in ids)
+    commit_map(st, tasks(), END - 40 * DAY)
+    commit_map(st, tasks(ancient="test"), END - 30 * DAY)
+    commit_map(st, tasks(ancient="test", past="test"), IN_PAST)
+    # Задача, переехавшая в архив принятой, — не закрытие в момент переезда.
+    moved = task_block("hr.flip-archived", "принято")
+    commit_map(st, tasks(ancient="test", past="test", now="test", dated="test"), IN_CURRENT,
+               archived=moved)
+    rc, data, why = st.show()
+    check(f"--show код 0 ({why[:80]})" if rc else "--show код 0", 0, rc)
+    check("test без дат, закрытый коммитом в текущем окне: закрыто 1", 1,
+          counts(data, "autonomy", "сейчас").get("закрыто"))
+    check("закрытый коммитом в прошлом окне и tested_at в прошлом: закрыто 2", 2,
+          counts(data, "autonomy", "прошлое").get("закрыто"))
+
+
+def case_whole_days(tmp: Path) -> None:
+    print("── 15. окна — целые сутки: дата без времени попадает в свои сутки ──")
+    # Крон меряет в 00:05: край окна 07.11 00:05, а «2026-11-07» — полночь, и
+    # закрытия первого дня текущего окна уходили в прошлое (15.11: 17 задач).
+    # Пояс стенда пуст — пояс машины, поэтому сутки здесь — местные.
+    lag = round(LAG / DAY)
+    midnight = datetime.datetime.combine(datetime.date.today(), datetime.time())
+    at = midnight + datetime.timedelta(minutes=5)
+    first = (at - datetime.timedelta(days=lag + 7)).date()
+    tasks = (task_block("hr.day-first-current", "test", tested_at=first.isoformat())
+             + task_block("hr.day-last-past", "test", tested_at=(first - datetime.timedelta(days=1)).isoformat())
+             + task_block("hr.day-lag", "test", tested_at=(at - datetime.timedelta(days=lag)).date().isoformat()))
+    st = Stand(tmp, tasks=tasks)
+    rc, out, err = st.run("--show", "--at", str(int(at.timestamp())))
+    data = json.JSONDecoder().raw_decode(out[out.find("{"):])[0] if "{" in out else {}
+    check(f"--show код 0 ({err[-80:]})" if rc else "--show код 0", 0, rc)
+    check("дата первого дня текущего окна — в текущем: закрыто 1", 1,
+          counts(data, "autonomy", "сейчас").get("закрыто"))
+    check("дата последнего дня прошлого окна — в прошлом: закрыто 1", 1,
+          counts(data, "autonomy", "прошлое").get("закрыто"))
 
 
 CASES = (case_classifier, case_quote, case_windows, case_closed, case_minimum,
          case_record_once, case_worse, case_resolve, case_empty, case_token_window,
-         case_own_alerts, case_alert_refused, case_closed_window)
+         case_own_alerts, case_alert_refused, case_closed_window, case_closed_by_history,
+         case_whole_days)
 
 
 # ── стенд не протёк ────────────────────────────────────────────────────────
@@ -585,14 +642,12 @@ def live_state() -> dict:
 
 
 def main() -> int:
-    check("проба не под сессией (иначе alert-task отвечает 6 и случаи 7–8 судят пустоту)",
-          [], ancestors_named("claude"))
     check("код scripts/self-sensors.py существует", True, SENSORS.is_file())
     check("конфиг self-sensors.yaml существует", True, CONFIG_SOURCE.is_file())
     if not (SENSORS.is_file() and CONFIG_SOURCE.is_file()):
         missing = "нет scripts/self-sensors.py" if not SENSORS.is_file() else "нет self-sensors.yaml"
         print(f"self-sensors проба: случаев {cases.paths}, падений {cases.failures} — "
-              f"{missing}, случаи 1–13 не прогнаны")
+              f"{missing}, случаи 1–14 не прогнаны")
         return 1
     before = live_state()
     with tempfile.TemporaryDirectory(prefix="self-sensors-probe-") as tmp:
