@@ -59,6 +59,7 @@ HOOK_SETTINGS = next((p for p in (SCRIPTS.parent / ".claude" / "settings.json", 
                       if p.is_file()), None)
 DEPLOY_GUARD = SCRIPTS / "deploy_guard.py"
 PROTECTED_DELETE = SCRIPTS / "protected-delete.py"
+EVOLUTION_NET = SCRIPTS / "evolution-net.py"
 ASK = SCRIPTS / "ask-consent.py"
 PUBLISH = SCRIPTS / "publish.sh"
 DROP_DB = SCRIPTS / "drop-database.sh"
@@ -352,6 +353,10 @@ class Stand:
         for door in BASH_DOORS.values():
             shutil.copy2(door, scripts / door.name)
         write(self.proj / "README.md", "проект стенда\n")
+        # Гейт чистоты переписи судит карточки карты проекта и без карты (или без карточек)
+        # отказывает раньше двери согласия. Карточка стенда — id, которого в копии нет.
+        write(self.proj / "dev-map.yaml",
+              "lines:\n- id: proba.stand-only-card\n  title: карточка стенда\n  status: plan\n")
         git("init", "-q", "-b", "master", cwd=self.proj)
         commit_all(self.proj, "проект стенда")
 
@@ -1075,7 +1080,7 @@ def probe_guard_import_crash(yard: Yard) -> None:
 # ── один судья (AST) ─────────────────────────────────────────────────────────
 JUDGE_FILES = {"выкат": [DEPLOY_GUARD], "пуш": [DEPLOY_GUARD], "публикация": [DEPLOY_GUARD],
                "снос-базы": [DEPLOY_GUARD], "перепись": [DEPLOY_GUARD],
-               "удаление": [PROTECTED_DELETE, GUARD_HOOK]}
+               "удаление": [PROTECTED_DELETE, GUARD_HOOK], "ключ-сети": [EVOLUTION_NET]}
 TEXT_NAMES = {"это_голое_согласие", "это_разрешение_цели", "_слова_владельца", "_согласие", "_приказ_переписи"}
 REVERSIBLE = {"это_разрешение_перезапуска", "это_разрешение_чтения"}
 

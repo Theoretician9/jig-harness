@@ -144,6 +144,11 @@ def add_to_local_layer(records: list, path: Path) -> list:
     return [запись["id"] for запись in новые]
 
 
+def _user() -> str:
+    import pwd
+    return pwd.getpwuid(os.getuid()).pw_name
+
+
 def _cli_carry_own(old_path: str, package_path: str, baseline_path: str) -> int:
     """Раскладка кладёт пакетный process-library.json поверх проектного: свои записи копии
     переезжают в слой установки до замены. Прежней сборки нет (пакет не в git) — своя запись
@@ -173,8 +178,11 @@ def _cli_carry_own(old_path: str, package_path: str, baseline_path: str) -> int:
     try:
         дописаны = add_to_local_layer(свои, путь)
     except (OSError, ValueError, KeyError, TypeError, AttributeError) as беда:
-        print(f"ВНИМАНИЕ: свои записи библиотеки процессов ({', '.join(r['id'] for r in свои)}) не перенесены "
-              f"в слой установки {путь}: {type(беда).__name__}: {беда}")
+        # Строка — причина отказа раскладки для владельца: что не перенесено, почему и чем открыть.
+        print(f"свои записи библиотеки процессов ({', '.join(r['id'] for r in свои)}) не перенесены "
+              f"в слой установки {путь}: {type(беда).__name__}: {беда} — проект не тронут; откройте "
+              f"каталог слоя на запись (sudo install -d -o {_user()} {путь.parent}) или задайте "
+              f"{LOCAL_LAYER_KEY} в harness.conf и повторите обновление")
         return 1
     print(f"  свои записи библиотеки процессов — в слое установки {путь}: "
           f"{', '.join(r['id'] for r in свои)} (дописано {len(дописаны)})")

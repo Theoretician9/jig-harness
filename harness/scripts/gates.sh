@@ -199,6 +199,8 @@ done
 проверка "самотест раскладчика" bash -c 'bash "$(python3 -c "import sys; sys.path.insert(0, \"scripts/lib\"); import config; print(config.katalog_paketa())")/harness/razlozhit-harnes.sh" --selftest'
 # Стенд самотеста весит гигабайты: обрыв по timeout обязан его убирать.
 проверка "самотест раскладчика: уборка при обрыве" python3 scripts/test_layout_selftest_cleanup.py
+# Самопроверка копии звала самотест с её PROJECT_DIR в окружении — стенд лёг в проект копии.
+проверка "самотест раскладчика: окружение вызывающего" python3 scripts/test_layout_selftest_env_project.py
 # Три несущих дефекта выпуска 0.9.3: каждый проходил ворота пакета зелёным и ронял установку с нуля.
 проверка "самотест раскладчика: код выхода" python3 scripts/test_layout_selftest_exit_code.py
 проверка "выгрузка UNIFIED свежа" python3 scripts/test_unified_fresh.py
@@ -442,6 +444,9 @@ done
 проверка "донос тревог sentinel" python3 scripts/test_sentinel_drain.py
 проверка "сторож меток: стенд" python3 scripts/test_heartbeat_watch_alerts.py
 проверка "писатель карты lib" python3 scripts/test_cards_lib.py
+# Писатель карты коммитит свои карточки сам: незакоммиченная карта в основном дереве
+# отказывала очереди слияния у всех помощников (код 4).
+проверка "писатель карты: коммит" python3 scripts/test_map_writer_commits.py
 # Ежемесячная ревизия: данные (области и пороги) и порции с курсором.
 # Область с маской, под которую не попадает ни один файл, читала бы пустоту и
 # отчитывалась «находок нет»; без курсора каждый месяц читались бы те же 15 %.
@@ -502,6 +507,7 @@ done
 # и на HEAD, и на копии. Все зелёные, вместе около минуты.
 проверка "сторож записи приказов" python3 scripts/hooks/test_orders_write_guard.py
 проверка "сторож файлов харнеса у копии" python3 scripts/hooks/test_harness_files_guard.py
+проверка "сторож записи в пакет из копии" python3 scripts/hooks/test_package_write_guard.py
 проверка "манифест эталона-проба" python3 scripts/test_check_self_manifest.py
 проверка "сверка с пакетом-проба" python3 scripts/test_compare_with_package.py
 проверка "обёртка коммита-проба" bash scripts/test_git_commit_locked.sh
@@ -867,7 +873,9 @@ if [ "${1:-}" = "--всё" ]; then
     проверка "след вне репозитория" python3 scripts/test_live_check_trace_outside_repo.py
     проверка "карта: три исхода" python3 scripts/test_map_from_message_three_outcomes.py
     проверка "карта: запасной путь" python3 scripts/test_map_from_message_fallback.py
+    проверка "потолок разбора сообщений" python3 scripts/test_owner_message_ceiling.py
     проверка "типовая копия-проба" python3 scripts/test_typical_copy.py
+    проверка "свои записи при закрытом слое" python3 scripts/test_layout_carry_own_refusal.py
     проверка "шаг мутаций"      python3 scripts/test_mutations_step.py
     проверка "показ диспетчера" python3 scripts/test_process_dispatcher_v2.py
     проверка "ревью спеки"      python3 scripts/test_spec_review.py

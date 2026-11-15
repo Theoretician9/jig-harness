@@ -139,7 +139,7 @@ def main() -> int:
         check("манифест=сходится" in verdict,
               f"в смонтированном дереве есть harness/self/MANIFEST.sha256 и он сходится ({mounted or 'не смонтировано'})")
         check("метка=есть" in verdict, "смонтировано публичное дерево (метка .публичная-сборка)")
-        status = subprocess.run(["git", "-C", str(pkg), "status", "--porcelain"],
+        status = subprocess.run(["git", "-c", "core.quotepath=false", "-C", str(pkg), "status", "--porcelain"],
                                 capture_output=True, text=True, env=clean_env()).stdout.strip()
         check(not (pkg / "harness" / "self" / "MANIFEST.sha256").exists() and not status,
               f"пакет-источник не тронут{': ' + status.splitlines()[0] if status else ''}")

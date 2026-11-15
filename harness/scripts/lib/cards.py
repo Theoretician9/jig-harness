@@ -22,7 +22,9 @@ import fcntl
 import json
 import os
 import re
+import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -210,9 +212,58 @@ def write_cards_locked(map_path, line_id, cards, *, recheck=None, lock_wait_sec=
             return False
         chosen = cards(text) if callable(cards) else cards
         map_path.write_text(insert_cards(text, line_id, chosen), encoding="utf-8")
+        commit_cards(map_path, line_id, chosen)
         if committed is not None:
             committed()
         return True
+
+
+COMMIT_WRAPPER = Path(__file__).resolve().parent.parent / "git-commit-locked.sh"
+
+
+def _git(repo: Path, *args: str, **kw) -> subprocess.CompletedProcess:
+    return subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True, **kw)
+
+
+def commit_cards(map_path: Path, line_id: str, chosen: list) -> None:
+    """Коммитит СВОИ карточки сразу, под локом карты: незакоммиченная карта в
+    основном дереве останавливает очередь слияния для всех помощников (код 4).
+
+    В коммит идёт карта HEAD плюс те же карточки, а не файл с диска: чужая
+    незакоммиченная правка карты остаётся в дереве у своего автора. Личный индекс
+    от HEAD, коммит обёрткой без путей; общий индекс лечит хук post-commit.
+    Отказ коммита — не отказ записи: карточка уже на диске, её догонит
+    devmap-selfheal, а причина уходит в stderr."""
+    folder = map_path.resolve().parent
+    if _git(folder, "ls-files", "--error-unmatch", map_path.name).returncode:
+        return                              # карта вне git: стенд, копия
+    repo = Path(_git(folder, "rev-parse", "--show-toplevel").stdout.strip())
+    name = map_path.resolve().relative_to(repo).as_posix()
+    ids = [НАЧАЛО.search("".join(card)).group(2) for card in chosen]
+    base = _git(repo, "rev-parse", "HEAD").stdout.strip()
+    with tempfile.TemporaryDirectory(prefix="map-commit-") as tmp:
+        index = os.path.join(tmp, "index")
+        env = {**os.environ, "GIT_INDEX_FILE": index}
+        try:
+            new_text = insert_cards(_git(repo, "show", f"{base}:{name}", check=True).stdout,
+                                    line_id, chosen)
+        except (MapRefused, subprocess.CalledProcessError) as error:
+            print(f"карта записана, коммит не собран: {error}", file=sys.stderr)
+            return
+        blob = _git(repo, "hash-object", "-w", "--stdin", f"--path={name}",
+                    input=new_text).stdout.strip()
+        _git(repo, "read-tree", base, env=env)
+        _git(repo, "update-index", "--cacheinfo", f"100644,{blob},{name}", env=env)
+        writer = os.path.basename(sys.argv[0]) or "писатель карты"
+        message = (f"Карта: {', '.join(ids)} — запись {writer}\n\n"
+                   f"Писатель карты коммитит свою запись сам: грязная карта в основном\n"
+                   f"дереве держит очередь слияния.\n\n"
+                   + "".join(f"Dev-Map: {i}\n" for i in ids))
+        done = subprocess.run(["bash", str(COMMIT_WRAPPER), "--base", base, "-F", "-"],
+                              cwd=repo, env=env, input=message, capture_output=True, text=True)
+    if done.returncode:
+        tail = (done.stderr.strip().splitlines() or ["?"])[-1]
+        print(f"карта записана, коммит не лёг (код {done.returncode}): {tail}", file=sys.stderr)
 
 
 def open_card_by_source(map_text: str, source: str) -> dict | None:

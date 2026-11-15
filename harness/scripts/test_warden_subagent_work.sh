@@ -473,6 +473,9 @@ CONF
 stand_a() {  # свежий LOG_DIR, карта с работой, новая панель
     rm -rf "$T/log" "$T/state" "$T/channel.txt" "$T/pane.txt"
     mkdir -p "$T/log/inbox/обработано" "$T/state/panel-state" "$T/proc"
+    # Суточная сверка меню бота сегодня уже прошла: без отметки стенд без bot-commands.py и
+    # Telegram шлёт владельцу весть об отказе меню, и случаи «владельцу 0 вестей» краснеют.
+    date +%F > "$T/log/меню-бота.день"
     : > "$T/channel.txt"
     printf '%s\n' '{"queue": [], "lines": [{"id": "hr", "tasks": [{"id": "hr.b", "status": "wip"}]}]}' \
         > "$T/project/dev-map.yaml"

@@ -339,7 +339,7 @@ def case_h_package(tmp: Path) -> None:
     check("з: код 0", 0, code)
     check("з: пакет обновлён", "новый\n", s.read("harness/scripts/tool.py", s.pkg))
     check("з: пакет закоммичен очередью", (True, ""),
-          ("Очередь слияния" in git(s.pkg, "log", "-1", "--format=%s"),
+          ("Очередь слияния" in git(s.pkg, "log", "-1", "--format=%B"),
            git(s.pkg, "status", "--porcelain").strip()))
     check("з: пакет_файлов 1", 1, data.get("пакет_файлов"))
 
@@ -565,11 +565,99 @@ def case_bad_call(tmp: Path) -> None:
     check("основное не на master — код 2", 2, s.queue(branch)[0])
 
 
+SAMPLE = "/".join(("harness", "config", "harness.conf"))
+
+
+def case_s_package_carried(tmp: Path) -> None:
+    # Поломка: файл пакета, уже равный вершине (помощник положил его сам), не попадает в
+    # коммит пакета — пакет копит незакоммиченное; коммитов пакета больше одного; в коммит
+    # уезжает чужая правка пакета; сообщение — не ветки.
+    print("s) пакет догоняется целиком одним коммитом с сообщением ветки")
+    s = Stand(tmp / "s")
+    branch, wt = s.tree("s")
+    s.write(wt, "scripts/new.py", "новый файл\n")
+    s.write(wt, "scripts/tool.py", "новый\n")
+    git(wt, "add", "--", "scripts/new.py", "scripts/tool.py")
+    git(wt, "commit", "-qm", "Первая правка: tool и new")
+    s.change(wt, "scripts/tool2.py", "вершина\n", "Вершина ветки: tool2")
+    s.write(s.pkg, "harness/scripts/tool.py", "новый\n")      # помощник положил сам
+    s.write(s.pkg, "harness/scripts/new.py", "новый файл\n")  # и новый файл
+    s.write(s.pkg, "harness/scripts/other.py", "чужое\n")     # чужая правка пакета
+    head = s.sha("HEAD", s.pkg)
+    code, data, _ = s.queue(branch, "--json")
+    check("s: код 0", 0, code)
+    check("s: в пакете ровно один новый коммит", "1",
+          git(s.pkg, "rev-list", "--count", f"{head}..HEAD").strip())
+    check("s: в коммит пакета ушли все три файла ветки",
+          ["harness/scripts/new.py", "harness/scripts/tool.py", "harness/scripts/tool2.py"],
+          sorted(git(s.pkg, "show", "--format=", "--name-only", "HEAD").split()))
+    check("s: в пакете грязна только чужая правка", "?? harness/scripts/other.py",
+          git(s.pkg, "status", "--porcelain").strip())
+    check("s: заголовок коммита пакета — заголовок вершины ветки", "Вершина ветки: tool2",
+          git(s.pkg, "log", "-1", "--format=%s").strip())
+    body = git(s.pkg, "log", "-1", "--format=%b")
+    check("s: тело называет коммиты ветки и очередь", (True, True),
+          ("Первая правка: tool и new" in body, f"Очередь слияния: {branch}" in body))
+    check("s: пакет_файлов 3", 3, data.get("пакет_файлов"))
+
+
+def keys_stand(tmp: Path, name: str) -> tuple:
+    """Стенд: образец в master и пакете; машинный конфиг знает OWNED со своим значением
+    и не знает OLD (давний пропуск, не этого слияния); ветка вносит в образец NEW."""
+    s = Stand(tmp / name)
+    sample = '# старый ключ\nOLD="1"\nOWNED="пакет"\n'
+    s.change(s.proj, SAMPLE, sample, "образец")
+    s.change(s.pkg, SAMPLE, sample, "образец")   # в пакете образец лежит тем же путём
+    machine = s.conf.read_text(encoding="utf-8") + '# слово владельца\nOWNED="владелец"\n'
+    s.conf.write_text(machine, encoding="utf-8")
+    branch, wt = s.tree(name)
+    s.change(wt, SAMPLE, sample.replace('OWNED="пакет"', 'OWNED="новое"')
+             + '# предел патча, байт\nNEW="5"\n')
+    return s, branch, machine
+
+
+def case_q_new_sample_key(tmp: Path) -> None:
+    # Поломка: ключ, внесённый слиянием в образец, не доходит до машинного конфига
+    # (инцидент 15.11: EVOLUTION_MAX_PATCH_BYTES) / дописано лишнее / переписано стоящее /
+    # нет копии / повтор дописывает дубль.
+    print("q) ключ, внесённый слиянием в образец, дописан в машинный конфиг")
+    s, branch, machine = keys_stand(tmp, "q")
+    code, data, _ = s.queue(branch, "--json")
+    after = s.conf.read_text(encoding="utf-8")
+    check("q: код 0", 0, code)
+    check("q: прежний текст конфига цел — только дописано", True, after.startswith(machine))
+    check("q: дописан ровно NEW с комментарием образца", '\n# предел патча, байт\nNEW="5"\n',
+          after[len(machine.rstrip("\n")) + 1:])
+    check("q: давний пропуск OLD не тронут", False, 'OLD=' in after)
+    check("q: отчёт называет ключ", ["NEW"], data.get("ключи_машины"))
+    copies = list((s.logs / "панель-копии").glob("harness.conf.*"))
+    check("q: копия прежнего конфига снята", [machine],
+          [c.read_text(encoding="utf-8") for c in copies])
+    b2, w2 = s.tree("q2")
+    s.change(w2, "a.txt", "a-q2\n")
+    s.queue(b2, "--json")
+    check("q: следующее слияние ничего не дописывает", after, s.conf.read_text(encoding="utf-8"))
+
+
+def case_r_key_unwritable(tmp: Path) -> None:
+    # Поломка: конфиг не записан, а очередь молчит «слито» — ключа на машине нет.
+    print("r) машинный конфиг не пишется — отказ называет ключ")
+    s, branch, machine = keys_stand(tmp, "r")
+    s.conf.chmod(0o444)
+    before = s.sha()
+    code, data, out = s.queue(branch, "--json")
+    check("r: код 10", 10, code)
+    check("r: слито — master ушёл вперёд", True, s.sha() != before and s.sha() == data.get("sha_после"))
+    check("r: отказ называет NEW и конфиг", True, "NEW" in out and str(s.conf) in out)
+    check("r: конфиг не тронут", machine, s.conf.read_text(encoding="utf-8"))
+
+
 CASES = (case_a_fast_forward, case_b_master_moved, case_c_conflict, case_d_red_gate,
          case_e_dirty_helper, case_f_dirty_main, case_g_locked, case_h_package,
          case_p_package_superset,
          case_i_two_queues, case_j_union, case_k_heal_hook, case_l_retries, case_m_cleanup,
-         case_n_rollback, case_bad_call)
+         case_n_rollback, case_bad_call, case_q_new_sample_key, case_r_key_unwritable,
+         case_s_package_carried)
 
 
 def main() -> int:

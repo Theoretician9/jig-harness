@@ -1297,6 +1297,8 @@
     - '16а) план не называет дамп всех баз через --базы-в'
     - '16ж) BACKUP_DBS не в ключах двери — дверь берёт его из окружения и снимает дампы по среде'
     - '16е) подсказка восстановления зовёт pg_restore --clean на каталог дампов'
+    - '1б код выхода ненулевой'
+    - '1б отказ называет заготовку из compose продукта'
   scripts/test_deploy_guard_consent.py:
     механизм: scripts/deploy_guard.py
     доказательство: python3 scripts/test_deploy_guard_consent.py
@@ -1525,6 +1527,12 @@
     - 's@^            if итог.get("довезти"):$@            if False:@'
     - 's@if not _ворота_в_журнал(журнал, предел_ворот()):@if not _ворота_в_журнал(журнал, 1800):@'
     - 's@^        except OSError as беда:$@        except ValueError as беда:@'
+    - 's/            if строка.strip() and not ЗЕЛЁНАЯ_СТРОКА.match(строка.strip()):/            if строка.strip():/'
+    - 's/return {имя: строки\[:СТРОК_ПРИЧИНЫ\] for/return {имя: строки[-СТРОК_ПРИЧИНЫ:] for/'
+    - 's/(в_данных if имя in данные else новые)\[имя\]/новые[имя]/'
+    - 's/    о_причинах = f" Причины: {слова_о_причинах(новые)}." if новые else ""/    о_причинах = ""/'
+    - 's/^        хвост += о_данных$/        pass/'
+    - 's/        print(f"\[обновление\] {слово} {имя}: {'' | ''.join(строки) or ''вывода нет''}")$/        print(f"[обновление] {слово} {имя}: {'' | ''.join(строки) or ''вывода нет''}", file=sys.stderr)/'
     мутация_случай:
     - файл, правленный ЗДЕСЬ, уходит в «обновить» — правка владельца затирается молча
     - красная самопроверка не откатывает пакет — обновление остаётся на сломанном коммите
@@ -1572,6 +1580,46 @@
     - 'R5 root-часть: --поставить не печатает команду установщика'
     - 'V3 предел ворот обновления снова зашит, ключ UPDATE_GATES_TIMEOUT_SEC не действует'
     - 'V2 беда записи версии роняет постановку, владелец не извещён'
+    - 'зелёные строки пробы («ок ·») идут в причину красной (bkb 15.11)'
+    - 'причина — хвост блока, а не первые строки (bkb 15.11)'
+    - 'красная в данных копии откатывает обновление (bkb 15.11: секреты, указания)'
+    - 'владельцу не сказана причина новой красной (bkb 15.11)'
+    - 'обновление встало, а красная в данных копии владельцу не названа (bkb 15.11)'
+    - 'причины печатаются в stderr — журнал копии одним «>» их не видит (bkb 15.11)'
+  # check-typical-copy.py: стенд типовой копии видит красные данных копии.
+  scripts/test_typical_copy.py:
+    механизм: scripts/check-typical-copy.py
+    доказательство: python3 scripts/test_typical_copy.py
+    подмена: из-копии
+    мутация:
+    - 's/^        stand.owner_says(\*OWNER_LATE)$/        pass/'
+    - 's/^        (self.project \/ OWN_PRODUCT).write_text(OWN_PRODUCT_TEXT, encoding="utf-8")$/        (self.project \/ OWN_PRODUCT).write_text("", encoding="utf-8")/'
+    - 's/ + \[entry\["гейт"\] for entry in held\]//'
+    - 's/fresh = sorted(name for name in after - before if name not in data_checks)/fresh = sorted(after - before)/'
+    мутация_случай:
+    - 'стенд без указания владельца за часы обновления — «указания» bkb не видны'
+    - 'стенд без своего кода продукта с паролем — «секреты» bkb не видны'
+    - 'карантин хозяина не судится стендом — 0.13.0 ушёл с красными «признаки»'
+    - 'красная в данных копии считается красной харнеса — замок отказывает выпуску'
+  # razlozhit-harnes.sh: свои записи библиотеки процессов при закрытом слое установки (bkb 15.11).
+  scripts/test_layout_carry_own_refusal.py:
+    механизм: ${STARTER_DIR}/harness/razlozhit-harnes.sh
+    доказательство: python3 scripts/test_layout_carry_own_refusal.py
+    подмена: LAYOUT_SCRIPT
+    мутация:
+    - 's/^  if (( carried_rc )) \&\& (( \${#ROLLBACK_ARGS\[@\]} == 0 )); then$/  if false; then/'
+    - 's/ \&\& (( \${#ROLLBACK_ARGS\[@\]} == 0 ))//'
+    - 's/\${carried:-перенос/${carried_rc:-перенос/'
+    - 's/^    || carried_rc=\$?$/    || true/'
+    - 's/^    baseline="\$BASELINE_TMP"$/    true/'
+    - 's/^  rm -f "\$BASELINE_TMP"$/  rm -f "$BASELINE_TMP"; cp "$HERE\/config\/process-library.json" "$PROJECT_DIR\/harness\/config\/process-library.json" 2>\/dev\/null || true/'
+    мутация_случай:
+    - 'К1 слой закрыт, а раскладка идёт дальше — своя запись копии пропадает'
+    - 'К3 откат прежней версии отказывает из-за слоя'
+    - 'К1 причина отказа без имени записи и пути слоя'
+    - 'К1 сбой переноса глотается (`|| true`, как в 0.13.0)'
+    - 'К1 прежняя сборка не читается — своя запись неотличима от снятой и не переносится'
+    - 'К2 отказ после записи в проект — process-library.json уже пакетный'
   scripts/test_layout_door.py:
     механизм: scripts/layout-door.py
     доказательство: python3 scripts/test_layout_door.py
@@ -4272,6 +4320,35 @@
     - 'форма из карточки тревоги разрешена'
     - 'запрещена: ключ с «/»'
     - 'в ФОРМЫ_СЛОВАМИ ровно одна строка с --is-green'
+  # acceptance.py --задача: приёмка названных карточек под локом карты, список владельца не трогается (15.11, сторож скорости).
+  scripts/test_acceptance_one_task.py:
+    механизм: scripts/acceptance.py
+    доказательство: python3 scripts/test_acceptance_one_task.py
+    подмена: HARNESS_ACCEPTANCE
+    мутация:
+    - 's@ and (только is None or з.get("id") in только)\]@]@'
+    - 's@^    только = None$@    только = set()@'
+    - 's@^    if "--задача" in sys.argv:$@    if False:@'
+    - 's@после\[0\].split(",")@после[0].split(";")@'
+    - 's@^        if not названные:$@        if False:@'
+    - 's@^        if нет:$@        if False:@'
+    - 's@^    if "--применить" in sys.argv and только is None:$@    if "--применить" in sys.argv:@'
+    - 's@^        if только is None:$@        if True:@'
+    - 's@исходы не записаны", file=sys.stderr)$@исходы не записаны", file=sys.stderr); return 0@'
+    - 's@--задача: лок карты занят@--задача: карта занята@'
+    - 's@^                    закрыто, вернулось = применить(вердикты, КАРТА)$@                    закрыто, вернулось = 0, 0@'
+    мутация_случай:
+    - 'сухой --задача: судит одну карточку'
+    - 'вся карта: судит обе'
+    - 'сухой --задача: судит одну карточку'
+    - 'сухой --задача: две через запятую'
+    - '--задача без id: код 2'
+    - 'карточки нет в test: код 2'
+    - '--применить: список владельца не переписан'
+    - 'лок занят: код 2, не «прогон состоялся»'
+    - 'лок занят: код 2, не «прогон состоялся»'
+    - 'лок занят: причина названа'
+    - '--применить: в карте пометка у названной'
   scripts/test_mutations_before_accept.py:
     # Мутации — долг до принятия: приёмка не принимает с долгом, ночь закрывает или заводит карточку.
     механизм: scripts/acceptance.py
@@ -7038,7 +7115,13 @@
     - 's@s/^В работе \\(\[0-9\]\[0-9\]\*\\).\*/\\1/p@s/^В работе: \\([0-9][0-9]*\\).*/\\1/p@'
     - 's@s/^Режим «\[^»\]\*»: \\(\[0-9\]\[0-9\]\*\\) .\*/\\1/p@s/^Режим «[^»]*» \\([0-9][0-9]*\\) .*/\\1/p@'
     - 's@            date +%s > "$over"@            :@'
-    - 's@        ровно) rm -f "$LOG_DIR/speed.unanswered"; say@        ровно) say@'
+    - 's@        ровно) rm -f "$LOG_DIR/speed.unanswered" "$offered"; say@        ровно) rm -f "$offered"; say@'
+    - 's@    \[ "$count" -gt 0 \] || rm -f "$LOG_DIR/speed.offered"@    :@'
+    - 's@    local offered="$LOG_DIR/speed.offered"@    local offered="$LOG_DIR/speed.offered.x"@'
+    - 's@--предложено "$(cat "$offered" 2>/dev/null)"@--предложено ""@'
+    - 's@        ровно) rm -f "$LOG_DIR/speed.unanswered" "$offered"; say@        ровно) rm -f "$LOG_DIR/speed.unanswered"; say@'
+    - 's@^        rm -f "$LOG_DIR/speed.unanswered" "$offered"$@        rm -f "$LOG_DIR/speed.unanswered"@'
+    - 's@^        tr .* >> "$offered"$@        :@'
     мутация_случай:
     - '3: OWNER_WAITING=1 — текста нет, судья не спрошен'
     - '4: пинок 6а в этом проходе — текста скорости нет; 5: ровно один текст — служебный'
@@ -7051,6 +7134,12 @@
     - '7: в слове числа из слов судьи (в работе 3, режим 5)'
     - '6: метка speed.over поставлена'
     - '7: «ровно» — счёт неотвеченных снят'
+    - '7а: прибавка в работе — память начата заново'
+    - '7а: после пинка в памяти предложенные id'
+    - '7а: второй пинок — судье передана память первого'
+    - '7а: «ровно» — память снята'
+    - '7а: «лишнее» — память снята'
+    - '7а: после пинка в памяти предложенные id'
   scripts/test_warden_speed.sh#pane.sh:
     # Флаг прохода TMUX_KICKED ставят двери pane.sh — одна точка на все толчки (05.11, Ч4).
     механизм: scripts/lib/pane.sh
@@ -7561,6 +7650,10 @@
     - 's@abs(series\[i\]\[3\] - known) > RESET_SHIFT_S@abs(series[i][3] - known) >= RESET_SHIFT_S@'
     - 's@known = series\[i\]\[3\] if series\[i\]\[3\] is not None else known@known = series[i][3]@'
     - 's@known = series\[0\]\[3\]@known = None@'
+    - 's@take = sorted(st\["к_взятию"\], key=lambda task: task in offered)@take = st["к_взятию"]@'
+    - 's@take = sorted(st\["к_взятию"\], key=lambda task: task in offered)@take = [task for task in st["к_взятию"] if task not in offered]@'
+    - 's@or "").split())@or "").split(","))@'
+    - 's@else 0.0, offered))@else 0.0))@'
     мутация_случай:
     - '[power_quiet_zone] 80 % 30 мин (не ниже порога тишины 75) — П держится 5'
     - '[kick_load_edges] 75 % (ровно порог тишины — по одной)'
@@ -7608,6 +7701,24 @@
     - '[limit_cut_shift_boundary] сдвиг ровно 60 с: скорость неделя сходится с независимым счётом'
     - '[limit_cut_shift_across_null] новый сброс только в чтении: скорость неделя — консервативная 0.5'
     - '[limit_cut_first_interval] одна точка и чтение: скорость неделя — консервативная 0.5'
+    - '[warden_offered] предложено: голова уже предлагалась — следующая'
+    - '[warden_offered] предложено: предлагалось всё — снова голова'
+    - '[warden_offered] предложено: три первых предлагались — четвёртая'
+    - '[warden_offered] предложено: голова уже предлагалась — следующая'
+  scripts/test_owner_message_ceiling.py:
+    # Потолок повода «о-чём-сообщение-владельца» — от потока владельца: пик
+    # 79 вызовов в сутки судит модель, цикл зовущего (1000) отказан потолком.
+    механизм: harness/config/model-call-reasons.yaml
+    доказательство: python3 scripts/test_owner_message_ceiling.py
+    подмена: из-копии
+    мутация:
+    - 's@^    потолок: 200$@    потолок: 30@'
+    - 's@^    потолок: 200$@@'
+    - 's@^    потолок: 200$@    потолок: 100000@'
+    мутация_случай:
+    - 'БОЛЬНОЙ СЛУЧАЙ: 79 вызовов за сутки (пик 07.11) — сообщение судит модель'
+    - 'БОЛЬНОЙ СЛУЧАЙ: 79 вызовов за сутки (пик 07.11) — сообщение судит модель'
+    - '1000 вызовов за сутки (цикл зовущего) — отказ потолком'
 
 # Исключения ворот scripts/check-probe-mutations.py: файл пробы БЕЗ записи
 # мутаций, но с названной причиной. Ключ — путь или каталог с «/» на конце;
@@ -9802,27 +9913,37 @@
     доказательство: python3 scripts/./././././././././test_consent_buttons.py --случай виды-10
     подмена: из-копии
     мутация:
-    - 's@"перепись": rewrite_text, "слой-человека": layer_text}@"перепись": rewrite_text}@'
+    - 's@"перепись": rewrite_text, "слой-человека": layer_text, "ключ-сети": net_key_text}@"перепись": rewrite_text, "ключ-сети": net_key_text}@'
+    - 's@"перепись": rewrite_text, "слой-человека": layer_text, "ключ-сети": net_key_text}@"перепись": rewrite_text, "слой-человека": layer_text}@'
     мутация_случай:
     - 'в10б) consent_buttons.py: таблица по виду есть, ключи == ВИДЫ_СОГЛАСИЯ'
+    - 'ключ сети: нет текста кнопки «ключ-сети» — «в10б) consent_buttons.py: таблица по виду есть, ключи == ВИДЫ_СОГЛАСИЯ»'
   scripts/././././././././././test_consent_buttons.py:
     механизм: scripts/lib/owner_word.py
     доказательство: python3 scripts/././././././././././test_consent_buttons.py --случай виды-10
     подмена: из-копии
     мутация:
-    - 's@"перепись": _погашено_предметом, "слой-человека": _погашено_записью_слоя}@"перепись": _погашено_предметом}@'
-    - 's@^                 "слой-человека")$@                 )@'
+    - 's@"перепись": _погашено_предметом, "слой-человека": _погашено_записью_слоя,$@"перепись": _погашено_предметом,@'
+    - 's@^                 "слой-человека", "ключ-сети")$@                 "ключ-сети")@'
+    - 's@^             "ключ-сети": _погашено_предметом}$@             }@'
+    - 's@^                 "слой-человека", "ключ-сети")$@                 "слой-человека")@'
+    - 's@^                  "ключ-сети": re.compile(r"ключ|подпис"),$@@'
     мутация_случай:
     - 'в10б) owner_word.py: таблица по виду есть, ключи == ВИДЫ_СОГЛАСИЯ'
-    - 'в10а) owner_word.ВИДЫ_СОГЛАСИЯ — восемь видов (спека §5: + «снос-базы», «перепись»; стандарты: + «слой-человека»)'
+    - 'в10а) owner_word.ВИДЫ_СОГЛАСИЯ — девять видов (спека §5: + «снос-базы», «перепись»; стандарты: + «слой-человека»; сеть: + «ключ-сети»)'
+    - 'ключ сети: нет погашения «ключ-сети» — «в10б) owner_word.py: таблица по виду есть, ключи == ВИДЫ_СОГЛАСИЯ»'
+    - 'ключ сети: «ключ-сети» не в ВИДЫ_СОГЛАСИЯ — «в10а) … девять видов»'
+    - 'ключ сети: нет предмета отзыва «ключ-сети» — «в10б) owner_word.py: таблица по виду есть, ключи == ВИДЫ_СОГЛАСИЯ»'
   scripts/./././././././././././test_consent_buttons.py:
     механизм: scripts/ask-consent.py
     доказательство: python3 scripts/./././././././././././test_consent_buttons.py --случай виды-10
     подмена: из-копии
     мутация:
-    - 's@^            "слой-человека": предмет_слоя_человека}$@            }@'
+    - 's@"слой-человека": предмет_слоя_человека, "ключ-сети": предмет_ключа_сети}@"ключ-сети": предмет_ключа_сети}@'
+    - 's@"слой-человека": предмет_слоя_человека, "ключ-сети": предмет_ключа_сети}@"слой-человека": предмет_слоя_человека}@'
     мутация_случай:
     - 'в10б) ask-consent.py: таблица по виду есть, ключи == ВИДЫ_СОГЛАСИЯ'
+    - 'ключ сети: нет разбора предмета «ключ-сети» — «в10б) ask-consent.py: таблица по виду есть, ключи == ВИДЫ_СОГЛАСИЯ»'
   # Стенд пробы кнопок сам держит свой журнал: внешний HARNESS_LOG_DIR (events.py берёт его раньше
   # LOG_DIR) не уводит запросы стенда. Механизм — сама проба. Внешний каталог — /dev/null/…:
   # создать его не может никто, поэтому мутант никуда не пишет, а чистая проба его не касается.
@@ -9943,6 +10064,17 @@
     мутация_случай:
     - 'уборка убранного стенда меняет код 0 на 1 — случаи 2) и 3)'
     - 'стенд с каталогом без записи не убирается — случай 4)'
+  # Самотест раскладчика снимает ключи стенда из окружения вызывающего (замок 6г 15.11.2026).
+  scripts/test_layout_selftest_env_project.py:
+    механизм: ${STARTER_DIR}/harness/razlozhit-harnes.sh
+    доказательство: python3 scripts/test_layout_selftest_env_project.py
+    подмена: LAYOUT_SCRIPT
+    мутация:
+    - 's@^  unset \$(sed -n .*@  :@'
+    - 's@"\$T/install.conf" "\$T/harness.conf" | sort -u)@"$T/harness.conf" | sort -u)@'
+    мутация_случай:
+    - 'проект копии из PROJECT_DIR окружения изменён'
+    - 'проект копии из PROJECT_DIR окружения изменён'
   scripts/test_installer_first_commit.py:
     механизм: ${STARTER_DIR}/USTANOVIT.sh
     доказательство: python3 scripts/test_installer_first_commit.py
@@ -10310,7 +10442,7 @@
     подмена: DOOR_UNDER_TEST
     мутация:
     - 's@^PREFLIGHT_REFUSAL=\$(HARNESS_LOG_DIR="\$LOG_DIR" python3 -I "\$SCRIPTS_REAL/deploy_guard\.py" --действие публикация --только-согласие \\$@PREFLIGHT_REFUSAL=$(HARNESS_LOG_DIR="$LOG_DIR" python3 "$SCRIPTS_REAL/deploy_guard.py" --действие публикация --только-согласие \\@'  # стр. 1014: I-publish
-    - 's@^konf_zagruzit_dveri STARTER_DIR PUBLIC_BRANCH PUBLIC_REMOTE PUBLIC_BUILD_DIR PUBLIC_COMMIT_EMAIL PUBLIC_PASPORT PAKET_SHA PREDMET_ZAMKA$@konf_zagruzit STARTER_DIR PUBLIC_BRANCH PUBLIC_REMOTE PUBLIC_BUILD_DIR PUBLIC_COMMIT_EMAIL PUBLIC_PASPORT PAKET_SHA PREDMET_ZAMKA@'  # стр. 35: kz-publish
+    - 's@^konf_zagruzit_dveri STARTER_DIR PUBLIC_BRANCH PUBLIC_REMOTE PUBLIC_BUILD_DIR PUBLIC_COMMIT_EMAIL PUBLIC_PASPORT PAKET_SHA PREDMET_ZAMKA TYPICAL_COPY_CHECK$@konf_zagruzit STARTER_DIR PUBLIC_BRANCH PUBLIC_REMOTE PUBLIC_BUILD_DIR PUBLIC_COMMIT_EMAIL PUBLIC_PASPORT PAKET_SHA PREDMET_ZAMKA TYPICAL_COPY_CHECK@'  # стр. 35: kz-publish
     мутация_случай:
     - "П-12 publish.sh: bash-дверь с PYTHONPATH на чужой sitecustomize → ни одной метки, предмет цел"
     - "П-12 publish.sh: HARNESS_CONF на чужой конфиг с python3() → конфиг не исполнен, дверь закрыта"
@@ -10332,7 +10464,7 @@
     подмена: DOOR_UNDER_TEST
     мутация:
     - 's@^GATE_OUT=\$(HARNESS_LOG_DIR="\$LOG_DIR" python3 -I "\$SCRIPT_DIR/deploy_guard\.py" --просить \$GATE_FORCE \${GATE_SUBJECT\[\@\]+"\${GATE_SUBJECT\[\@\]}"} 2>&1) || GATE_RC=\$?$@GATE_OUT=$(HARNESS_LOG_DIR="$LOG_DIR" python3 "$SCRIPT_DIR/deploy_guard.py" --просить $GATE_FORCE ${GATE_SUBJECT[\@]+"${GATE_SUBJECT[\@]}"} 2>\&1) || GATE_RC=$?@'  # стр. 253: I-deploy
-    - 's@^konf_zagruzit_dveri PROJECT_DIR LOG_DIR TMUX_SESSION SECRETS_DIR AGENT_START_CMD DOCKER_SWEEP_ENABLED BACKUP_DIR BACKUP_DBS DB_ADMIN_USER DEVMAP_AUDIT_DAYS HARNESS_LOG_DIR PRODUCT_DIR PRODUCT_REPO STACK_BUILD_CMD STACK_BUILD_NOCACHE_CMD STACK_CRON_SRC STACK_DB_DUMP_CMD STACK_DB_RESTORE_HINT STACK_HEALTH_CMD STACK_HEALTH_URL STACK_IMAGES STACK_MANIFESTS STACK_MIGRATE_CMD STACK_PROXY_RELOAD_CMD STACK_RELEASE_CMD STACK_UP_CMD$@konf_zagruzit PROJECT_DIR LOG_DIR TMUX_SESSION SECRETS_DIR AGENT_START_CMD DOCKER_SWEEP_ENABLED BACKUP_DIR BACKUP_DBS DB_ADMIN_USER DEVMAP_AUDIT_DAYS HARNESS_LOG_DIR PRODUCT_DIR PRODUCT_REPO STACK_BUILD_CMD STACK_BUILD_NOCACHE_CMD STACK_CRON_SRC STACK_DB_DUMP_CMD STACK_DB_RESTORE_HINT STACK_HEALTH_CMD STACK_HEALTH_URL STACK_IMAGES STACK_MANIFESTS STACK_MIGRATE_CMD STACK_PROXY_RELOAD_CMD STACK_RELEASE_CMD STACK_UP_CMD@'  # стр. 46: kz-deploy
+    - 's@^konf_zagruzit_dveri PROJECT_DIR LOG_DIR TMUX_SESSION SECRETS_DIR AGENT_START_CMD DOCKER_SWEEP_ENABLED BACKUP_DIR BACKUP_DBS DB_ADMIN_USER DEVMAP_AUDIT_DAYS HARNESS_LOG_DIR PRODUCT_DIR PRODUCT_REPO STACK_BUILD_CMD STACK_BUILD_NOCACHE_CMD STACK_CRON_SRC STACK_DB_DUMP_CMD STACK_DB_RESTORE_HINT STACK_HEALTH_CMD STACK_HEALTH_URL STACK_IMAGES STACK_MANIFESTS STACK_MIGRATE_CMD STACK_PROXY_RELOAD_CMD STACK_RELEASE_CMD STACK_UP_CMD PRODUCT_PATH$@konf_zagruzit PROJECT_DIR LOG_DIR TMUX_SESSION SECRETS_DIR AGENT_START_CMD DOCKER_SWEEP_ENABLED BACKUP_DIR BACKUP_DBS DB_ADMIN_USER DEVMAP_AUDIT_DAYS HARNESS_LOG_DIR PRODUCT_DIR PRODUCT_REPO STACK_BUILD_CMD STACK_BUILD_NOCACHE_CMD STACK_CRON_SRC STACK_DB_DUMP_CMD STACK_DB_RESTORE_HINT STACK_HEALTH_CMD STACK_HEALTH_URL STACK_IMAGES STACK_MANIFESTS STACK_MIGRATE_CMD STACK_PROXY_RELOAD_CMD STACK_RELEASE_CMD STACK_UP_CMD PRODUCT_PATH@'  # стр. 46: kz-deploy
     мутация_случай:
     - "П-12 deploy.sh: каждый зов python3 — с -I (разбор)"
     - "П-12 deploy.sh: конфиг — konf_zagruzit_dveri, не konf_zagruzit (разбор)"
@@ -10407,7 +10539,7 @@
     доказательство: python3 scripts/././././././././././././././././././././././././test_owner_word_carrier.py
     подмена: DOOR_UNDER_TEST
     мутация:
-    - 's@^konf_zagruzit_dveri PROJECT_DIR LOG_DIR TMUX_SESSION SECRETS_DIR AGENT_START_CMD DOCKER_SWEEP_ENABLED BACKUP_DIR BACKUP_DBS DB_ADMIN_USER DEVMAP_AUDIT_DAYS HARNESS_LOG_DIR PRODUCT_DIR PRODUCT_REPO STACK_BUILD_CMD STACK_BUILD_NOCACHE_CMD STACK_CRON_SRC STACK_DB_DUMP_CMD STACK_DB_RESTORE_HINT STACK_HEALTH_CMD STACK_HEALTH_URL STACK_IMAGES STACK_MANIFESTS STACK_MIGRATE_CMD STACK_PROXY_RELOAD_CMD STACK_RELEASE_CMD STACK_UP_CMD$@konf_zagruzit_dveri PROJECT_DIR LOG_DIR TMUX_SESSION SECRETS_DIR AGENT_START_CMD DOCKER_SWEEP_ENABLED BACKUP_DIR BACKUP_DBS DB_ADMIN_USER DEVMAP_AUDIT_DAYS HARNESS_LOG_DIR PRODUCT_DIR PRODUCT_REPO STACK_BUILD_CMD STACK_BUILD_NOCACHE_CMD STACK_CRON_SRC STACK_DB_DUMP_CMD STACK_DB_RESTORE_HINT STACK_HEALTH_CMD STACK_HEALTH_URL STACK_IMAGES STACK_MANIFESTS STACK_MIGRATE_CMD STACK_PROXY_RELOAD_CMD STACK_RELEASE_CMD@'  # стр. 46: deploy-stackup
+    - 's@^konf_zagruzit_dveri PROJECT_DIR LOG_DIR TMUX_SESSION SECRETS_DIR AGENT_START_CMD DOCKER_SWEEP_ENABLED BACKUP_DIR BACKUP_DBS DB_ADMIN_USER DEVMAP_AUDIT_DAYS HARNESS_LOG_DIR PRODUCT_DIR PRODUCT_REPO STACK_BUILD_CMD STACK_BUILD_NOCACHE_CMD STACK_CRON_SRC STACK_DB_DUMP_CMD STACK_DB_RESTORE_HINT STACK_HEALTH_CMD STACK_HEALTH_URL STACK_IMAGES STACK_MANIFESTS STACK_MIGRATE_CMD STACK_PROXY_RELOAD_CMD STACK_RELEASE_CMD STACK_UP_CMD PRODUCT_PATH$@konf_zagruzit_dveri PROJECT_DIR LOG_DIR TMUX_SESSION SECRETS_DIR AGENT_START_CMD DOCKER_SWEEP_ENABLED BACKUP_DIR BACKUP_DBS DB_ADMIN_USER DEVMAP_AUDIT_DAYS HARNESS_LOG_DIR PRODUCT_DIR PRODUCT_REPO STACK_BUILD_CMD STACK_BUILD_NOCACHE_CMD STACK_CRON_SRC STACK_DB_DUMP_CMD STACK_DB_RESTORE_HINT STACK_HEALTH_CMD STACK_HEALTH_URL STACK_IMAGES STACK_MANIFESTS STACK_MIGRATE_CMD STACK_PROXY_RELOAD_CMD STACK_RELEASE_CMD PRODUCT_PATH@'  # стр. 46: deploy-stackup
     мутация_случай:
     - "П-12 АР-4 deploy.sh: 31 ключей подлогом в окружении → после konf_zagruzit_dveri (паспорт стенда без ключей двери) значение файла или умолчание, не окружение"
   # АР-4: scripts/publish.sh — STARTER_DIR и PUBLIC_PASPORT выпали из доводов; паспорт сборщику и гейту чистоты от konf_koren (HARNESS_HOME окружения), не от паспорта двери.
@@ -10416,8 +10548,8 @@
     доказательство: python3 scripts/./././././././././././././././././././././././././test_owner_word_carrier.py
     подмена: DOOR_UNDER_TEST
     мутация:
-    - 's@^konf_zagruzit_dveri STARTER_DIR PUBLIC_BRANCH PUBLIC_REMOTE PUBLIC_BUILD_DIR PUBLIC_COMMIT_EMAIL PUBLIC_PASPORT PAKET_SHA PREDMET_ZAMKA$@konf_zagruzit_dveri PUBLIC_BRANCH PUBLIC_REMOTE PUBLIC_BUILD_DIR PUBLIC_COMMIT_EMAIL PUBLIC_PASPORT PAKET_SHA PREDMET_ZAMKA@'  # стр. 35: publish-starter
-    - 's@^konf_zagruzit_dveri STARTER_DIR PUBLIC_BRANCH PUBLIC_REMOTE PUBLIC_BUILD_DIR PUBLIC_COMMIT_EMAIL PUBLIC_PASPORT PAKET_SHA PREDMET_ZAMKA$@konf_zagruzit_dveri STARTER_DIR PUBLIC_BRANCH PUBLIC_REMOTE PUBLIC_BUILD_DIR PUBLIC_COMMIT_EMAIL PAKET_SHA PREDMET_ZAMKA@'  # стр. 35: publish-pasport
+    - 's@^konf_zagruzit_dveri STARTER_DIR PUBLIC_BRANCH PUBLIC_REMOTE PUBLIC_BUILD_DIR PUBLIC_COMMIT_EMAIL PUBLIC_PASPORT PAKET_SHA PREDMET_ZAMKA TYPICAL_COPY_CHECK$@konf_zagruzit_dveri PUBLIC_BRANCH PUBLIC_REMOTE PUBLIC_BUILD_DIR PUBLIC_COMMIT_EMAIL PUBLIC_PASPORT PAKET_SHA PREDMET_ZAMKA TYPICAL_COPY_CHECK@'  # стр. 35: publish-starter
+    - 's@^konf_zagruzit_dveri STARTER_DIR PUBLIC_BRANCH PUBLIC_REMOTE PUBLIC_BUILD_DIR PUBLIC_COMMIT_EMAIL PUBLIC_PASPORT PAKET_SHA PREDMET_ZAMKA TYPICAL_COPY_CHECK$@konf_zagruzit_dveri STARTER_DIR PUBLIC_BRANCH PUBLIC_REMOTE PUBLIC_BUILD_DIR PUBLIC_COMMIT_EMAIL PAKET_SHA PREDMET_ZAMKA TYPICAL_COPY_CHECK@'  # стр. 35: publish-pasport
     - 's@^    local pasport="\${PUBLIC_PASPORT:-\$KONF_DVERI_KOREN/install\.conf}"$@    local pasport="${PUBLIC_PASPORT:-$(konf_koren)/install.conf}"@'  # стр. 212: publish-koren212
     - 's@^    pasport="\${PUBLIC_PASPORT:-\$KONF_DVERI_KOREN/install\.conf}"$@    pasport="${PUBLIC_PASPORT:-$(konf_koren)/install.conf}"@'  # стр. 541: publish-koren541
     мутация_случай:
@@ -10545,6 +10677,14 @@
     - 's@    return record_extras(\*texts) + line_extras(\*comments)@    return record_extras(*texts)@'
     - 's@if isinstance(item, dict) and "файл" in item:@if False:@'
     - 's@^            \[k for k in before if k not in ours\]:@            []:@'
+    - 's@for key, lines in new.items() if key not in old)@for key, lines in new.items())@'
+    - 's@    keys_refusal = deliver_new_keys(ctx, before, tip, report)@    keys_refusal = None@'
+    - 's@    if install_new.писатель.надо_поднять_права(\[target\]):@    if False:@'
+    - 's@    install_new.писатель.снять_копию(target)@    pass@'
+    - 's@        raise Stop(10, keys_refusal)@        pass@'
+    - 's@    report.fields\["ключи_машины"\] = keys@    pass@'
+    - 's@blob(ctx.project, before, SAMPLE_CONF)@blob(ctx.project, tip, SAMPLE_CONF)@'
+    - 's@appended, keys, _ = install_new.дополнить_из_образца(text, brought)@appended, keys, _ = brought, list(new), []@'
     мутация_случай:
     - 'и: без flock очереди не ждут друг друга'
     - 'в: забытый rebase --abort'
@@ -10572,6 +10712,14 @@
     - 'п(в3): комментарий yaml только в пакете затирается'
     - 'п(в2): механизм не по полю «файл» — запись не названа'
     - 'п(в4): удалённая в пакете запись yaml не судится'
+    - 'ключи машины: давний пропуск OLD дописан — «q: давний пропуск OLD не тронут»'
+    - 'ключи машины: ключи не доставляются — «q: дописан ровно NEW», «r: код 10»'
+    - 'ключи машины: запись без права — исключение вместо кода 10, случай r'
+    - 'ключи машины: копия прежнего не снята — «q: копия прежнего конфига снята»'
+    - 'ключи машины: отказ молчит кодом 0 — «r: код 10»'
+    - 'ключи машины: отчёт не называет ключ — «q: отчёт называет ключ»'
+    - 'ключи машины: разность образца пуста — NEW не дописан, случаи q и r'
+    - 'ключи машины: конфиг переписан образцом — «q: прежний текст конфига цел»'
   # Счётчик трения коммитов (13.11): 9 из 9 после усиления пробы.
   scripts/test_commit_friction.py:
     механизм: scripts/commit-friction.py
@@ -10655,6 +10803,7 @@
     мутация:
     - 's#url=need("EVOLUTION_REMOTE_URL")#url=(conf.get("EVOLUTION_REMOTE_URL") or "/nonexistent/evolution.git").strip()#'
     - 's@if flag == "G" else refuse(flag)@if flag != "B" else refuse(flag)@'
+    - 's@return refuse(f"U ключ {key} нет в {SIGNERS_PATH}")@return refuse(flag)@'
     - 's@parts\[1\] == signer and FILE_FORM.match@FILE_FORM.match@'
     - 's@if SIGNER_LINE.match(line) and line.split()\[0\] != host_principal\]@if True]@'
     - 's@if part.startswith(".git") and not (allow_gitkeep and part == ".gitkeep"):@if False:@'
@@ -10676,11 +10825,42 @@
     - 's@^    names = \[visible(Path(path)\.name)\[:40\] for path in edits\]$@    names = [visible(path)[:40] for path in edits]@'
     - 's@^        state\["carded"\]\[path\] = sha$@        pass@'
     - 's@ and p in state\["accepted"\]}$@}@'
-    - 's@^    touch_mark()$@    pass@'
+    - 's@^        touch_mark()$@        pass@'
     - 's@^        return read_tick(cfg)$@        try:\n            return read_tick(cfg)\n        except Refusal as refusal:\n            print(refusal.text, file=sys.stderr)\n            return OK@'
+    - 's@accepted and sent\.fullmatch(parts\[2\])@accepted and PATCH_DIR_FORM.match(parts[2])@'
+    - 's@parts\[0\] == "почта" and parts\[1\] == owner and bool@parts[0] == "почта" and bool@'
+    - 's@ok = (change\.status == "A" and change\.path not in accepted and @ok = (@'
+    - 's@change\.path not in accepted and sent@sent@'
+    - 's@ and all(PATCH_PART\.fullmatch(part) for part in rest))@)@'
+    - 's@and len(rest) <= PATCH_DEPTH and@and@'
+    - 's@return cfg\.max_patch if is_patch_path(path, cfg\.project_name) else cfg\.max_entry@return 10 ** 9 if is_patch_path(path, cfg.project_name) else cfg.max_entry@'
+    - 's@return cfg\.max_patch if is_patch_path(path, cfg\.project_name) else@return cfg.max_patch if path.startswith(f"почта/{cfg.project_name}/") else@'
+    - 's@blob_size(cfg\.clone, blob) > blob_limit(cfg, path)@blob_size(cfg.clone, blob) > cfg.max_entry@'
+    - 's@blob_size(cfg\.clone, obj) > blob_limit(cfg, path)):@blob_size(cfg.clone, obj) > cfg.max_entry):@'
+    - 's@return parts\[3:\] == \[PATCH_README\]@return True@'
+    - 's@parts\[2\])\.removeprefix(f"{accepted_by}-")@parts[2])@'
+    - 's@"ответ", "патч")@"ответ")@'
+    - 's@form_refusal(repo, change, host, blob_limit(cfg, change\.path))@form_refusal(repo, change, host, cfg.max_entry)@'
+    - 's@^    if is_patch_path(change\.path, owner):$@    if False:@'
+    - 's@    return name if DIR_FORM.fullmatch(name) and f"серверы/{name}.md" in accepted else None@    return name or None@'
+    - 's@        if finger in asked:@        if False:@'
+    - 's@    return owner_word.судить_кнопкой(KEY_KIND, subject)\[0\]@    return True@'
+    - 's@    taken, _ = rejudge(cfg, state, trust, shas, fresh_blob)@    taken = 0@'
+    - 's@dict(state\["accepted"\], \*\*({SIGNERS_PATH: signers_blob} if signers_blob else {}))@dict(state["accepted"])@'
+    - 's@    if code == OK and entered:@    if False:@'
+    - 's@    if stray:@    if False:@'
+    - 's@^            refused += 1$@            refused += 1; state["accepted"] = apply(state["accepted"], verdict.changes)@'
+    - 's@^    if shas:$@    if False:@'
+    - 's@    new = (old + b"\\n" if old else b"") + record\["line"\].encode() + b"\\n"@    new = record["line"].encode() + b"\\n"@'
+    - 's@            state\["rejected"\].remove(record)   # карточку@            pass   # карточку@'
+    - 's@^    rejudge_listed(cfg, state, trust)$@    pass@'
+    - 's@^    ask_about_keys(cfg, state)$@    pass@'
+    - 's@^    entered = enter_approved_keys(cfg, state, trust)$@    entered = False@'
+    - 's@        if record\["line"\] in signer_lines(cfg, state\["accepted"\]):@        if False:@'
     мутация_случай:
     - 'M1 Task 0: умолчание адреса в коде вместо отказа — «K1 пустой EVOLUTION_REMOTE_URL: код 4 без падения»'
-    - 'Task 2: == "G" → != "B" — «J2 ключ y вне списка → отказ: U»'
+    - 'Task 2: == "G" → != "B" — «J3 без подписи → отказ: N» (U судит своя ветка выше)'
+    - 'ключ сети: отказ U без отпечатка ключа — «J2 ключ y вне списка → отказ: U с отпечатком ключа», J8, J8c, J9'
     - 'Task 2: снято сравнение X == signer — «J5 HarnessX в находки/HarnessY/ → отказ»'
     - 'Task 2: снят фильтр строк списка подписантов — «J8 строка host@… с ключом y в списке → коммит y: отказ: U»'
     - 'Task 2: снят запрет .git* — «J10 .gitattributes от копии → отказ»'
@@ -10704,6 +10884,36 @@
     - 'R41-03 m8 (C3, 6c06d168): read_tick берёт из pending путь, которого нет в accepted — «C3» --читать код 1 (KeyError в write_cards)'
     - 'удачный тик не ставит метку пульса — «B4 метка пульса evolution-net»'
     - 'отказ тика под events.run теряет свой код — «K1 пустой EVOLUTION_REMOTE_URL: код 4», «R8 force-push → код 3»'
+    - 'дверь патча: каталог не сверен с подписантом — «J25b HarnessX кладёт каталог «-HarnessY-» → отказ»'
+    - 'дверь патча: открыта в любой ящик — «J25c HarnessX кладёт каталог патча в почта/HarnessY/ → отказ»'
+    - 'дверь патча: снято «только A нового пути» — «J25d правит файл своего патча», «J25e удаляет файл своего патча»'
+    - 'дверь патча: судится против родителя, не accepted — «P4 X удалил свой патч (отказ) и положил заново»'
+    - 'дверь патча: снят PATCH_PART — «J25f компонент «.env» в каталоге патча → отказ»'
+    - 'дверь патча: снят PATCH_DEPTH — «J25g глубина 7 внутри каталога патча → отказ»'
+    - 'дверь патча: потолок блоба патча снят — «J25h блоб 70000 в каталоге патча → отказ»'
+    - 'дверь патча: потолок патча всему ящику — «J25i письмо 20000 в почта/<эта копия>/ (не каталог) → отказ»'
+    - 'дверь патча: основа якоря судит патч потолком записи — «P3 якорь после патча: блоб патча в его дереве»'
+    - 'дверь патча: первое дерево судит патч потолком записи — «P5 --первый: блоб патча 20 КБ в дереве первого якоря»'
+    - 'дверь патча: карточка на каждый файл — «P2 карточка одна — на README.md»'
+    - 'дверь патча: суть карточки с именем отправителя — «P2 … «патч от HarnessX: server-patch»»'
+    - 'дверь патча: вид «патч» не в KINDS — «P2 … «патч от HarnessX: server-patch»»'
+    - 'дверь патча: форма судит патч потолком записи — «J25 HarnessX кладёт каталог патча (блоб 20 КБ) → ok», «P1»'
+    - 'дверь патча: путь патча не зовёт patch_refusal — «J25 HarnessX кладёт каталог патча → ok», «P1»'
+    - 'ключ сети: страница копии не сверена — «KY3 U без серверы/HarnessQ.md → просьбы о нём нет»'
+    - 'ключ сети: вопрос на каждый коммит — «KY2 второй коммит того же ключа → просьб всё ещё 1»'
+    - 'ключ сети: ключ без «Да» — «KY4 «Да» чужого from_id → список и main те же, c1 c2 отвергнуты»'
+    - 'ключ сети: якорь без перечитывания — «KY6 якорь с новым ключом не удаляет находки этого ключа»'
+    - 'ключ сети: перечитывание по старому списку — «KY6 якорь с новым ключом не удаляет находки этого ключа»'
+    - 'ключ сети: нет второго прохода — «KY7 карточки на обе находки»'
+    - 'ключ сети: --перечитать чужого sha — «KY11 --перечитать sha не из отвергнутых → код 2»'
+    - 'ключ сети: перечитанное отвергнутое в принятом — «KY9 --перечитать при прежнем потолке → снова отвергнута»'
+    - 'ключ сети: ключ в списке — без перечитывания — «KY12 ключ занесён якорем руками → отвергнутое по U перечитано и принято»'
+    - 'ключ сети: список заменён одной строкой — «KY5 прежние строки списка на месте»'
+    - 'ключ сети: перечитанный остаётся в отвергнутых — «KY7 c1 c2 не в отвергнутых, обе находки приняты»'
+    - 'ключ сети: перечитывание по списку снято — «KY12 ключ занесён якорем руками → отвергнутое по U перечитано и принято»'
+    - 'ключ сети: вопроса нет — «KY1 U от копии с серверы/HarnessB.md → одна просьба «ключ-сети» с именем и отпечатком»'
+    - 'ключ сети: занесение снято — «KY5 «Да» владельца → в allowed_signers строка HarnessB с этим ключом»'
+    - 'ключ сети: дубль строки после ручного занесения — «KY13 ключ занесён руками до «Да» → новой строки и якоря нет»'
   # Правило сторожа «сеть_мимо_двери»: push в клон сети — только дверью evolution-net.py --отправить.
   scripts/hooks/test_guard_bash.py#evolution-net:
     механизм: scripts/hooks/guard_bash.py
@@ -11112,6 +11322,19 @@
     мутация_случай:
     - '16 построчно: строка захода в журнале запуска и в заход.log, пока заход идёт'
     - '16 построчно: строка захода в журнале запуска и в заход.log, пока заход идёт'
+  # Заявка несёт команду своего дерева; пачка — заявки одной команды, гонится командой пачки.
+  scripts/test_batch_queue.py#своя-команда:
+    механизм: scripts/lib/batch_queue.py
+    доказательство: python3 scripts/test_batch_queue.py
+    подмена: HARNESS_BATCH_QUEUE
+    мутация:
+    - 's@^            pending = \[з for з in pending if з\["команда"\] == pending\[0\]\["команда"\]\]$@            pass@'
+    - 's@^        return tokens, ids, pending\[0\]\["команда"\]$@        return tokens, ids, state["заявки"][-1]["команда"]@'
+    - 's@"ids": ids, "команда": command,@"ids": ids, "команда": [sys.executable, "-c", "pass"],@'
+    мутация_случай:
+    - '18 заявки двух деревьев — каждая своей командой, не одной пачкой'
+    - '18 заявки двух деревьев — каждая своей командой, не одной пачкой'
+    - '18 заявки двух деревьев — каждая своей командой, не одной пачкой'
   # Дверь среза ставит мягкий срок MUTATION_DEADLINE_TS до предела юнита: прибор и пачка успевают записать итог.
   scripts/test_checks_slice_door.py#мягкий-срок:
     механизм: scripts/run-in-checks-slice.sh
@@ -11123,6 +11346,48 @@
     мутация_случай:
     - 'G-04: мягкий срок MUTATION_DEADLINE_TS дошёл до юнита — за полпредела до RuntimeMaxSec'
     - 'G-04: мягкий срок MUTATION_DEADLINE_TS дошёл до юнита — за полпредела до RuntimeMaxSec'
+  # work-queue.py: карточка, ждущая внешнего (повтор приёмки, кнопка владельца, выпуск, очередь мутаций), — не работа (сторож скорости 15.11).
+  scripts/test_work_queue_external_wait.py:
+    механизм: scripts/work-queue.py
+    доказательство: python3 scripts/test_work_queue_external_wait.py
+    подмена: WORK_QUEUE_SCRIPT
+    мутация:
+    - 's@ or ид in внешние:@:@'
+    - 's@        if any(с.startswith("Dev-Map:") and ид in с@        if False and any(с.startswith("Dev-Map:") and ид in с@'
+    - 's@возраст <= owner_word.срок_кнопки_мин(вид)@True@'
+    - 's@            if идёт:@            if True:@'
+    - 's@    итог = {\*\*ждут_мутаций(журналы), @    итог = {@'
+    - 's@            ждут.append(f"{ид}={внешние\[ид\]}")@            pass@'
+    мутация_случай:
+    - 'провал и коммит с трейлером после него — не работа'
+    - 'провал и коммит с трейлером — в «ждут» повтор приёмки'
+    - 'кнопка протухла — снова работа'
+    - 'publish.sh кончился — карточка снова работа'
+    - 'заявка в очереди мутаций — не работа'
+    - 'кнопка послана — в «ждут» кнопка владельца'
+  # lib/cards.py: писатель карты коммитит свои карточки сам, под локом карты (очередь слияния, код 4).
+  scripts/test_map_writer_commits.py:
+    механизм: scripts/lib/cards.py
+    доказательство: python3 scripts/test_map_writer_commits.py
+    подмена: из-копии
+    мутация:
+    - 's@        commit_cards(map_path, line_id, chosen)@        pass@'
+    - 's@            new_text = insert_cards(_git(repo, "show", f"{base}:{name}", check=True).stdout,@            new_text = map_path.read_text(encoding="utf-8") or (@'
+    - 's@    if _git(folder, "ls-files", "--error-unmatch", map_path.name).returncode:@    if False:@'
+    - 's@        print(f"карта записана, коммит не лёг@        0 and print(f"карта записана, коммит не лёг@'
+    - 's@Dev-Map: {i}@Dev-Map- {i}@'
+    - 's@        _git(repo, "read-tree", base, env=env)@        _git(repo, "update-index", "--add", "--cacheinfo", f"100644,{blob},{name}", env=env)@'
+    - 's@        commit_cards(map_path, line_id, chosen)@        __import__("atexit").register(commit_cards, map_path, line_id, chosen)@'
+    - 's@        _git(repo, "update-index", "--cacheinfo", f"100644,{blob},{name}", env=env)@        _git(repo, "update-index", "--cacheinfo", f"100644,{blob},{name}")@'
+    мутация_случай:
+    - 'БОЛЬНОЙ СЛУЧАЙ 15.11: коммитов стало на один больше'
+    - 'чужая правка в HEAD не попала'
+    - 'раздел section_untracked дошёл до конца'
+    - 'отказ коммита назван в stderr'
+    - 'в сообщении трейлер Dev-Map новой карточки'
+    - 'коммит меняет только карту, соседи на месте'
+    - 'во время коммита лок карты держит писатель'
+    - 'merge --ff-only ветки помощника проходит (было: код 4 «мешают-правки»)'
 без_мутаций:
   scripts/test_unified_fresh.py: 'мутация на копии невозможна: дверь UNIFIED_DIR — каталог глав, сборщика и выгрузки, а прибор подставляет в дверь путь одного файла; проба отвечает «нет сборщика» и красна на чистой копии. Красная на поломке доказана живьём: пакет 8da1ae2 — «ОТСТАЛА 323599 против 323861» (c266329, релиз 0.9.3)'
   scripts/test_layout_selftest_cleanup.py: 'мутация на копии невозможна (проверено прогоном 10.11): раскладчик пакета лежит вне дерева проекта, одинокая копия без соседних файлов пакета падает раньше обрыва по timeout — проба отвечает «обрыва не было (код 1)», чистая копия красна до мутации (hr.alert-disk-cleanup-full-2)'

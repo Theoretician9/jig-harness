@@ -924,11 +924,15 @@
     класс: D
   "scripts/test_layout_selftest_exit_code.py":
     класс: D
+  "scripts/test_layout_selftest_env_project.py":
+    класс: D
   "scripts/test_unified_fresh.py":
     класс: D
   "scripts/test_installer_first_commit.py":
     класс: D
   "scripts/test_layout_self_seal.py":
+    класс: D
+  "scripts/test_layout_carry_own_refusal.py":
     класс: D
   "scripts/test_installer_resume_seal.sh":
     класс: D
@@ -1088,6 +1092,10 @@
   "scripts/hooks/launch_plan_guard.py":
     класс: B1
   "scripts/hooks/test_launch_plan_guard.py":
+    класс: D
+  "scripts/hooks/package_write_guard.py":
+    класс: B1
+  "scripts/hooks/test_package_write_guard.py":
     класс: D
   "scripts/hooks/rotation_queue_guard.py":
     класс: B1

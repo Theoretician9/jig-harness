@@ -221,6 +221,9 @@ build_stand() {  # $1 = каталог, $2 = файл сторожа, $3 = им�
     mkdir -p "$s/tree/harness/demons" "$s/tree/scripts/lib" "$s/tree/scripts/hooks" "$s/tree/docs" \
              "$s/log/locks/services" "$s/hb" "$s/home" "$s/bin" "$s/panel" "$s/state" \
              "$s/secrets" "$s/steps" "$s/tmux"
+    # Суточная сверка меню бота сегодня уже прошла: без отметки стенд без bot-commands.py
+    # шлёт весть об отказе меню, которой эталон не знал, — тексты вестей расходятся.
+    date +%F > "$s/log/меню-бота.день"
     printf '%s\n' "$name" > "$s/name"
     printf '%s\n' "$mode" > "$s/mode"
     cp "$src" "$s/tree/harness/demons/$name.sh"
@@ -271,7 +274,9 @@ WRAP
     # Подставные инструменты машины.
     printf '#!/usr/bin/env bash\nprintf "vyzvan\\n" >> "%s/curl.log"\nprintf %s\n' "$s" \
         "'{\"ok\":true,\"result\":{\"message_id\":1}}'" > "$s/bin/curl"
-    printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> "%s/claude.log"\nexit 1\n' "$s" > "$s/bin/claude"
+    # «--version» — не вызов модели (так же судит check-model-call.py): проба личности
+    # сторожа спрашивает версию CLI; в журнал идёт всё прочее.
+    printf '#!/usr/bin/env bash\n[ "${1:-}" = --version ] && { echo "2.1.299 (Claude Code)"; exit 0; }\nprintf "%%s\\n" "$*" >> "%s/claude.log"\nexit 1\n' "$s" > "$s/bin/claude"
     for tool in docker npm pip uv sudo; do printf '#!/usr/bin/env bash\nexit 1\n' > "$s/bin/$tool"; done
     printf '#!/usr/bin/env bash\nexit 1\n' > "$s/bin/pgrep"
     cat > "$s/bin/df" <<'DF'

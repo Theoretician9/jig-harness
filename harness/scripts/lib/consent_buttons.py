@@ -290,10 +290,17 @@ def layer_text(request: dict, secrets_dir: str, ttl: int) -> str:
             f"Почему: {why}\nКнопка действует {ttl_phrase(ttl)}.")
 
 
+def net_key_text(request: dict, secrets_dir: str, ttl: int) -> str:
+    copy, _, finger = str(request["цель"]).partition(" ")
+    why = str(request.get("почему") or "")[:WHY_LIMIT]
+    return (f"Копия {copy} подписывает коммиты сети ключом {finger}; в списке подписантов его нет. Занести?\n"
+            f"{why}\nКнопка действует {ttl_phrase(ttl)}.")
+
+
 # Текст по виду: ключи — ВИДЫ_СОГЛАСИЯ.
 TEXT = {"удаление": delete_text, "пуш": push_text, "выкат": deploy_text,
         "публикация": publish_text, "спека": spec_text, "снос-базы": drop_text,
-        "перепись": rewrite_text, "слой-человека": layer_text}
+        "перепись": rewrite_text, "слой-человека": layer_text, "ключ-сети": net_key_text}
 
 
 def message_text(request: dict, secrets_dir: str, ttl: int) -> str:

@@ -49,6 +49,11 @@
             "type": "command",
             "command": "python3 $CLAUDE_PROJECT_DIR/scripts/hooks/harness_files_guard.py",
             "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "python3 $CLAUDE_PROJECT_DIR/scripts/hooks/package_write_guard.py",
+            "timeout": 5
           }
         ]
       },
@@ -100,6 +105,11 @@
           {
             "type": "command",
             "command": "python3 $CLAUDE_PROJECT_DIR/scripts/hooks/harness_files_guard.py",
+            "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "python3 $CLAUDE_PROJECT_DIR/scripts/hooks/package_write_guard.py",
             "timeout": 5
           }
         ]

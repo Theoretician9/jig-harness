@@ -103,6 +103,7 @@ STAND_DB = "proba_nrp_stand"
 ASK_DB = "proba_nrp_stand_ask"
 SPEC_TASK = "nrp.stand-spec"
 SELF_SUBJECT = ("цель", "проба nrp стенд")
+NET_KEY_SUBJECT = "HarnessNrp SHA256:" + "A" * 43
 FULL_UID_MAP = "0 0 4294967295"
 
 results: list[tuple[str, str, str]] = []   # (исход, имя, подробность)
@@ -387,6 +388,7 @@ class P12Stand:
         self.instance = self.root / "instance.yaml"
         self.instance.write_text("копия: стенд\nцель: прежняя\n", encoding="utf-8")
         press(self.log, "слой-человека", "=".join(SELF_SUBJECT), 60)
+        press(self.log, "ключ-сети", NET_KEY_SUBJECT, 60)
         self.ask_stub = self.root / "ask_stub.py"
         self.ask_stub.write_text('print("кнопка уже ушла (заглушка стенда)")\nraise SystemExit(3)\n',
                                  encoding="utf-8")
@@ -478,6 +480,17 @@ def door_layout(stand: P12Stand, path: Path) -> tuple[bool, str]:
     agreed = result[0]
     if agreed:
         return False, f"затравка СОГЛАСОВАНА «да, убрать» стенда (путь M): {sorted(agreed)}"
+    return True, ""
+
+
+def door_net_key(stand: P12Stand, path: Path) -> tuple[bool, str]:
+    code, out, result = run_door({"как": "вызов", "файл": str(path), "модуль": "evolution_net_under_test",
+                                  "функция": "key_approved", "доводы": {"subject": NET_KEY_SUBJECT}},
+                                 stand.env())
+    if code != 0 or "Traceback" in out:
+        return False, f"код {code}: {tail(out)}"
+    if result:
+        return False, "ключ сети ОДОБРЕН «Да» стенда (путь M): строка ушла бы в allowed_signers"
     return True, ""
 
 
@@ -799,6 +812,7 @@ def judge_bash_gate_doors(doors: dict) -> None:
 
 EXEC_CALL = re.compile(r'(?:^|[\s;(|&!{])(?:bash|python3(?:\s+-I)?)\s+"\$\{?([A-Za-z_]\w*)\}?/([^"$]+\.(?:sh|py))"')
 STAND_TASK = "задача-стенд"
+TYPICAL_JUDGE = "check-typical-copy.py"
 STUB_ANSWERS = {   # что цель печатает настоящему вызывающему: без ответа путь дальше не идёт
     "build-public.py": "собрано", "version.py": json.dumps({"следующая": "0.0.1", "почему": "стенд"}),
     "vitrina_status.py": f"{STAND_TASK} (статус test)", "deploy_guard.py": "предмет: стенд"}
@@ -857,6 +871,9 @@ class PublishPathStand:
         for side, top in (("настоящая", self.real), ("подлог", self.fake)):
             for key in targets:
                 self.stub(top / "scripts" / key, helper, key, side)
+            # Судья замка 6г зовётся «${TYPICAL_COPY_CHECK:-$SCRIPTS_REAL/…}» — разбор его не берёт,
+            # а без него публикация кончалась отказом 6г, не дойдя до сверки предмета перед пушем.
+            self.stub(top / "scripts" / TYPICAL_JUDGE, helper, TYPICAL_JUDGE, side)
             repo_with_trailer(top)
         self.bin = self.root / "bin"
         self.bin.mkdir()
@@ -1138,7 +1155,7 @@ def case_request_writers(doors: dict) -> None:
 PY_CALLERS = {"hooks/guard_bash.py": door_guard, "guard_bash.py": door_guard,
               "protected-delete.py": door_protected_delete, "deploy_guard.py": door_deploy_guard,
               "self-set.py": door_self_set, "layout-door.py": door_layout,
-              "spec_approval.py": door_spec, "ask-consent.py": door_ask}
+              "spec_approval.py": door_spec, "ask-consent.py": door_ask, "evolution-net.py": door_net_key}
 
 
 def judge_door(stand: P12Stand, name: str, door: dict, doors: dict) -> None:
@@ -1324,7 +1341,8 @@ PY_EXEC = {"guard_bash.py": exec_guard, "protected-delete.py": exec_protected_de
            "deploy_guard.py": exec_deploy_guard, "self-set.py": exec_self_set,
            "layout-door.py": lambda stand: (["--help"], "", None),
            "spec_approval.py": lambda stand: ([], "", None),
-           "ask-consent.py": lambda stand: (["--help"], "", None)}
+           "ask-consent.py": lambda stand: (["--help"], "", None),
+           "evolution-net.py": lambda stand: (["--help"], "", None)}
 
 
 def exec_python_door(stand: EnvStand, name: str, door: Path) -> tuple[bool, str]:

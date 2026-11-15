@@ -10,12 +10,27 @@
 Стенд: пакет копии — git-клон (прежний выпуск, затем новый коммит), проект копии —
 свой git, чужие PROJECT_NAME и AGENT_USER, подставной crontab, окружение с нуля
 (`env` без нашего TMUX и HARNESS_DEV_GATES), слой установки и корень harness — в стенде.
+PROJECT_DIR — только в паспорте стенда, не в окружении: у живой копии его там нет
+(update.py зовут диспетчер и демон без него), а с ним самотест раскладчика 0.13.0
+раскладывал стенд в проект копии — красная, которой у копии не бывает (15.11.2026).
 Раскладка и доустановка — те же, что зовёт update.py --поставить; между выпусками копия
-заводит свой процесс по слову судьи. Проверки самопроверки идут до и после; новая
-красная (её не было до) — отказ с именем и последними строками вывода.
+заводит свой процесс по слову судьи.
 
-    python3 scripts/check-typical-copy.py --старое <дерево выпуска> --новое <дерево выпуска>
-Дерево — корень сборки (в нём каталог harness/). Коды: 0 — новых красных нет,
+Данные проекта — как у живой копии (bkb 15.11.2026 откатила 0.13.0 на «секретах» и
+«указаниях», которых чистый стенд не видел): свой код продукта с паролем в адресе базы,
+разбитым на два литерала, своя ORDERS.md и очередь сообщений владельца, а за часы
+обновления владелец пишет новое указание.
+
+Проверки — те, чей предмет у копии свой (harness/config/copy-subject-checks.yaml нового
+выпуска), и те, что у нас под карантином ворот: карантин прятал красную от публикации,
+а у копии его нет (0.13.0 ушёл с красными «признаки» под карантином хозяина). Идут до и
+после; новая красная харнеса — отказ с именем и первыми строками вывода. Новая красная
+проверки с предметом «данные» обновление не откатывает (update.py того же выпуска) — она
+названа строкой, а не отказом.
+
+    python3 scripts/check-typical-copy.py --старое <дерево выпуска> --новое <дерево выпуска> [--карантин <yaml>]
+Дерево — корень сборки (в нём каталог harness/). Карантин — умолчанием наш
+harness/config/gates-quarantine.yaml. Коды: 0 — новых красных харнеса нет,
 1 — есть (названы), 2 — стенд не собрался.
 """
 import argparse
@@ -29,16 +44,28 @@ import sys
 import tempfile
 from pathlib import Path
 
-# Проверки самопроверки, которые судят то, что у копии своё (находка bkb 14.11.2026).
-CHECKS = ("библиотека процессов", "изоляция tmux")
+import yaml
+
 STEP_TIMEOUT = 900
+# Самопроверка — под тем же пределом, что у копии (UPDATE_GATES_TIMEOUT_SEC, умолчание
+# update.py): один «самотест раскладчика» идёт полчаса, и 900 с обрывали стенд раньше вердикта.
+SELF_CHECK_TIMEOUT = 5400
 OWN_SCRIPT = "scripts/typical-backup.sh"
 OWN_TMUX = "scripts/typical-preview.sh"
+# Свой код продукта копии: пароль в адресе базы, разбитый на два литерала (находка bkb 10.11.2026).
+OWN_PRODUCT = "app/settings.py"
+OWN_PRODUCT_TEXT = 'DATABASE_URL = ("postgresql://typical:Typical2026pass"\n                "@db:5432/typical")\n'  # не-секрет: пароль стенда, судья обязан найти его в коде копии
+# Сообщения владельца копии: занесённое указание, не указание и — за часы обновления — новое.
+OWNER_MESSAGES = (("1794000000.1", "я тебе говорил искать по карте", 1794000000),
+                  ("1794000100.2", "ок, спасибо", 1794000100))
+OWNER_LATE = ("1794700000.3", "больше не перезапускай панель днём", 1794700000)
+OWN_ORDER = "\n- искать дома по карте <!-- inbox:1794000000.1 -->\n"
+HERE = Path(__file__).resolve().parent
 
 
-def run(command: list, env: dict, cwd=None) -> subprocess.CompletedProcess:
+def run(command: list, env: dict, cwd=None, timeout: int = STEP_TIMEOUT) -> subprocess.CompletedProcess:
     return subprocess.run(command, env=env, cwd=cwd, capture_output=True, text=True,
-                          timeout=STEP_TIMEOUT, stdin=subprocess.DEVNULL)
+                          timeout=timeout, stdin=subprocess.DEVNULL)
 
 
 def git(where: Path, *args) -> None:
@@ -69,10 +96,13 @@ class Stand:
                     "HARNESS_HOME": f"{base}/корень", "HARNESS_INSTALL_CONF": f"{base}/install.conf",
                     "HARNESS_CONF": f"{base}/harness.conf", "HARNESS_STARTER": str(self.package),
                     "HARNESS_PROCESS_LIBRARY_LOCAL": f"{base}/слой-процессов.json",
-                    "PROJECT_DIR": str(self.project), "FAKE_CRON": str(self.crontab)}
+                    "FAKE_CRON": str(self.crontab)}
         git(self.package, "init", "-q")
         git(self.project, "init", "-q")
-        git(self.project, "commit", "-q", "--allow-empty", "-m", "копия")
+        (self.project / OWN_PRODUCT).parent.mkdir(parents=True)
+        (self.project / OWN_PRODUCT).write_text(OWN_PRODUCT_TEXT, encoding="utf-8")
+        git(self.project, "add", OWN_PRODUCT)
+        git(self.project, "commit", "-q", "-m", "копия")
 
     def release(self, tree: Path, label: str) -> None:
         """Пакет копии уходит на выпуск tree (коммит в её клоне) и раскладывается в проект."""
@@ -109,11 +139,39 @@ class Stand:
         with self.crontab.open("a", encoding="utf-8") as cron:
             cron.write(f"0 4 * * * {self.project}/scripts/run-background.sh typical-backup -- "
                        f"{self.project}/{OWN_SCRIPT} >>{self.base}/журналы/typical-backup.log 2>&1\n")
+        orders = self.project / "память" / "ORDERS.md"
+        orders.write_text(orders.read_text(encoding="utf-8") + OWN_ORDER, encoding="utf-8")
+        for message in OWNER_MESSAGES:
+            self.owner_says(*message)
 
-    def self_check(self) -> str:
-        done = run(["bash", str(self.project / "scripts" / "gates.sh"), "--только", "|".join(CHECKS)],
-                   self.env, cwd=self.project)
+    def owner_says(self, ident: str, text: str, when: int) -> None:
+        folder = self.base / "журналы" / "inbox" / "обработано"
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / f"{ident}.txt").write_text(text, encoding="utf-8")
+        os.utime(folder / f"{ident}.txt", (when, when))
+
+    def self_check(self, checks: list) -> str:
+        done = run(["bash", str(self.project / "scripts" / "gates.sh"), "--только", "|".join(checks)],
+                   self.env, cwd=self.project, timeout=SELF_CHECK_TIMEOUT)
         return done.stdout + done.stderr
+
+
+def checks_of(tree: Path, quarantine: Path) -> tuple:
+    """(проверки стенда, имена с предметом «данные»): предмет копии из нового выпуска и наш карантин."""
+    subject = (yaml.safe_load((tree / "harness" / "config" / "copy-subject-checks.yaml")
+                              .read_text(encoding="utf-8")) or {}).get("проверки") or []
+    held = ((yaml.safe_load(quarantine.read_text(encoding="utf-8")) or {}).get("карантин") or []
+            if quarantine.is_file() else [])
+    names = [entry["имя"] for entry in subject] + [entry["гейт"] for entry in held]
+    return list(dict.fromkeys(names)), {entry["имя"] for entry in subject if entry.get("предмет") == "данные"}
+
+
+def default_quarantine() -> Path:
+    # Проект кладёт конфиги в harness/config, пакет (судья в harness/scripts) — в config.
+    for folder in (HERE.parent / "harness" / "config", HERE.parent / "config"):
+        if (folder / "gates-quarantine.yaml").is_file():
+            return folder / "gates-quarantine.yaml"
+    return HERE.parent / "harness" / "config" / "gates-quarantine.yaml"
 
 
 def reds_parser(tree: Path):
@@ -128,19 +186,22 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--старое", required=True, type=Path)
     ap.add_argument("--новое", required=True, type=Path)
+    ap.add_argument("--карантин", type=Path, default=default_quarantine())
     args = ap.parse_args()
     old, new = args.старое.resolve(), args.новое.resolve()
     base = Path(tempfile.mkdtemp(prefix="proba-typical-copy-"))
     try:
+        checks, data_checks = checks_of(new, args.карантин)
         stand = Stand(base, old / "harness" / "config" / "harness.conf")
         stand.release(old, "прежний выпуск")
         stand.own_process()
         parse = reds_parser(new)
-        before = parse(stand.self_check())
+        before = parse(stand.self_check(checks))
+        stand.owner_says(*OWNER_LATE)
         stand.release(new, "новый выпуск")
-        after_text = stand.self_check()
+        after_text = stand.self_check(checks)
         after = parse(after_text)
-    except (RuntimeError, OSError, subprocess.SubprocessError) as trouble:
+    except (RuntimeError, OSError, subprocess.SubprocessError, ValueError, KeyError) as trouble:
         print(f"типовая копия: стенд не собрался — {trouble}")
         return 2
     finally:
@@ -148,12 +209,15 @@ def main() -> int:
     if before is None or after is None:
         print("типовая копия: итог самопроверки не прочитан — " + after_text.strip()[-300:])
         return 2
-    fresh = sorted(after - before)
+    for name in sorted(name for name in after if name in data_checks):
+        print(f"типовая копия: красная в данных копии «{name}» (откат её не снимает — обновление встанет и "
+              f"назовёт): {' | '.join(after.причины.get(name, [])) or 'вывода нет'}")
+    fresh = sorted(name for name in after - before if name not in data_checks)
     for name in fresh:
         print(f"типовая копия: новая красная «{name}»: {' | '.join(after.причины.get(name, [])) or 'вывода нет'}")
     if fresh:
         return 1
-    print(f"типовая копия: новых красных нет (проверок {len(CHECKS)}, красных до {sum(before.values())}, "
+    print(f"типовая копия: новых красных нет (харнеса; проверок {len(checks)}, красных до {sum(before.values())}, "
           f"после {sum(after.values())})")
     return 0
 

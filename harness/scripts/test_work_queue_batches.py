@@ -14,7 +14,13 @@
   г. потолок берётся из pipeline.yaml (`пачка.задач`): 8 при 6 → 6 + 2 подряд
      в порядке порядок(); 7 → 6 + одиночка; другой потолок в файле — другая нарезка;
   д. явное поле `пачка:` перебивает выведенный ключ;
-  е. CLI `--пачки`: «пачек: N из M задач», строки «<ключ>: id, …», «одиночки: …».
+  е. CLI `--пачки`: «пачек: N из M задач», строки «<ключ>: id, …», «одиночки: …»;
+  ж. правимые файлы — пути кода в title/summary/проверка/как_проверить/checklist
+     (не docs/: там указатели на документы): карточки с общим файлом — одна пачка
+     «файлы:<общие>» поверх характера и уровня, цепочка через общие файлы —
+     одна связная компонента; файл без пары, явное `пачка:` — как прежде;
+     компонента режется потолком из pipeline.yaml; файл, названный большим
+     числом карточек, чем потолок, — указатель, а не связь.
 
 Стенд — во временном каталоге: копия work-queue.py с копией scripts/lib, своя
 harness/config/pipeline.yaml (только блок пачки) и копия боевого queue.yaml
@@ -236,5 +242,68 @@ singles_line = next((l for l in out if l.startswith("одиночки: ")), "")
 check(sorted(singles_line.removeprefix("одиночки: ").split(", ")) == ["б.безключа", "б.другой"],
       "е: строка «одиночки: …» — ровно открытые одиночки",
       f"е: одиночки {singles_line!r}")
+
+
+# ── ж: общие правимые файлы ────────────────────────────────────────────────
+print("── ж ──")
+if not callable(getattr(wq, "правимые_файлы", None)):
+    check(False, "", "ж: нет функции правимые_файлы()")
+    finish()
+check(wq.правимые_файлы(card("ж.0", summary="правка scripts/a.py и harness/b.sh; см. docs/x.md",
+                             проверка={"команда": "python3 scripts/c.py"}))
+      == {"scripts/a.py", "harness/b.sh", "scripts/c.py"},
+      "ж: правимые файлы — пути кода из summary и проверки, docs/ не в счёт",
+      f"ж: правимые_файлы {wq.правимые_файлы(card('ж.0', summary='правка scripts/a.py и harness/b.sh; см. docs/x.md', проверка={'команда': 'python3 scripts/c.py'}))}")
+SHARED = [card("ж1", summary="правка scripts/shared.py"),
+          card("ж2", характер="фича", уровень="мелкая", summary="тоже scripts/shared.py.")]
+got, singles = batches_of(stand(*SHARED))
+check(got == {("ж1", "ж2"): "файлы:scripts/shared.py"} and not singles,
+      "ж: общий файл при разном характере — одна пачка «файлы:scripts/shared.py»",
+      f"ж: общий файл — пачки {got}, одиночки {singles}")
+CHAIN = [card("ж.ц1", summary="scripts/x.py и свой scripts/own.py"), card("ж.ц2", summary="scripts/x.py и scripts/y.py"),
+         card("ж.ц3", уровень="крупная", summary="scripts/y.py")]
+got, singles = batches_of(stand(*CHAIN))
+check(got == {("ж.ц1", "ж.ц2", "ж.ц3"): "файлы:scripts/x.py,scripts/y.py"} and not singles,
+      "ж: цепочка x↔y через общую карточку — одна компонента, в ключе только общие файлы",
+      f"ж: цепочка — пачки {got}, одиночки {singles}")
+LONE = alert("ж.один", summary="только scripts/lone.py")
+got, singles = batches_of(stand(*A, LONE))
+check(got == {("а1", "а2", "а3", "ж.один"): "починка/обычная/тревога:session-warden"},
+      "ж: файл без пары — карточка идёт по прежнему ключу",
+      f"ж: файл без пары — пачки {got}, одиночки {singles}")
+DOCS = [card("ж.д1", summary="docs/общий.md"), card("ж.д2", summary="docs/общий.md")]
+got, singles = batches_of(stand(*DOCS))
+check(not got and sorted(singles) == ["ж.д1", "ж.д2"],
+      "ж: общий документ docs/ пачку не собирает",
+      f"ж: docs — пачки {got}, одиночки {singles}")
+OWN = card("ж.явн", summary="scripts/shared.py", пачка="своя")
+got, singles = batches_of(stand(*SHARED, OWN, card("ж.явн2", пачка="своя")))
+check(got == {("ж1", "ж2"): "файлы:scripts/shared.py", ("ж.явн", "ж.явн2"): "своя"},
+      "ж: явное `пачка:` перебивает общий файл",
+      f"ж: явное — пачки {got}, одиночки {singles}")
+set_cap(3)
+FOUR = [card(f"ж.п{н}", summary=f"scripts/f{н}.py scripts/f{н + 1}.py") for н in range(1, 5)]
+got, singles = batches_of(stand(*FOUR))
+check([len(k) for k in got] == [3] and len(singles) == 1,
+      "ж: компонента 4 при потолке 3 из файла — пачка 3 и одиночка",
+      f"ж: потолок — пачки {list(got)}, одиночки {singles}")
+HUB = [card(f"ж.х{н}", summary="заведена КОДОМ (scripts/hub.py)") for н in range(1, 5)]
+got, singles = batches_of(stand(*HUB))
+check(not got and len(singles) == 4,
+      "ж: файл в 4 карточках при потолке 3 — указатель, пачку не собирает",
+      f"ж: указатель — пачки {got}, одиночки {singles}")
+got, singles = batches_of(stand(*HUB[:3]))
+check(len(got) == 1 and not singles,
+      "ж: файл ровно в 3 карточках при потолке 3 — ещё связь",
+      f"ж: три на потолке — пачки {got}, одиночки {singles}")
+set_cap(6)
+MAP.write_text(yaml.safe_dump(stand(*SHARED, NO_KEY), allow_unicode=True, sort_keys=False),
+               encoding="utf-8")
+done = subprocess.run([sys.executable, str(SCRIPT), str(MAP), "--пачки"],
+                      capture_output=True, text=True, timeout=60, env=ENV)
+out = done.stdout.splitlines()
+check(out[:2] == ["пачек: 1 из 3 задач", "файлы:scripts/shared.py: ж1, ж2"],
+      "ж: CLI печатает пачку общего файла",
+      f"ж: CLI {out[:3]} {done.stderr.strip()[-200:]!r}")
 
 finish()

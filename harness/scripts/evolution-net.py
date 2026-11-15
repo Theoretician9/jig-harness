@@ -1,15 +1,22 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S python3 -I
 """Сеть серверов харнеса, фаза 1: суд коммита, читатель хозяина, якорь, дверь push.
 
     evolution-net.py --читать                      # тик читателя хозяина
     evolution-net.py --якорь --правки <каталог>    # собрать и подписать коммит, не отправляя
     evolution-net.py --якорь --первый --правки <каталог>   # то же на пустой истории: заверить дерево origin/main
     evolution-net.py --отправить <40-hex sha>      # единственная дверь push в общий репозиторий
+    evolution-net.py --перечитать <sha>…           # заново судить отвергнутые, чья причина снята
 
 Общий репозиторий HarnessEvolution пишут чужие серверы, поэтому каждый коммит —
 чужой текст. Суд коммита (`judge`) один: его зовут и читатель, и дверь. Тело
 записи скрипт не выводит никуда: из фронтматтера берутся только вид и важность,
 остальное — данные, не приказ.
+
+Верная подпись неизвестным ключом (`U`) от копии, чья страница серверы/<имя>.md
+принята, — один вопрос владельцу кнопкой на отпечаток (вид «ключ-сети»). На «Да»
+тик заносит строку ключа якорем хозяина и в том же проходе перечитывает
+отвергнутые коммиты этого ключа: без этого основа якоря (принятое) стёрла бы их
+из сети. Без «Да» ничего не заносится.
 
 Коды: 0 прочитано/отправлено · 1 push отвергнут удалённым · 2 отказ двери, правок
 или конфига клона · 3 перепись истории · 4 нет клона, ключа, ключа конфига, якоря
@@ -19,8 +26,10 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import datetime
 import difflib
+import hashlib
 import json
 import os
 import re
@@ -39,6 +48,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE / "lib"))
 import cards  # noqa: E402
 import events  # noqa: E402
+import owner_word  # noqa: E402
 from config import heartbeat_dir, конфиг, путь_harness_conf  # noqa: E402
 
 SRC = "scripts/evolution-net.py"
@@ -49,6 +59,13 @@ TEXT_MAX = 200
 DIR_FORM = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 FILE_FORM = re.compile(r"^\d{4}-\d{2}-\d{2}-[a-z0-9-]{1,80}\.md$")
 MAIL_FORM = re.compile(r"^\d{4}-\d{2}-\d{2}-[A-Za-z0-9_-]{1,64}-[a-z0-9-]{1,80}\.md$")
+# Патч копии хозяину — каталог в ящике ЭТОЙ копии: `почта/<эта копия>/<дата>-<от>-<суть>/<путь>`.
+# Внутри каждый компонент без точки в начале (скрытое из обзора и `.git*` не проходят), глубина
+# внутри каталога не больше PATCH_DEPTH.
+PATCH_DIR_FORM = re.compile(r"^\d{4}-\d{2}-\d{2}-[A-Za-z0-9_-]{1,64}-[a-z0-9-]{1,80}$")
+PATCH_PART = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]{0,80}$")
+PATCH_DEPTH = 6
+PATCH_README = "README.md"
 # Строка списка подписантов копий: `<principal> [namespaces="git" ]ssh-ed25519 <base64>`.
 # Всё прочее отбрасывается: principal хозяина или `*` в чужой строке дал бы чужому
 # ключу права хозяина (факт 4 плана).
@@ -58,10 +75,13 @@ SIGNER_LINE = re.compile(r'^([A-Za-z0-9_-]{1,64}) (?:namespaces="git" )?ssh-ed25
 # лежит то же самое, а `git config --local` без --includes его не видит.
 CLONE_REDIRECT = r"^(include\..*|includeif\..*|url\..*|remote\..*\.pushurl|core\.hookspath)$"
 SHA_FORM = re.compile(r"^[0-9a-f]{40}$")
-KINDS = ("косяк", "задача", "фикс", "вопрос", "ответ")
+KINDS = ("косяк", "задача", "фикс", "вопрос", "ответ", "патч")
 GIT_NAME = "HarnessEvolution"
 SIGNERS_PATH = "серверы/allowed_signers"
 MAIL_ANSWER_KEYS = ("статус:".encode(), "ответ:".encode())
+KEY_KIND = "ключ-сети"
+U_REFUSAL = "отказ: U"
+SSHSIG_MAGIC = b"SSHSIG"
 
 
 class Refusal(Exception):
@@ -80,6 +100,7 @@ class Settings(NamedTuple):
     url: str
     role: str
     max_entry: int
+    max_patch: int
     max_commits: int
     max_files: int
     max_cards: int
@@ -125,7 +146,8 @@ def load_settings() -> Settings:
         clone=Path(os.path.realpath(os.path.expanduser(need("EVOLUTION_DIR")))),
         key=Path(os.path.expanduser(need("EVOLUTION_KEY"))),
         url=need("EVOLUTION_REMOTE_URL"), role=need("EVOLUTION_ROLE"),
-        max_entry=number("EVOLUTION_MAX_ENTRY_BYTES"), max_commits=number("EVOLUTION_MAX_COMMITS_PER_TICK"),
+        max_entry=number("EVOLUTION_MAX_ENTRY_BYTES"),
+        max_patch=number("EVOLUTION_MAX_PATCH_BYTES"), max_commits=number("EVOLUTION_MAX_COMMITS_PER_TICK"),
         max_files=number("EVOLUTION_MAX_FILES_PER_COMMIT"), max_cards=number("EVOLUTION_MAX_CARDS_PER_TICK"),
         max_anchor_paths=number("EVOLUTION_MAX_ANCHOR_PATHS"),
         fetch_timeout=number("EVOLUTION_FETCH_TIMEOUT"), fetch_max=number("EVOLUTION_FETCH_MAX_BYTES"),
@@ -341,13 +363,40 @@ def only_answer_changed(old: bytes, new: bytes) -> bool:
     return keep(before[0]) == keep(after[0])
 
 
-def copy_path_refusal(repo: Path, change: Change, signer: str, limit: int, accepted: dict) -> str | None:
+def is_patch_path(path: str, owner: str) -> bool:
+    """Путь под каталогом патча в ящике `owner`: глубже письма (4+ компонента)."""
+    parts = path.split("/")
+    return len(parts) > 3 and parts[0] == "почта" and parts[1] == owner and bool(PATCH_DIR_FORM.fullmatch(parts[2]))
+
+
+def blob_limit(cfg: Settings, path: str) -> int:
+    """Потолок блоба: у патча свой (код больше записи), у остального — потолок записи."""
+    return cfg.max_patch if is_patch_path(path, cfg.project_name) else cfg.max_entry
+
+
+def patch_refusal(change: Change, signer: str, accepted: dict) -> str | None:
+    """Дверь патча: только новый путь, каталог несёт подписанта, компоненты внутри
+    без точки в начале, глубина внутри каталога не больше PATCH_DEPTH. Режим и
+    размер судит общая форма; ничего не исполняется, checkout читатель не делает."""
+    parts = change.path.split("/")
+    where = f"путь {visible(change.path)}"
+    sent = re.compile(rf"^\d{{4}}-\d{{2}}-\d{{2}}-{re.escape(signer)}-[a-z0-9-]{{1,80}}$")
+    rest = parts[3:]
+    ok = (change.status == "A" and change.path not in accepted and sent.fullmatch(parts[2])
+          and len(rest) <= PATCH_DEPTH and all(PATCH_PART.fullmatch(part) for part in rest))
+    return None if ok else where
+
+
+def copy_path_refusal(repo: Path, change: Change, signer: str, limit: int, accepted: dict,
+                      owner: str) -> str | None:
     """Правила путей копии X: своя находка и своя страница сервера — A/M/D;
     письмо в чужой ящик — только A; свой ящик — только ответ на письмо.
 
     Почта судится против `accepted`, а не против родителя: в дереве origin/main
     может лежать отвергнутый шаг X, и следующий шаг поверх него выглядел бы
     законным (A отвергнут → M статуса «узаконивает» письмо от имени Y)."""
+    if is_patch_path(change.path, owner):
+        return patch_refusal(change, signer, accepted)
     parts = change.path.split("/")
     where = f"путь {visible(change.path)}"
     if len(parts) == 3 and parts[0] == "находки" and parts[1] == signer and FILE_FORM.match(parts[2]):
@@ -381,17 +430,17 @@ def form_refusal(repo: Path, change: Change, host: bool, limit: int) -> str | No
     return problem
 
 
-def change_refusal(repo: Path, change: Change, verdict: Verdict, limit: int, accepted: dict) -> str | None:
+def change_refusal(repo: Path, change: Change, verdict: Verdict, cfg: Settings, accepted: dict) -> str | None:
     """Правило одного изменения. Форма (`.git*`, длина пути, режим, размер) — для
     всех, и до чтения блоба; regex имён и пути — только коммитам НЕ хозяина."""
     host = verdict.host
-    problem = None if change.status == "D" else form_refusal(repo, change, host, limit)
+    problem = None if change.status == "D" else form_refusal(repo, change, host, blob_limit(cfg, change.path))
     if not problem and change.status == "T":
         problem = "смена типа файла"
     if not problem and change.status not in ("A", "M", "D"):
         problem = f"статус {change.status}"
     if not problem and not host:
-        problem = copy_path_refusal(repo, change, verdict.signer, limit, accepted)
+        problem = copy_path_refusal(repo, change, verdict.signer, cfg.max_entry, accepted, cfg.project_name)
     return problem
 
 
@@ -405,7 +454,14 @@ def signed_by(repo: Path, commit: str, accepted: dict, cfg: Settings, trust: str
             return Verdict(True, "ok", principal, [], True)
         listed = accepted.get(SIGNERS_PATH)
         blob = blob_bytes(repo, listed) if listed and blob_size(repo, listed) <= cfg.max_entry else None
-        flag, who = signature(repo, commit, copy_signers(blob, Path(tmp), principal))
+        signers = copy_signers(blob, Path(tmp), principal)
+        flag, who = signature(repo, commit, signers)
+        if flag == "U":
+            # Ключ копии хозяин заносит по её первому подписанному коммиту, сверив
+            # отпечаток с deploy key; голое «U» не говорит, какой ключ заносить.
+            key = git_text(repo, "log", "-1", "--format=%GF", commit,
+                           config=(f"gpg.ssh.allowedSignersFile={signers}",))
+            return refuse(f"U ключ {key} нет в {SIGNERS_PATH}")
     return Verdict(True, "ok", who, []) if flag == "G" else refuse(flag)
 
 
@@ -426,7 +482,7 @@ def judge(repo: Path, parent: str, commit: str, accepted: dict, cfg: Settings, t
     if len(changes) > cfg.max_files:
         return refuse(f"файлов {len(changes)} больше потолка {cfg.max_files}", signer.signer, changes, signer.host)
     for change in changes:
-        problem = change_refusal(repo, change, signer, cfg.max_entry, accepted)
+        problem = change_refusal(repo, change, signer, cfg, accepted)
         if problem:
             return refuse(problem, signer.signer, changes, signer.host)
     return signer._replace(changes=changes)
@@ -492,6 +548,8 @@ def alarm(cfg: Settings, text: str) -> None:
 
 def is_card_path(path: str, project_name: str) -> bool:
     parts = path.split("/")
+    if is_patch_path(path, project_name):
+        return parts[3:] == [PATCH_README]
     if len(parts) != 3 or parts[2] == ".gitkeep":
         return False
     return parts[0] == "находки" or (parts[0] == "почта" and parts[1] == project_name)
@@ -518,6 +576,8 @@ def card_names(path: str, accepted_by: str) -> tuple[str, str]:
     Каталог находки из дерева якоря не подписан — там отправитель тоже `?`.
     Путь не по форме (дерево якоря и коммиты хозяина путей не судят) — суть `?`."""
     parts = path.split("/")
+    if len(parts) > 3:
+        return accepted_by, re.sub(r"^\d{4}-\d{2}-\d{2}-", "", parts[2]).removeprefix(f"{accepted_by}-")
     name = re.sub(r"^\d{4}-\d{2}-\d{2}-", "", parts[2]).removesuffix(".md")
     if parts[0] == "находки":
         sender = parts[1] if accepted_by != "?" and DIR_FORM.match(parts[1]) else "?"
@@ -602,6 +662,184 @@ def write_cards(cfg: Settings, pending: dict, accepted: dict) -> int:
 
     cards.write_cards_locked(cfg.map, cfg.map_line, build, recheck=lambda text: bool(fresh(text)))
     return len(made)
+
+
+# ── неизвестный ключ копии: вопрос, занесение, перечитывание ───────────────
+
+def ssh_string(blob: bytes, at: int) -> tuple[bytes, int]:
+    size = int.from_bytes(blob[at:at + 4], "big")
+    return blob[at + 4:at + 4 + size], at + 4 + size
+
+
+def signing_key(repo: Path, commit: str) -> tuple[str, str] | None:
+    """(отпечаток, «ssh-ed25519 <base64>») из подписи коммита: открытый ключ лежит в
+    самом блобе SSHSIG. Отпечаток считается из ключа, а не берётся у git, — строка,
+    которую заносит хозяин, и отпечаток в вопросе владельцу одни и те же по построению."""
+    head = git(repo, "cat-file", "commit", commit).split(b"\n\n", 1)[0].decode(errors="replace")
+    armored, inside_sig = [], False
+    for line in head.split("\n"):
+        if line.startswith("gpgsig "):
+            inside_sig, line = True, line[len("gpgsig "):]
+        elif not line.startswith(" "):
+            inside_sig = False
+        if inside_sig:
+            armored.append(line.strip())
+    body = "".join(x for x in armored if x and not x.startswith("-----"))
+    try:
+        blob = base64.b64decode(body, validate=True)
+    except ValueError:
+        return None
+    if not blob.startswith(SSHSIG_MAGIC):
+        return None
+    public, _ = ssh_string(blob, len(SSHSIG_MAGIC) + 4)
+    kind, _ = ssh_string(public, 0)
+    if kind != b"ssh-ed25519":
+        return None
+    finger = "SHA256:" + base64.b64encode(hashlib.sha256(public).digest()).decode().rstrip("=")
+    return finger, f"ssh-ed25519 {base64.b64encode(public).decode()}"
+
+
+def claimed_copy(cfg: Settings, commit: str, accepted: dict) -> str | None:
+    """Копия, от чьего имени пишет коммит: единственное имя его путей находки/<X>/ и
+    серверы/<X>.md, если страница серверы/<X>.md уже принята. Иначе None — о ключе
+    неизвестной хозяину копии владельца не спрашивают."""
+    parent = git_text(cfg.clone, "rev-list", "--parents", "-n1", commit).split()[1:2]
+    if not parent:
+        return None
+    names = set()
+    for change in raw_changes(cfg.clone, parent[0], commit):
+        parts = change.path.split("/")
+        if parts[0] == "находки" and len(parts) == 3:
+            names.add(parts[1])
+        elif parts[0] == "серверы" and len(parts) == 2 and parts[1].endswith(".md"):
+            names.add(parts[1].removesuffix(".md"))
+    name = names.pop() if len(names) == 1 else ""
+    return name if DIR_FORM.fullmatch(name) and f"серверы/{name}.md" in accepted else None
+
+
+def signer_lines(cfg: Settings, accepted: dict) -> list:
+    blob = accepted.get(SIGNERS_PATH)
+    return blob_bytes(cfg.clone, blob).decode(errors="replace").splitlines() if blob else []
+
+
+def rejudge(cfg: Settings, state: dict, trust: str, shas: set, signers_blob: str | None = None) -> tuple[int, int]:
+    """Заново судит отвергнутые коммиты из `shas` в порядке очереди против принятого.
+    `signers_blob` — список подписантов, по которому судить подпись (новый, ещё не
+    отправленный); принятое при этом своё. Прошедший уходит из отвергнутых в принятое."""
+    taken = refused = 0
+    for record in [r for r in state["rejected"] if r["sha"] in shas]:
+        sha = record["sha"]
+        parent = git_text(cfg.clone, "rev-list", "--parents", "-n1", sha).split()[1]
+        judged_by = dict(state["accepted"], **({SIGNERS_PATH: signers_blob} if signers_blob else {}))
+        verdict = judge(cfg.clone, parent, sha, judged_by, cfg, trust)
+        if verdict.ok:
+            taken += 1
+            state["accepted"] = apply(state["accepted"], verdict.changes)
+            state["rejected"].remove(record)   # карточку заведёт queue_uncarded по принятому
+            log_line(cfg, f"перечитан и принят {sha}")
+        else:
+            refused += 1
+            record["why"] = verdict.why
+    return taken, refused
+
+
+def unknown_keys(cfg: Settings, state: dict) -> dict:
+    """Отпечаток → sha отвергнутых по U, по порядку очереди."""
+    found: dict = {}
+    for record in state["rejected"]:
+        if record["why"].startswith(U_REFUSAL):
+            key = signing_key(cfg.clone, record["sha"])
+            if key:
+                found.setdefault(key[0], []).append(record["sha"])
+    return found
+
+
+def ask_about_keys(cfg: Settings, state: dict) -> None:
+    """Один вопрос владельцу на отпечаток. Ключ без признанной копии не спрашивается
+    и не запоминается: страница копии может появиться позже."""
+    asked = state.setdefault("keys", {})
+    for finger, shas in unknown_keys(cfg, state).items():
+        if finger in asked:
+            continue
+        copy = claimed_copy(cfg, shas[0], state["accepted"])
+        if not copy:
+            continue
+        subject = f"{copy} {finger}"
+        why = (f"{len(shas)} коммит(ов) копии отвергнуто: ключа нет в {SIGNERS_PATH}. Сверь отпечаток "
+               f"с deploy key копии; на «Да» читатель занесёт строку якорем хозяина и перечитает их.")
+        code, answer = owner_word.попросить_кнопку(KEY_KIND, subject, why, журнал_просьбы=cfg.log_dir)
+        if code not in (0, owner_word.КОД_ПОВТОРА):
+            log_line(cfg, f"ключ {finger}: вопрос владельцу не ушёл: {answer}")
+            continue
+        line = f'{copy} namespaces="git" {signing_key(cfg.clone, shas[0])[1]}'
+        asked[finger] = {"copy": copy, "line": line, "status": "спрошен"}
+        log_line(cfg, f"ключ {finger} копии {copy}: владельцу ушёл вопрос кнопкой")
+
+
+def enter_key(cfg: Settings, state: dict, trust: str, finger: str, record: dict) -> bool:
+    """Строка ключа — якорем хозяина. До подписи отвергнутое этим ключом перечитывается
+    по новому списку и входит в принятое: основа якоря — принятое, и без перечитывания
+    якорь стёр бы из сети находки этого ключа. True — якорь отправлен."""
+    old = b"\n".join(x.encode() for x in signer_lines(cfg, state["accepted"]))
+    new = (old + b"\n" if old else b"") + record["line"].encode() + b"\n"
+    fresh_blob = git_text(cfg.clone, "hash-object", "-w", "--stdin", input=new)
+    shas = set(unknown_keys(cfg, state).get(finger, []))
+    taken, _ = rejudge(cfg, state, trust, shas, fresh_blob)
+    save_state(cfg, state)
+    try:
+        sha = sign_edits(cfg, {SIGNERS_PATH: new}, False)
+        send_command(cfg, sha)
+    except Refusal as refusal:
+        alarm(cfg, f"ключ {finger} копии {record['copy']}: «Да» есть, якорь не ушёл: {refusal.text}")
+        return False
+    record.update(status="занесён", anchor=sha)
+    log_line(cfg, f"ключ {finger} копии {record['copy']} занесён якорем {sha}, перечитано и принято {taken}")
+    return True
+
+
+def key_approved(subject: str) -> bool:
+    """«Да» владельца на ключ «<копия> SHA256:…»: судья — носитель машины, не окружение."""
+    return owner_word.судить_кнопкой(KEY_KIND, subject)[0]
+
+
+def enter_approved_keys(cfg: Settings, state: dict, trust: str) -> bool:
+    entered = False
+    for finger, record in state.get("keys", {}).items():
+        if record["status"] != "спрошен":
+            continue
+        if record["line"] in signer_lines(cfg, state["accepted"]):
+            record["status"] = "занесён"
+            continue
+        # «Нет» и молчание одинаково ничего не заносят: нажатие на кнопку одно, повтора нет.
+        if key_approved(f"{record['copy']} {finger}"):
+            entered = enter_key(cfg, state, trust, finger, record) or entered
+    return entered
+
+
+def rejudge_listed(cfg: Settings, state: dict, trust: str) -> None:
+    """Отвергнутое по U, чей ключ уже в принятом списке (занесён якорем или руками),
+    перечитывается само."""
+    listed = {line.split(" ", 1)[1].removeprefix('namespaces="git" ') for line in signer_lines(cfg, state["accepted"])
+              if SIGNER_LINE.match(line)}
+    shas = {r["sha"] for r in state["rejected"] if r["why"].startswith(U_REFUSAL)
+            and (signing_key(cfg.clone, r["sha"]) or ("", ""))[1] in listed}
+    if shas:
+        rejudge(cfg, state, trust, shas)
+
+
+def rejudge_command(cfg: Settings, shas: list) -> int:
+    require_host_ready(cfg)
+    state = load_state(cfg)
+    if "accepted" not in state:
+        raise Refusal(NOT_READY, "нет состояния читателя: сначала evolution-net.py --читать")
+    known = {r["sha"] for r in state["rejected"]}
+    stray = [sha for sha in shas if sha not in known]
+    if stray:
+        raise Refusal(DOOR_REFUSED, f"отказ: не среди отвергнутых: {', '.join(s[:12] for s in stray)}")
+    taken, refused = rejudge(cfg, state, host_line(cfg), set(shas))
+    save_state(cfg, state)
+    print(f"evolution-net --перечитать: принято {taken}, отвергнуто снова {refused}")
+    return OK
 
 
 # ── читатель --читать ───────────────────────────────────────────────────────
@@ -718,7 +956,18 @@ def raise_alarm_once(cfg: Settings, state: dict) -> None:
 
 
 def read_tick(cfg: Settings) -> int:
+    """Тик; занесённый на «Да» ключ даёт второй проход: якорь хозяина принимается и
+    карточки на перечитанное заводятся сразу, а не следующим тиком."""
     require_host_ready(cfg)
+    code, entered = read_pass(cfg)
+    if code == OK and entered:
+        code, _ = read_pass(cfg)
+    if code == OK:
+        touch_mark()
+    return code
+
+
+def read_pass(cfg: Settings) -> tuple[int, bool]:
     trust = host_line(cfg)
     state = load_state(cfg)
     anchor = "" if state.get("last_seen") else anchor_sha(cfg)
@@ -727,9 +976,11 @@ def read_tick(cfg: Settings) -> int:
         state = start_from_anchor(cfg, anchor, trust)
     elif not is_ancestor(cfg.clone, state["last_seen"], "refs/remotes/origin/main"):
         alarm(cfg, "перепись истории: last_seen не предок origin/main, чтение остановлено")
-        return HISTORY_REWRITTEN
+        return HISTORY_REWRITTEN, False
     state.setdefault("pending", {})
     judged, taken, refused = judge_queue(cfg, state, trust)
+    rejudge_listed(cfg, state, trust)
+    ask_about_keys(cfg, state)
     queue_uncarded(cfg, state)
     # Ждущий путь мог уйти из accepted мимо note_cards: догон хозяина судит без очереди.
     waiting = {p: v for p, v in state["pending"].items() if p not in state["carded"] and p in state["accepted"]}
@@ -741,9 +992,11 @@ def read_tick(cfg: Settings) -> int:
     state["checked_at"] = now_stamp()
     state.pop("first", None)   # читатель принял своё: --первый больше не повторить
     save_state(cfg, state)
+    entered = enter_approved_keys(cfg, state, trust)
+    if entered:
+        save_state(cfg, state)
     print(f"evolution-net --читать: судимо {judged}, принято {taken}, отвергнуто {refused}, карточек {made}")
-    touch_mark()
-    return OK
+    return OK, entered
 
 
 def touch_mark() -> None:
@@ -786,7 +1039,7 @@ def base_tree(cfg: Settings, accepted: dict) -> tuple[dict, list]:
     серверы/<X>.md — законные пути хозяина)."""
     kept, dropped = {}, []
     for path, blob in accepted.items():
-        problem = path_refusal(path, True) or len(path) > TEXT_MAX or blob_size(cfg.clone, blob) > cfg.max_entry
+        problem = path_refusal(path, True) or len(path) > TEXT_MAX or blob_size(cfg.clone, blob) > blob_limit(cfg, path)
         if problem:
             dropped.append(path)
         else:
@@ -915,7 +1168,7 @@ def first_tree(cfg: Settings) -> tuple[dict, list]:
     kept, dropped = {}, []
     for path, (mode, obj) in tree_entries(cfg.clone, "refs/remotes/origin/main").items():
         if (path == SIGNERS_PATH or visible(path) != path or path_refusal(path, True) or len(path) > TEXT_MAX
-                or mode_refusal(mode) or blob_size(cfg.clone, obj) > cfg.max_entry):
+                or mode_refusal(mode) or blob_size(cfg.clone, obj) > blob_limit(cfg, path)):
             dropped.append(path)
         else:
             kept[path] = obj
@@ -954,13 +1207,18 @@ def anchor_message(edits: dict) -> str:
 
 def anchor_command(cfg: Settings, edits_dir: str, first: bool) -> int:
     require_host_ready(cfg)
-    caught_up = False
     problem = first_state_problem(cfg) if first else None
     if problem:
         raise Refusal(NOT_READY, problem)
     if first:
         ensure_state_dir(cfg)
-    edits = read_edits(Path(edits_dir))
+    print(sign_edits(cfg, read_edits(Path(edits_dir)), first))
+    return OK
+
+
+def sign_edits(cfg: Settings, edits: dict, first: bool) -> str:
+    """Подписанный коммит хозяина с правками `edits` поверх принятого; sha, не отправлен."""
+    caught_up = False
     for path, data in edits.items():
         problem = path_refusal(path, True) or ("блоб больше потолка" if len(data) > cfg.max_entry else None)
         if problem:
@@ -990,8 +1248,7 @@ def anchor_command(cfg: Settings, edits_dir: str, first: bool) -> int:
     sha = build_host_commit(cfg, base, edits, anchor_message(edits))
     if first or caught_up:
         save_state(cfg, state)
-    print(sha)
-    return OK
+    return sha
 
 
 # ── дверь --отправить ───────────────────────────────────────────────────────
@@ -1077,6 +1334,7 @@ def main(argv: list[str]) -> int:
     mode.add_argument("--читать", action="store_true", dest="read")
     mode.add_argument("--якорь", action="store_true", dest="anchor")
     mode.add_argument("--отправить", metavar="SHA", dest="send")
+    mode.add_argument("--перечитать", metavar="SHA", nargs="+", dest="rejudge")
     parser.add_argument("--первый", action="store_true", dest="first",
                         help="с --якорь: первый якорь на пустой истории (нет файла якоря и состояния)")
     parser.add_argument("--правки", dest="edits", metavar="КАТАЛОГ")
@@ -1084,6 +1342,8 @@ def main(argv: list[str]) -> int:
     try:
         if args.send is not None and not SHA_FORM.match(args.send):
             raise Refusal(DOOR_REFUSED, "отказ двери: довод должен быть 40-hex sha коммита")
+        if args.rejudge and not all(SHA_FORM.match(sha) for sha in args.rejudge):
+            raise Refusal(DOOR_REFUSED, "отказ: --перечитать берёт 40-hex sha отвергнутых коммитов")
         cfg = load_settings()
         if args.first and not args.anchor:
             raise Refusal(DOOR_REFUSED, "--первый только с --якорь")
@@ -1094,6 +1354,8 @@ def main(argv: list[str]) -> int:
             if not args.edits:
                 raise Refusal(DOOR_REFUSED, "--якорь требует --правки <каталог>")
             return anchor_command(cfg, args.edits, args.first)
+        if args.rejudge:
+            return rejudge_command(cfg, args.rejudge)
         return send_command(cfg, args.send)
     except Refusal as refusal:
         print(refusal.text, file=sys.stderr)

@@ -12,7 +12,8 @@
 
 Коды: 0 слито · 1 конфликт rebase · 2 неверный вызов · 3 ворота красные ·
 4 правки основного мешают · 5 грязное дерево помощника · 6 master не стоит ·
-7 пакет разошёлся · 8 замок очереди не взят · 9 слито, пакет не закоммичен.
+7 пакет разошёлся · 8 замок очереди не взят · 9 слито, пакет не закоммичен ·
+10 слито, новый ключ образца не дописан в машинный конфиг.
 Контракт: спека копий кода помощников §4.
 """
 from __future__ import annotations
@@ -54,13 +55,14 @@ events = _load("events_lib", LIB_DIR / "events.py")
 SRC = "scripts/merge-queue.py"
 RESULTS = {0: "слито", 1: "конфликт", 2: "неверный-вызов", 3: "ворота", 4: "мешают-правки",
            5: "грязное-дерево", 6: "master-не-стоит", 7: "пакет-разошёлся",
-           8: "замок-не-взят", 9: "пакет-не-закоммичен"}
+           8: "замок-не-взят", 9: "пакет-не-закоммичен", 10: "ключи-не-дописаны"}
 HUNK_LINES = 200
 STALE_TEMP_SECONDS = 3600
 LOCK_RETRY_SECONDS = 2
 LOCK_RETRY_TIMES = 5
 REMEMBERED_PATHS = 500
 CC_LOCK_NOTE = "держит Claude Code, уберёт --убрать"
+SAMPLE_CONF = "harness/config/harness.conf"
 
 
 class Stop(Exception):
@@ -81,7 +83,7 @@ class Report:
         self.success = "убрано" if tidy else RESULTS[0]
         self.fields = {"код": 0, "итог": RESULTS[0], "ветка": target, "sha_до": "", "sha_после": "",
                        "файлов": 0, "пакет_файлов": 0, "ожидание_с": 0.0, "ворота_с": None,
-                       "повторов": 0, "конфликт": [], "оставлено": []}
+                       "повторов": 0, "конфликт": [], "оставлено": [], "ключи_машины": []}
 
     def finish(self, code: int) -> dict:
         self.fields.update(код=code, итог=self.success if code == 0 else RESULTS[code])
@@ -303,8 +305,10 @@ def contents_equal(compare, path: str, left: bytes | None, right: bytes | None) 
 
 
 def package_plan(ctx: Context, tip: str, changes: list[tuple[str, str]]) -> tuple[list, list]:
-    """Сверка ДО слияния: (файлы к записи в пакет [(путь, цель)], удалённые в ветке).
-    Правка рабочего файла пакета к master обязана входить в правку вершины — иначе код 7."""
+    """Сверка ДО слияния: (файлы ветки для пакета [(путь, цель)], удалённые в ветке).
+    Правка рабочего файла пакета к master обязана входить в правку вершины — иначе код 7.
+    Файл, уже равный вершине, тоже несётся: его положили в пакет руками, и без коммита
+    очереди он лежал бы там незакоммиченным."""
     compare = _load("compare_with_package", HERE / "compare-with-package.py")
     skills = compare.скилы_наборов(ctx.package) if ctx.package.is_dir() else set()
     write, deleted, diverged = [], [], []
@@ -318,10 +322,9 @@ def package_plan(ctx: Context, tip: str, changes: list[tuple[str, str]]) -> tupl
         target = ctx.package / inside
         current = target.read_bytes() if target.exists() else None
         wanted = blob(ctx.project, tip, path)
-        if contents_equal(compare, path, current, wanted):
-            continue
         versions = (blob(ctx.project, "master", path), current, wanted)
-        extras = package_extras(path, *(compare.сравнимое(path, v or b"") for v in versions))
+        extras = [] if contents_equal(compare, path, current, wanted) else \
+            package_extras(path, *(compare.сравнимое(path, v or b"") for v in versions))
         if extras:
             diverged.append((path, target, current, wanted, extras))
         else:
@@ -430,28 +433,71 @@ def write_atomic(target: Path, data: bytes, executable: bool) -> None:
     os.replace(temp, target)
 
 
-def sync_package(ctx: Context, write: list, branch: str, tip: str) -> str | None:
-    """Записать файлы в пакет и закоммитить их; None — готово, иначе команда доделки."""
-    if not write:
-        return None
+def package_message(ctx: Context, branch: str, before: str, tip: str) -> str:
+    """Сообщение ветки: заголовок вершины, ниже — прочие коммиты ветки и метка очереди."""
+    subjects = git(ctx.project, "log", "--reverse", "--format=%s", f"{before}..{tip}").stdout.splitlines()
+    others = [f"- {s}" for s in subjects[:-1]]
+    body = (["Коммиты ветки:", *others, ""] if others else []) + [f"Очередь слияния: {branch} {tip[:12]}"]
+    return "\n".join([subjects[-1] if subjects else branch, "", *body]) + "\n"
+
+
+def sync_package(ctx: Context, carry: list, branch: str, before: str, tip: str) -> tuple[int, str | None]:
+    """Записать файлы ветки в пакет и закоммитить изменённые одним коммитом.
+    (файлов в коммите, None — готово, иначе команда доделки)."""
+    if not carry:
+        return 0, None
     compare = _load("compare_with_package", HERE / "compare-with-package.py")
-    for path, target in write:
+    for path, target in carry:
         mode = git(ctx.project, "ls-tree", tip, "--", path).stdout.split(" ", 1)[0]
         # Пакет держит сравнимый вид: числа замера process-library.json — серверу, не копиям.
         data = compare.сравнимое(path, blob(ctx.project, tip, path) or b"")
-        write_atomic(target, data, mode == "100755")
-    paths = [str(target.relative_to(ctx.package)) for _, target in write]
-    message = f"Очередь слияния: {branch} {tip[:12]}"
+        if not target.exists() or target.read_bytes() != data:
+            write_atomic(target, data, mode == "100755")
+    paths = [str(target.relative_to(ctx.package)) for _, target in carry]
+    message = package_message(ctx, branch, before, tip)
+    added = git(ctx.package, "add", "--", *paths)
+    staged = git(ctx.package, "diff", "--cached", "--name-only", "-z", "--", *paths).stdout
+    changed = [p for p in staged.split("\0") if p]
+    if not added.returncode and not changed:
+        return 0, None
     with tempfile.NamedTemporaryFile("w", suffix=".txt", encoding="utf-8") as handle:
-        handle.write(message + "\n")
+        handle.write(message)
         handle.flush()
-        added = git(ctx.package, "add", "--", *paths)
-        done = git(ctx.package, "commit", "-F", handle.name, "--", *paths) if not added.returncode else added
+        done = git(ctx.package, "commit", "-F", handle.name, "--", *changed) if not added.returncode else added
     if done.returncode == 0:
-        return None
+        return len(changed), None
     quoted = " ".join(shlex.quote(p) for p in paths)
-    return (f"git -C {shlex.quote(str(ctx.package))} add -- {quoted} && "
-            f"git -C {shlex.quote(str(ctx.package))} commit -m {shlex.quote(message)} -- {quoted}")
+    return len(changed), (f"git -C {shlex.quote(str(ctx.package))} add -- {quoted} && "
+                          f"git -C {shlex.quote(str(ctx.package))} commit "
+                          f"-m {shlex.quote(message.splitlines()[0])} -- {quoted}")
+
+
+# ───────────────────────────── ключи машинного конфига ─────────────────────────────
+
+def deliver_new_keys(ctx: Context, before: str, tip: str, report: Report) -> str | None:
+    """Ключи, которые слияние внесло в образец, — дописать в машинный конфиг.
+
+    На этой машине код идёт прямо из master: обновления (update.py → install-new.py),
+    которое дописывает ключи образца у копий, здесь нет, и новый обязательный ключ
+    валил читателя сети до ручной правки (EVOLUTION_MAX_PATCH_BYTES, 15.11.2026).
+    Только ключи ЭТОГО слияния: давние пропуски машины живут на умолчаниях кода, и
+    дописать их значит сменить поведение без решения. None — готово, иначе отказ."""
+    install_new = _load("install_new", HERE / "install-new.py")
+    old = install_new.ключи_образца((blob(ctx.project, before, SAMPLE_CONF) or b"").decode())
+    new = install_new.ключи_образца((blob(ctx.project, tip, SAMPLE_CONF) or b"").decode())
+    brought = "\n".join("\n".join(lines) for key, lines in new.items() if key not in old)
+    target = Path(config.путь_harness_conf())
+    text = target.read_text(encoding="utf-8")
+    appended, keys, _ = install_new.дополнить_из_образца(text, brought)
+    if not keys:
+        return None
+    report.fields["ключи_машины"] = keys
+    if install_new.писатель.надо_поднять_права([target]):
+        return f"слито, но {target} не пишется: ключи {', '.join(keys)} не дописаны — код их ждёт"
+    install_new.писатель.снять_копию(target)
+    install_new.писатель.записать_атомарно(target, appended)
+    say(f"дописаны в {target}: {', '.join(keys)}")
+    return None
 
 
 # ───────────────────────────── запомненные пути (откат) ─────────────────────────────
@@ -512,7 +558,7 @@ def merge_branch(ctx: Context, target: str, report: Report) -> None:
         tip = rev(tree["path"], "HEAD")
         run_gates(ctx, tip, report)
         changes = branch_changes(ctx, tip)
-        write, deleted = package_plan(ctx, tip, changes)
+        carry, deleted = package_plan(ctx, tip, changes)
         before = rev(ctx.project, "master")
         if fast_forward(ctx, branch):
             break
@@ -520,14 +566,17 @@ def merge_branch(ctx: Context, target: str, report: Report) -> None:
             raise Stop(6, f"master уходит из-под слияния: предел повторов {ctx.retries}")
         report.fields["повторов"] += 1
     report.fields.update(sha_до=before, sha_после=rev(ctx.project, "master"),
-                         файлов=len(changes), пакет_файлов=len(write))
+                         файлов=len(changes))
     remember_paths(ctx, branch, before, tip, changes)
     if deleted:
         say("удалены в ветке, в пакете остаются (решает человек): " + ", ".join(deleted))
-    failed_command = sync_package(ctx, write, branch, tip)
+    report.fields["пакет_файлов"], failed_command = sync_package(ctx, carry, branch, before, tip)
+    keys_refusal = deliver_new_keys(ctx, before, tip, report)
     finish_tree(ctx, tree, report)
     if failed_command:
         raise Stop(9, "слито, но пакет не закоммичен; доделать:\n" + failed_command)
+    if keys_refusal:
+        raise Stop(10, keys_refusal)
 
 
 def finish_tree(ctx: Context, tree: dict, report: Report) -> None:

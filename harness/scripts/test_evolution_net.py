@@ -20,7 +20,7 @@ HARNESS_DEVMAP / DEVMAP_ARCHIVE / EVOLUTION_STATE. Боевой клон и бо
 проба не печатает — только счётчики, коды и булевы ответы.
 
     python3 scripts/test_evolution_net.py                    # все секции
-    python3 scripts/test_evolution_net.py --section judge     # keys|root|judge|read|forge|write|door|boot|state|threat|status|answer|sign
+    python3 scripts/test_evolution_net.py --section judge     # keys|root|judge|read|forge|write|door|boot|state|threat|status|answer|sign|patch|key
 
 Дверь мутаций: HARNESS_EVOLUTION_NET — путь evolution-net.py под пробой.
 Последняя строка: `evolution-net --пробы: случаев N, падений F`.
@@ -101,7 +101,7 @@ def git(repo: Path, *args: str, input: bytes | None = None, index: Path | None =
 
 def entries(repo: Path, rev: str) -> dict:
     """Путь → (режим, объект) из ls-tree -r -z: без -z git кавычит кириллицу."""
-    raw = subprocess.run(["git", "-C", str(repo), "ls-tree", "-r", "-z", rev], env=GIT_ENV,
+    raw = subprocess.run(["git", "-c", "core.quotepath=false", "-C", str(repo), "ls-tree", "-r", "-z", rev], env=GIT_ENV,
                          capture_output=True, check=True).stdout.decode()
     out = {}
     for item in filter(None, raw.split("\0")):
@@ -152,6 +152,13 @@ class Keys:
     @staticmethod
     def pub(path: Path) -> str:
         return " ".join(Path(f"{path}.pub").read_text().split()[:2])
+
+    @staticmethod
+    def unknown(path: Path) -> str:
+        """Причина отказа подписи ключом вне списка: отпечаток — то, по чему хозяин
+        сверяет ключ с deploy key копии и заносит строку в allowed_signers."""
+        out = subprocess.run(["ssh-keygen", "-lf", f"{path}.pub"], check=True, capture_output=True, text=True)
+        return f"U ключ {out.stdout.split()[1]} нет в серверы/allowed_signers"
 
 
 def signers_text(keys: Keys, extra: str = "") -> bytes:
@@ -282,7 +289,8 @@ class Stand:
         self.settings = {
             "EVOLUTION_DIR": str(self.clone), "EVOLUTION_KEY": str(keys.host),
             "EVOLUTION_REMOTE_URL": self.url, "EVOLUTION_ROLE": "host",
-            "EVOLUTION_MAX_ENTRY_BYTES": "16384", "EVOLUTION_MAX_COMMITS_PER_TICK": "50",
+            "EVOLUTION_MAX_ENTRY_BYTES": "16384", "EVOLUTION_MAX_PATCH_BYTES": "65536",
+            "EVOLUTION_MAX_COMMITS_PER_TICK": "50",
             "EVOLUTION_MAX_FILES_PER_COMMIT": "50", "EVOLUTION_MAX_CARDS_PER_TICK": "50",
             "EVOLUTION_MAX_ANCHOR_PATHS": "1000",
             "EVOLUTION_FETCH_TIMEOUT": "60", "EVOLUTION_FETCH_MAX_BYTES": "67108864",
@@ -527,7 +535,8 @@ def judge_cases(st: Stand, keys: Keys, module) -> None:
     ok_as("J1 коммит хозяина commit-tree -S → ok, signer=host", "host",
           C0, b({"README.md": b"# new\n"}, keys.host))
     # J2 — краснеет, если суд пропускает не-G (мутация M3: == "G" → != "B")
-    refused("J2 ключ y вне списка → отказ: U", C0, b({find_x: entry("HarnessX")}, keys.y), "U")
+    # J2 — и если отказ U не называет отпечаток ключа: без него хозяин не занесёт ключ копии
+    refused("J2 ключ y вне списка → отказ: U с отпечатком ключа", C0, b({find_x: entry("HarnessX")}, keys.y), keys.unknown(keys.y))
     # J3 — краснеет, если коммит без подписи проходит или причина не N
     refused("J3 без подписи → отказ: N", C0, b({find_x: entry("HarnessX")}, None), "N")
     # J4 — краснеет, если законная запись копии в свой каталог отвергнута (очередь мертва)
@@ -548,7 +557,7 @@ def judge_cases(st: Stand, keys: Keys, module) -> None:
     c8 = b({"серверы/allowed_signers": signers_text(keys, host_line)}, keys.host)
     # J8 — краснеет, если строка репозиторного списка с principal хозяина даёт права хозяина (M5)
     refused("J8 строка host@… с ключом y в списке → коммит y: отказ: U", c8,
-            st.build(w, [c8], {"README.md": b"# y\n"}, keys.y), "U")
+            st.build(w, [c8], {"README.md": b"# y\n"}, keys.y), keys.unknown(keys.y))
     c8b = b({"серверы/allowed_signers": signers_text(keys, f'host namespaces="git" {keys.pub(keys.y)}\n')}, keys.host)
     # J8b — краснеет, если права хозяина даёт имя «host» в списке копий, а не подпись ключом пакета (F-1)
     refused("J8b строка «host <ключ y>» → коммит y в README: отказ, y не хозяин", c8b,
@@ -556,11 +565,11 @@ def judge_cases(st: Stand, keys: Keys, module) -> None:
     c8c = b({"серверы/allowed_signers": signers_text(keys, f'{HOST_PRINCIPAL} {keys.pub(keys.y)}\n')}, keys.host)
     # J8c — краснеет, если строка с principal хозяина без namespaces принята в список копий
     refused("J8c строка «host@… <ключ y>» без namespaces → коммит y: отказ: U", c8c,
-            st.build(w, [c8c], {"README.md": b"# y\n"}, keys.y), "U")
+            st.build(w, [c8c], {"README.md": b"# y\n"}, keys.y), keys.unknown(keys.y))
     c9 = b({"серверы/allowed_signers": signers_text(keys, f'* namespaces="git" {keys.pub(keys.y)}\n')}, keys.host)
     # J9 — краснеет, если regex principal ослаблен до .* (M5b): иначе %G?=G [*], а не U
     refused("J9 строка «*» с ключом y → отказ: U", c9,
-            st.build(w, [c9], {find_x: entry("HarnessX")}, keys.y), "U")
+            st.build(w, [c9], {find_x: entry("HarnessX")}, keys.y), keys.unknown(keys.y))
     # J10 — краснеет, если .git* копии проходит
     refused("J10 .gitattributes от копии → отказ", C0,
             b({"находки/HarnessX/.gitattributes": b"* filter=x\n"}, keys.x))
@@ -642,6 +651,93 @@ def judge_cases(st: Stand, keys: Keys, module) -> None:
     # не может убрать из дерева путь, который форме не удовлетворяет (первый якорь так чистит origin)
     ok_as("J24 хозяин удаляет .gitattributes, 100755 и большой блоб → ok", "host", dirty,
           st.build(w, [dirty], {path: None for path in junk}, keys.host))
+    patch_cases(st, keys, b, ok_as, refused)
+
+
+# Патч копии хозяину — каталог в ящике ЭТОЙ копии: `почта/<эта копия>/<дата>-X-<суть>/…`.
+# Блоб патча — код, он больше потолка записи; данные, не исполняются (режим 100644,
+# checkout нет). Потолок патча стенда — EVOLUTION_MAX_PATCH_BYTES.
+PATCH = f"почта/{NAME}/2026-11-15-HarnessX-server-patch"
+PATCH_CODE = b"#!/bin/bash\n" + b"x" * 20000
+
+
+def patch_cases(st: Stand, keys: Keys, b, ok_as, refused) -> None:
+    C0, w = st.anchor, st.writer
+    readme, code = f"{PATCH}/README.md", f"{PATCH}/files/scripts/lib/deploy_server.sh"
+    sent = b({readme: entry("HarnessX", "патч", to=NAME), code: PATCH_CODE}, keys.x)
+    # J25 — краснеет, если законный патч копии этой копии отвергнут: двери нет или блоб судится потолком записи
+    ok_as("J25 HarnessX кладёт каталог патча в почта/<эта копия>/ (A, блоб 20 КБ) → ok", "HarnessX", C0, sent)
+    # J25b — краснеет, если имя каталога не сверено с подписантом: X шлёт патч от имени Y
+    refused("J25b HarnessX кладёт каталог «-HarnessY-» → отказ", C0,
+            b({f"почта/{NAME}/2026-11-15-HarnessY-server-patch/a.sh": b"x\n"}, keys.x))
+    # J25c — краснеет, если дверь открыта в ящик другой копии, а не только этой
+    refused("J25c HarnessX кладёт каталог патча в почта/HarnessY/ → отказ", C0,
+            b({"почта/HarnessY/2026-11-15-HarnessX-server-patch/a.sh": b"x\n"}, keys.x))
+    # J25d — краснеет, если патч правится после отправки (M): принятый текст подменён тем же X
+    refused("J25d HarnessX правит файл своего принятого патча → отказ", sent,
+            st.build(w, [sent], {code: b"#!/bin/bash\necho\n"}, keys.x))
+    # J25e — краснеет, если копия удаляет патч (D): дверь только на добавление
+    refused("J25e HarnessX удаляет файл своего патча → отказ", sent, st.build(w, [sent], {code: None}, keys.x))
+    # J25f — краснеет, если компонент с точкой в начале проходит (.env, .hooks — скрытое из обзора)
+    refused("J25f компонент «.env» в каталоге патча → отказ", C0, b({f"{PATCH}/files/.env": b"x\n"}, keys.x))
+    # J25g — краснеет, если снят потолок глубины внутри каталога патча
+    refused("J25g глубина 7 внутри каталога патча → отказ", C0,
+            b({f"{PATCH}/a/b/c/d/e/f/g.sh": b"x\n"}, keys.x))
+    # J25h — краснеет, если блоб патча не судится своим потолком (65536 у стенда)
+    refused("J25h блоб 70000 в каталоге патча → отказ: блоб больше потолка", C0,
+            b({code: b"x" * 70000}, keys.x), "блоб больше потолка")
+    # J25i — краснеет, если потолок патча дал большой блоб и обычному письму в этот же ящик
+    refused("J25i письмо 20000 в почта/<эта копия>/ (не каталог) → отказ", C0,
+            b({f"почта/{NAME}/2026-11-15-HarnessX-big.md": b"x" * 20000}, keys.x))
+    # J25j — краснеет, если каталог не по форме «<дата>-<от>-<суть>» проходит
+    refused("J25j каталог без даты в почта/<эта копия>/ → отказ", C0,
+            b({f"почта/{NAME}/HarnessX-server-patch/a.sh": b"x\n"}, keys.x))
+    # J25k — краснеет, если форма каталога судится `match` с `$`: перевод строки в конце имени
+    # проходит, а в карте и журнале (visible) путь неотличим от законного каталога
+    refused("J25k каталог патча с «\\n» в конце имени → отказ", C0,
+            b({f"{PATCH}\n/a.sh": b"x\n"}, keys.x))
+    # J25l — краснеет, если компонент внутри каталога судится `match` с `$` («a.sh\n» проходит)
+    refused("J25l компонент «a.sh\\n» в каталоге патча → отказ", C0,
+            b({f"{PATCH}/a.sh\n": b"x\n"}, keys.x))
+
+
+# ── patch: патч копии в ящик этой копии — принят, одна карточка, якорь не выкидывает ──
+
+def section_patch(base: Path, keys: Keys) -> None:
+    st = Stand(base / "patch", keys)
+    st.tick()
+    readme, code = f"{PATCH}/README.md", f"{PATCH}/files/scripts/lib/deploy_server.sh"
+    sent = st.add({readme: entry("HarnessX", "патч", to=NAME), code: PATCH_CODE}, keys.x)
+    r = st.tick()
+    acc = st.read_state().get("accepted", {})
+    # P1 — краснеет, если читатель отвергает законный патч: тревога вместо приёма
+    check("P1 патч HarnessX: тик 0, не в rejected, оба файла в accepted", (0, False, True, True),
+          (r.rc, sent in st.rejected(), readme in acc, code in acc))
+    title = str((st.cards_for(readme) or [{}])[0].get("title", "нет карточки"))
+    # P2 — краснеет, если патч принят молча (нет карточки) или карточка заведена на каждый файл
+    check("P2 карточка одна — на README.md: «патч от HarnessX: server-patch»",
+          (1, 0, "патч от HarnessX: server-patch"), (len(st.cards_for(readme)), len(st.cards_for(code)), title))
+    # P3 — краснеет, если основа якоря судит блоб патча потолком записи: якорь хозяина стёр бы патч из сети
+    r = st.run("--якорь", "--правки", str(write_edits(st.root / "правки", {"рассылка/2026-11-15-kept.md": b"x\n"})))
+    anchor = printed_sha(r)
+    check("P3 якорь после патча: код 0, блоб патча в его дереве", (0, True),
+          (r.rc, bool(anchor) and code in entries(st.clone, anchor)))
+    # P4 — краснеет, если патч судится против родителя, а не против accepted: отвергнутое D убрало
+    # файл из дерева, и следующее A того же X «новым путём» подменило бы принятый код
+    kept_blob = acc.get(code)
+    gone = st.add({code: None}, keys.x)
+    swap = st.add({code: b"#!/bin/bash\necho swapped\n"}, keys.x)
+    st.tick()
+    check("P4 X удалил свой патч (отказ) и положил заново → оба в rejected, принятый блоб прежний",
+          (True, True, True), (gone in st.rejected(), swap in st.rejected(),
+                               bool(kept_blob) and st.read_state().get("accepted", {}).get(code) == kept_blob))
+    # P5 — краснеет, если первое дерево (--первый) судит блоб патча потолком записи: первый якорь
+    # выкинул бы из сети патч, пришедший до него
+    st = boot_stand(base / "patch-first", keys)
+    st.add({code: PATCH_CODE}, None)
+    anchor = printed_sha(first_anchor(st))
+    check("P5 --первый: блоб патча 20 КБ в дереве первого якоря", True,
+          bool(anchor) and code in entries(st.clone, anchor))
 
 
 # ── read: читатель хозяина ──────────────────────────────────────────────────
@@ -2136,6 +2232,199 @@ def section_sign(base: Path, keys: Keys) -> None:
 
 # ── запуск ──────────────────────────────────────────────────────────────────
 
+# ── key: неизвестный ключ копии → вопрос кнопкой, на «Да» — занесение и перечитывание ──
+
+KEY_KIND = "ключ-сети"
+OWNER_ID = "4242"
+# Журналы согласия стенда — по именам носителя (owner_word): проба пишет их как диспетчер.
+REQUESTS_JOURNAL = "consent-requests.jsonl"
+BUTTONS_JOURNAL = "consent-" + "buttons.jsonl"
+INBOX_JOURNAL = "in" + "box.jsonl"
+# Подставной ask-consent: просьба в журнал стенда, без канала (Telegram шлёт только диспетчер).
+KEY_FAKE_ASK = r'''#!/usr/bin/env python3
+import datetime, json, os, secrets, sys
+from pathlib import Path
+args = sys.argv[1:]
+def value(flag):
+    return args[args.index(flag) + 1] if flag in args and args.index(flag) + 1 < len(args) else None
+log = Path(os.environ["HARNESS_LOG_DIR"])
+nonce = secrets.token_urlsafe(16)
+row = {"v": 1, "ts": datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
+       "src": "scripts/ask-consent.py", "event": "consent.request", "outcome": "ok",
+       "data": {"nonce": nonce, "вид": value("--вид"), "цель": value("--предмет-двери"),
+                "почему": value("--почему")}}
+with open(log / "consent-requests.jsonl", "a", encoding="utf-8") as fh:
+    fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+print("[согласие кнопкой] запрос записан; диспетчер пришлёт владельцу кнопки")
+print(nonce)
+'''
+# Раннер: судья слова владельца получает носитель стенда, а не машины.
+KEY_RUNNER = r'''
+import json, pathlib, runpy, sys
+spec = json.loads(sys.argv[1])
+sys.path.insert(0, spec["lib"])
+import owner_word
+carrier = owner_word.Носитель(папка=pathlib.Path(spec["папка"]), uid=None, паспорт=spec["паспорт"],
+                              граница=pathlib.Path(spec["папка"]), окно_мин=60, срок_кнопки_мин=15, ручки={})
+owner_word.носитель = lambda: carrier
+owner_word.ЗАПРОС_КНОПКИ = pathlib.Path(spec["ask"])
+sys.argv = spec["argv"]
+runpy.run_path(spec["argv"][0], run_name="__main__")
+'''
+
+
+def key_run(st: Stand, *args: str, conf: Path | None = None) -> Result:
+    if not SCRIPT.is_file():
+        return Result(-1, "", f"скрипта нет: {SCRIPT}")
+    ask = st.root / "fake-ask-consent.py"
+    if not ask.exists():
+        ask.write_text(KEY_FAKE_ASK, encoding="utf-8")
+        # Отзыв «Да» судья ищет в журнале входящих: на стенде он есть и пуст, как у тихого владельца.
+        (st.log / INBOX_JOURNAL).write_text("", encoding="utf-8")
+    spec = {"lib": str(HERE / "lib"), "папка": str(st.log), "ask": str(ask),
+            "паспорт": {"TG_CHAT_ID": OWNER_ID}, "argv": [str(SCRIPT), *args]}
+    done = subprocess.run([sys.executable, "-c", KEY_RUNNER, json.dumps(spec, ensure_ascii=False)],
+                          env=st.env(conf), capture_output=True, text=True, timeout=300, cwd=st.root)
+    return Result(done.returncode, done.stdout, done.stderr)
+
+
+def key_requests(st: Stand) -> list:
+    path = st.log / REQUESTS_JOURNAL
+    rows = [json.loads(x) for x in path.read_text(encoding="utf-8").splitlines() if x.strip()] if path.exists() else []
+    return [r["data"] for r in rows if r.get("data", {}).get("вид") == KEY_KIND]
+
+
+def now_iso() -> str:
+    import datetime
+    return datetime.datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def key_press(st: Stand, subject: str, answer: str, from_id: str = OWNER_ID) -> None:
+    """Нажатие так, как его пишет диспетчер: «отправлено» и решение по nonce просьбы."""
+    nonce = [r for r in key_requests(st) if r["цель"] == subject][-1]["nonce"]
+    with open(st.log / BUTTONS_JOURNAL, "a", encoding="utf-8") as fh:
+        for event in ("consent.sent", {"да": "consent.yes", "нет": "consent.no"}[answer]):
+            sender = None if event == "consent.sent" else int(from_id)
+            fh.write(json.dumps({"v": 1, "ts": now_iso(), "src": "проба", "event": event, "outcome": "ok",
+                                 "data": {"nonce": nonce, "вид": KEY_KIND, "цель": subject, "message_id": 77,
+                                          "from_id": sender}}, ensure_ascii=False) + "\n")
+
+
+def fingerprint(path: Path) -> str:
+    out = subprocess.run(["ssh-keygen", "-lf", f"{path}.pub"], check=True, capture_output=True, text=True)
+    return out.stdout.split()[1]
+
+
+def remote_file(st: Stand, path: str) -> str:
+    try:
+        return git(st.remote, "show", f"main:{path}")
+    except RuntimeError:
+        return ""
+
+
+def section_key(base: Path, keys: Keys) -> None:
+    st = Stand(base / "key", keys)
+    kb = base / "kb"
+    subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "", "-f", str(kb)],
+                   check=True, capture_output=True)
+    st.add({"серверы/HarnessB.md": "# HarnessB\nстенд\n".encode()}, keys.host)
+    key_run(st, "--читать")
+    subject = f"HarnessB {fingerprint(kb)}"
+    p1, p2 = "находки/HarnessB/2026-11-14-b-one.md", "находки/HarnessB/2026-11-14-b-two.md"
+    c1 = st.add({p1: entry("HarnessB")}, kb)
+    r = key_run(st, "--читать")
+    asks = key_requests(st)
+    # краснеет, если читатель отвергает верную подпись неизвестным ключом молча (дефект 14–15.11)
+    check("KY1 U от копии с серверы/HarnessB.md → одна просьба «ключ-сети» с именем и отпечатком",
+          (0, [subject]), (r.rc, [a["цель"] for a in asks]))
+    check("KY1 в «почему» названо число ждущих коммитов", True, bool(asks) and "1" in str(asks[0].get("почему")))
+    c2 = st.add({p2: entry("HarnessB")}, kb)
+    key_run(st, "--читать")
+    # краснеет, если просьба уходит каждый тик, а не раз на отпечаток
+    check("KY2 второй коммит того же ключа → просьб всё ещё 1", 1, len(key_requests(st)))
+    st.add({"находки/HarnessQ/2026-11-14-q.md": entry("HarnessQ")}, keys.y)
+    key_run(st, "--читать")
+    # краснеет, если вопрос задаётся про копию, которой хозяин не знает (нет серверы/<имя>.md)
+    check("KY3 U без серверы/HarnessQ.md → просьбы о нём нет", [subject], [a["цель"] for a in key_requests(st)])
+    signers_before, main_before = remote_file(st, "серверы/allowed_signers"), st.remote_main()
+    key_press(st, subject, "да", from_id="999")
+    r = key_run(st, "--читать")
+    # краснеет, если ключ заносится без «Да» владельца: рубеж подписи сети ослаб бы
+    check("KY4 «Да» чужого from_id → список и main те же, c1 c2 отвергнуты",
+          (0, signers_before, main_before, True),
+          (r.rc, remote_file(st, "серверы/allowed_signers"), st.remote_main(), {c1, c2} <= set(st.rejected())))
+    key_press(st, subject, "да")
+    r = key_run(st, "--читать")
+    signers = remote_file(st, "серверы/allowed_signers")
+    # краснеет, если на «Да» строка не занесена якорем хозяина
+    check("KY5 «Да» владельца → в allowed_signers строка HarnessB с этим ключом", (0, True),
+          (r.rc, f'HarnessB namespaces="git" {keys.pub(kb)}' in signers.splitlines()))
+    check("KY5 прежние строки списка на месте", True,
+          all(line in signers.splitlines() for line in signers_before.splitlines()))
+    tree = entries(st.remote, "main")
+    # краснеет, если якорь строится из принятого без перечитанных: находка ключа стёрта из сети
+    check("KY6 якорь с новым ключом не удаляет находки этого ключа", (True, True), (p1 in tree, p2 in tree))
+    state = st.read_state()
+    # краснеет, если отвергнутое по U не перечитано после занесения
+    check("KY7 c1 c2 не в отвергнутых, обе находки приняты", (False, False, True, True),
+          (c1 in st.rejected(), c2 in st.rejected(), p1 in state.get("accepted", {}), p2 in state.get("accepted", {})))
+    check("KY7 карточки на обе находки", (1, 1), (len(st.cards_for(p1)), len(st.cards_for(p2))))
+    main_after = st.remote_main()
+    r = key_run(st, "--читать")
+    # краснеет, если «Да» тратится второй раз (новый якорь) или вопрос повторяется
+    check("KY8 следующий тик: main тот же, просьб 1", (0, main_after, 1),
+          (r.rc, st.remote_main(), len(key_requests(st))))
+
+    big = "находки/HarnessX/2026-11-14-big.md"
+    git(st.writer, "fetch", "-q", st.url, "main")
+    st.tip = st.remote_main()   # вершина — якорь хозяина, отправленный читателем
+    cb = st.add({big: entry("HarnessX", body="ж" * 9000)}, keys.x)
+    r = key_run(st, "--читать")
+    check("KY9 запись 18 КБ при потолке 16 КБ → отвергнута", (0, True), (r.rc, cb in st.rejected()))
+    r = key_run(st, "--перечитать", cb)
+    # краснеет, если ручное перечитывание принимает то, что суд по-прежнему отвергает
+    check("KY9 --перечитать при прежнем потолке → снова отвергнута", (0, True, False),
+          (r.rc, cb in st.rejected(), big in st.read_state().get("accepted", {})))
+    wide = st.write_conf(EVOLUTION_MAX_ENTRY_BYTES="65536")
+    r = key_run(st, "--перечитать", cb, conf=wide)
+    # краснеет, если отвергнутое со снятой причиной не перечитывается руками (276b48c до двери патча)
+    check("KY10 --перечитать после снятия причины → принята, не в отвергнутых", (0, False, True),
+          (r.rc, cb in st.rejected(), big in st.read_state().get("accepted", {})))
+    r = key_run(st, "--перечитать", "0" * 40)
+    # краснеет, если дверь молча «перечитывает» sha, которого нет среди отвергнутых
+    check("KY11 --перечитать sha не из отвергнутых → код 2", 2, r.rc)
+
+    pq = "находки/HarnessQ/2026-11-14-q.md"
+    cq = [sha for sha, rec in st.rejected().items() if rec["why"].startswith("отказ: U")]
+    git(st.writer, "fetch", "-q", st.url, "main")
+    st.tip = st.remote_main()
+    st.add({"серверы/allowed_signers": (remote_file(st, "серверы/allowed_signers") + "\n"
+                                        f'HarnessQ namespaces="git" {keys.pub(keys.y)}\n').encode()}, keys.host)
+    r = key_run(st, "--читать")
+    # краснеет, если ключ, занесённый хозяином мимо кнопки, не перечитывает отвергнутое им само
+    check("KY12 ключ занесён якорем руками → отвергнутое по U перечитано и принято", (0, 1, [], True),
+          (r.rc, len(cq), [s for s in cq if s in st.rejected()], pq in st.read_state().get("accepted", {})))
+
+    kd = base / "kd"
+    subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "", "-f", str(kd)],
+                   check=True, capture_output=True)
+    st.tip = st.remote_main()
+    st.add({"серверы/HarnessD.md": "# HarnessD\nстенд\n".encode()}, keys.host)
+    st.add({"находки/HarnessD/2026-11-15-d.md": entry("HarnessD")}, kd)
+    key_run(st, "--читать")
+    line_d = f'HarnessD namespaces="git" {keys.pub(kd)}'
+    git(st.writer, "fetch", "-q", st.url, "main")
+    st.tip = st.remote_main()
+    st.add({"серверы/allowed_signers": (remote_file(st, "серверы/allowed_signers") + f"\n{line_d}\n").encode()},
+           keys.host)
+    key_press(st, f"HarnessD {fingerprint(kd)}", "да")
+    main_d = st.remote_main()
+    r = key_run(st, "--читать")
+    # краснеет, если «Да» на ключ, уже занесённый руками, дописывает строку второй раз
+    check("KY13 ключ занесён руками до «Да» → новой строки и якоря нет", (0, 1, main_d),
+          (r.rc, remote_file(st, "серверы/allowed_signers").splitlines().count(line_d), st.remote_main()))
+
+
 def stand_commits() -> list:
     """sha коммитов в удалённых стендов секции. Ищутся они, а не карточки карты
     стенда: скрипт, пишущий ЧУЖУЮ карту вместо своей, оставил бы карту стенда
@@ -2152,8 +2441,8 @@ def section_read_all(base: Path, keys: Keys) -> None:
 SECTIONS = {"keys": section_keys, "root": section_root, "judge": section_judge,
             "read": section_read_all, "forge": section_forge, "write": section_write,
             "door": section_door, "boot": section_boot, "state": section_state, "threat": section_threat,
-            "status": section_status,
-            "answer": section_answer, "sign": section_sign}
+            "status": section_status, "patch": section_patch,
+            "answer": section_answer, "sign": section_sign, "key": section_key}
 
 
 def main(argv: list[str]) -> int:

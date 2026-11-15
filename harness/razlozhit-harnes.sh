@@ -62,6 +62,13 @@ EOF
     sed "s|^BACKUP_DIR=.*|BACKUP_DIR=\"$2\"|" "$sample" > "$1"
   }
   make_stand_conf "$T/harness.conf" "$T/копии"
+  # Ключи стенда — только из его файлов. Окружение старше конфига (scripts/lib/config.sh):
+  # ключ, унаследованный от вызывающего, уводит мимо стенда и вложенную раскладку, и скрипты
+  # стенда. Улика — замок 6г 15.11.2026: с PROJECT_DIR самопроверки копии в окружении
+  # раскладка стенда легла в проект копии и затёрла её запись в process-library.json.
+  # Перечень — те же строки КЛЮЧ=, что читает загрузчик: список по имени забыл бы новый ключ.
+  # shellcheck disable=SC2046
+  unset $(sed -n 's/^[[:space:]]*\([A-Z][A-Z0-9_]*\)=.*/\1/p' "$T/install.conf" "$T/harness.conf" | sort -u)
   # bash "$0", не "$0": после scp с Windows exec-бита может не быть,
   # и прямой перезапуск падал бы «Permission denied».
   # HARNESS_SELFTEST=1 — селфтест НИКОГДА не трогает /etc (П-11): без флага
@@ -2828,6 +2835,31 @@ if (( ${#BLOCKED[@]} )); then
   echo "  sudo chown -R $(id -un):$(id -gn) ${BLOCKED[*]}" >&2
   exit 3
 fi
+# ── свои записи библиотеки процессов — в слой установки ДО первой записи ────
+# Пакетный process-library.json ложится поверх проектного; свои записи копии (нет ни
+# в пакете, ни в прежней сборке из описи) уходят в слой установки (копия bkb
+# 14.11.2026 теряла их каждым обновлением). Слой не записан — отказ «не начата»:
+# иначе своя запись пропала бы, и самопроверка откатила бы обновление «без записи:
+# crontab» (копия bkb 15.11.2026). Откат не отказывает: возврат прежней версии важнее.
+if ! not_laid config/process-library.json; then
+  prev_pkg=$(sed -n '2s/^# пакет \([0-9a-f]\{40\}\)$/\1/p' "$PROJECT_DIR/.layout-manifest" 2>/dev/null || true)
+  baseline=-
+  BASELINE_TMP=$(mktemp)
+  if [[ -n "$prev_pkg" ]] && git -C "$HERE/.." show "$prev_pkg:harness/config/process-library.json" \
+      > "$BASELINE_TMP" 2>/dev/null; then
+    baseline="$BASELINE_TMP"
+  fi
+  carried_rc=0
+  carried=$(python3 -B "$HERE/scripts/lib/process_library.py" carry-own \
+      "$PROJECT_DIR/harness/config/process-library.json" "$HERE/config/process-library.json" "$baseline") \
+    || carried_rc=$?
+  rm -f "$BASELINE_TMP"
+  if (( carried_rc )) && (( ${#ROLLBACK_ARGS[@]} == 0 )); then
+    echo "РАСКЛАДКА НЕ НАЧАТА: ${carried:-перенос своих записей библиотеки процессов упал кодом $carried_rc (причина выше)}" >&2
+    exit 3
+  fi
+  [[ -z "$carried" ]] || printf '%s\n' "$carried"
+fi
 # Раскладчик только СОБИРАЕТ план укладки; файлы в проект кладёт дверь
 # (scripts/layout-door.py) одним вызовом: сначала предпроверка и копии
 # перекрываемого, потом запись. Укладка файла прямо отсюда писала поверх чужого
@@ -2931,16 +2963,7 @@ for f in "$HERE"/config/*; do
     # dispatcher'а (indent=2), поэтому идёт через шаг и на чистой установке: иначе
     # вторая раскладка «перекрывала» бы его одним переформатированием.
     # Не вышло — кладём пакетный файл как раньше.
-    # Свои записи копии (нет ни в пакете, ни в прежней сборке из описи) до замены
-    # файла уходят в слой установки: копия bkb 14.11.2026 теряла их каждым обновлением,
-    # и самопроверка краснела «без записи» на её же строке крона.
-    prev_pkg=$(sed -n '2s/^# пакет \([0-9a-f]\{40\}\)$/\1/p' "$PROJECT_DIR/.layout-manifest" 2>/dev/null || true)
-    baseline=-
-    if [[ -n "$prev_pkg" ]] && git -C "$HERE/.." show "$prev_pkg:harness/config/$name" \
-        > "$LIBTMP/$name.baseline" 2>/dev/null; then
-      baseline="$LIBTMP/$name.baseline"
-    fi
-    python3 -B "$HERE/scripts/lib/process_library.py" carry-own "$PROJECT_DIR/harness/config/$name" "$f" "$baseline" || true
+    # Свои записи копии к этому месту уже в слое установки (шаг до первой записи).
     if python3 -B - "$PROJECT_DIR/harness/config/$name" "$f" "$LIBTMP/$name" <<'PY'
 import json, sys
 old_path, pkg_path, out_path = sys.argv[1:4]
