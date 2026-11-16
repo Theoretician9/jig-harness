@@ -114,8 +114,20 @@ case_check "слова «разберусь» в сообщении нет" \
     "нет" "$(grep -q 'разберусь' "$STAND/zhurnal/kanal.txt" && echo да || echo нет)"
 case_check "сказано, что демон повторит сам" \
     "да" "$(grep -q 'повторю сам' "$STAND/zhurnal/kanal.txt" && echo да || echo нет)"
-case_check "красный гейт назван по имени" \
-    "да" "$(grep -q 'проба_гейта' "$STAND/zhurnal/kanal.txt" && echo да || echo нет)"
+# Владелец 16.11 о сообщении «Правку памяти с панели пока не сохранил…: красный
+# гейт «прополка_без_потерь»»: «А что за правка памяти, что туда сохранилось» —
+# панелью он ничего не правил, а имя гейта ему ничего не говорит. Канал называет
+# ФАЙЛ человеческими словами и причину одной фразой; имя гейта — смене, на доску.
+case_check "в канале нет имени гейта" \
+    "нет" "$(grep -q 'проба_гейта' "$STAND/zhurnal/kanal.txt" && echo да || echo нет)"
+case_check "в канале нет слова «гейт»" \
+    "нет" "$(grep -q 'гейт' "$STAND/zhurnal/kanal.txt" && echo да || echo нет)"
+case_check "в канале нет «с панели» — источник демону не известен" \
+    "нет" "$(grep -q 'с панели' "$STAND/zhurnal/kanal.txt" && echo да || echo нет)"
+case_check "сообщение называет файл человеческими словами" \
+    "да" "$(grep -qF 'запись памяти (запись.md)' "$STAND/zhurnal/kanal.txt" && echo да || echo нет)"
+case_check "причина названа простыми словами" \
+    "да" "$(grep -qF 'не пропустила проверка перед коммитом' "$STAND/zhurnal/kanal.txt" && echo да || echo нет)"
 
 echo "── тот же отказ на следующем обходе: владельцу не пишем ──"
 progon
@@ -140,7 +152,7 @@ case_check "счёт неудач подряд обнулён" \
 # quotepath=false: без него git печатает кириллицу escape-байтами, и проба
 # искала бы слово, которого в выводе нет (память: quotepath).
 case_check "правка памяти в итоге закоммичена" \
-    "да" "$(git -C "$PROJECT" -c core.quotepath=false log -1 --format=%s | grep -q 'Правка памяти' && echo да || echo нет)"
+    "да" "$(git -C "$PROJECT" -c core.quotepath=false log -1 --format=%s | grep -q '^Сохранил в git файлы памяти: ' && echo да || echo нет)"
 
 echo "── решение «коммитить нечего» отличает исчезнувшую правку от красного гейта ──"
 # Находка ревью M-08: инвариант «нечего коммитить — владельцу не писать» был без
@@ -228,16 +240,14 @@ progon
 progon
 case_check "порог достигнут" "3" "$(schet)"
 POSLEDNEE=$(tail -1 "$STAND/zhurnal/kanal.txt" 2>/dev/null || true)
-case_check "сообщение о пороге называет первый гейт серии" \
-    "да" "$(printf '%s' "$POSLEDNEE" | grep -q 'gejt_odin' && echo да || echo нет)"
-case_check "сообщение о пороге называет второй гейт серии" \
-    "да" "$(printf '%s' "$POSLEDNEE" | grep -q 'gejt_dva' && echo да || echo нет)"
+case_check "сообщение о пороге имён гейтов владельцу не несёт" \
+    "нет" "$(printf '%s' "$POSLEDNEE" | grep -q 'gejt_odin\|gejt_dva' && echo да || echo нет)"
 case_check "доска называет оба гейта" \
     "да" "$(doska_tekst | grep -q 'gejt_odin' && doska_tekst | grep -q 'gejt_dva' && echo да || echo нет)"
 # Повтор гейта в серии — одно имя: «gejt_dva, gejt_dva» владелец прочёл бы как
 # два разных отказа. Занятый индекс в серии не участвует — его текст гейтом не назван.
 case_check "гейт, отказавший дважды, назван один раз" \
-    "1" "$(printf '%s' "$POSLEDNEE" | grep -o 'gejt_dva' | grep -c . || true)"
+    "1" "$(doska_tekst | grep -o 'gejt_dva' | grep -c . || true)"
 case_check "отказ блокировки индекса гейтом не назван" \
     "нет" "$(printf '%s' "$POSLEDNEE" | grep -q 'index.lock\|fatal' && echo да || echo нет)"
 
@@ -249,11 +259,11 @@ printf 'четвёртая редакция\n' > "$PROJECT/память/запи
 progon; progon; progon
 POSLEDNEE=$(tail -1 "$STAND/zhurnal/kanal.txt" 2>/dev/null || true)
 case_check "новая серия называет свой гейт" \
-    "да" "$(printf '%s' "$POSLEDNEE" | grep -q 'gejt_tri' && echo да || echo нет)"
+    "да" "$(doska_tekst | grep -q 'gejt_tri' && echo да || echo нет)"
 case_check "гейты прошлой серии в новой не названы" \
-    "нет" "$(printf '%s' "$POSLEDNEE" | grep -q 'gejt_odin\|gejt_dva' && echo да || echo нет)"
+    "нет" "$(doska_tekst | grep -q 'gejt_odin\|gejt_dva' && echo да || echo нет)"
 case_check "серия из одного гейта называет его один раз" \
-    "1" "$(printf '%s' "$POSLEDNEE" | grep -o 'gejt_tri' | grep -c . || true)"
+    "1" "$(doska_tekst | grep -o 'gejt_tri' | grep -c . || true)"
 
 echo "── серия занятых индексов до своего порога: ни счёта гейтов, ни тревоги, ни долга ──"
 # Живая серия 02.11: index.lock шёл в счёт наравне с гейтами и вёл к тревоге
@@ -285,10 +295,10 @@ rm -f "$STAND/zhurnal/heartbeat/memory-commit"
 progon
 SOOBSHCHENIE=$(tail -1 "$STAND/zhurnal/kanal.txt" 2>/dev/null || true)
 case_check "на пятом занятом обходе владельцу сказано один раз" "$((SKAZANO_DO + 1))" "$(skazano)"
-case_check "сообщение называет беду: «индекс занят 5 обходов»" \
-    "да" "$(printf '%s' "$SOOBSHCHENIE" | grep -qF 'индекс занят 5 обходов' && echo да || echo нет)"
-case_check "занятый индекс красным гейтом не назван" \
-    "нет" "$(printf '%s' "$SOOBSHCHENIE" | grep -q 'красный гейт' && echo да || echo нет)"
+case_check "сообщение называет беду: «git занят другим процессом 5 обходов»" \
+    "да" "$(printf '%s' "$SOOBSHCHENIE" | grep -qF 'git занят другим процессом 5 обходов' && echo да || echo нет)"
+case_check "занятый индекс отказом проверки не назван" \
+    "нет" "$(printf '%s' "$SOOBSHCHENIE" | grep -q 'проверка перед коммитом' && echo да || echo нет)"
 case_check "долг занятого индекса на доске" "да" "$(doska_zamka)"
 case_check "долга красного гейта от занятого индекса нет" "нет" "$(doska_est)"
 case_check "счёт гейтов и на пороге блокировок пуст" "0" "$(schet)"
@@ -301,7 +311,7 @@ rm -f "$PROJECT/.git/index.lock"
 echo "── индекс освободился: счёт занятых индексов и долг сняты ──"
 progon
 case_check "правка, ждавшая индекса, закоммичена" \
-    "да" "$(git -C "$PROJECT" -c core.quotepath=false log -1 --format=%s | grep -q 'Правка памяти' && echo да || echo нет)"
+    "да" "$(git -C "$PROJECT" -c core.quotepath=false log -1 --format=%s | grep -q '^Сохранил в git файлы памяти: ' && echo да || echo нет)"
 case_check "зелёный обход снимает счёт занятых индексов" \
     "нет" "$([ -f "$STAND/zhurnal/memory-commit.индекс-занят" ] && echo да || echo нет)"
 case_check "зелёный обход снимает долг занятого индекса" "нет" "$(doska_zamka)"
@@ -332,10 +342,10 @@ progon; progon; progon
 POSLEDNEE=$(tail -1 "$STAND/zhurnal/kanal.txt" 2>/dev/null || true)
 case_check "X2 отказ гейта посчитан до порога" "3" "$(schet)"
 case_check "X2 первое слово и тревога по порогу" "$((SK + 2))" "$(skazano)"
-case_check "X2 тревога называет гейт" \
-    "да" "$(printf '%s' "$POSLEDNEE" | grep -q 'stale_lock' && echo да || echo нет)"
-case_check "X2 тревога — о красном гейте, не о занятом индексе" \
-    "да" "$(printf '%s' "$POSLEDNEE" | grep -q 'красный гейт' && ! printf '%s' "$POSLEDNEE" | grep -q 'индекс занят' && echo да || echo нет)"
+case_check "X2 доска называет гейт" \
+    "да" "$(doska_tekst | grep -q 'stale_lock' && echo да || echo нет)"
+case_check "X2 тревога — об отказе проверки, не о занятом git" \
+    "да" "$(printf '%s' "$POSLEDNEE" | grep -q 'проверка перед коммитом' && ! printf '%s' "$POSLEDNEE" | grep -q 'git занят' && echo да || echo нет)"
 case_check "X2 долг на доске" "да" "$(doska_est)"
 case_check "X2 счёт занятых индексов не тронут" "0" "$(schet_zamkov)"
 
@@ -343,8 +353,8 @@ echo "── X3 кириллица в имени гейта под LC_ALL=C ─�
 zelenyj_gejt; printf 'x3\n' > "$PROJECT/память/запись.md"; progon
 gejt_s_imenem "гейт_кириллица"; printf 'x3b\n' > "$PROJECT/память/запись.md"
 LC_ALL=C progon; LC_ALL=C progon
-case_check "X3 имя в канале" \
-    "да" "$(tail -1 "$STAND/zhurnal/kanal.txt" | grep -q 'гейт_кириллица' && echo да || echo нет)"
+case_check "X3 имя в списке серии" \
+    "да" "$(grep -q 'гейт_кириллица' "$STAND/zhurnal/memory-commit.неудач.gates" 2>/dev/null && echo да || echo нет)"
 case_check "X3 имя в списке серии один раз" \
     "1" "$(grep -c . "$STAND/zhurnal/memory-commit.неудач.gates" 2>/dev/null || true)"
 
@@ -379,8 +389,6 @@ case_check "R-5 список гейтов серии — только новый
     "gejt_novyj" "$(cat "$STAND/zhurnal/memory-commit.неудач.gates" 2>/dev/null || true)"
 case_check "R-5 сообщение без имени прежней серии" \
     "нет" "$(printf '%s' "$POSLEDNEE" | grep -q 'gejt_staryj' && echo да || echo нет)"
-case_check "R-5 сообщение называет новый гейт" \
-    "да" "$(printf '%s' "$POSLEDNEE" | grep -q 'gejt_novyj' && echo да || echo нет)"
 
 echo "── W1 прополка запускается при правах 644 (без бита запуска) ──"
 # Заглушка вместо настоящей прополки: важен сам запуск, а не её работа.
@@ -444,6 +452,34 @@ case_check "H1 метка пульса стоит" "да" "$(puls)"
 progon
 case_check "H1 без гонки правка закоммичена" \
     "да" "$(git -C "$PROJECT" -c core.quotepath=false show --name-only --format= HEAD | grep -q 'запись.md' && echo да || echo нет)"
+
+echo "── БОЛЬНОЙ СЛУЧАЙ 16.11: файлы механизмов не названы «правкой с панели» ──"
+# Коммит 5e58e5ac «Правка памяти с панели: .tasks-triaged, ORDERS.md, …»:
+# файлы правили агент и механизмы, а не владелец. Демон источника не знает —
+# говорит, ЧТО сохраняет, и человеческими словами.
+printf 'указание\n' > "$PROJECT/память/ORDERS.md"
+printf 'отметка\n' > "$PROJECT/память/.tasks-triaged"
+krasnyj_gejt
+progon
+POSLEDNEE=$(tail -1 "$STAND/zhurnal/kanal.txt" 2>/dev/null || true)
+case_check "Z1 отказ: канал называет указания владельца" \
+    "да" "$(printf '%s' "$POSLEDNEE" | grep -qF 'указания владельца (ORDERS.md)' && echo да || echo нет)"
+case_check "Z1 отказ: канал называет отметки разбора сообщений" \
+    "да" "$(printf '%s' "$POSLEDNEE" | grep -qF 'отметки разбора сообщений (.tasks-triaged)' && echo да || echo нет)"
+case_check "Z1 отказ: без «с панели»" \
+    "нет" "$(printf '%s' "$POSLEDNEE" | grep -q 'панел' && echo да || echo нет)"
+zelenyj_gejt
+progon
+TEMA="$(git -C "$PROJECT" -c core.quotepath=false log -1 --format=%s)"
+TELO="$(git -C "$PROJECT" -c core.quotepath=false log -1 --format=%b)"
+case_check "Z2 подпись коммита без «с панели»" \
+    "нет" "$(printf '%s\n%s' "$TEMA" "$TELO" | grep -q 'с панели\|через веб-панель' && echo да || echo нет)"
+case_check "Z2 подпись называет указания владельца" \
+    "да" "$(printf '%s' "$TEMA" | grep -qF 'указания владельца (ORDERS.md)' && echo да || echo нет)"
+case_check "Z2 подпись называет отметки разбора сообщений" \
+    "да" "$(printf '%s' "$TEMA" | grep -qF 'отметки разбора сообщений (.tasks-triaged)' && echo да || echo нет)"
+case_check "Z2 сверка состава: оба файла в коммите" \
+    "0" "$(grep -c . "$STAND/zhurnal/memory-commit.вывод.назвал-не-внёс" 2>/dev/null || true)"
 
 printf '\nПАМЯТЬ-В-ГИТ: путей %d, неудач %d\n' "$CASES_PATHS" "$CASES_FAILED"
 [ "$CASES_FAILED" -eq 0 ]

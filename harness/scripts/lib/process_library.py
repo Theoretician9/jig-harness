@@ -25,9 +25,12 @@ CLI:
 из harness.conf. Файла нет — реестр как есть; есть — записи добавляются, а при
 том же id заменяют пакетные.
 
+Замер нагрузки (доля_нагрузки.замер) — данные машины: process-dispatcher --в-библиотеку
+пишет его в $LOG_DIR/process-library-measure.json, registry() накладывает поверх описания.
+
 Двери проб: HARNESS_PROCESS_LIBRARY — путь к YAML библиотеки (расписание,
 выключатель), HARNESS_PROCESS_LIBRARY_JSON — путь к JSON (свойства процессов),
-HARNESS_PROCESS_LIBRARY_LOCAL — путь к слою установки.
+HARNESS_PROCESS_LIBRARY_LOCAL — путь к слою установки, HARNESS_PROCESS_MEASURE — путь к замеру.
 """
 import os
 import re
@@ -108,6 +111,35 @@ def with_local_layer(library: dict) -> dict:
         return library
     слитые = [слой.pop(запись["id"], запись) for запись in library.get("процессы") or []]
     return {**library, "процессы": слитые + list(слой.values())}
+
+
+MEASURE_NAME = "process-library-measure.json"
+
+
+def measure_path(logs=None) -> Path:
+    # Замер — данные машины: учтённый файл пакета, переписанный демоном, держал дерево
+    # копии грязным неделями (копия bkb 16.11.2026). Файл пакета несёт только описание.
+    путь = os.environ.get("HARNESS_PROCESS_MEASURE")
+    return Path(путь) if путь else Path(logs or _config().log_dir()) / MEASURE_NAME
+
+
+def read_measure(path: Path) -> dict:
+    """{id: замер} из данных установки; файла нет или он битый — пусто (панель покажет замер описания)."""
+    import json
+    try:
+        замеры = json.loads(path.read_text(encoding="utf-8")).get("процессы")
+    except (OSError, ValueError, AttributeError):
+        return {}
+    return замеры if isinstance(замеры, dict) else {}
+
+
+def with_measure(library: dict, path=None) -> dict:
+    """Копия библиотеки, где «доля_нагрузки.замер» записи взят из данных установки, если он там есть."""
+    замеры = read_measure(path or measure_path())
+    записи = [{**r, "доля_нагрузки": {**r["доля_нагрузки"], "замер": замеры[r["id"]]}}
+              if r.get("id") in замеры and isinstance(r.get("доля_нагрузки"), dict) else r
+              for r in library.get("процессы") or []]
+    return {**library, "процессы": записи}
 
 
 def layer_records(документ) -> list:
@@ -193,7 +225,7 @@ def registry(path=None) -> dict:
     # Свойства процессов (класс, запуск, механизмы, доля нагрузки) живут в JSON, расписание — в YAML.
     import json
     путь = path or os.environ.get("HARNESS_PROCESS_LIBRARY_JSON") or _каталог_конфигов() / "process-library.json"
-    return with_local_layer(json.loads(Path(путь).read_text(encoding="utf-8")))
+    return with_measure(with_local_layer(json.loads(Path(путь).read_text(encoding="utf-8"))))
 
 
 def is_exempt(process_id: str, path=None) -> bool:

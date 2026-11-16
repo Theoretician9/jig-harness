@@ -98,6 +98,12 @@
     расписание: "15 4 * * *"
     команда: "harness/demons/devmap-selfheal.sh"
     журнал: devmap-selfheal.log
+  # Сведение автопамяти: не выкат продукта, а расписание харнеса (спека §5.4 Г5).
+  claude-mem-fix:
+    запуск: крон
+    расписание: "30 4 * * *"
+    команда: "scripts/claude-mem-fix.py"
+    журнал: claude-mem-fix.log
   nightly-gates:
     запуск: служба-проверок
     расписание: "0 6 * * *"

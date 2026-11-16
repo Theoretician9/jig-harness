@@ -51,6 +51,7 @@ def _load(name: str, path: Path):
 
 
 events = _load("events_lib", LIB_DIR / "events.py")
+cards = _load("cards_lib", LIB_DIR / "cards.py")
 
 SRC = "scripts/merge-queue.py"
 RESULTS = {0: "слито", 1: "конфликт", 2: "неверный-вызов", 3: "ворота", 4: "мешают-правки",
@@ -63,6 +64,11 @@ LOCK_RETRY_TIMES = 5
 REMEMBERED_PATHS = 500
 CC_LOCK_NOTE = "держит Claude Code, уберёт --убрать"
 SAMPLE_CONF = "harness/config/harness.conf"
+MAP = "dev-map.yaml"
+# Писатели держат лок карты секунды; демон — до получаса, и очередь за ним не стоит:
+# карта остаётся грязной, и слияние решит, мешает ли она.
+MAP_LOCK_WAIT_SECONDS = 60
+COMMIT_WRAPPER = HERE / "git-commit-locked.sh"
 
 
 class Stop(Exception):
@@ -83,7 +89,8 @@ class Report:
         self.success = "убрано" if tidy else RESULTS[0]
         self.fields = {"код": 0, "итог": RESULTS[0], "ветка": target, "sha_до": "", "sha_после": "",
                        "файлов": 0, "пакет_файлов": 0, "ожидание_с": 0.0, "ворота_с": None,
-                       "повторов": 0, "конфликт": [], "оставлено": [], "ключи_машины": []}
+                       "повторов": 0, "конфликт": [], "мешают": [], "оставлено": [],
+                       "ключи_машины": []}
 
     def finish(self, code: int) -> dict:
         self.fields.update(код=code, итог=self.success if code == 0 else RESULTS[code])
@@ -111,11 +118,16 @@ def say(text: str) -> None:
     print(text, file=OUT)
 
 
-def git(where: Path, *args: str, binary: bool = False) -> subprocess.CompletedProcess:
-    """git без унаследованных GIT_*: вызов из хука иначе судил бы чужой индекс."""
+def git_env() -> dict:
+    """Среда без унаследованных GIT_*: вызов из хука иначе судил бы чужой индекс."""
     env = {k: v for k, v in os.environ.items()
            if k not in ("GIT_DIR", "GIT_INDEX_FILE", "GIT_WORK_TREE")}
     env["LC_ALL"] = "C"
+    return env
+
+
+def git(where: Path, *args: str, binary: bool = False) -> subprocess.CompletedProcess:
+    env = git_env()
     extra = {} if binary else {"text": True, "encoding": "utf-8", "errors": "surrogateescape"}
     return subprocess.run(["git", "-C", str(where), *args], capture_output=True, env=env, **extra)
 
@@ -267,8 +279,42 @@ def rebase_on_master(tree: dict) -> None:
     raise Stop(1, "", files)
 
 
+def branch_trailers(project: Path, tip: str) -> str:
+    """id трейлеров Dev-Map коммитов ветки через пробел: гейт пайплайна судит названные
+    ими карточки — стадии commit-msg, где он читает трейлер коммита, у ворот очереди нет."""
+    return " ".join(cards.dev_map_ids(git_out(project, "log", "--format=%B", f"master..{tip}")))
+
+
+def checked_tree(ctx: Context, tip: str) -> str:
+    """Дерево вершины, если хук коммита уже судил его зелёным (иначе пусто).
+    Только для одного коммита над master: у хука набор файлов — против родителя,
+    у очереди — против master, и у ветки из двух коммитов предмет проверки другой."""
+    parent = rev(ctx.project, f"{tip}^")
+    if parent is None or parent != rev(ctx.project, "master"):
+        return ""
+    tree = rev(ctx.project, f"{tip}^{{tree}}")
+    journal = ctx.log_dir / "gates.jsonl"
+    if not tree or not journal.is_file():
+        return ""
+    last = None
+    for line in journal.read_text(encoding="utf-8", errors="replace").splitlines():
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(row, dict) and row.get("gate") == "pre-commit" and row.get("tree") == tree:
+            last = row
+    return tree if last and last.get("verdict") == "pass" else ""
+
+
 def run_gates(ctx: Context, tip: str, report: Report) -> None:
-    """Ворота на вершине ветки во временном дереве; дерево снимается всегда."""
+    """Ворота на вершине ветки во временном дереве; дерево снимается всегда.
+    Один коммит над master и зелёная запись хука на то же дерево — ворота не гоняются."""
+    same = checked_tree(ctx, tip)
+    if same:
+        report.fields["ворота_с"] = 0
+        report.fields["ворота"] = f"то же дерево {same[:8]}"
+        return
     where = ctx.mq_dir / f"mq-{os.getpid()}-{int(time.time())}"
     proc = git(ctx.project, "worktree", "add", "--detach", str(where), "master")
     if proc.returncode:
@@ -280,6 +326,7 @@ def run_gates(ctx: Context, tip: str, report: Report) -> None:
                           f"{checkout.stderr.strip()}")
         env = {k: v for k, v in os.environ.items()
                if k not in ("GIT_DIR", "GIT_INDEX_FILE", "GIT_WORK_TREE")}
+        env["HARNESS_PIPELINE_DEV_MAP"] = branch_trailers(ctx.project, tip)
         started = time.monotonic()
         gate = subprocess.run(["bash", "scripts/pre-commit-gate.sh"], cwd=where, env=env,
                               capture_output=True, text=True, errors="replace")
@@ -411,7 +458,13 @@ def fast_forward(ctx: Context, branch: str) -> bool:
         if proc.returncode == 0:
             return True
         if "would be overwritten" in text:
-            raise Stop(4, "правки основного дерева мешают слиянию:\n" + text.strip())
+            blocking = [line.strip() for line in text.splitlines() if line.startswith("\t")]
+            if blocking != [MAP]:
+                raise Stop(4, "правки основного дерева мешают слиянию:\n" + text.strip(), blocking)
+            refusal = commit_dirty_map(ctx, branch)
+            if refusal:
+                raise Stop(4, refusal, blocking)
+            return False                    # карта легла в master: rebase и круг заново
         if "index.lock" in text and attempt < LOCK_RETRY_TIMES:
             time.sleep(LOCK_RETRY_SECONDS)
             continue
@@ -421,6 +474,50 @@ def fast_forward(ctx: Context, branch: str) -> bool:
             return False
         raise Stop(6, f"слияние не удалось: {text.strip()}")
     return False
+
+
+def commit_dirty_map(ctx: Context, branch: str) -> str | None:
+    """Грязная карта основного — отдельным коммитом, под общим локом писателей карты.
+    None — карта чиста или закоммичена; строка — почему не коммитим.
+
+    Писатели карты (строитель проверок, map-from-message и др.) пишут её под локом и
+    не всегда коммитят; грязная карта держала очередь кодом 4 (16.11 трижды за час)."""
+    if not git_out(ctx.project, "status", "--porcelain", "--", MAP):
+        return None
+    try:
+        with cards.map_lock(cards.lock_path(), MAP_LOCK_WAIT_SECONDS):
+            return commit_map_locked(ctx, branch)
+    except cards.LockBusy:
+        return f"карта не закоммичена: лок карты занят дольше {MAP_LOCK_WAIT_SECONDS} с"
+
+
+def commit_map_locked(ctx: Context, branch: str) -> str | None:
+    """Под локом карта на диске не меняется: проверенное и закоммиченное — одни байты.
+    Личный индекс от HEAD плюс одна карта: чужие staged-пути общего индекса не уходят."""
+    try:
+        yaml.safe_load((ctx.project / MAP).read_text(encoding="utf-8"))
+    except yaml.YAMLError as error:
+        return f"карта невалидна (yaml.safe_load), не коммичу: {error}"
+    base = rev(ctx.project, "HEAD")
+    blob_sha = git_out(ctx.project, "hash-object", "-w", "--", MAP)
+    message = (f"Карта: записи писателей карты — коммит очереди слияния перед {branch}\n\n"
+               f"Писатели карты записали её под локом и не закоммитили; грязная карта\n"
+               f"основного дерева мешала слиянию, очередь коммитит её под тем же локом.\n")
+    with tempfile.TemporaryDirectory(prefix="mq-map-") as tmp:
+        env = {**git_env(), "GIT_INDEX_FILE": os.path.join(tmp, "index")}
+        subprocess.run(["git", "read-tree", base], cwd=ctx.project, env=env, check=True)
+        subprocess.run(["git", "update-index", "--cacheinfo", f"100644,{blob_sha},{MAP}"],
+                       cwd=ctx.project, env=env, check=True)
+        done = subprocess.run(["bash", str(COMMIT_WRAPPER), "--base", base, "-F", "-"],
+                              cwd=ctx.project, env=env, input=message, capture_output=True,
+                              text=True)
+    if done.returncode:
+        tail = (done.stderr.strip().splitlines() or ["?"])[-1]
+        return f"карта не закоммичена (обёртка, код {done.returncode}): {tail}"
+    # Общий индекс держит прежний блоб карты: без сброса ff-слияние снова отказало бы.
+    git(ctx.project, "update-index", "--cacheinfo", f"100644,{blob_sha},{MAP}")
+    say(f"карта закоммичена очередью: {rev(ctx.project, 'HEAD')}")
+    return None
 
 
 def write_atomic(target: Path, data: bytes, executable: bool) -> None:
@@ -550,6 +647,11 @@ def merge_branch(ctx: Context, target: str, report: Report) -> None:
     require_clean(tree)
     report.fields["sha_до"] = report.fields["sha_после"] = rev(ctx.project, "master")
     while True:
+        # Карта коммитится до rebase, чтобы ворота шли один раз; невалидную или под
+        # долгим локом оставляем — мешает ли она, решит слияние.
+        refusal = commit_dirty_map(ctx, branch)
+        if refusal:
+            say(refusal)
         try:
             rebase_on_master(tree)
         except Stop as stop:
@@ -560,8 +662,12 @@ def merge_branch(ctx: Context, target: str, report: Report) -> None:
         changes = branch_changes(ctx, tip)
         carry, deleted = package_plan(ctx, tip, changes)
         before = rev(ctx.project, "master")
-        if fast_forward(ctx, branch):
-            break
+        try:
+            if fast_forward(ctx, branch):
+                break
+        except Stop as stop:
+            report.fields["мешают"] = stop.files
+            raise
         if report.fields["повторов"] >= ctx.retries:
             raise Stop(6, f"master уходит из-под слияния: предел повторов {ctx.retries}")
         report.fields["повторов"] += 1
@@ -611,6 +717,10 @@ def main(argv: list[str]) -> int:
     args = parse(argv)
     OUT = sys.stderr if args.as_json else sys.stdout
     ctx = Context()
+    if HERE.is_relative_to(ctx.mq_dir):
+        # Копия из дерева помощника сняла бы под собой свои модули — итог упал бы без
+        # JSON; слияние ведёт копия основного дерева.
+        os.execv(sys.executable, [sys.executable, str(ctx.project / SRC), *argv])
     report = Report("-" if args.tidy else args.target, tidy=args.tidy)
     code = 0
     lock = None

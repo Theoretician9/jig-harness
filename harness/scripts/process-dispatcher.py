@@ -4,14 +4,14 @@
 Что делает: раз в минуту (--замер, под кроном через run-background.sh) делит CPU
 и память сервера между процессами библиотеки и дописывает строку process.sample
 в process-load.jsonl; по запросу показывает «сейчас», «за 24ч|7д» и вносит
-недельный замер в process-library.json. Разбор cgroup и дерева процессов — в
+недельный замер в данные установки ($LOG_DIR/process-library-measure.json). Разбор cgroup и дерева процессов — в
 scripts/lib/process_load.py: cgroup даёт точный итог, дерево его только делит.
 
 Режимы:
   --замер            один проход сборщика (под замком, с ротацией журналов);
   --сейчас           два скана с паузой 2 с, таблица;
   --за 24ч|7д        свёртка журнала;
-  --в-библиотеку     замер за неделю → доля_нагрузки.замер в process-library.json;
+  --в-библиотеку     замер за неделю → $LOG_DIR/process-library-measure.json (файл пакета не трогает);
   --витрина          собрать файл витрины для панели (проход --замер зовёт то же раз в ~10 минут);
   --selftest         разбор на искусственном снимке.
 
@@ -83,8 +83,8 @@ def load_json(path: Path, default):
 
 
 def read_library(args) -> dict:
-    """Библиотека для чтения: файл пакета плюс слой установки. Писать надо в файл пакета
-    (to_library), поэтому слитый вид туда не идёт."""
+    """Библиотека для чтения: файл пакета плюс слой установки. Файл пакета не пишется никем:
+    замер — в данные установки (to_library)."""
     return process_library.with_local_layer(load_json(Path(args.library), {}))
 
 
@@ -99,6 +99,8 @@ def replace_atomically(path: Path, text: str) -> None:
             os.chown(tmp, before.st_uid, before.st_gid)
         except PermissionError:
             pass                                    # чужой владелец при не-root: права сохранены, владелец — писавший
+    else:
+        os.chmod(tmp, 0o644)                        # новый файл читает панель другим пользователем
     os.replace(tmp, path)
 
 
@@ -486,18 +488,15 @@ def view_mode(args) -> int:
 # ───────────────────────── библиотека ─────────────────────────
 
 def to_library(args) -> int:
-    path = Path(args.library)
+    """Недельный замер → данные установки (process_library.measure_path), не файл пакета:
+    учтённый файл, переписанный демоном, держал дерево копии грязным (копия bkb 16.11.2026)."""
+    path = process_library.measure_path(args.logs)
     lock = locked(Path(args.logs) / "locks" / "process-library.lock")
     if lock is None:
-        print("process-dispatcher: библиотеку правит другой проход (замок занят) — выхожу")
+        print("process-dispatcher: замер правит другой проход (замок занят) — выхожу")
         return 0
-    text = path.read_text(encoding="utf-8")              # перечитано под замком
-    library = json.loads(text)
-    pretty = lambda doc: json.dumps(doc, indent=2, ensure_ascii=False) + "\n"  # noqa: E731
-    if text != pretty(library):
-        print(f"process-dispatcher: отказ — оформление {path} не json.dumps(indent=2, ensure_ascii=False): "
-              "файл не тронут, чтобы не раздуть дифф")
-        return 1
+    library = read_library(args)
+    measured = process_library.read_measure(path)        # под замком; замер записи без новых данных остаётся
     now = time.time()
     agg = process_load.aggregate(process_load.read_lines(args.logs), now, HOURS["7д"])
     shares = process_load.window_shares(args.logs, args.transcripts, args.proc, agg, library, now, HOURS["7д"])
@@ -509,11 +508,11 @@ def to_library(args) -> int:
         accuracy = "точно" if share["приписка"]["способ"] in ("cgroup", "обёртка") else "≈ оценка"
         week = process_load.week_record(agg, shares, record["id"], accuracy)
         if week:
-            share["замер"] = {"дата": today, "источник": "process-load.jsonl", "неделя": week}
+            measured[record["id"]] = {"дата": today, "источник": "process-load.jsonl", "неделя": week}
             changed += 1
     if changed:
-        replace_atomically(path, pretty(library))
-    print(f"process-dispatcher: замер внесён в {changed} записей библиотеки")
+        replace_atomically(path, json.dumps({"процессы": measured}, indent=2, ensure_ascii=False) + "\n")
+    print(f"process-dispatcher: замер внесён в {changed} записей ({path})")
     return 0
 
 

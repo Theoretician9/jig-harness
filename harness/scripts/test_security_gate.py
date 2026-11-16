@@ -386,6 +386,22 @@ def c11b_one_helper_many_edits():
     green(stand.debts())
 
 
+def c11c_rejected_seal_is_not_a_run():
+    # Печать не той модели гейт отвергает — значит, она не
+    # прогон. Три помощника opus и один sonnet — три прогона, зелёный.
+    stand = Stand()
+    stand.skill(agent="agent-zzz", ts="2026-10-25T10:00:10Z")
+    stand.seal(agent="agent-zzz", model="claude-sonnet-5-5", ts="2026-10-25T10:00:20Z")
+    for number, agent in enumerate(("agent-bbb", "agent-ccc"), 1):
+        stand.skill(agent=agent, ts=f"2026-10-25T10:0{number}:00Z")
+        stand.seal(agent=agent, ts=f"2026-10-25T10:0{number}:30Z")
+    green(stand.debts())
+    # Четвёртый помощник opus — прогонов больше трёх.
+    stand.skill(agent="agent-ddd", ts="2026-10-25T10:05:00Z")
+    stand.seal(agent="agent-ddd", ts="2026-10-25T10:05:30Z")
+    only(stand.debts(), "too_many_runs")
+
+
 def c16_rule_finding_without_trigger():
     # C1 ревью r1: правило кода нашло дыру, триггер класса молчит — бумага нужна.
     for code in ({"app/perm.sh": "chmod -R 755 /\n"},
@@ -555,6 +571,8 @@ def main():
         ("C10c closed на свой коммит, не трогавший файл находки", c10c_closed_own_commit_not_touching_location),
         ("C11 четыре помощника — прогонов больше трёх", c11),
         ("C11b один помощник, четыре печати — один прогон, зелёный", c11b_one_helper_many_edits),
+        ("C11c печать sonnet — не прогон; четыре opus — прогонов больше трёх",
+         c11c_rejected_seal_is_not_a_run),
         ("C16 находка правила без триггера класса — нужна бумага", c16_rule_finding_without_trigger),
         ("C17 ghp_ в коммите задачи — нужна бумага (C1+M2)", c17_token_in_task_commit_needs_paper),
         ("C12 после бумаги только служебные файлы — не устарел", c12),

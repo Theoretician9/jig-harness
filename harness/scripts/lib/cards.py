@@ -234,28 +234,46 @@ def commit_cards(map_path: Path, line_id: str, chosen: list) -> None:
     от HEAD, коммит обёрткой без путей; общий индекс лечит хук post-commit.
     Отказ коммита — не отказ записи: карточка уже на диске, её догонит
     devmap-selfheal, а причина уходит в stderr."""
+    ids = [НАЧАЛО.search("".join(card)).group(2) for card in chosen]
+    commit_from_head(map_path, lambda head, name: {name: insert_cards(head(name), line_id, chosen)},
+                     ids, "запись")
+
+
+def commit_from_head(map_path: Path, edit, ids: list, what: str) -> None:
+    """Коммит писателя карты: `edit(head, имя карты)` строит {путь от корня: текст}
+    из HEAD (`head(путь)` — текст файла в HEAD или None), а не из файлов на диске —
+    чужие незакоммиченные правки остаются у автора. Личный индекс от HEAD, коммит
+    обёрткой без путей. Карта вне git (стенд, копия) — коммита нет."""
+    map_path = Path(map_path)
     folder = map_path.resolve().parent
     if _git(folder, "ls-files", "--error-unmatch", map_path.name).returncode:
         return                              # карта вне git: стенд, копия
     repo = Path(_git(folder, "rev-parse", "--show-toplevel").stdout.strip())
     name = map_path.resolve().relative_to(repo).as_posix()
-    ids = [НАЧАЛО.search("".join(card)).group(2) for card in chosen]
     base = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    def head(path: str) -> str | None:
+        done = _git(repo, "show", f"{base}:{path}")
+        return done.stdout if done.returncode == 0 else None
+
+    if head(name) is None:
+        print(f"карта записана, коммит не собран: {name} нет в HEAD", file=sys.stderr)
+        return
     with tempfile.TemporaryDirectory(prefix="map-commit-") as tmp:
         index = os.path.join(tmp, "index")
         env = {**os.environ, "GIT_INDEX_FILE": index}
         try:
-            new_text = insert_cards(_git(repo, "show", f"{base}:{name}", check=True).stdout,
-                                    line_id, chosen)
-        except (MapRefused, subprocess.CalledProcessError) as error:
+            files = edit(head, name)
+        except MapRefused as error:
             print(f"карта записана, коммит не собран: {error}", file=sys.stderr)
             return
-        blob = _git(repo, "hash-object", "-w", "--stdin", f"--path={name}",
-                    input=new_text).stdout.strip()
         _git(repo, "read-tree", base, env=env)
-        _git(repo, "update-index", "--cacheinfo", f"100644,{blob},{name}", env=env)
+        for path, text in files.items():
+            blob = _git(repo, "hash-object", "-w", "--stdin", f"--path={path}",
+                        input=text).stdout.strip()
+            _git(repo, "update-index", "--add", "--cacheinfo", f"100644,{blob},{path}", env=env)
         writer = os.path.basename(sys.argv[0]) or "писатель карты"
-        message = (f"Карта: {', '.join(ids)} — запись {writer}\n\n"
+        message = (f"Карта: {', '.join(ids)} — {what} {writer}\n\n"
                    f"Писатель карты коммитит свою запись сам: грязная карта в основном\n"
                    f"дереве держит очередь слияния.\n\n"
                    + "".join(f"Dev-Map: {i}\n" for i in ids))

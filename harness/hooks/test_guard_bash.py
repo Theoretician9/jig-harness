@@ -1397,6 +1397,71 @@ def check_consent_log_writes() -> tuple[int, int]:
         return _judge_cases(cases, env, "журнал согласий")
 
 
+def check_gates_summary_log_writes() -> tuple[int, int]:
+    """Р-11 ревью 7а (16.11.2026): замок 1 публикации верит $LOG_DIR/ворота-итог.jsonl
+    (зелёный полный итог того же sha снимает полные ворота), очередь слияний будет
+    верить $LOG_DIR/gates.jsonl. Слово владельца publish-gates-waiver.json не охраняется
+    (решение управляющего 04:35: оркестратор пишет его руками). Пишет их тот же пользователь, что и смена: одна строка
+    `printf … >> ворота-итог.jsonl` из оболочки снимала полные ворота без прогона.
+    Законные писатели — gates.sh, pre-commit-gate.sh и publish.sh — пишут своим
+    процессом, сторож Bash их строк не видит (он судит только команды инструмента
+    Bash: main() отпускает всё, где tool_name не Bash). Отказ — и оркестратору, и
+    помощнику; чтение свободно.
+    """
+    with tempfile.TemporaryDirectory(prefix="проба-итога-ворот-") as yard:
+        logs = pathlib.Path(yard, "log")
+        logs.mkdir()
+        summary, gates = logs / "ворота-итог.jsonl", logs / "gates.jsonl"
+        for f in (summary, gates):
+            f.write_text("{}\n", encoding="utf-8")
+        install = pathlib.Path(yard, "install.conf")
+        install.write_text(f'LOG_DIR="{logs}"\nAUTONOMY="semi"\n', encoding="utf-8")
+        harness = pathlib.Path(yard, "harness.conf")
+        harness.write_text("", encoding="utf-8")
+        env = dict(os.environ, HARNESS_INSTALL_CONF=str(install), HARNESS_CONF=str(harness))
+        row = '{"режим":"обычный","красных":0,"новых":0,"sha":"x","чисто":true,"код":0}'
+        cases = []
+        for name, f in (("ворота-итог.jsonl", summary), ("gates.jsonl", gates)):
+            cases += [
+                (2, f"printf >> {name}", f"printf '%s\\n' '{row}' >> {f}"),
+                (2, f"printf > {name}", f"printf '%s\\n' '{row}' > {f}"),
+                (2, f"tee -a {name}", f"echo '{row}' | tee -a {f}"),
+                (2, f"python3 -c open(..., 'a') {name}",
+                 f"python3 -c \"open('{f}', 'a').write('{{}}\\n')\""),
+                (2, f"sed -i по {name}", f"sed -i s/1/0/ {f}"),
+                (2, f"cp поверх {name}", f"cp /tmp/x {f}"),
+                (0, f"tail {name}", f"tail -n 3 {f}"),
+                (0, f"cat {name}", f"cat {f}"),
+                (0, f"grep {name}", f"grep красных {f}"),
+            ]
+        # Путь, собранный из переменной, буквально не равен имени журнала.
+        cases += [
+            (2, "дописка по куску имени: >> \"$L/ворота-итог.jsonl\"",
+             f"L={logs}; echo '{row}' >> \"$L/ворота-итог.jsonl\""),
+            (0, "законный прогон ворот (пишет своим процессом)", "bash scripts/gates.sh --хакатон"),
+            (0, "echo >> другого журнала в LOG_DIR", f"echo x >> {logs}/другой.log"),
+        ]
+        bad, paths = 0, 0
+        прежний = ГВАРД.ПОМОЩНИК
+        try:
+            for helper, who in ((False, "оркестратор"), (True, "помощник")):
+                ГВАРД.ПОМОЩНИК = helper
+                b, p = _judge_cases(cases, env, f"журнал ворот ({who})")
+                bad, paths = bad + b, paths + p
+        finally:
+            ГВАРД.ПОМОЩНИК = прежний
+        # Процессом, как его зовёт оболочка помощника: agent_id во входе хука.
+        paths += 1
+        p = subprocess.run(GUARD, capture_output=True, text=True, env=env, input=json.dumps(
+            {"tool_name": "Bash", "agent_id": "a-proba",
+             "tool_input": {"command": f"printf '%s\\n' '{row}' >> {summary}"}}))
+        ok = p.returncode == 2
+        bad += not ok
+        print(f"  {'ок ' if ok else 'ПЛОХО'} ждали=2 получили={p.returncode}  "
+              "журнал ворот: процесс сторожа, agent_id во входе, printf >> ворота-итог.jsonl")
+        return bad, paths
+
+
 def проверить_дверь_previous() -> tuple[int, int]:
     """Дверь удаления образа отката закрыта наглухо; заодно — дверь чтения живого учёта.
 
@@ -2614,7 +2679,7 @@ def main() -> int:
     bad += _плохо_дан
     total += _путей_дан
     for check_holes in (check_protected_paths, check_delete_door_targets,
-                        check_consent_log_writes):
+                        check_consent_log_writes, check_gates_summary_log_writes):
         holes_bad, holes_paths = check_holes()
         bad += holes_bad
         total += holes_paths

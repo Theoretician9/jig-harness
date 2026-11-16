@@ -794,9 +794,90 @@ def case_j21() -> None:
         shutil.rmtree(root, ignore_errors=True)
 
 
+def case_j22() -> None:
+    """Нечитаемый файл в дереве не отнимает снимок у всего дерева (находка Content-Factory
+    15.11.2026, 0.12.2: «снимка до раскладки нет», после отката остались CLAUDE.md и
+    pipeline.yaml новой версии). Один файл без права чтения валил hash-object всего списка.
+    Зелен на поломке? «снимок без нечитаемого молча» — нет: путь обязан быть назван;
+    «снимок пропущен» — нет: record обязан дописать CLAUDE.md."""
+    after = load_after()
+    root = Path(tempfile.mkdtemp(prefix="layout-journal-probe-"))
+    closed = None
+    try:
+        project, _ = after_stand(root)
+        closed = project / "logs" / "root-only.log"
+        closed.parent.mkdir()
+        closed.write_bytes(b"not ours\n")
+        closed.chmod(0)
+        snapshot = root / "снимок.tsv"
+        rc, out = run_after("snap", str(project), str(snapshot))
+        PROBE.check("J22", "snap: код 0, снимок есть, нечитаемый путь назван",
+                    rc == 0 and snapshot.is_file() and "logs/root-only.log" in out,
+                    f"код {rc}, снимок {snapshot.is_file()}: {out.strip()[-300:]}")
+        (project / "CLAUDE.md").write_bytes(b"# rules\n@STATE.md\n@new.md\n")
+        archive = root / "копии" / "раскладка" / "стенд-20261115-000000-22"
+        rc, out = run_after("record", str(project), str(archive), "--snapshot", str(snapshot))
+        journal, reason = LJ.read_journal(str(archive))
+        kinds = [(a.kind, a.path) for a in journal.actions] if journal else []
+        PROBE.check("J22", "record дописал CLAUDE.md, нечитаемый путь не тронут",
+                    rc == 0 and kinds == [("перекрыт", "CLAUDE.md")],
+                    f"код {rc}: {out.strip()[-300:]}; журнал {kinds}, {reason}")
+    finally:
+        if closed is not None and closed.exists():
+            closed.chmod(0o600)
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def case_j23() -> None:
+    """Смена одного режима файла попадает в журнал и откатывается (находка Content-Factory
+    15.11.2026: после отката scripts/test_deploy_ci.sh остался с режимом 100755 новой
+    версии). Разница судила только blob — тот же blob с другим режимом была «нет изменений».
+    Зелен на поломке? «режим не сравнивается» — нет: строки «перекрыт» не будет;
+    «копия с режимом диска» — нет: возврат обязан дать 644."""
+    load_after()
+    root = Path(tempfile.mkdtemp(prefix="layout-journal-probe-"))
+    try:
+        project, files = after_stand(root)
+        doc = project / "docs" / "keep.md"
+        doc.chmod(0o644)
+        snapshot = root / "снимок.tsv"
+        run_after("snap", str(project), str(snapshot))
+        doc.chmod(0o755)
+        archive = root / "копии" / "раскладка" / "стенд-20261115-000000-23"
+        rc, out = run_after("record", str(project), str(archive), "--snapshot", str(snapshot))
+        journal, reason = LJ.read_journal(str(archive))
+        kinds = [(a.kind, a.path) for a in journal.actions] if journal else []
+        PROBE.check("J23", "record: смена режима docs/keep.md — строка «перекрыт»",
+                    rc == 0 and kinds == [("перекрыт", "docs/keep.md")],
+                    f"код {rc}: {out.strip()[-300:]}; журнал {kinds}, {reason}")
+        if journal is None:
+            return
+        copy_path = archive / "files" / "docs" / "keep.md"
+
+        def disk(rel):
+            path = project / rel
+            return git_blob_of(path.read_bytes()) if path.is_file() else None
+
+        def copy(rel):
+            path = archive / "files" / rel
+            return git_blob_of(path.read_bytes()) if path.is_file() else None
+
+        found = LJ.rollback_decisions(journal, {}, disk, copy)
+        for rel in found.restore:
+            shutil.copy2(archive / "files" / rel, project / rel)
+        mode = doc.stat().st_mode & 0o777
+        PROBE.check("J23", "после решений отката режим docs/keep.md — 644, байты те же",
+                    "docs/keep.md" in found.restore and mode == 0o644
+                    and doc.read_bytes() == files["docs/keep.md"],
+                    f"возврат {sorted(found.restore)}, режим {mode:o}, копия "
+                    f"{copy_path.is_file() and oct(copy_path.stat().st_mode & 0o777)}")
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 CASES = (case_j1, case_j2, case_j3, case_j4, case_j4_mode, case_j_unbounded, case_j5, case_j6, case_j7, case_j8, case_j9,
          case_j10, case_j11, case_j12, case_j13, case_j14, case_j15, case_j16, case_j17,
-         case_j18, case_j19, case_j20, case_j21)
+         case_j18, case_j19, case_j20, case_j21, case_j22, case_j23)
 
 
 def main() -> int:

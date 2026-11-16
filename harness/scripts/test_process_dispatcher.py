@@ -35,6 +35,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -511,35 +512,63 @@ def hour_of_samples(groups_: list, rest: dict, cores: int, count: int = 60) -> l
     return [sample_row(now - dt.timedelta(minutes=count - i), groups_, rest, cores) for i in range(count)]
 
 
-@case("9. замер без даты/источника")
-def case_library():
-    w = World("p9")
-    before_text = w.library_path.read_text(encoding="utf-8")
-    w.journal.write_text("\n".join(hour_of_samples(
-        [{"id": "probe-burner", "прогон": "1001", "cpu_с": 30.0, "rss_мб": 100, "процессов": 2}],
-        {"cron.service": 1.0, "вне_корзин": 0.5}, 6)) + "\n", encoding="utf-8")
-    rc, out = w.run("--в-библиотеку", "--библиотека", str(w.library_path), "--журналы", str(w.logs),
-                    "--проект", str(w.project))
-    after_text = w.library_path.read_text(encoding="utf-8")
-    try:
-        before, after = json.loads(before_text), json.loads(after_text)
-    except ValueError as error:
-        report(False, "--в-библиотеку оставил читаемый JSON", [error])
-        return
+MEASURE_NAME = "process-library-measure.json"
 
-    def stripped(lib):
-        copy = json.loads(json.dumps(lib))
-        for r in copy["процессы"]:
-            r.get("доля_нагрузки", {}).pop("замер", None)
-        return copy
-    report(rc == 0 and stripped(before) == stripped(after),
-           "--в-библиотеку меняет только доля_нагрузки.замер (прочее и число записей прежние)",
-           [f"rc={rc} «{out[-160:]}»", f"записей {len(before['процессы'])} → {len(after['процессы'])}"])
-    by_id = {r["id"]: r for r in after["процессы"]}
-    measured = by_id["probe-burner"]["доля_нагрузки"]["замер"]
-    today = dt.date.today()
-    date_ok = isinstance(measured, dict) and any(
-        f in str(measured.get("дата")) for f in (today.isoformat(), today.strftime("%d.%m.%Y")))
+
+def registry_view(w: "World", measure: Path) -> dict:
+    """registry() модуля рядом с диспетчером: описание из файла, замер — из данных установки."""
+    code = ("import json, sys; sys.path.insert(0, sys.argv[1]); import process_library; "
+            "print(json.dumps(process_library.registry(), ensure_ascii=False))")
+    env = dict(w.env, HARNESS_PROCESS_LIBRARY_JSON=str(w.library_path), HARNESS_PROCESS_MEASURE=str(measure))
+    done = subprocess.run([sys.executable, "-c", code, str(DISPATCHER.parent / "lib")],
+                          capture_output=True, text=True, env=env, timeout=60)
+    return json.loads(done.stdout) if done.returncode == 0 and done.stdout.strip() else {}
+
+
+def tracked_library(w: "World") -> bool:
+    """Файл библиотеки — учтённый файл своего git, как у копии: замер не смеет делать его грязным."""
+    git = ["git", "-C", str(w.dir), "-c", "user.name=p", "-c", "user.email=p@p"]
+    return all(subprocess.run(git + args, capture_output=True).returncode == 0
+               for args in (["init", "-q"], ["add", w.library_path.name], ["commit", "-qm", "стенд"]))
+
+
+def dirty_library(w: "World") -> str:
+    return subprocess.run(["git", "-C", str(w.dir), "status", "--porcelain", "--", w.library_path.name],
+                          capture_output=True, text=True).stdout.strip()
+
+
+def burner_hour(w: "World", ident: str = "probe-burner") -> None:
+    w.journal.write_text("\n".join(hour_of_samples(
+        [{"id": ident, "прогон": "1001", "cpu_с": 30.0, "rss_мб": 100, "процессов": 2}],
+        {"cron.service": 1.0, "вне_корзин": 0.5}, 6)) + "\n", encoding="utf-8")
+
+
+def to_library(w: "World") -> tuple[int, str]:
+    return w.run("--в-библиотеку", "--библиотека", str(w.library_path), "--журналы", str(w.logs),
+                 "--проект", str(w.project))
+
+
+@case("9. замер — в данные установки, файл пакета не тронут")
+def case_library():
+    # Копия bkb 16.11.2026: --в-библиотеку переписывал учтённый process-library.json —
+    # файл пакета у копии был грязным неделями. Замер — данные машины, описание — пакета.
+    w = World("p9")
+    stand = tracked_library(w)
+    before_text = w.library_path.read_text(encoding="utf-8")
+    burner_hour(w)
+    rc, out = to_library(w)
+    report(stand and rc == 0 and w.library_path.read_text(encoding="utf-8") == before_text and not dirty_library(w),
+           "--в-библиотеку не трогает файл пакета: байты те же, git status чист",
+           [f"стенд git {'собран' if stand else 'НЕ собран'}", f"rc={rc} «{out[-160:]}»",
+            f"git status: {dirty_library(w)!r}"])
+    measure = w.logs / MEASURE_NAME
+    try:
+        written = json.loads(measure.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        report(False, f"замер лежит в {MEASURE_NAME} журналов установки", [f"{type(error).__name__}: {error}"])
+        return
+    measured = (written.get("процессы") or {}).get("probe-burner")
+    date_ok = isinstance(measured, dict) and dt.date.today().isoformat() in str(measured.get("дата"))
     report(date_ok and bool(str(measured.get("источник") or "").strip()),
            "замер probe-burner: «дата» сегодняшняя и «источник» непустой", [repr(measured)[:200]])
     week = measured.get("неделя") if isinstance(measured, dict) else None
@@ -547,21 +576,32 @@ def case_library():
     report(isinstance(week, dict) and near(week.get("покрытие_ч"), 1.0, 0.1)
            and near(server.get("ядро_часов"), 0.5, 0.02),
            "замер.неделя: покрытие_ч ≈ 1, сервер.ядро_часов = 60×30 с / 3600 = 0,5", [repr(week)[:200]])
-    untouched = [r["id"] for r in before["процессы"] if r["id"] != "probe-burner"
-                 and r["доля_нагрузки"]["замер"] != by_id[r["id"]]["доля_нагрузки"]["замер"]]
-    # Без удачного первого прохода эти строки зелены даром: судим их только при rc 0.
-    report(rc == 0 and not untouched, "записи без данных в журнале сохранили прежний замер", untouched or [f"rc={rc}"])
-    report(rc == 0 and after_text == dumps_library(after), "файл = json.dumps(indent=2, ensure_ascii=False) + «\\n»",
-           [f"rc={rc}" if rc else "оформление разошлось"])
+    report(stat.S_IMODE(measure.stat().st_mode) == 0o644, "файл замера 0644: панель читает его другим пользователем",
+           [f"права {stat.S_IMODE(measure.stat().st_mode):o}"])
+    view = {r["id"]: r for r in registry_view(w, measure).get("процессы") or []}
+    before = {r["id"]: r for r in json.loads(before_text)["процессы"]}
+    shown = (view.get("probe-burner") or {}).get("доля_нагрузки", {}).get("замер")
+    report(shown == measured, "registry(): замер probe-burner — из данных установки", [f"в реестре {repr(shown)[:120]}"])
+    untouched = [i for i, r in before.items() if i != "probe-burner" and "доля_нагрузки" in r
+                 and (view.get(i) or {}).get("доля_нагрузки", {}).get("замер") != r["доля_нагрузки"]["замер"]]
+    report(bool(view) and not untouched, "записи без замера показывают замер описания", untouched[:5] or [f"rc={rc}"])
 
+    # Проход с данными только о другой записи файл переписывает, а замер probe-burner хранит.
+    burner_hour(w, "burner-decoy")
+    rc2, out2 = to_library(w)
+    second = json.loads(measure.read_text(encoding="utf-8")).get("процессы") or {}
+    report(rc2 == 0 and "burner-decoy" in second and second.get("probe-burner") == measured,
+           "проход с данными о другой записи хранит прежний замер probe-burner",
+           [f"rc={rc2} «{out2[-120:]}»", f"записей в замере {sorted(second)}"])
+
+    # Оформление файла пакета замеру больше не помеха: он файл не пишет.
     w2 = World("p9b")
     foreign = json.dumps(json.loads(w2.library_path.read_text(encoding="utf-8")), indent=1, ensure_ascii=False) + "\n"
     w2.library_path.write_text(foreign, encoding="utf-8")
-    shutil.copy(w.journal, w2.journal)
-    rc2, out2 = w2.run("--в-библиотеку", "--библиотека", str(w2.library_path), "--журналы", str(w2.logs),
-                       "--проект", str(w2.project))
-    report(rc == 0 and rc2 != 0 and bool(out2) and w2.library_path.read_text(encoding="utf-8") == foreign,
-           "чужое оформление (indent=1) → отказ с причиной, файл не тронут", [f"rc={rc2} «{out2[-160:]}»"])
+    burner_hour(w2)
+    rc3, out3 = to_library(w2)
+    report(rc3 == 0 and w2.library_path.read_text(encoding="utf-8") == foreign and (w2.logs / MEASURE_NAME).is_file(),
+           "чужое оформление файла пакета (indent=1) → замер внесён, файл не тронут", [f"rc={rc3} «{out3[-160:]}»"])
 
 
 def load_module(name: str, path: Path):
@@ -894,18 +934,17 @@ def case_show_helper():
            [f"rc={rc}", f"строки helpers: {helper}", out.replace(chr(10), " ⏎ ")[-300:]])
 
 
-@case("9б. --в-библиотеку сменил права файла библиотеки (mkstemp 0600)")
+@case("9б. --в-библиотеку сменил права файла замера (mkstemp 0600)")
 def case_library_mode():
     for mode in (0o644, 0o640):
         w = World("p9m")
-        w.journal.write_text("\n".join(hour_of_samples(
-            [{"id": "probe-burner", "прогон": "1001", "cpu_с": 30.0, "rss_мб": 100, "процессов": 2}],
-            {"cron.service": 1.0, "вне_корзин": 0.5}, 6)) + "\n", encoding="utf-8")
-        os.chmod(w.library_path, mode)
-        rc, out = w.run("--в-библиотеку", "--библиотека", str(w.library_path), "--журналы", str(w.logs),
-                        "--проект", str(w.project))
-        got = os.stat(w.library_path).st_mode & 0o777
-        written = '"неделя"' in w.library_path.read_text(encoding="utf-8")
+        burner_hour(w)
+        measure = w.logs / MEASURE_NAME
+        measure.write_text('{"процессы": {}}\n', encoding="utf-8")
+        os.chmod(measure, mode)
+        rc, out = to_library(w)
+        got = os.stat(measure).st_mode & 0o777
+        written = '"неделя"' in measure.read_text(encoding="utf-8")
         report(rc == 0 and written and got == mode, f"права {mode:o} до замены → {mode:o} после (замер внесён)",
                [f"rc={rc} «{out[-120:]}»", f"замер {'внесён' if written else 'не внесён'}", f"права после {got:o}"])
 

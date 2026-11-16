@@ -115,6 +115,13 @@ def build_library(folder: Path):
                 and not record["статус"].startswith("снят")):
             quota[cls] -= 1
             drop.append(record["id"])
+    # Класс из одной живой записи квота опустошила бы, и пробы фильтра судили бы пустоту:
+    # такой класс сдвигается вверх — запись остаётся, рядом её двойник.
+    for cls in quota:
+        own = [r for r in records if r["класс"] == cls]
+        if own and all(r["id"] in drop for r in own):
+            drop.remove(own[0]["id"])
+            records.append(dict(own[0], id=own[0]["id"] + "-probe"))
     records[:] = [r for r in records if r["id"] not in drop]
 
     # Запись без «зачем» с путём механизма: «что делает» берётся из роли механизма.

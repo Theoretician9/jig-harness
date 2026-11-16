@@ -1100,6 +1100,61 @@ try:
         return troubles
     root_case("V3 ворота обновления: предел — ключ UPDATE_GATES_TIMEOUT_SEC, мусор — умолчание, отказ называет ключ", case_gates_limit)
 
+    def case_gates_limit_from_runs():
+        """Content-Factory 15.11.2026 (0.12.2): её полный прогон ворот идёт 1,5–2,5 ч, а
+        предел постановки 5400 с — ворота после обновления обрывались, обновление
+        откатывалось. Предел — не меньше 1,5 × стены прошлого законченного полного прогона
+        этой установки, и тот же предел получает сам gates.sh (GATES_RUN_TIMEOUT_SEC).
+        Зелёна на поломке? «стена не читается» — нет: 10800 ждём точно; «gates.sh со своим
+        5400» — нет: окружение запуска судится; «ключ ниже данных берёт верх» — нет."""
+        troubles, окружения = [], []
+        начало = datetime.now().astimezone() - timedelta(hours=3)
+        конец = начало + timedelta(seconds=7200)
+        прогон = f"{начало.isoformat(timespec='seconds')} 4242"
+        проверки = [{"v": 1, "ts": когда.isoformat(timespec="seconds"), "event": "gate.check",
+                     "outcome": "ok", "data": {"name": f"п{i}", "run": прогон, "secs": 1}}
+                    for i, когда in enumerate((начало + timedelta(seconds=5), конец))]
+        итог = {"ts": (конец + timedelta(seconds=30)).isoformat(timespec="seconds"),
+                "режим": "обычный", "зелёных": 2, "красных": 0}
+        файлы = {журналы / "gates-timing.jsonl": "".join(json.dumps(з, ensure_ascii=False) + "\n"
+                                                        for з in проверки),
+                 журналы / "ворота-итог.jsonl": json.dumps(итог, ensure_ascii=False) + "\n"}
+        прежние = {путь: путь.read_bytes() if путь.exists() else None for путь in файлы}
+        прежний_popen = обновление.subprocess.Popen
+
+        class Записано(Exception):
+            pass
+
+        def ловушка(*доводы, env=None, **прочее):
+            окружения.append(env or {})
+            raise Записано
+
+        try:
+            set_stand_key("UPDATE_GATES_TIMEOUT_SEC", "5400")
+            for путь, текст in файлы.items():
+                путь.write_text(текст, encoding="utf-8")
+            предел = обновление.предел_ворот()
+            if предел != 10800:
+                troubles.append(f"предел {предел}, ждали 10800 (1,5 × 7200 с прошлого прогона)")
+            обновление.subprocess.Popen = ловушка
+            with contextlib.suppress(Записано):
+                обновление._ворота_в_журнал(журналы / "update-gates-probe.log", предел)
+            if not окружения or окружения[0].get("GATES_RUN_TIMEOUT_SEC") != "10800":
+                troubles.append("gates.sh запущен без GATES_RUN_TIMEOUT_SEC=10800: "
+                                f"{[о.get('GATES_RUN_TIMEOUT_SEC') for о in окружения]}")
+            set_stand_key("UPDATE_GATES_TIMEOUT_SEC", "20000")
+            if обновление.предел_ворот() != 20000:
+                troubles.append(f"ключ выше данных не взят: {обновление.предел_ворот()}")
+        finally:
+            обновление.subprocess.Popen = прежний_popen
+            set_stand_key("UPDATE_GATES_TIMEOUT_SEC", "5400")
+            for путь, было in прежние.items():
+                путь.unlink(missing_ok=True) if было is None else путь.write_bytes(было)
+            (журналы / "update-gates-probe.log").unlink(missing_ok=True)
+        return troubles
+    root_case("V3д ворота обновления: предел — не меньше 1,5 × прошлого полного прогона, и он же у gates.sh",
+              case_gates_limit_from_runs)
+
     print("── заметки выпуска: строка «Что нового» в сообщении об обновлении ──")
     # hr.release-notes-human-language: сообщение «Харнес обновлён» несёт первую строку
     # «Что изменилось для вас» из заметок ПРИШЕДШЕЙ версии — и не растёт за потолок.
@@ -1295,6 +1350,63 @@ try:
         путь_ок("отказ из-за выката сказан владельцу")
     else:
         путь_плохо(f"отказ из-за выката не сказан: {сказано_выкат!r}")
+
+    print("── замок раскладки: STACK_ROLLOUT=server без STACK_CHECKS_FILE (эталонный выкат §6.2 п. 2) ──")
+    # Копия катила своим выкатом с развилкой STACK_ROLLOUT=server (тесты на стенде); эталон
+    # пакета развилки не знает и без файла проверок выкатил бы её продукт без тестов. Какая
+    # поломка оставила бы случай зелёным: замок по одному STACK_ROLLOUT (ловит контроль с
+    # заданным STACK_CHECKS_FILE), замок для всех копий (ловит контроль без STACK_ROLLOUT),
+    # обновление, переписавшее harness.conf копии (судится текст файла).
+    конф_до_раскладки = STAND_HARNESS_CONF.read_text(encoding="utf-8")
+
+    def новое_для_раскладки(слово: str) -> None:
+        (исток / "harness" / "правило.txt").write_text(f"обновление: {слово}\n", encoding="utf-8")
+        гит("add", "-A", где=исток); гит("commit", "-m", слово, где=исток)
+        гит("push", "origin", "master", где=исток)
+
+    def поставить_раскладку() -> tuple:
+        ворота_р, сказано_р, разложено_р = ворота_проба(Counter(), Counter()), [], []
+        итог_р = поставить_без_падения(
+            разложить=lambda **_: разложено_р.append(1) or РАЗЛОЖЕНО, перезапустить=lambda: True,
+            проверить=ворота_р, сказать=сказано_р.append)
+        return итог_р, " | ".join(сказано_р), разложено_р
+
+    try:
+        STAND_HARNESS_CONF.write_text(конф_до_раскладки + 'STACK_ROLLOUT="server"\n', encoding="utf-8")
+        конф_копии = STAND_HARNESS_CONF.read_text(encoding="utf-8")
+        новое_для_раскладки("старая раскладка без файла проверок")
+        было_раскладка = гит("rev-parse", "HEAD", где=пакет).stdout.strip()
+        итог_р, сказано_р, разложено_р = поставить_раскладку()
+        if (итог_р.get("поставлено") is False and "исключение" not in итог_р and not разложено_р
+                and гит("rev-parse", "HEAD", где=пакет).stdout.strip() == было_раскладка):
+            путь_ок("STACK_ROLLOUT=server, STACK_CHECKS_FILE пуст → не поставлено до раскладки, пакет на прежнем")
+        else:
+            путь_плохо(f"замок раскладки не держит: {итог_р} · раскладок {len(разложено_р)}")
+        if "STACK_ROLLOUT" in сказано_р and "STACK_CHECKS_FILE" in сказано_р:
+            путь_ок(f"отказ называет ключи: {сказано_р[:90]}")
+        else:
+            путь_плохо(f"ключи в отказе не названы: {сказано_р!r}")
+        if STAND_HARNESS_CONF.read_text(encoding="utf-8") == конф_копии:
+            путь_ок("harness.conf копии побайтно прежний после отказа")
+        else:
+            путь_плохо("обновление тронуло harness.conf копии")
+
+        set_stand_key("STACK_CHECKS_FILE", "deploy/server-checks.yaml")
+        итог_р, сказано_р, _ = поставить_раскладку()
+        if итог_р.get("поставлено") is True:
+            путь_ок("контроль: STACK_ROLLOUT=server и STACK_CHECKS_FILE задан → поставлено")
+        else:
+            путь_плохо(f"с файлом проверок не поставлено: {итог_р} · {сказано_р[:120]}")
+
+        STAND_HARNESS_CONF.write_text(конф_до_раскладки, encoding="utf-8")
+        новое_для_раскладки("копия без STACK_ROLLOUT")
+        итог_р, сказано_р, _ = поставить_раскладку()
+        if итог_р.get("поставлено") is True:
+            путь_ок("контроль: копия без STACK_ROLLOUT и без файла проверок → поставлено, замок не задел")
+        else:
+            путь_плохо(f"копию без STACK_ROLLOUT замок не пустил: {итог_р} · {сказано_р[:120]}")
+    finally:
+        STAND_HARNESS_CONF.write_text(конф_до_раскладки, encoding="utf-8")
 
     print("── оборванный пределом прогон ворот → None ──")
     # Какая поломка оставила бы случай зелёным: поимка ЛЮБОГО исключения в

@@ -371,6 +371,9 @@
   "scripts/extensions.py":
     класс: C2
     почему: "единственная точка установки плагинов и MCP — ставит и показывает состояние, а условия держат данные extensions.yaml"
+  "scripts/claude-mem-fix.py":
+    класс: C2
+    почему: "расписание сведения автопамяти: зовёт fix-claude-mem-project.py, сам ничего не судит"
   "scripts/firewall-docker-ports.sh":
     класс: C1
   "scripts/fix-claude-mem-project.py":
@@ -545,6 +548,10 @@
   "scripts/test_comments_intake.py":
     класс: D
   "scripts/test_data_delete_door.py":
+    класс: D
+  "scripts/test_deploy_artifact.sh":
+    класс: D
+  "scripts/test_deploy_boundary.sh":
     класс: D
   "scripts/test_deploy_consent_return.sh":
     класс: D
@@ -991,6 +998,17 @@
     класс: C2
   "scripts/lib/door_subjects.py":
     класс: C2
+  "scripts/lib/door_stages.sh":
+    класс: C3
+    причина: "выкат на производство"
+  "scripts/lib/server_checks.py":
+    класс: C2
+  "scripts/lib/door_checks.sh":
+    класс: C2
+  "scripts/test_server_checks_lib.py":
+    класс: D
+  "scripts/test_door_checks.sh":
+    класс: D
   "scripts/test_consent_push.py":
     класс: D
   "scripts/test_consent_doors.py":
@@ -1049,6 +1067,10 @@
   "scripts/test_instrument_carrier.py":
     класс: D
   "scripts/test_login_expiry_exit79.py":
+    класс: D
+  "scripts/test_login_organization_without_api.py":
+    класс: D
+  "scripts/test_limit_from_stream.py":
     класс: D
   "scripts/test_carrier_exit79.sh":
     класс: D
@@ -1126,6 +1148,10 @@
   "scripts/test_stack_template.py":
     класс: D
   "scripts/stack-template.py":
+    класс: C2
+  "scripts/test_task_efficiency.py":
+    класс: D
+  "scripts/task-efficiency.py":
     класс: C2
   "scripts/test_security_secrets_masked.py":
     класс: D

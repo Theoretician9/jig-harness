@@ -519,6 +519,22 @@ report(not any(": fine ::" in l for l in lines), "состояние_из: {dock
 rc, said = judged(field_records[:1], ["logrotate.timer", "logrotate.service"])
 report(rc == 0, "оба юнита состояние_из.systemd в списке → чисто", [f"rc={rc}"] + said.splitlines()[-3:])
 
+print("── 9. сведение автопамяти идёт процессом харнеса, а не выкатом продукта ──")
+# Выкат продукта не вправе сводить память харнеса (спека §5.4 Г5); сведение живёт расписанием,
+# а гейт писателей журналов требует events.run( в файле каждого задания.
+MEM_FIX = "claude-mem-fix"
+mem_job = next((j for j in jobs_parsed if j.get("имя") == MEM_FIX), {})
+mem_file = ROOT / "scripts" / "claude-mem-fix.py"
+mem_text = mem_file.read_text(encoding="utf-8") if mem_file.is_file() else ""
+journals_registry, _ = read(CONFIG / "journals.yaml", yaml.safe_load, "journals.yaml")
+mem_journal = ((journals_registry or {}).get("journals") or {}).get(MEM_FIX) or {}
+report(MEM_FIX in processes and bool(mem_job) and MEM_FIX in by_id,
+       f"процесс {MEM_FIX} есть в process-library.yaml, process-library.json и system-jobs.yaml",
+       [n for n, ok in (("yaml", MEM_FIX in processes), ("json", MEM_FIX in by_id), ("system-jobs", bool(mem_job))) if not ok])
+report("events.run(" in mem_text, f"файл {mem_file.name} зовёт events.run(", [] if mem_text else ["файла нет"])
+report("scripts/claude-mem-fix.py" in (mem_journal.get("writers") or []),
+       f"журнал {MEM_FIX} в journals.yaml называет писателем scripts/claude-mem-fix.py")
+
 print(f"БИБЛИОТЕКА ПРОЦЕССОВ: путей {paths}, неудач {failures}")
 if failures:
     sys.exit(1)

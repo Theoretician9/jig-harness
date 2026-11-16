@@ -136,8 +136,8 @@ def added_lines(task_id, root) -> dict[str, list[tuple[int, str]]] | None:
 
 
 # ── исключения и классы ─────────────────────────────────────────────────────
-def is_excluded(path: str, checklist: dict) -> bool:
-    for mask in checklist.get("excluded_paths") or []:
+def is_excluded(path: str, checklist: dict, key: str = "excluded_paths") -> bool:
+    for mask in checklist.get(key) or []:
         if mask.endswith("/"):
             if path.startswith(mask):
                 return True
@@ -521,7 +521,9 @@ def blob_of(root, path, source, commits):
 
 
 def code_fingerprint(task_id, root, source="index") -> str | None:
-    """sha256 от «путь\\tblob» файлов задачи без служебных; None — git молчит."""
+    """sha256 от «путь\\tblob» файлов задачи без служебных и общих реестров;
+    None — git молчит. Реестр в отпечатке устаревал бы от строки чужой задачи
+    при неизменном коде этой; свои строки задачи в нём судят правила."""
     try:
         checklist = load_checklist()
     except Unreadable:
@@ -532,7 +534,7 @@ def code_fingerprint(task_id, root, source="index") -> str | None:
     commits = task_commits(task_id, root) if source == "history" else []
     rows = []
     for path in names:
-        if is_excluded(path, checklist):
+        if is_excluded(path, checklist) or is_excluded(path, checklist, "shared_registries"):
             continue
         blob = blob_of(root, path, source, commits)
         if blob is None:

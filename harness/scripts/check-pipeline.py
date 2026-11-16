@@ -101,9 +101,10 @@ def отказ_без_названной_задачи(карта=None) -> list:
     """
     сколько = len(задачи_в_rabote(карта))
     return ["[пайплайн] крупная работа, а задача не названа: "
-            f"карточек в статусе wip — {сколько}, нужна ровно одна.",
-            "    Поставь той задаче, над которой работаешь, status: wip —",
-            "    тогда гейт видит, к чему привязаны спека и её ревью.",
+            f"карточек в статусе wip — {сколько}, трейлер не назвал ни одной из них.",
+            "    Поставь в сообщение коммита трейлер «Dev-Map: <id>» задачи, над которой",
+            "    работаешь (её карточка — в статусе wip), — гейт судит её спеку и ревью.",
+            "    Без трейлера задачу называет только единственная wip в карте.",
             "    Честная дверь: HARNESS_PIPELINE_FORCE=1 и HARNESS_PIPELINE_WHY='почему'."]
 
 
@@ -177,8 +178,8 @@ def решение_без_названной_задачи() -> int:
     return 1
 
 
-def _single_wip(data):
-    """(id, карточка) единственной wip-карточки данных карты. Неоднозначно — (None, None)."""
+def _wip_cards(data):
+    """Все wip-карточки данных карты."""
     def walk(node):
         if isinstance(node, dict):
             if "id" in node and node.get("status") == "wip":
@@ -189,10 +190,34 @@ def _single_wip(data):
             for value in node:
                 yield from walk(value)
 
-    tasks = list(walk(data))
+    return list(walk(data))
+
+
+def _single_wip(data):
+    """(id, карточка) единственной wip-карточки данных карты. Неоднозначно — (None, None)."""
+    tasks = _wip_cards(data)
     if len(tasks) != 1:
         return None, None
     return tasks[0]["id"], tasks[0]
+
+
+def tasks_to_judge(named, data):
+    """[(id, карточка)] задач, которые гейт крупной работы судит в этом коммите.
+
+    Задачу коммита называет трейлер Dev-Map (named): при параллельной работе в
+    карте несколько wip, и «единственная wip» не называет никого — 16.11 пять
+    wip краснили каждый крупный коммит, и смена ходила дверью FORCE. Из
+    названных берутся карточки в wip или test (test судит ещё и гейт
+    закрытия). Трейлер не назвал ни одной такой — прежнее правило: единственная
+    wip карты. Пусто — задача не названа.
+    """
+    by_id = _статусы(data or {})
+    named_cards = [(task_id, by_id[task_id]) for task_id in dict.fromkeys(named or ())
+                   if (by_id.get(task_id) or {}).get("status") in ("wip", "test")]
+    if named_cards:
+        return named_cards
+    task_id, card = _single_wip(data)
+    return [(task_id, card)] if card else []
 
 
 def задача_карты(карта=None):
@@ -384,7 +409,7 @@ def _git_out(корень, *args):
 
 
 def _seal_debts(бумага, относительный, журнал):
-    """Печать и вызов скила: (печать | None, беды). Файл судится по последней печати."""
+    """Печать и вызов скила: (признанные печати | None, беды). Файл судится по последней печати."""
     печати = [з for з in _jsonl(журнал / "artifact-seals.jsonl") if з.get("file") == относительный]
     последняя = печати[-1] if печати else None
     sha = hashlib.sha256(бумага.read_bytes()).hexdigest()
@@ -400,7 +425,8 @@ def _seal_debts(бумага, относительный, журнал):
               and str(з.get("ts") or "") <= str(последняя.get("ts") or "")]
     if not вызовы:
         return None, [SECURITY_REASONS["no_skill"]]
-    return печати, []
+    # Печать не той модели гейт отвергает — значит, и прогоном она не считается.
+    return [п for п in печати if guard.род(п.get("model")) == "opus"], []
 
 
 def _answers_debts(данные, затронутые, чек_лист, находки_кода):
@@ -2018,6 +2044,9 @@ def commit_msg_gate(message_path):
         print(f"[пайплайн] сообщение коммита не прочитано ({error}): трейлер Dev-Map неизвестен.")
         return 1
     ids = cards.dev_map_ids(text)
+    code = judge_by_trailer(ids)
+    if code:
+        return code
     # Без трейлера и без живого срока суду хакатона нечего делать: карту не читаем.
     if not ids and not hackathon.active():
         return 0
@@ -2043,6 +2072,21 @@ def commit_msg_gate(message_path):
     if _only_map_leaves_hackathon(named, maps, price):
         return 0
     return judge_hackathon(", ".join(named), price)
+
+
+def judge_by_trailer(ids):
+    """Суд крупной работы, отложенный pre-commit: в карте больше одной wip, и
+    задачу коммита называет только трейлер, а он есть лишь здесь."""
+    if len(_wip_cards(_карта_из(":"))) < 2:
+        return 0
+    price = _модуль_цены()
+    признаки = price.признаки_коммита()
+    if признаки is None:
+        return 0           # pre-commit уже отказал на этом же «индекс не прочитан»
+    настройки = price.конфиг()
+    if price.уровень(price.цена(признаки, настройки["веса"]), настройки["пороги"]) != "крупная":
+        return 0
+    return run_checks(price, False, ids)
 
 
 def _trailer_present_or_door(maps):
@@ -2084,10 +2128,14 @@ def main():
     # в wip не должна судить чужие коммиты, а после срока запирать репозиторий.
     if hackathon.is_hackathon(card):
         return 0
-    return run_checks(price, False)
+    # Очередь слияний стадии commit-msg не гонит: трейлеры коммитов ветки она
+    # передаёт сюда переменной (пустая — трейлеров у ветки нет).
+    named = os.environ.get("HARNESS_PIPELINE_DEV_MAP")
+    return run_checks(price, False, None if named is None else named.split())
 
 
-def run_checks(price, is_hackathon):
+def run_checks(price, is_hackathon, named=None):
+    """Общий суд коммита. named — id трейлеров Dev-Map; None — трейлер ещё неизвестен (pre-commit)."""
     настройки = price.конфиг()
     признаки = price.признаки_коммита()
     if признаки is None:
@@ -2168,9 +2216,25 @@ def run_checks(price, is_hackathon):
 
     # Карточка из индекса, как и уровень: спека, вписанная только в рабочее
     # дерево, в коммит не уйдёт.
-    id_задачи, карточка = wip_task_in_index()
-    if карточка is None:
+    карта_индекса = _карта_из(":")
+    задачи = tasks_to_judge(named, карта_индекса)
+    if not задачи:
+        wip = len(_wip_cards(карта_индекса))
+        if named is None and wip > 1:
+            # Сообщения на pre-commit ещё нет: задачу назовёт трейлер на commit-msg.
+            print(f"[пайплайн] крупная работа, карточек в wip — {wip}: задачу назовёт "
+                  "трейлер Dev-Map, суд — на стадии commit-msg")
+            return 0
         return решение_без_названной_задачи()
+    for id_задачи, карточка in задачи:
+        код = judge_task(price, настройки, признаки, значение, level_name, id_задачи, карточка)
+        if код:
+            return код
+    return 0
+
+
+def judge_task(price, настройки, признаки, значение, level_name, id_задачи, карточка):
+    """Суд крупной работы по одной задаче: бумаги шагов, закрытие, слово владельца."""
     водораздел = (настройки.get("строгость") or {}).get("водораздел")
     if старше_водораздела(карточка, водораздел):
         print(f"[пайплайн] задача {id_задачи} начата до {водораздел} — гейт её не судит")
@@ -2183,8 +2247,10 @@ def run_checks(price, is_hackathon):
     # это и делает проверить_закрытие. Иначе каждый промежуточный коммит
     # крупной задачи упирается в честную дверь, а дверь, через которую ходят
     # каждый раз, — не дверь (улика 11.09.2026: третий обход за сутки).
-    свои = [(id_задачи, б)
-            for б in проверить(карточка, шаги=шаги_под_состояние(настройки, карточка))]
+    # Карточку, названную трейлером в статусе test, судит гейт закрытия по переходу.
+    в_работе = карточка.get("status") == "wip"
+    свои = [(id_задачи, б) for б in
+            (проверить(карточка, шаги=шаги_под_состояние(настройки, карточка)) if в_работе else [])]
     чужие = проверить_закрытие(price, настройки)
     пары = свои + чужие
     беды = [текст for _, текст in пары]
@@ -2194,7 +2260,7 @@ def run_checks(price, is_hackathon):
         # Носитель — ручка «Уровень автоматизации» в панели, а не правило в
         # памяти: «либо полный, либо частичный где скидывается сначала спека,
         # и пока полтзователь не одобрит, работа не начинается».
-        беды_слова = spec_approval.беды_одобрения(id_задачи, карточка)
+        беды_слова = spec_approval.беды_одобрения(id_задачи, карточка) if в_работе else []
         if беды_слова:
             наметить(id_задачи, беды_слова[0])
             if дверь_открыта(id_задачи):

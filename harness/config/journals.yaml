@@ -13,7 +13,7 @@
 
 ignore_dirs: [demon-stream, проба-хука, .events]
 name_is_key_dirs: [PANEL_STATE_DIR]
-digest_keys: [sha256, head, commit, ino_from]
+digest_keys: [sha256, head, commit, ino_from, sha, checks_file_sha]
 # Долг ворот G1 (scripts/check-event-writers.py): писатели — пары (файл, журнал из
 # journals), демоны — файл. Список только сокращается (сверка с HEAD) и обязан находиться обходом: запись без прямой
 # дозаписи в коде (у демона — без нарушений меток) краснит. Закрывается переводом
@@ -138,10 +138,16 @@ journals:
     event_from: db.dropped
   deploy-releases:
     file: deploy-releases.jsonl
-    writers: [scripts/deploy.sh]
+    writers: [scripts/lib/door_stages.sh]
     time_field: ts
     time_kind: tz
     event_from: deploy.release
+  deploy-results:
+    file: deploy-results.jsonl
+    writers: [scripts/lib/door_stages.sh]
+    time_field: ts
+    time_kind: tz
+    event_from: deploy.result
   demon-spend:
     file: demon-spend.jsonl
     writers: [scripts/claude-demon.sh]
@@ -150,6 +156,12 @@ journals:
     event_from: demon.spend
     session_field: session_id
     reason_field: api_error
+  deploy-checks:
+    file: deploy-checks.jsonl
+    writers: [scripts/lib/door_checks.sh]
+    time_field: ts
+    time_kind: tz
+    event_from: deploy.checks
   gates:
     file: gates.jsonl
     task_infer: commit
@@ -397,6 +409,12 @@ journals:
     time_kind: tz
     event_from: "field:событие"
     reason_field: "почему"
+  claude-mem-fix:
+    file: claude-mem-fix.jsonl
+    writers: [scripts/claude-mem-fix.py]
+    time_field: ts
+    time_kind: tz
+    event_from: "field:event"
   "уборка-tmp":
     file: "уборка-tmp.jsonl"
     writers: [scripts/tmp-sweep.py]

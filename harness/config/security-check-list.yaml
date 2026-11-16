@@ -22,6 +22,15 @@ excluded_paths:
   - "test_*"
   - "*.test.*"
 
+# Shared registries: every task appends its own lines to them. They stay judged
+# by the rules (the task's added lines), but do not enter the task's code
+# fingerprint: a foreign task's line would make the security paper stale while
+# the task's code is unchanged. Same mask syntax as excluded_paths.
+shared_registries:
+  - "harness/config/mechanisms.yaml"
+  - "harness/config/probe-mutations.yaml"
+  - "harness/config/harness.conf"
+
 classes:
   injection:
     triggers:

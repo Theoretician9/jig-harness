@@ -116,7 +116,7 @@ class Stand:
     def env(self, **extra: str) -> dict:
         env = {k: v for k, v in os.environ.items()
                if k not in ("GIT_DIR", "GIT_INDEX_FILE", "GIT_WORK_TREE", "PROJECT_DIR",
-                            "STARTER_DIR", "HARNESS_TASK")}
+                            "STARTER_DIR", "HARNESS_TASK", "SERVICE_LOCKS_SUBDIR")}
         env.update(GIT_ENV, LOG_DIR=str(self.logs), HARNESS_LOG_DIR=str(self.logs),
                    HARNESS_CONF=str(self.conf), HARNESS_INSTALL_CONF=str(self.install),
                    HARNESS_STARTER=str(self.pkg), HARNESS_EVENTS_STATE=str(self.base / "state"),
@@ -300,6 +300,8 @@ def case_f_dirty_main(tmp: Path) -> None:
     check("е: байты и git diff основного до = после", ("e-чужая-правка\n", diff_before),
           (s.read("e.txt"), git(s.proj, "diff")))
     check("е: master на месте", master, s.sha())
+    code, data, _ = s.queue(branch, "--json")
+    check("е: мешающий файл назван в JSON", (4, ["e.txt"]), (code, data.get("мешают")))
 
     s = Stand(tmp / "е2")
     branch, wt = s.tree("f2")
@@ -652,12 +654,100 @@ def case_r_key_unwritable(tmp: Path) -> None:
     check("r: конфиг не тронут", machine, s.conf.read_text(encoding="utf-8"))
 
 
+MAP_TEXT = ("lines:\n- id: l1\n  tasks:\n  - id: t1\n    status: plan\n"
+            "  - id: t2\n    status: plan\n  - id: t3\n    status: plan\n")
+
+
+def map_stand(tmp: Path, name: str) -> tuple:
+    """Карта в master, ветка помощника правит t1 — слияние трогает dev-map.yaml."""
+    s = Stand(tmp / name)
+    s.change(s.proj, "dev-map.yaml", MAP_TEXT, "карта")
+    branch, wt = s.tree(name)
+    s.change(wt, "dev-map.yaml", MAP_TEXT.replace("plan", "test", 1), "t1 в test")
+    return s, branch
+
+
+def hold_map_lock(s: Stand, seconds: float) -> subprocess.Popen:
+    """Писатель карты держит ОБЩИЙ лок карты; возврат — когда лок взят."""
+    lock = s.logs / "locks/services/dev-map.lock"
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    holder = subprocess.Popen([sys.executable, "-c",
+                               "import fcntl,sys,time\n"
+                               "h=open(sys.argv[1],'a'); fcntl.flock(h, fcntl.LOCK_EX)\n"
+                               "print('взят', flush=True); time.sleep(float(sys.argv[2]))",
+                               str(lock), str(seconds)], stdout=subprocess.PIPE, text=True)
+    holder.stdout.readline()
+    return holder
+
+
+def case_t_dirty_map(tmp: Path) -> None:
+    # Поломка: очередь не коммитит карту писателей — код 4 «мешают-правки» (16.11 трижды);
+    # коммит мимо общего лока карты — гонка с писателем.
+    print("т) грязная карта основного — очередь коммитит её сама под локом карты")
+    s, branch = map_stand(tmp, "t")
+    s.write(s.proj, "dev-map.yaml", MAP_TEXT.replace("t3\n    status: plan", "t3\n    status: wip"))
+    holder = hold_map_lock(s, 3)
+    started = time.monotonic()
+    code, _, _ = s.queue(branch, "--json")
+    waited = time.monotonic() - started
+    holder.wait()
+    check("т: код 0", 0, code)
+    subjects = git(s.proj, "log", "--format=%s", "master").splitlines()
+    want = f"Карта: записи писателей карты — коммит очереди слияния перед {branch}"
+    check("т: коммит карты в истории", True, want in subjects)
+    text = s.read("dev-map.yaml")
+    check("т: обе правки карты в master", (True, True),
+          ("t1\n    status: test" in text, "t3\n    status: wip" in text))
+    check("т: карта основного чиста", "", git(s.proj, "status", "--porcelain", "--", "dev-map.yaml"))
+    check("т: коммит ждал лок писателя карты", True, waited >= 2.5)
+    check("т: карта закоммичена до ворот — ворота один раз", 1, len(s.gate_blocks()))
+
+
+def case_u_broken_map(tmp: Path) -> None:
+    # Поломка: невалидная карта закоммичена — сломанный YAML лёг бы в master.
+    print("у) невалидная карта основного — не коммитится, код 4 с причиной")
+    s, branch = map_stand(tmp, "u")
+    broken = MAP_TEXT + "  - id: [t4\n"
+    s.write(s.proj, "dev-map.yaml", broken)
+    master = s.sha()
+    code, data, out = s.queue(branch, "--json")
+    check("у: код 4, мешает карта", (4, ["dev-map.yaml"]), (code, data.get("мешают")))
+    check("у: причина — невалидная карта", True, "невалидн" in out)
+    check("у: master на месте, карта не тронута", (master, broken), (s.sha(), s.read("dev-map.yaml")))
+
+
+def case_v_called_from_tree(tmp: Path) -> None:
+    # Поломка: очередь из дерева помощника грузит модули и держит cwd в дереве, которое
+    # сама снимает, — итог падает ModuleNotFoundError/getcwd, JSON не печатается.
+    print("в2) вызов из своего дерева: дерево снято, JSON «слито» пришёл")
+    s = Stand(tmp / "в2")
+    for rel in ("lib", "compare-with-package.py", "install-new.py", "git-commit-locked.sh"):
+        source = HERE / rel
+        (shutil.copytree if source.is_dir() else shutil.copy2)(source, s.proj / "scripts" / rel)
+    shutil.copy2(QUEUE, s.proj / "scripts/merge-queue.py")
+    git(s.proj, "add", "-A")
+    git(s.proj, "commit", "-qm", "очередь в проекте")
+    branch, wt = s.tree("v")
+    tip = s.change(wt, "a.txt", "a1\n")
+    proc = subprocess.run([sys.executable, "scripts/merge-queue.py", branch, "--json"],
+                          capture_output=True, text=True, env=s.env(), cwd=wt, timeout=600)
+    try:
+        data = json.loads(proc.stdout)
+    except ValueError:
+        data = {}
+    check("в2: код 0 и JSON «слито»", (0, "слито"), (proc.returncode, data.get("итог")))
+    check("в2: без ModuleNotFoundError и getcwd", "", "\n".join(
+        line for line in proc.stderr.splitlines() if "ModuleNotFound" in line or "getcwd" in line))
+    check("в2: master == вершина, дерево снято", (tip, False), (s.sha(), wt.exists()))
+
+
 CASES = (case_a_fast_forward, case_b_master_moved, case_c_conflict, case_d_red_gate,
          case_e_dirty_helper, case_f_dirty_main, case_g_locked, case_h_package,
          case_p_package_superset,
          case_i_two_queues, case_j_union, case_k_heal_hook, case_l_retries, case_m_cleanup,
          case_n_rollback, case_bad_call, case_q_new_sample_key, case_r_key_unwritable,
-         case_s_package_carried)
+         case_s_package_carried, case_t_dirty_map, case_u_broken_map,
+         case_v_called_from_tree)
 
 
 def main() -> int:

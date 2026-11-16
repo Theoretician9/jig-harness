@@ -213,8 +213,10 @@ def package_cases() -> None:
     check(f"в пакете есть образец и deploy.sh ({pkg})", sample_path.is_file() and deploy.is_file())
     if not (sample_path.is_file() and deploy.is_file()):
         return
-    # Без читателя случаи ниже пусты: «ключ читает код» — их предпосылка.
-    code_lines = [l for l in deploy.read_text(encoding="utf-8").splitlines() if not l.lstrip().startswith("#")]
+    # Без читателя случаи ниже пусты: «ключ читает код» — их предпосылка. Читатель —
+    # deploy.sh вместе с этапами выката (lib/door_*.sh): ключи ушли в их функции.
+    readers = [deploy, *sorted((deploy.parent / "lib").glob("door_*.sh"))]
+    code_lines = [l for f in readers for l in f.read_text(encoding="utf-8").splitlines() if not l.lstrip().startswith("#")]
     unread = [k for k in STACK_KEYS if not any(re.search(rf"(?<![A-Z0-9_]){k}(?![A-Z0-9_])", l) for l in code_lines)]
     check("deploy.sh пакета читает все три ключа стека (предпосылка)", not unread, " ".join(unread))
 
@@ -223,6 +225,21 @@ def package_cases() -> None:
     missing = [k for k in STACK_KEYS if k not in declared]
     check("образец пакета описывает каждый ключ стека строкой KEY= или # KEY=",
           not missing, f"нет в {sample_path}: {' '.join(missing)}")
+
+    # Ключи продукта, которые дверь выката грузит (konf_zagruzit_dveri), — все в образце: копия
+    # получает образец, а не наш конфиг (эталонный выкат §5.2, фаза 5). Список — разбором двери:
+    # пустой значил бы «судить нечего», а не «образец полон».
+    loaded = [key for line in deploy.read_text(encoding="utf-8").splitlines()
+              if line.startswith("konf_zagruzit_dveri ")
+              for key in line.split()[1:] if re.match(r"(STACK|DEPLOY|PRODUCT)_", key)]
+    unsampled = [k for k in loaded if k not in declared]
+    check(f"образец пакета описывает каждый ключ продукта двери выката ({len(loaded)})",
+          len(loaded) >= 20 and not unsampled, f"разобрано {len(loaded)}; нет в образце: {' '.join(unsampled)}")
+    # Ключи выката CF, которых эталон не вводит (§5.2): их строка в образце раздала бы копиям развилку.
+    foreign = sorted(set(re.findall(r"^\s*#?\s*(STACK_ROLLOUT|STACK_CI_[A-Z0-9_]*|STACK_AFTER_CMDS|"
+                                    r"STACK_IMAGE_SNAPSHOT_CMD)=", sample, re.MULTILINE)))
+    check("в образце пакета нет ключей CF STACK_ROLLOUT, STACK_CI_*, STACK_AFTER_CMDS, STACK_IMAGE_SNAPSHOT_CMD",
+          not foreign, " ".join(foreign))
 
     if not GATE.is_file():
         return

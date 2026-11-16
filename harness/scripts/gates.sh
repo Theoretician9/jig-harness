@@ -101,7 +101,25 @@ if [ "${1:-}" = "--selftest" ]; then
 fi
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Что проверяется — снимаем ДО первой проверки: коммит или правка, появившиеся
+# за время ворот, ворота не видели, и итог не вправе называть их проверенными.
+GATES_SHA=$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || echo "")
+if [ -z "$(git -C "$ROOT" status --porcelain 2>/dev/null)" ]; then GATES_CLEAN_START=true; else GATES_CLEAN_START=false; fi
+# «чисто» итога = чисто в начале И в конце И HEAD не сдвинулся: правку или коммит
+# посреди прогона ворота не видели. Производные документы, которые ворота сами
+# собирают на свежей установке (цикл «Производные документы» ниже), дерево не пачкают.
+gates_clean_at_end() {
+    [ "$GATES_CLEAN_START" = true ] || { echo false; return; }
+    [ -z "$(git -C "$ROOT" status --porcelain -- . ':!docs/УСТРОЙСТВО-ХАРНЕСА.md' \
+        ':!docs/живая-проверка-механизмов.md' 2>/dev/null)" ] || { echo false; return; }
+    [ "$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || echo "")" = "$GATES_SHA" ] || { echo false; return; }
+    echo true
+}
 cd "$ROOT" || { echo "не нашёл корень проекта"; exit 1; }
+
+# Причины итоговых красных — файлом $LOG_DIR/ворота-причины-красных.txt (gates_save_reds
+# перед итогом): старый update.py копии держит вывод в памяти и называет только имена.
+GATES_REDS_FILE="$RUN_TMP/причины-красных"
 
 # Красная общего прогона перед итогом перепрогоняется соло (gates_recheck_reds):
 # соло-зелёная — флейк, итог не красит, но названа и посчитана (gate.flake).
@@ -150,9 +168,10 @@ for item in checks:
     rm -f "$HK_LIST"
     gates_wait_all
     gates_recheck_reds
+    gates_save_reds
     echo "=== итог: зелёных $GREEN, красных $RED$(gates_flakes_tail) ==="
-    printf '{"ts":"%s","режим":"%s","зелёных":%s,"красных":%s,"флейков":%s}\n' \
-        "$(date -Is)" "$REZHIM" "$GREEN" "$RED" "$FLAKES" >> "$ITOG_LOG" 2>/dev/null || true
+    printf '{"ts":"%s","режим":"%s","зелёных":%s,"красных":%s,"флейков":%s,"sha":"%s","чисто":%s,"код":%s}\n' \
+        "$(date -Is)" "$REZHIM" "$GREEN" "$RED" "$FLAKES" "$GATES_SHA" "$(gates_clean_at_end)" "$RED" >> "$ITOG_LOG" 2>/dev/null || true
     exit "$RED"
 fi
 # Производные документы на свежей установке не лежат: раскладчик их не кладёт,
@@ -194,6 +213,7 @@ done
 проверка "заметки выпуска" python3 scripts/test_release_notes.py
 проверка "карантин ворот" python3 scripts/test_gates_quarantine.py
 проверка "флейки ворот" python3 scripts/test_gates_flake_recheck.py
+проверка "причины красных ворот" python3 scripts/test_gates_red_reasons.py
 # Только этот самотест судит plan_absent, info/exclude, коммит пакета и связку
 # «дверь ↔ раскладчик»; раскладчик живёт в пакете, а не в проекте.
 проверка "самотест раскладчика" bash -c 'bash "$(python3 -c "import sys; sys.path.insert(0, \"scripts/lib\"); import config; print(config.katalog_paketa())")/harness/razlozhit-harnes.sh" --selftest'
@@ -209,6 +229,10 @@ done
 # Четыре несущих дефекта живой установки R7 (Д-20…Д-23): каждый ронял код установки или эталон.
 проверка "установщик: эталон на обновлении" bash scripts/test_installer_resume_seal.sh
 проверка "установщик: шаг 13 до входа" bash scripts/test_installer_demon_probe.sh
+проверка "итог ворот называет sha и чистоту дерева" bash scripts/test_gates_summary_sha.sh
+проверка "публикация берёт итог ворот того же sha" bash scripts/test_publish_gates_reuse.sh
+проверка "журнал хука называет дерево и секунды" bash scripts/test_precommit_journal_tree.sh
+проверка "очередь не гоняет ворота на том же дереве" python3 scripts/test_merge_queue_same_tree.py
 проверка "первый коммит установщика не мимо карты" bash scripts/test_devmap_selfheal_installer_commit.sh
 проверка "id сессии демона без uuidgen" bash scripts/test_claude_demon_session_id.sh
 # Голый mktemp проб обязан попадать в каталог harness-run-, который уборка /tmp опознаёт.
@@ -263,6 +287,8 @@ done
 проверка "зов модели: приборы"        python3 scripts/test_instrument_carrier.py
 проверка "зов модели: код 79 у фоновых служб" bash scripts/test_carrier_exit79.sh
 проверка "зов модели: код 79 у входа" python3 scripts/test_login_expiry_exit79.py
+проверка "вход: организация без прямого запроса" python3 scripts/test_login_organization_without_api.py
+проверка "аккаунт: лимит из потока CLI" python3 scripts/test_limit_from_stream.py
 проверка "кто зовёт"      python3 scripts/check-who-calls.py
 # Мера Ф2 ревизии: население — ВСЕ .py/.sh харнеса (193), а не только
 # механизмы реестра. Печатает СПИСОК: инструменты смены, живых только через
@@ -685,6 +711,7 @@ done
 проверка "установщик: прозвища продукта" bash scripts/test_installer_product_aliases.sh
 # Пачка evo-deploy-door (находка копии bkb): заготовка STACK_* из compose продукта.
 проверка "заготовка STACK_* из compose" python3 scripts/test_stack_template.py
+проверка "отчёт о неэффективных задачах" python3 scripts/test_task_efficiency.py
 проверка "скорость: судья" python3 scripts/test_speed_mode.py
 проверка "скорость: сторож" bash scripts/test_warden_speed.sh
 проверка "сеть серверов: суд и дверь" python3 scripts/test_evolution_net.py
@@ -796,6 +823,17 @@ if [ "${1:-}" = "--всё" ]; then
     # Объявленный продукт выкатывается только через deploy.sh: отказ при пустой
     # секции STACK_*, тег и секреты по репозиторию продукта, откат при красном health.
     проверка "выкат продукта"   bash scripts/test_deploy_product.sh
+    # Граница продукт/харнес: выкат продукта не судит и не пишет харнес (спека §5.4).
+    проверка "граница выката"   bash scripts/test_deploy_boundary.sh
+    проверка "образ выката и откат" bash scripts/test_deploy_artifact.sh
+    # Одна цепочка выката (спека §5.1): тесты продукта до лока и ворот, --проверка, потолки шагов
+    # прода, отказ STACK_RUN_AS root. Разбор файла проверок и тестовый этап — две пробы к ней.
+    проверка "этапы выката"     bash scripts/test_deploy_stages.sh
+    проверка "разбор файла проверок продукта" python3 scripts/test_server_checks_lib.py
+    проверка "тестовый этап двери" bash scripts/test_door_checks.sh
+    # Этапы D/I: скан образа до ворот, политика critical-fixable | warn, «скан не прочитан» не зелёное.
+    проверка "скан образа при выкате" bash scripts/test_deploy_scan.sh
+    проверка "разбор вывода сканера" python3 scripts/test_scan_verdict_lib.py
     # Дампы всех баз перед выкатом и права копий (опыт копии Content-Factory):
     # backup.sh --базы-в, umask 077, ротация перед-выкатом; проба восстановления
     # заливает в psql только дамп PostgreSQL.
@@ -906,6 +944,7 @@ gates_recheck_reds
 YELLOW_TAIL=""
 [ "$YELLOW" -gt 0 ] && YELLOW_TAIL=", жёлтых $YELLOW (обкатка)"
 gates_dev_skipped_line
+gates_save_reds
 echo "=== итог: зелёных $GREEN, красных $RED$YELLOW_TAIL$(gates_flakes_tail) ==="
 # Суд карантина (scripts/gates-quarantine.py): красные известных поломок под
 # годной записью не краснят ворота, красны только новые и беды карантина.
@@ -931,7 +970,7 @@ fi
 # след есть, а сказать по нему нечего).
 # Выборка — свой режим: её «красных 0» не годится за итог полного прогона.
 [ -n "$ONLY_CHECKS" ] && REZHIM="выборка"
-printf '{"ts":"%s","режим":"%s","зелёных":%s,"красных":%s,"новых":%s,"в_карантине":%s,"флейков":%s}\n' \
-    "$(date -Is)" "$REZHIM" "$GREEN" "$RED" "${QUAR_NEW:-$RED}" "${QUAR_HELD:-0}" "$FLAKES" \
+printf '{"ts":"%s","режим":"%s","зелёных":%s,"красных":%s,"новых":%s,"в_карантине":%s,"флейков":%s,"sha":"%s","чисто":%s,"код":%s}\n' \
+    "$(date -Is)" "$REZHIM" "$GREEN" "$RED" "${QUAR_NEW:-$RED}" "${QUAR_HELD:-0}" "$FLAKES" "$GATES_SHA" "$(gates_clean_at_end)" "$QUAR_RC" \
     >> "$ITOG_LOG" 2>/dev/null || true
 exit "$QUAR_RC"

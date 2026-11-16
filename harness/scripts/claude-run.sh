@@ -58,4 +58,15 @@ head -n 1 "$f" | grep -q '^Метка сборки: ' || refuse "в первой
 # Демоны идут мимо as-account.sh; без ключа профиля claude берёт /login чужой
 # организации. Вести нет: беду входа видит сторож входа. Ключ — только окружение.
 [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] && account_key_export
+# Метка аккаунта в начале потока: rate_limit_event CLI не называет, чей это
+# ключ, а лимит работающего аккаунта читают из потока (лимит_из_потока в
+# check-login-expiry.py) вместо прямого запроса к API. Отпечаток — тот же, что
+# у профиля (sha256, 8 знаков); ключ уходит в sha256sum через stdin, не в доводы.
+case " $* " in
+    *" stream-json "*)
+        mark=login
+        [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] \
+            && mark="$(printf %s "$CLAUDE_CODE_OAUTH_TOKEN" | sha256sum | cut -c1-8)"
+        printf '{"type": "harness_account", "отпечаток": "%s"}\n' "$mark" ;;
+esac
 exec "${CLAUDE_BIN:-claude}" --append-system-prompt-file "$f" "$@"

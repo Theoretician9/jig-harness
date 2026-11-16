@@ -66,11 +66,20 @@ def regular(project: str, rel: str) -> bool:
         return False
 
 
+def disk_mode(project: str, rel: str) -> int:
+    return stat.S_IMODE(os.lstat(os.path.join(project, rel)).st_mode)
+
+
 def snap(project: str, out: str) -> int:
     if not is_repo_root(project):
         print(f"шаги после двери в журнал не пишутся: {project} не корень репозитория git")
         return 0
-    paths = [rel for rel in tree_paths(project) if regular(project, rel)]
+    files = [rel for rel in tree_paths(project) if regular(project, rel)]
+    # Один нечитаемый файл (журнал демона, заведённый root) валил hash-object всего списка,
+    # и откат терял все шаги после двери (Content-Factory 15.11.2026, 0.12.2). Его
+    # раскладка не пишет: в снимок не идёт, но назван.
+    paths = [rel for rel in files if os.access(os.path.join(project, rel), os.R_OK)]
+    unreadable = sorted(set(files) - set(paths))
     hashed = _git(project, "hash-object", "-w", "--stdin-paths",
                   data="".join(f"{rel}\n" for rel in paths).encode("utf-8", "surrogateescape"))
     if hashed.returncode != 0:
@@ -78,9 +87,12 @@ def snap(project: str, out: str) -> int:
     blobs = hashed.stdout.decode().split()
     with open(out, "w", encoding="utf-8", errors="surrogateescape") as handle:
         for rel, blob in zip(paths, blobs, strict=True):
-            mode = stat.S_IMODE(os.lstat(os.path.join(project, rel)).st_mode)
+            mode = disk_mode(project, rel)
             handle.write(f"{rel}\t{blob}\t{mode:o}\n")
     print(f"снимок до раскладки: файлов {len(paths)}")
+    if unreadable:
+        shown = ", ".join(unreadable[:10]) + (" …" if len(unreadable) > 10 else "")
+        print(f"вне снимка, нечитаемы: {len(unreadable)}: {shown}")
     return 0
 
 
@@ -144,7 +156,12 @@ def drift(project: str, before: dict, left: dict) -> list:
         disk = layout_manifest.project_blob(project, project_real, rel)
         if disk == layout_journal.NOT_A_FILE:
             continue        # ссылку и каталог журнал не выражает
-        own = before.get(rel, (None, 0))[0]
+        own, own_mode = before.get(rel, (None, 0))
+        if disk == own and rel not in left and own is not None and disk_mode(project, rel) != own_mode:
+            # Тот же blob, другой режим (Content-Factory 15.11.2026: test_deploy_ci.sh
+            # остался 100755 после отката): копия в архиве несёт режим снимка.
+            changes.append(("перекрыт", own, own, rel))
+            continue
         if disk in (own, left.get(rel, own)):
             continue        # уже «до» — откатывать нечего; или ровно то, что знает журнал
         if own is None:

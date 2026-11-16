@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import datetime as dt
 import grp
+import base64
 import hashlib
 import json
 import os
@@ -284,6 +285,8 @@ SAMPLES = [
     # Журналы без боевого файла на 27.10: строка — по коду писателя (указан), не выдумка.
     ("log", 'account-switch.jsonl', {"v": 1, "ts": "2026-11-13T17:07:45+05:00", "src": "scripts/account-switch.py", "event": "account.switch", "outcome": "ok", "task": "hr.sample", "task_from": "map", "session": None, "data": {"вход": "итог", "откуда": "acc-a", "куда": "acc-b", "код": 0}}, '2026-11-13T12:07:45+00:00'),
     # scripts/deploy.sh → harness_event (формат v1).
+    ("log", 'deploy-checks.jsonl', {"v": 1, "ts": "2026-11-16T10:20:31+05:00", "src": "scripts/lib/door_checks.sh", "event": "deploy.checks", "outcome": "ok", "task": "-", "task_from": "env", "session": None, "data": {"tests": "success", "branch": "sample"}}, '2026-11-16T05:20:31+00:00'),
+    ("log", 'deploy-results.jsonl', {"v": 1, "ts": "2026-11-14T10:20:31+05:00", "src": "scripts/deploy.sh", "event": "deploy.result", "outcome": "ok", "task": "-", "task_from": "env", "session": None, "data": {"тег": "sample", "sha": "abc123def456", "итог": "выкачено: health 200"}}, '2026-11-14T05:20:31+00:00'),
     ("log", 'deploy-releases.jsonl', {"v": 1, "ts": "2026-11-14T10:20:31+05:00", "src": "scripts/deploy.sh", "event": "deploy.release", "outcome": "ok", "task": "-", "task_from": "env", "session": None, "data": {"note": "цель=abc1234 /srv/sample", "тег": "sample"}}, '2026-11-14T05:20:31+00:00'),
     # scripts/docker-sweep.py journal_row: время — «когда», UTC isoformat.
     ("log", 'уборка-docker.jsonl', {"когда": "2026-11-14T05:20:31+00:00", "класс": "образ", "идентификатор": "sha256:sample", "мб": 12.5, "правило": "sample", "действие": "удалено"}, '2026-11-14T05:20:31+00:00'),
@@ -502,10 +505,13 @@ def case_secrets(base: Path) -> None:
         skip("sha256 вне digest_keys", "форма не узнаёт sha256 — случай пустой")
     st = Stand(base, "secret")
     key_path = f"{st.panel}/tok-{secrets.token_hex(4)}"
+    # Отпечаток ssh-ключа — «SHA256:» и 43 знака base64, как его печатает ssh-keygen -l.
+    finger = "SHA256:" + base64.b64encode(hashlib.sha256(os.urandom(16)).digest()).decode().rstrip("=")
     keep_path = f"{st.secrets}/tg-token"
     rc, res, err = run_child(emit_body(src=SRC, event="probe.secret", outcome="ok", journal="sec",
                                        data={"note": f"ключ {secret} в речи", "sha256": sha, "other": sha,
-                                             "head": f"x {secret}", "file": key_path, "copy": keep_path}),
+                                             "head": f"x {secret}", "file": key_path, "copy": keep_path,
+                                             "цель": f"bkb {finger}", "почему": f"bkb {finger}"}),
                              st.env())
     raw = "\n".join(st.lines("sec"))
     check("секрет: emit вернул True (событие пишется)", True, res)
@@ -516,6 +522,9 @@ def case_secrets(base: Path) -> None:
     check("тот же sha256 в ключе вне списка — <СКРЫТО>", "<СКРЫТО>", d.get("other"))
     check("digest-ключ, но значение не хэш целиком — судится формой", False, secret in str(d.get("head")))
     check("путь под PANEL_STATE_DIR — <путь-ключ>", "<путь-ключ>", d.get("file"))
+    # краснеет, если маска ест отпечаток ключа в предмете кнопки: «Да» на «ключ-сети» не сойдётся с судьёй (15.11)
+    check("отпечаток ssh-ключа в «цели» остался как есть", f"bkb {finger}", d.get("цель"))
+    check("тот же отпечаток в ключе вне «цели» — <СКРЫТО>", "bkb <СКРЫТО>", d.get("почему"))
     check("путь под SECRETS_DIR остался (журнал удалений без пути бесполезен, И-1)", keep_path, d.get("copy"))
     check("каждая замена посчитана как mangled", True,
           sum(1 for x in st.lost() if x.get("kind") == "mangled") >= 1)

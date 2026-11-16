@@ -37,7 +37,9 @@ OUTCOMES = ("ok", "refused", "error", "skipped", "held")
 JOURNAL_NAME = re.compile(r"[a-zа-яё0-9_-]+")
 HASH_VALUE = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 HASH_RANGE = re.compile(r"[0-9a-f]{40}\.\.[0-9a-f]{40}")
-DIGEST_KEYS = frozenset({"sha256", "head", "commit", "ino_from"})
+# Отпечаток ssh-ключа — хэш ОТКРЫТОГО ключа, предмет кнопки «ключ-сети»: секретом он не бывает.
+SSH_FINGERPRINT = re.compile(r"SHA256:[A-Za-z0-9+/]{43}")
+DIGEST_KEYS = frozenset({"sha256", "head", "commit", "ino_from", "sha", "checks_file_sha"})
 # Предмет согласия (sha выката, пакета, спеки) — строка кода, а не речь: хэш в нём не секрет.
 SUBJECT_KEY = "цель"
 
@@ -223,7 +225,9 @@ def _scrub_string(key: str, value: str, key_dirs: list[str], mangled: list[str])
         # Диапазон двух git-хэшей — предмет согласия на пуш, а не секрет: без него
         # запись запроса кнопки теряет предмет и «Да» не сходится с воротами.
         # Хэши выката, публикации и спеки несёт ключ «цель»: без них «Да» не сходится с воротами.
-        if HASH_RANGE.fullmatch(secret) or (key == SUBJECT_KEY and HASH_VALUE.fullmatch(secret)):
+        # Отпечаток ключа сети — тоже в «цели»: без него «Да» на ключ не сходится с судьёй (15.11).
+        if HASH_RANGE.fullmatch(secret) or (key == SUBJECT_KEY and (HASH_VALUE.fullmatch(secret)
+                                                                    or SSH_FINGERPRINT.fullmatch(secret))):
             continue
         value = value.replace(secret, "<СКРЫТО>")
         mangled.append("digest" if HASH_VALUE.fullmatch(secret) else "secret")

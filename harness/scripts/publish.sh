@@ -127,10 +127,64 @@ propustit_statusy_po_slovu() {
     bash "$SCRIPTS_REAL/tg_send.sh" "Публикую по твоему слову «$slovo». В публичную ветку уезжает непроверенное тобой: $(printf '%s\n' "$spisok" | sed 's/ (статус.*//' | paste -sd, | sed 's/,/, /g')" >/dev/null 2>&1 || true
 }
 
+# Полные ворота идут десятки минут; если последняя ПОЛНАЯ строка итога (режим
+# «обычный» или «всё») снята на этом же sha чистого дерева, а дерево чисто и сейчас,
+# второй прогон ничего не проверит нового. Правило то же, что у самих ворот: они
+# выходят кодом суда карантина, красные под записью карантина ими приняты —
+# принимает и замок. Строки хакатона и выборки полную не заслоняют; строка без
+# «код» (старый формат) права не даёт.
+# Печатает время итога; 0 — итог годен.
+gates_summary_reusable() { # $1=каталог журнала
+    local summary="$1/ворота-итог.jsonl" head
+    [ -s "$summary" ] || return 1
+    [ -z "$(git -C "$PROJECT_DIR" status --porcelain 2>/dev/null)" ] || return 1
+    head=$(git -C "$PROJECT_DIR" rev-parse HEAD 2>/dev/null) || return 1
+    python3 -I - "$summary" "$head" <<'PY'
+import json, sys
+try:
+    lines = open(sys.argv[1], encoding="utf-8").read().splitlines()
+except OSError:
+    sys.exit(1)
+last = None
+for line in lines:
+    try:
+        row = json.loads(line)
+    except ValueError:
+        continue
+    if (isinstance(row, dict) and row.get("режим") in ("обычный", "всё")
+            and row.get("sha") == sys.argv[2]):
+        last = row
+if last is None or not (last.get("код") == 0 and last.get("новых") == 0
+                        and last.get("чисто") is True):
+    sys.exit(1)
+print("итог от " + str(last.get("ts", "?")))
+PY
+}
+
+# Путь «по слову» не гоняет check-secrets.sh сам: скан секретов в составе быстрых
+# ворот держат данные gates-hackathon.yaml рядом со скриптами ворот. Нет файла или
+# нет проверки, чей cmd зовёт check-secrets.sh, — публиковать без скана нельзя.
+hackathon_gates_scan_secrets() { # $1=каталог скриптов ворот
+    python3 -I - "$1/../harness/config/gates-hackathon.yaml" <<'PY'
+import sys
+try:
+    import yaml
+    checks = yaml.safe_load(open(sys.argv[1], encoding="utf-8")).get("checks") or []
+    found = any(isinstance(c, dict) and "check-secrets.sh" in str(c.get("cmd", ""))
+                for c in checks)
+except (OSError, ValueError, AttributeError, ImportError):
+    found = False
+sys.exit(0 if found else 1)
+PY
+}
+
 zamok_vorot() { # $1=каталог журнала [$2=каталог скриптов ворот] → 0 пустить, 1 отказ
-    local katalog="$1" skripty="${2:-$SCRIPTS_REAL}" slovo rc
+    local katalog="$1" skripty="${2:-$SCRIPTS_REAL}" slovo rc itog
     slovo=$(proverit_zapis_propuska "$katalog" 2>/tmp/публикация-пропуск.err); rc=$?
     if [ "$rc" = 3 ]; then
+        if itog=$(gates_summary_reusable "$katalog"); then
+            say "замок 1 · ворота не гоняю: взят зелёный полный итог того же sha ($itog)"; return 0
+        fi
         bash "$skripty/gates.sh" > /tmp/публикация-ворота.log 2>&1 || {
             say "ОТКАЗ: ворота красные — публиковать нельзя. Хвост:"
             tail -5 /tmp/публикация-ворота.log; return 1; }
@@ -139,8 +193,11 @@ zamok_vorot() { # $1=каталог журнала [$2=каталог скрип
     if [ "$rc" != 0 ]; then
         say "ОТКАЗ: $(cat /tmp/публикация-пропуск.err)"; return 1
     fi
+    if ! hackathon_gates_scan_secrets "$skripty"; then
+        say "ОТКАЗ: в составе быстрых ворот (gates-hackathon.yaml) нет проверки секретов — по слову публиковать нельзя"
+        return 1
+    fi
     if ! { bash "$skripty/gates.sh" --хакатон \
-           && bash "$skripty/check-secrets.sh" "$PROJECT_DIR" \
            && python3 -I "$skripty/build-public.py" --selftest; } \
            > /tmp/публикация-ворота.log 2>&1; then
         say "ОТКАЗ: быстрые ворота красные — публиковать нельзя. Хвост:"
@@ -746,7 +803,10 @@ if [ "${1:-}" = "--selftest" ]; then
     # проект с заглушками ворот: проба судит выбор прогона, а не сами ворота.
     proba_vorota() { # $1=двор $2=запись (json или пусто) → печатает вывод замка
         local d="$1"
-        mkdir -p "$d/проект/scripts" "$d/лог"
+        mkdir -p "$d/проект/scripts" "$d/проект/harness/config" "$d/лог"
+        # Быстрая дверь открывается, только если скан секретов в составе быстрых ворот.
+        printf 'checks:\n  - name: секреты\n    cmd: bash scripts/check-secrets.sh "$ROOT"\n' \
+            > "$d/проект/harness/config/gates-hackathon.yaml"
         printf '#!/bin/sh\necho "gates $*" >> "%s/звали"\n' "$d" > "$d/проект/scripts/gates.sh"
         printf '#!/bin/sh\necho "secrets" >> "%s/звали"\n' "$d" > "$d/проект/scripts/check-secrets.sh"
         printf 'open("%s/звали","a").write("build\\n")\n' "$d" > "$d/проект/scripts/build-public.py"
@@ -763,7 +823,7 @@ if [ "${1:-}" = "--selftest" ]; then
         echo "  ок    ворота без записи о пропуске — полный прогон, как раньше"
     else echo "  ПЛОХО без записи не полный прогон: ${OUT:0:150}"; ok=0; fi
     OUT=$(proba_vorota "$T/в2" "$(zapis_propuska -60 3600)"); if printf '%s' "$OUT" | grep -q 'rc=0' \
-       && grep -q 'gates --хакатон' "$T/в2/звали" && grep -q secrets "$T/в2/звали" \
+       && grep -q 'gates --хакатон' "$T/в2/звали" && ! grep -q secrets "$T/в2/звали" \
        && grep -q build "$T/в2/звали" && grep -q 'ворота пропущены по слову владельца «без прогона полного»' "$T/в2/лог/publish.log"; then
         echo "  ок    запись о пропуске — быстрое подмножество и строка в журнале публикации"
     else echo "  ПЛОХО запись о пропуске не открыла быструю дверь: ${OUT:0:150}"; ok=0; fi

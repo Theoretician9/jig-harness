@@ -41,7 +41,9 @@ GATES_LOG="$LOG_DIR/${GATES_LOG_NAME:-gates.jsonl}"
 # Один текст на боевой гейт и самотест: два экземпляра валидатора разъехались
 # бы на первой правке. Кривой манифест — кривой дашборд у владельца.
 DEVMAP_VALIDATOR=$(cat <<'PYEOF'
+import os
 import sys
+from datetime import date
 from pathlib import Path
 
 try:
@@ -79,7 +81,108 @@ errors = list(дубли)
 # ровно то, что есть, — доказательство машинное, и вот команда.
 # «беклог» — то, что владелец велел не трогать без его слова
 # (28.09.2026). Вывод из беклога стережёт гейт пайплайна.
-STATUSES = {"done", "принято", "test", "wip", "plan", "беклог"}
+# Список статусов, поля карточки и их типы — данные
+# harness/config/devmap-schema.yaml: у карты одна схема, и судит её этот же
+# валидатор. Архив карты (--архив) — история: там законны статусы снято/слито
+# и старые формы полей, а правила работы (И-4, очередь, глубина) не судятся.
+ARCHIVE = "--архив" in sys.argv[2:]
+FILE_KIND = "архив" if ARCHIVE else "карта"
+# Дубль ключа в архиве не судится: два старых дубля там (замер 16.11) — история,
+# которую не перепишешь без решения, чей текст верен; новые карточки приезжают
+# из живой карты, где дубль красный.
+if ARCHIVE:
+    errors.clear()
+TYPES = {"строка": str, "логическое": bool, "число": (int, float), "дата": date,
+         "словарь": dict, "список": list, "пусто": type(None)}
+
+
+def find_config(name):
+    """harness/config/<name> этого проекта: от каталога карты вверх, затем от cwd."""
+    roots = list(Path(sys.argv[1]).resolve().parents) + [Path.cwd(), *Path.cwd().parents]
+    return next((r / "harness" / "config" / name for r in roots
+                 if (r / "harness" / "config" / name).exists()), None)
+
+
+def load_schema():
+    path = find_config("devmap-schema.yaml")
+    if path is None:
+        # Молчать нельзя: гейт, который перестал проверять, неотличим от
+        # гейта, которому нечего сказать.
+        print("[dev-map] ⚠ схема harness/config/devmap-schema.yaml не найдена — "
+              "поля, типы и статусы не проверяю", file=sys.stderr)
+        return None
+    return yaml.safe_load(path.read_text(encoding="utf-8"))
+
+
+def as_list(value):
+    return value if isinstance(value, list) else [value]
+
+
+def type_name(value):
+    # bool — подкласс int: логическое ищется раньше числа.
+    return next(name for name, kind in TYPES.items() if isinstance(value, kind))
+
+
+def check_value(value, spec, path, found):
+    """Значение против описания поля схемы; находки — в found строками «путь: беда»."""
+    allowed = list(as_list(spec.get("тип") or []))
+    if ARCHIVE:
+        allowed += as_list(spec.get("тип_в_архиве") or [])
+    if allowed and type_name(value) not in allowed:
+        found.append(f"{path}: тип {type_name(value)}, схема ждёт {'/'.join(allowed)}")
+        return
+    if isinstance(value, dict) and "поля" in spec:
+        for key, sub in value.items():
+            if key in spec["поля"]:
+                check_value(sub, spec["поля"][key], f"{path}.{key}", found)
+            else:
+                found.append(f"{path}.{key}: подполя нет в схеме")
+    if isinstance(value, list) and "элемент" in spec:
+        for i, item in enumerate(value):
+            check_value(item, spec["элемент"], f"{path}[{i}]", found)
+
+
+SCHEMA = load_schema()
+FIELDS = (SCHEMA or {}).get("поля") or {}
+OBSOLETE = (SCHEMA or {}).get("устаревшие") or {}
+SCHEMA_STATUSES = (SCHEMA or {}).get("статусы") or {}
+STATUSES = {name for name, spec in SCHEMA_STATUSES.items() if FILE_KIND in (spec.get("где") or [])}
+obsolete_cards = {}
+unknown_fields = []
+# Поле вне схемы и устаревшее сверх предела красят карту только при
+# DEVMAP_SCHEMA_STRICT=1 (harness.conf): карты копий схема не разбирала, и
+# обновление пакета не должно вставать поперёк их коммитов. Тип и статус
+# судились и раньше — они красные всегда.
+STRICT = os.environ.get("DEVMAP_SCHEMA_STRICT") == "1"
+
+
+def check_card_schema(task, tid):
+    """Карточка против схемы: поля и их типы. Без схемы — ничего."""
+    if SCHEMA is None:
+        return []
+    found = []
+    for field, value in task.items():
+        if field in FIELDS:
+            check_value(value, FIELDS[field], field, found)
+        elif field in OBSOLETE:
+            obsolete_cards.setdefault(field, []).append(tid)
+        else:
+            unknown_fields.append(f"задача {tid}: поле «{field}» вне схемы (harness/config/devmap-schema.yaml)")
+    return [f"задача {tid}: {line}" for line in found]
+
+
+def check_obsolete_ceiling():
+    """Устаревшее поле в живой карте — не больше карточек, чем записано в схеме."""
+    if ARCHIVE:
+        return []
+    found = []
+    for field, ids in obsolete_cards.items():
+        ceiling = ((OBSOLETE[field] or {}).get("карточек") or {}).get("карта", 0)
+        if len(ids) > ceiling:
+            found.append(f"устаревшее поле «{field}» на {len(ids)} карточках при пределе {ceiling} — "
+                         f"новых не заводить: {', '.join(ids[ceiling:])}")
+    return found
+
 # Глубина задачи: уровень — цена ошибки, характер — чем работа является.
 # Списки берутся из пульта владельца (harness/config/pipeline.yaml), а не
 # вшиты сюда: иначе у факта снова окажется два судьи (находка ревью C-7).
@@ -121,13 +224,13 @@ def _характеры():
 
 if not isinstance(data, dict):
     print("манифест не словарь"); sys.exit(1)
-for field in ("version", "lines", "layers", "queue"):
+for field in ("version", "lines") if ARCHIVE else ("version", "lines", "layers", "queue"):
     if field not in data:
         errors.append(f"нет обязательного поля верхнего уровня: {field}")
 
 status_by_id = {}
 for line in data.get("lines") or []:
-    for f in ("id", "layer", "name", "tasks"):
+    for f in ("id", "tasks") if ARCHIVE else ("id", "layer", "name", "tasks"):
         if f not in line:
             errors.append(f"направление {line.get('id', '?')}: нет поля {f}")
     for t in line.get("tasks") or []:
@@ -136,9 +239,12 @@ for line in data.get("lines") or []:
             if f not in t:
                 errors.append(f"задача {tid}: нет поля {f}")
         st = t.get("status")
-        if st not in STATUSES:
-            errors.append(f"задача {tid}: статус «{st}» вне {sorted(STATUSES)}")
+        if SCHEMA is not None and st not in STATUSES:
+            errors.append(f"задача {tid}: статус «{st}» вне {sorted(STATUSES)} ({FILE_KIND}, схема статусов)")
         status_by_id[tid] = st
+        errors += check_card_schema(t, tid)
+        if ARCHIVE:
+            continue
         # И-4: done — только после подтверждения владельца. tested_at — дата
         # подтверждения; owner_testable: false — внутренняя работа, владельцу
         # нечего щупать, сразу done — норма (UNIFIED/07).
@@ -180,6 +286,13 @@ for line in data.get("lines") or []:
             if item.get("done") and not (item.get("done_at") and item.get("summary")):
                 errors.append(f"задача {tid}: пункт чек-листа done без done_at/summary")
 
+soft_findings = unknown_fields + check_obsolete_ceiling()
+if STRICT:
+    errors += soft_findings
+else:
+    for line in soft_findings:
+        print(f"[dev-map] ⚠ {line} (DEVMAP_SCHEMA_STRICT=0 — предупреждение, не красный)")
+
 # queue — только живое: задача в done/test из очереди удаляется при той же правке
 for qid in data.get("queue") or []:
     st = status_by_id.get(qid)
@@ -198,8 +311,9 @@ PYEOF
 
 # Схема карты + долг «до продакшна» хакатона. Правила долга живут в одном
 # месте — hackathon.py; гейт только зовёт его и показывает вывод как есть.
-devmap_check() {
-    python3 -c "$DEVMAP_VALIDATOR" "$1" || return 1
+devmap_check() {  # путь [--архив]: архив — история, долг хакатона судит только живую карту
+    DEVMAP_SCHEMA_STRICT="${DEVMAP_SCHEMA_STRICT:-0}" python3 -c "$DEVMAP_VALIDATOR" "$@" || return 1
+    [ "${2:-}" = "--архив" ] && return 0
     python3 "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/hackathon.py" --проверить-карту "$1"
 }
 
@@ -210,7 +324,7 @@ devmap_check() {
 # бы на первой правке.
 if [ "${1:-}" = "--devmap-only" ]; then
     [ -n "${2:-}" ] || { echo "--devmap-only: нужен путь к карте" >&2; exit 2; }
-    devmap_check "$2"
+    devmap_check "$2" ${3:+"$3"}
     exit $?
 fi
 
@@ -414,11 +528,14 @@ fi
 # а не совпадать с машиной.
 # Журнал прогона: SHA + вердикт, и на успех, и на провал. Пишется jq —
 # ручная склейка JSON ломается на первой кавычке (улика session-warden).
+# secs — стена хука (SECONDS его оболочки); tree — дерево индекса, который он судил
+# (с учётом GIT_INDEX_FILE): очередь слияния по нему узнаёт уже проверенное дерево.
 journal() {  # вердикт, имя-гейта
     mkdir -p "$LOG_DIR" 2>/dev/null || true
     jq -cn --arg ts "$(date -Is)" --arg sha "$HEAD_SHA" --arg v "$1" --arg g "${2:-}" \
         --arg n "$(printf '%s' "$CHANGED" | grep -c . || true)" \
-        '{ts:$ts, gate:"pre-commit", head:$sha, staged:($n|tonumber), verdict:$v, failed:$g}' \
+        --argjson secs "$SECONDS" --arg tree "$(git write-tree 2>/dev/null || true)" \
+        '{ts:$ts, gate:"pre-commit", head:$sha, staged:($n|tonumber), verdict:$v, failed:$g, secs:$secs, tree:$tree}' \
         >> "$GATES_LOG" 2>/dev/null || echo "[pre-commit] журнал $GATES_LOG недоступен (гейт не затронут)"
 }
 
@@ -686,13 +803,22 @@ printf '%s\n' "$CHANGED" | python3 "$SNAP_DIR/scripts/check-harness-clean.py" --
 python3 "$SCRIPT_DIR/check-map-keeps-tasks.py" <<< "$CHANGED" || fail "карта_теряет_задачи"
 
 # ── 4. Схема dev-map.yaml, если карта в коммите ─────────────────────────────
-# Проверяются: обязательные поля, допустимые статусы, статусный гейт И-4
+# Проверяются: схема карточки (поля, типы, статусы — данные
+# harness/config/devmap-schema.yaml), обязательные поля, статусный гейт И-4
 # (done только с tested_at либо owner_testable: false), queue без закрытых
 # задач. Содержимое — из индекса (К-4), как и весь остальной staged.
 if echo "$CHANGED" | grep -qx "dev-map.yaml"; then
     git -c core.quotepath=false show ":dev-map.yaml" > "$STAGE_TMP/dev-map.yaml" \
         || fail "index_read:dev-map.yaml"
     devmap_check "$STAGE_TMP/dev-map.yaml" || fail "devmap_schema"
+fi
+# Архив — по той же схеме полей и статусов (harness/config/devmap-schema.yaml):
+# карточка уезжает туда целиком, и незнакомое поле или опечатка статуса иначе
+# жили бы в истории молча.
+if echo "$CHANGED" | grep -qx "docs/dev-map-archive.yaml"; then
+    git -c core.quotepath=false show ":docs/dev-map-archive.yaml" > "$STAGE_TMP/dev-map-archive.yaml" \
+        || fail "index_read:docs/dev-map-archive.yaml"
+    devmap_check "$STAGE_TMP/dev-map-archive.yaml" --архив || fail "devmap_archive_schema"
 fi
 
 # ── 5. Линтеры кода продукта — данными, не кодом ────────────────────────────

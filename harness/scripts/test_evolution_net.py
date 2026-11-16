@@ -20,7 +20,7 @@ HARNESS_DEVMAP / DEVMAP_ARCHIVE / EVOLUTION_STATE. Боевой клон и бо
 проба не печатает — только счётчики, коды и булевы ответы.
 
     python3 scripts/test_evolution_net.py                    # все секции
-    python3 scripts/test_evolution_net.py --section judge     # keys|root|judge|read|forge|write|door|boot|state|threat|status|answer|sign|patch|key
+    python3 scripts/test_evolution_net.py --section judge     # keys|root|judge|read|forge|write|door|boot|state|threat|status|answer|sign|patch|key|addition
 
 Дверь мутаций: HARNESS_EVOLUTION_NET — путь evolution-net.py под пробой.
 Последняя строка: `evolution-net --пробы: случаев N, падений F`.
@@ -265,6 +265,7 @@ class Stand:
         self.index = root / "idx"
         for path in (self.log, self.state_dir, self.state.parent, self.package):
             path.mkdir(parents=True)
+        self.fake_tmux()
         self.map.write_text(SAMPLE_MAP, encoding="utf-8")
         self.archive.write_text(SAMPLE_ARCHIVE, encoding="utf-8")
         git(root, "init", "-q", "--bare", "-b", "main", str(self.remote))
@@ -297,11 +298,36 @@ class Stand:
             "EVOLUTION_MAP_LINE": "harness", "STARTER_DIR": str(self.package),
             "PUBLIC_BUILD_DIR": str(self.public), "SERVICE_LOCKS_SUBDIR": "services",
             "EVOLUTION_STATE_SUBDIR": "evolution-net",
-            "DEVMAP_SUMMARY_MAX": "500",
+            "DEVMAP_SUMMARY_MAX": "500", "TMUX_SESSION": self.tmux_session,
         }
         self.settings.update(conf)
         self.conf = self.write_conf()
         self.tip = self.anchor
+
+    # ── панель смены: свой tmux ────────────────────────────────────────────
+    def fake_tmux(self) -> None:
+        """tmux стенда первым в PATH: толчок смены пишется в файл, а не в боевую
+        панель. Ставится КАЖДОМУ стенду — ни одна секция не дойдёт до живого tmux.
+        Файл tmux-down — панели нет (has-session отвечает 1)."""
+        self.tmux_session = f"evo-stand-{secrets.token_hex(3)}"
+        self.tmux_log = self.root / "tmux-kicks.log"
+        self.tmux_down = self.root / "tmux-down"
+        bin_dir = self.root / "bin"
+        bin_dir.mkdir()
+        tmux = bin_dir / "tmux"
+        tmux.write_text("#!/bin/bash\n"
+                        f'[ -e "{self.tmux_down}" ] && exit 1\n'
+                        f'printf \'%s\\n\' "$*" >> "{self.tmux_log}"\n'
+                        'case "$*" in *pane_dead*) echo 0 ;; *pane_current_command*) echo claude ;; esac\n',
+                        encoding="utf-8")
+        tmux.chmod(0o755)
+
+    def kicks(self) -> list:
+        """Тексты, отданные в панель стенда (send-keys -l -- <текст>)."""
+        if not self.tmux_log.exists():
+            return []
+        return [line.split(" -l -- ", 1)[1] for line in self.tmux_log.read_text(encoding="utf-8").splitlines()
+                if line.startswith("send-keys") and " -l -- " in line]
 
     # ── конфиг и запуск ────────────────────────────────────────────────────
     def write_conf(self, drop: tuple = (), **over) -> Path:
@@ -319,7 +345,9 @@ class Stand:
             "HARNESS_DEVMAP": str(self.map), "DEVMAP_ARCHIVE": str(self.archive),
             "EVOLUTION_STATE": str(self.state), "PROJECT_DIR": str(self.project),
             "LOG_DIR": str(self.log), "STATE_DIR": str(self.state_dir),
-            "PYTHONDONTWRITEBYTECODE": "1",
+            "PYTHONDONTWRITEBYTECODE": "1", "TMUX_SESSION": self.tmux_session,
+            "PATH": f"{self.root / 'bin'}:{os.environ.get('PATH', '/usr/bin:/bin')}",
+            "PANE_ENTER_DELAY": "0",
         })
         env.update(extra)
         return env
@@ -2241,22 +2269,32 @@ REQUESTS_JOURNAL = "consent-requests.jsonl"
 BUTTONS_JOURNAL = "consent-" + "buttons.jsonl"
 INBOX_JOURNAL = "in" + "box.jsonl"
 # Подставной ask-consent: просьба в журнал стенда, без канала (Telegram шлёт только диспетчер).
+# Пишет НАСТОЯЩИМ events.emit, как живой ask-consent: маска секретов журнала — часть пути
+# предмета (15.11 она съела отпечаток «SHA256:…», и «Да» владельца не сошлось с судьёй).
 KEY_FAKE_ASK = r'''#!/usr/bin/env python3
-import datetime, json, os, secrets, sys
-from pathlib import Path
+import secrets, sys
+sys.path.insert(0, %r)
+import events
 args = sys.argv[1:]
 def value(flag):
     return args[args.index(flag) + 1] if flag in args and args.index(flag) + 1 < len(args) else None
-log = Path(os.environ["HARNESS_LOG_DIR"])
 nonce = secrets.token_urlsafe(16)
-row = {"v": 1, "ts": datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
-       "src": "scripts/ask-consent.py", "event": "consent.request", "outcome": "ok",
-       "data": {"nonce": nonce, "вид": value("--вид"), "цель": value("--предмет-двери"),
-                "почему": value("--почему")}}
-with open(log / "consent-requests.jsonl", "a", encoding="utf-8") as fh:
-    fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+events.emit("scripts/ask-consent.py", "consent.request", "ok", journal=%r,
+            data={"nonce": nonce, "вид": value("--вид"), "цель": value("--предмет-двери"),
+                  "почему": value("--почему")})
 print("[согласие кнопкой] запрос записан; диспетчер пришлёт владельцу кнопки")
 print(nonce)
+''' % (str(HERE / "lib"), REQUESTS_JOURNAL.removesuffix(".jsonl"))
+# Нажатие — тоже настоящим events.emit, как его пишет диспетчер.
+KEY_PRESS = r'''
+import json, sys
+spec = json.loads(sys.argv[1])
+sys.path.insert(0, spec["lib"])
+import events
+for event, sender in spec["rows"]:
+    events.emit("проба", event, "ok", journal=spec["journal"],
+                data={"nonce": spec["nonce"], "вид": spec["вид"], "цель": spec["цель"], "message_id": 77,
+                      "from_id": sender})
 '''
 # Раннер: судья слова владельца получает носитель стенда, а не машины.
 KEY_RUNNER = r'''
@@ -2294,20 +2332,15 @@ def key_requests(st: Stand) -> list:
     return [r["data"] for r in rows if r.get("data", {}).get("вид") == KEY_KIND]
 
 
-def now_iso() -> str:
-    import datetime
-    return datetime.datetime.now().astimezone().isoformat(timespec="seconds")
-
-
 def key_press(st: Stand, subject: str, answer: str, from_id: str = OWNER_ID) -> None:
     """Нажатие так, как его пишет диспетчер: «отправлено» и решение по nonce просьбы."""
     nonce = [r for r in key_requests(st) if r["цель"] == subject][-1]["nonce"]
-    with open(st.log / BUTTONS_JOURNAL, "a", encoding="utf-8") as fh:
-        for event in ("consent.sent", {"да": "consent.yes", "нет": "consent.no"}[answer]):
-            sender = None if event == "consent.sent" else int(from_id)
-            fh.write(json.dumps({"v": 1, "ts": now_iso(), "src": "проба", "event": event, "outcome": "ok",
-                                 "data": {"nonce": nonce, "вид": KEY_KIND, "цель": subject, "message_id": 77,
-                                          "from_id": sender}}, ensure_ascii=False) + "\n")
+    spec = {"lib": str(HERE / "lib"), "journal": BUTTONS_JOURNAL.removesuffix(".jsonl"), "nonce": nonce,
+            "вид": KEY_KIND, "цель": subject,
+            "rows": [["consent.sent", None], [{"да": "consent.yes", "нет": "consent.no"}[answer], int(from_id)]]}
+    subprocess.run([sys.executable, "-c", KEY_PRESS, json.dumps(spec, ensure_ascii=False)], check=True,
+                   env=st.env(HARNESS_LOG_DIR=str(st.log), HARNESS_EVENTS_STATE=str(st.root / ".events")),
+                   capture_output=True, text=True, timeout=60, cwd=st.root)
 
 
 def fingerprint(path: Path) -> str:
@@ -2424,6 +2457,159 @@ def section_key(base: Path, keys: Keys) -> None:
     check("KY13 ключ занесён руками до «Да» → новой строки и якоря нет", (0, 1, main_d),
           (r.rc, remote_file(st, "серверы/allowed_signers").splitlines().count(line_d), st.remote_main()))
 
+    ke = base / "ke"
+    subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "", "-f", str(ke)],
+                   check=True, capture_output=True)
+    git(st.writer, "fetch", "-q", st.url, "main")
+    st.tip = st.remote_main()
+    st.add({"серверы/HarnessE.md": "# HarnessE\nстенд\n".encode()}, keys.host)
+    st.add({"находки/HarnessE/2026-11-15-e.md": entry("HarnessE")}, ke)
+    key_run(st, "--читать")
+    subject_e = f"HarnessE {fingerprint(ke)}"
+    # Просьба до правки 15.11: маска журнала съела отпечаток, предмет записи — «<копия> <СКРЫТО>».
+    requests = st.log / REQUESTS_JOURNAL
+    lines = requests.read_text(encoding="utf-8").splitlines()
+    # Тот же предмет в просьбе ДРУГОГО вида — не просьба о ключе: краснеет, если вид не сверяется.
+    other = [json.loads(x) for x in lines if subject_e in x][0]
+    other["data"]["вид"] = "пуш"
+    lines = [x.replace(fingerprint(ke), "<СКРЫТО>") for x in lines] + [json.dumps(other, ensure_ascii=False)]
+    requests.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    r = key_run(st, "--читать")
+    # краснеет, если отпечаток, о котором журнал просьб не знает (просьба потеряла предмет), не спрашивается заново
+    check("KY14 просьба с потерянным предметом → одна новая просьба по отпечатку", (0, [subject_e]),
+          (r.rc, [a["цель"] for a in key_requests(st) if a["цель"].startswith("HarnessE")][1:]))
+    key_press(st, subject_e, "да")
+    r = key_run(st, "--читать")
+    check("KY14 «Да» на новую просьбу → ключ HarnessE занесён", (0, True),
+          (r.rc, f'HarnessE namespaces="git" {keys.pub(ke)}' in remote_file(st, "серверы/allowed_signers").splitlines()))
+
+
+# ── addition: дописка в находку, у которой уже есть карточка ────────────────
+#
+# 16.11 02:55 копия bkb дописала в старую находку «четвёртый откат»; тик принял
+# коммит («карточек 0») — и смена узнала о нём через 40 минут толчком владельца.
+# Принятая дописка известной находки — событие для смены: строка в журнале
+# карточки, карточка снова в работе, толчок в панель.
+
+OWN = "находки/HarnessX/2026-11-12-own.md"           # из дерева якоря: карточка с первого тика
+Y_FIND = "находки/HarnessY/2026-11-12-y-find.md"
+ADDED = "Четвёртый откат: обновление снова откатилось."
+
+
+def card_of(st: Stand, path: str) -> dict:
+    found = st.cards_for(path)
+    return found[0] if found else {}
+
+
+def set_status(st: Stand, card_id: str, status: str) -> None:
+    text = st.map.read_text(encoding="utf-8")
+    head = f"      - id: {card_id}\n        status: "
+    at = text.find(head)
+    if at < 0:
+        raise AssertionError(f"карточки {card_id} нет в карте стенда")
+    end = text.index("\n", at + len(head))
+    st.map.write_text(text[:at + len(head)] + status + text[end:], encoding="utf-8")
+
+
+def journal(st: Stand, card_id: str) -> str:
+    path = st.project / ".tasks" / card_id / "журнал.md"
+    return path.read_text(encoding="utf-8") if path.exists() else ""
+
+
+def appended(frm: str, kind: str, extra: str) -> bytes:
+    return entry(frm, kind, body=f"Факты стенда.\n\n## Дополнение\n{extra}")
+
+
+def section_addition(base: Path, keys: Keys) -> None:
+    st = Stand(base / "addition", keys)
+    r = st.tick()
+    own, y_find = card_of(st, OWN).get("id", "нет"), card_of(st, Y_FIND).get("id", "нет")
+    # A0 — краснеет, если новая находка вдруг толкает смену или карточек не 2: «новая — как раньше»
+    check("A0 первый тик: карточки на 2 находки, толчков 0", (0, 2, []), (r.rc, len(st.cards()), st.kicks()))
+
+    set_status(st, own, "test")
+    before = len(st.tasks())
+    c1 = st.add({OWN: appended("HarnessX", "фикс", ADDED)}, keys.x)
+    r = st.tick()
+    card, text = card_of(st, OWN), journal(st, own)
+    # A1 — краснеет, если дописка известной находки не оставила строки в журнале карточки:
+    # дата, sha коммита и первые строки добавленного (живой случай bkb 16.11)
+    check("A1 дописка → строка в журнале карточки: дата, sha, добавленный текст", (True, True, True),
+          (datetime_today() in text, c1 in text, ADDED in text))
+    # A2 — краснеет, если карточка в test не вернулась в работу полем провал_проверки
+    check("A2 карточка в test → провал_проверки, статус test, дубля нет", (True, "test", before, 0),
+          (bool(card.get("провал_проверки")), card.get("status"), len(st.tasks()), r.summary.get("карточек")))
+    kicks = st.kicks()
+    # A3 — краснеет, если смену не будит толчок в панель с id карточки
+    check("A3 толчок в панель: один, с id карточки", (1, True), (len(kicks), own in "".join(kicks)))
+    # A3 — краснеет, если в толчок попало тело записи: тело — данные, не приказ
+    check("A3 тело записи в толчок не идёт", False, ADDED in "".join(kicks))
+
+    map_before, journal_before = read_bytes(st.map), text
+    r = st.tick()
+    # A4 — краснеет, если тик без дописки снова пишет журнал, карту или толкает
+    check("A4 тик без дописки: журнал, карта и толчки те же", (0, journal_before, True, 1),
+          (r.rc, journal(st, own), read_bytes(st.map) == map_before, len(st.kicks())))
+
+    st.tmux_down.touch()
+    c2 = st.add({Y_FIND: appended("HarnessY", "задача", "Ещё строка от Y.")}, keys.w)
+    r = st.tick()
+    plan_card = card_of(st, Y_FIND)
+    # A5 — краснеет, если карточка в plan сменила статус: plan/wip остаются как есть
+    check("A5 карточка в plan: статус plan, провала нет, строка в журнале", ("plan", False, True),
+          (plan_card.get("status"), "провал_проверки" in plan_card, c2 in journal(st, y_find)))
+    check("A6 панели нет → толчок не отдан", 1, len(st.kicks()))
+    st.tmux_down.unlink()
+    r = st.tick()
+    kicks = st.kicks()
+    # A6 — краснеет, если неотданный толчок теряется: событие ждёт панели и уходит следующим тиком
+    check("A6 панель вернулась → толчок о карточке plan отдан следующим тиком", (2, True),
+          (len(kicks), y_find in (kicks[-1] if kicks else "")))
+    r = st.tick()
+    check("A6 отданный толчок не повторяется", 2, len(st.kicks()))
+
+    set_status(st, own, "принято")
+    c3 = st.add({OWN: appended("HarnessX", "фикс", ADDED + "\nПятый откат.")}, keys.x)
+    st.tick()
+    # A7 — краснеет, если закрытая (принято) карточка не вернулась в работу статусом plan
+    check("A7 карточка «принято» → plan, строка в журнале", ("plan", True),
+          (card_of(st, OWN).get("status"), c3 in journal(st, own)))
+
+    kicks_before, own_journal = len(st.kicks()), journal(st, own)
+    st.add({OWN: appended("HarnessX", "фикс", "Хозяин ответил в теле.")}, keys.host)
+    st.tick()
+    # A8 — краснеет, если своя правка хозяина (ответ, закрытие) считается дополнением копии
+    check("A8 правка хозяина: журнал и толчки те же", (own_journal, kicks_before),
+          (journal(st, own), len(st.kicks())))
+
+    target = "hr.sample-one"
+    set_status(st, target, "test")
+    set_status(st, own, "дубль\n        дубль_из: " + target)
+    own_journal, own_fail = journal(st, own), card_of(st, OWN).get("провал_проверки")
+    c4 = st.add({OWN: appended("HarnessX", "фикс", "Шестой откат.")}, keys.x)
+    st.tick()
+    goal, dup = {t["id"]: t for t in st.tasks()}.get(target, {}), card_of(st, OWN)
+    # A9 — краснеет, если событие дубля идёт дублю, а не карточке-цели по дубль_из
+    check("A9 дубль → цель: строка в журнале цели, провал у цели, дубль не тронут",
+          (True, True, "дубль", own_fail, own_journal),
+          (c4 in journal(st, target), bool(goal.get("провал_проверки")), dup.get("status"),
+           dup.get("провал_проверки"), journal(st, own)))
+    kicks = st.kicks()
+    check("A9 толчок называет цель", True, target in (kicks[-1] if kicks else ""))
+
+    set_status(st, y_find, "беклог")
+    c5 = st.add({Y_FIND: appended("HarnessY", "задача", "Беклог дописан.")}, keys.w)
+    before_kicks = len(st.kicks())
+    st.tick()
+    # A10 — краснеет, если беклог без дубль_из возвращается в работу: решение владельца 28.09
+    check("A10 беклог без дубля: статус беклог, строка в журнале, толчок", ("беклог", True, before_kicks + 1),
+          (card_of(st, Y_FIND).get("status"), c5 in journal(st, y_find), len(st.kicks())))
+
+
+def datetime_today() -> str:
+    import datetime
+    return datetime.date.today().isoformat()
+
 
 def stand_commits() -> list:
     """sha коммитов в удалённых стендов секции. Ищутся они, а не карточки карты
@@ -2442,7 +2628,8 @@ SECTIONS = {"keys": section_keys, "root": section_root, "judge": section_judge,
             "read": section_read_all, "forge": section_forge, "write": section_write,
             "door": section_door, "boot": section_boot, "state": section_state, "threat": section_threat,
             "status": section_status, "patch": section_patch,
-            "answer": section_answer, "sign": section_sign, "key": section_key}
+            "answer": section_answer, "sign": section_sign, "key": section_key,
+            "addition": section_addition}
 
 
 def main(argv: list[str]) -> int:

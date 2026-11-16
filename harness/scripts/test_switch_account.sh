@@ -90,8 +90,10 @@ chmod 600 "$S"/secrets/*
 
 # ── конфиг стенда ──────────────────────────────────────────────────────────
 : > "$S/home/install.conf"
-printf 'TMUX_SESSION="switch-proba"\nLOGIN_EXPECTED_ORG="%s %s %s"\n' "$ORG_A" "$ORG_B" "$ORG_C" \
-    > "$S/home/harness.conf"
+# LOGIN_ORG_PROBE=1: сторож входа на стенде сверяет организацию вызовом подставного
+# API, как account-switch.py; путь без вызова судит test_login_organization_without_api.py.
+printf 'TMUX_SESSION="switch-proba"\nLOGIN_EXPECTED_ORG="%s %s %s"\nLOGIN_ORG_PROBE="1"\n' \
+    "$ORG_A" "$ORG_B" "$ORG_C" > "$S/home/harness.conf"
 export HARNESS_HOME="$S/home" HARNESS_CONF="$S/home/harness.conf" HARNESS_INSTALL_CONF="$S/home/install.conf"
 export LOGIN_ORG_TIMEOUT=5
 export LOG_DIR="$S/log" STATE_DIR="$S/state" SECRETS_DIR="$S/secrets" HARNESS_ACCOUNT_DIR="$S/acc"

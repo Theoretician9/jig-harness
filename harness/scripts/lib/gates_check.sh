@@ -279,7 +279,30 @@ _gates_print_block() {  # каталог блока
         RED=$((RED + 1))
         printf '  ПЛОХО · %s (код %d)\n' "$name" "$rc"
         sed 's/^/       /' "$dir/out"
+        _gates_note_red "$name" "$rc" < "$dir/out"
     fi
+}
+
+# Итоговая красная — именем, кодом и первыми строками вывода в GATES_REDS_FILE (пусто — не пишется).
+# Старый update.py копии держит вывод ворот в памяти и называет только имена (копия bkb
+# 16.11.2026): причину оставляют ворота сами, файлом в LOG_DIR (gates_save_reds).
+GATES_REDS_LINES=5
+_gates_note_red() {  # имя, код; вывод — stdin
+    if [ -z "${GATES_REDS_FILE:-}" ]; then cat > /dev/null; return 0; fi
+    { printf 'ПЛОХО · %s (код %d)\n' "$1" "$2"; grep -v '^[[:space:]]*$' | head -n "$GATES_REDS_LINES" | sed 's/^/    /'; } \
+        >> "$GATES_REDS_FILE"
+}
+
+# Перед строкой итога: файл причин LOG_DIR переписывается целиком, без красных — «красных нет».
+gates_save_reds() {
+    [ -n "${GATES_REDS_FILE:-}" ] && [ -n "${LOG_DIR:-}" ] || return 0
+    local target="$LOG_DIR/ворота-причины-красных.txt"
+    {
+        printf 'ворота %s, режим %s%s, корень %s\n' "$(date -Is)" "${REZHIM:-}" \
+            "${ONLY_CHECKS:+, выборка $ONLY_CHECKS}" "${ROOT:-$PWD}"
+        if [ -s "$GATES_REDS_FILE" ]; then cat "$GATES_REDS_FILE"; else echo "красных нет"; fi
+    } > "$target.tmp" 2>/dev/null && mv "$target.tmp" "$target" 2>/dev/null
+    return 0
 }
 
 # Блок красной — в отложенные: каталог базы стирается после печати, а перепрогону
@@ -337,6 +360,7 @@ _gates_recheck_one() {  # каталог отложенного блока
         RED=$((RED + 1))
         printf '  ПЛОХО · %s (код %d) — красная и соло\n' "$name" "$rc"
         printf '%s\n' "$out" | sed 's/^/       /'
+        printf '%s\n' "$out" | _gates_note_red "$name" "$rc"
     fi
 }
 
@@ -463,6 +487,7 @@ _gates_run_inline() {  # имя, группа, команда...
         gates_wait_all
         RED=$((RED + 1))
         printf '  ПЛОХО · %s — гейт объявлен БЕЗ КОМАНДЫ: он зелёный всегда\n' "$name"
+        echo "гейт объявлен без команды" | _gates_note_red "$name" 0
         return
     fi
     local group=${GATES_SERIAL[$name]:-}

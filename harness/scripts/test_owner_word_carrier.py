@@ -866,6 +866,12 @@ class PublishPathStand:
         (scripts / "lib").mkdir(parents=True)
         shutil.copyfile(door, scripts / "publish.sh")
         shutil.copyfile(LIB / "config.sh", scripts / "lib" / "config.sh")
+        # Быстрая дверь замка 1 (пропуск ворот) идёт до build-public.py, только если скан
+        # секретов в составе быстрых ворот раскладки; без него зов сборщика там не судится.
+        fast_gates = self.real / "harness" / "config" / "gates-hackathon.yaml"
+        fast_gates.parent.mkdir(parents=True)
+        fast_gates.write_text('checks:\n  - name: секреты\n    cmd: bash scripts/check-secrets.sh "$ROOT"\n',
+                              encoding="utf-8")
         helper = self.root / "exec-stub.py"
         helper.write_text(EXEC_STUB % json.dumps(STUB_ANSWERS, ensure_ascii=False), encoding="utf-8")
         for side, top in (("настоящая", self.real), ("подлог", self.fake)):

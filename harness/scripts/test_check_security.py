@@ -331,6 +331,36 @@ def case_fp_ignores_foreign_file():
     assert mod.code_fingerprint(TASK, root) == before
 
 
+def shared_registries():
+    """Общие реестры из чек-листа: их правят все задачи. Список берётся РАЗБОРОМ
+    чек-листа; пустой — провал, иначе проба судила бы ничто."""
+    import yaml
+    data = yaml.safe_load(probe_checklist().read_text(encoding="utf-8"))
+    names = [m for m in data.get("shared_registries") or [] if "*" not in m and not m.endswith("/")]
+    assert names, "в чек-листе нет shared_registries — проба судила бы пустой список"
+    for must in ("harness/config/mechanisms.yaml", "harness/config/probe-mutations.yaml",
+                 "harness/config/harness.conf"):
+        assert must in names, f"{must} не в shared_registries"
+    return names
+
+
+def case_fp_ignores_foreign_line_in_registry():
+    """Задача правила app.py и строки общих реестров; чужая задача дописала свою
+    строку в те же реестры — отпечаток задачи прежний. Правка app.py задачей —
+    отпечаток другой: сужение не ослепило отпечаток к коду задачи."""
+    mod = module()
+    registries = shared_registries()
+    root = make_repo()
+    commit(root, {"app.py": "x = 1\n", **{r: "своя: 1\n" for r in registries}})
+    before = mod.code_fingerprint(TASK, root)
+    assert before and len(before) == 64, before
+    for number, name in enumerate(registries):
+        commit(root, {name: f"своя: 1\nчужая{number}: 2\n"}, task="t.other")
+        assert mod.code_fingerprint(TASK, root) == before, f"строка чужой задачи в {name} сдвинула отпечаток"
+    commit(root, {"app.py": "x = 2\n"})
+    assert mod.code_fingerprint(TASK, root) != before, "правка кода задачи не сдвинула отпечаток"
+
+
 def case_git_refuses():
     mod = module()
     root = tmp_dir()            # не репозиторий
@@ -627,6 +657,8 @@ def main():
     run_case("F1 правка dev-map/STATE/docs не двигает отпечаток", case_fp_ignores_service_files)
     run_case("F2 правка файла задачи двигает отпечаток", case_fp_moves_with_task_file)
     run_case("F3 правка чужого файла не двигает отпечаток", case_fp_ignores_foreign_file)
+    run_case("F4 чужая строка в общем реестре не двигает отпечаток, код задачи двигает",
+             case_fp_ignores_foreign_line_in_registry)
     run_case("G1 git отказал — None и код 3 со словом «git молчит»", case_git_refuses)
     run_case("P1 --по-истории: задач 5, задето 2", case_history_count)
     run_case("R1 --staged отмечает прогон при задетом классе", case_staged_marks_run_when_touched)

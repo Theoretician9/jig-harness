@@ -141,6 +141,23 @@ fi
 # Сообщение коммита называет ИМЕНА записей: по журналу панели потом видно, кто
 # и когда правил, а по истории — что именно менялось.
 NAMES="$(printf '%s\n' "$CHANGED" | awk '{print $NF}' | xargs -n1 basename 2>/dev/null | paste -sd', ' - || true)"
+ljudskie_imena() {  # stdin — имена файлов по одному; stdout — «название (имя), …»
+    while IFS= read -r imya; do
+        [ -n "$imya" ] || continue
+        case "$imya" in
+            ORDERS.md)                  printf 'указания владельца (%s)\n' "$imya" ;;
+            MEMORY.md)                  printf 'оглавление памяти (%s)\n' "$imya" ;;
+            .tasks-triaged)             printf 'отметки разбора сообщений (%s)\n' "$imya" ;;
+            .details-triaged)           printf 'отметки разбора подробностей (%s)\n' "$imya" ;;
+            .orders-processed|.указания-разобрано)
+                                        printf 'отметки разбора указаний (%s)\n' "$imya" ;;
+            owner-*-verbatim.md)        printf 'дословные слова владельца (%s)\n' "$imya" ;;
+            orders-weed-*.md)           printf 'указания из прополки (%s)\n' "$imya" ;;
+            *)                          printf 'запись памяти (%s)\n' "$imya" ;;
+        esac
+    done | paste -sd, - | sed 's/,/, /g'
+}
+LJUDSKI="$(printf '%s\n' "$NAMES" | tr ',' '\n' | sed 's/^ *//' | ljudskie_imena || true)"
 MSG="Правка памяти с панели: ${NAMES:-записи}
 
 Записи изменены владельцем через веб-панель; демон memory-commit переносит их
@@ -231,7 +248,7 @@ else
 
     if [ "$FAILS_ROW" = 1 ] && [ -x "$PROJECT_DIR/scripts/tg_send.sh" ]; then
         bash "$PROJECT_DIR/scripts/tg_send.sh" \
-            "Правку памяти с панели пока не сохранил в хранилище кода: красный гейт${GATE_NAME:+ «$GATE_NAME»}. Файл цел, повторю сам на следующем обходе — делать ничего не нужно." >/dev/null 2>&1 || true
+            "Не сохранил в git файлы памяти: ${LJUDSKI:-записи} — их не пропустила проверка перед коммитом. Файлы целы, повторю сам на следующем обходе — делать ничего не нужно." >/dev/null 2>&1 || true
     fi
 
     if [ "$FAILS_ROW" -ge "$FAILS_MAX" ]; then
@@ -242,7 +259,7 @@ else
             >/dev/null 2>&1 || say "доска не приняла запись о долге"
         if [ "$FAILS_ROW" = "$FAILS_MAX" ] && [ -x "$PROJECT_DIR/scripts/tg_send.sh" ]; then
             bash "$PROJECT_DIR/scripts/tg_send.sh" \
-                "Правка памяти не уходит в код уже ${FAILS_ROW} обходов подряд: красный гейт${GATE_NAME:+ «$GATE_NAME»} сам не чинится. Это уже не ожидание — долг записан смене на доску." >/dev/null 2>&1 || true
+                "Файлы памяти (${LJUDSKI:-записи}) не сохраняются в git уже ${FAILS_ROW} обходов подряд: проверка перед коммитом их не пропускает и сама не чинится. Долг записан смене на доску." >/dev/null 2>&1 || true
         fi
     fi
     # Метка — про ПРОГОН, а не про удачу (M-05): обход состоялся и решение

@@ -123,6 +123,35 @@ def main() -> int:
             итог(вышло.returncode == ждём, f"журнал согласия: {имя}",
                  f"код {вышло.returncode}, ждали {ждём}: {вышло.stderr.strip()[:160]}")
 
+        # Итоги ворот: замок публикации и очередь слияний верят им как проверке, строка,
+        # вписанная инструментом, сняла бы ворота без прогона. Пишут их pre-commit-gate.sh
+        # и gates.sh из оболочки — этот хук их не видит. Путь через симлинк судится так же.
+        for имя in ("gates.jsonl", "ворота-итог.jsonl", "gates-timing.jsonl"):
+            (логи / имя).write_text("", encoding="utf-8")
+        ссылка = Path(стенд) / "логи-ссылка"
+        ссылка.symlink_to(логи)
+        ворота = [
+            ("Write", "file_path", логи / "gates.jsonl", 2, "Write в gates.jsonl — отказ"),
+            ("Edit", "file_path", логи / "gates.jsonl", 2, "Edit gates.jsonl — отказ"),
+            ("Write", "file_path", логи / "ворота-итог.jsonl", 2, "Write в ворота-итог.jsonl — отказ"),
+            ("Edit", "file_path", логи / "ворота-итог.jsonl", 2, "Edit ворота-итог.jsonl — отказ"),
+            ("NotebookEdit", "notebook_path", логи / "gates.jsonl", 2, "NotebookEdit gates.jsonl — отказ"),
+            ("Edit", "file_path", ссылка / "ворота-итог.jsonl", 2,
+             "Edit ворота-итог.jsonl через симлинк — отказ"),
+            ("Edit", "file_path", Path("log") / "gates.jsonl", 2,
+             "Edit gates.jsonl относительным путём — отказ"),
+            ("Edit", "file_path", логи / "gates-timing.jsonl", 0,
+             "контроль: Edit соседа gates-timing.jsonl — пропущен"),
+        ]
+        for инструмент, поле, путь_журнала, ждём, имя in ворота:
+            нагрузка = json.dumps({"tool_name": инструмент,
+                                   "tool_input": {поле: str(путь_журнала)}})
+            вышло = subprocess.run([sys.executable, str(ПОДСУДНЫЙ), "--hook"],
+                                   input=нагрузка, capture_output=True, text=True,
+                                   cwd=стенд, timeout=60)
+            итог(вышло.returncode == ждём, f"журнал ворот: {имя}",
+                 f"код {вышло.returncode}, ждали {ждём}: {вышло.stderr.strip()[:160]}")
+
     print(f"\nвсего путей: {всего}, неудач: {плохо}")
     return 1 if плохо else 0
 

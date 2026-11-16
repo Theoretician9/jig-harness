@@ -29,6 +29,11 @@ PROJECT_DIR — только в паспорте стенда, не в окру�
 названа строкой, а не отказом.
 
     python3 scripts/check-typical-copy.py --старое <дерево выпуска> --новое <дерево выпуска> [--карантин <yaml>]
+Вторая типовая копия — с продуктом-игрушкой (эталонный выкат §6.1): Dockerfile на alpine:3.20,
+файл проверок с одним набором `image: артефакт`, ручка здоровья командой. Её deploy.sh идёт на
+новом выпуске: `--план` — выход 0 и названная цепочка; `--проверка` — если docker и образ базы
+есть (база — TYPICAL_COPY_TOY_IMAGE, умолчание alpine:3.20), иначе «пропущено: нет docker/образа».
+Провал — красная «выкат продукта-игрушки». Контейнеры, образы и сети стенда убираются.
 Дерево — корень сборки (в нём каталог harness/). Карантин — умолчанием наш
 harness/config/gates-quarantine.yaml. Коды: 0 — новых красных харнеса нет,
 1 — есть (названы), 2 — стенд не собрался.
@@ -50,6 +55,12 @@ STEP_TIMEOUT = 900
 # Самопроверка — под тем же пределом, что у копии (UPDATE_GATES_TIMEOUT_SEC, умолчание
 # update.py): один «самотест раскладчика» идёт полчаса, и 900 с обрывали стенд раньше вердикта.
 SELF_CHECK_TIMEOUT = 5400
+TOY_NAME = "typical-toy"  # латиница: имя образа и контейнеров стенда, docker кириллицу не принимает
+TOY_BASE = "alpine:3.20"
+TOY_RED = "выкат продукта-игрушки"
+TOY_LINE = "типовая копия с продуктом-игрушкой: "
+TOY_CHECKS = ("suites:\n  - name: na-artefakte\n    image: артефакт\n    base: alpine:3.20\n"
+              "    install: 'true'\n    manifests: []\n    timeout_s: 60\n    steps:\n      - cmd: 'true'\n")
 OWN_SCRIPT = "scripts/typical-backup.sh"
 OWN_TMUX = "scripts/typical-preview.sh"
 # Свой код продукта копии: пароль в адресе базы, разбитый на два литерала (находка bkb 10.11.2026).
@@ -75,7 +86,7 @@ def git(where: Path, *args) -> None:
 
 
 class Stand:
-    def __init__(self, base: Path, sample_conf: Path):
+    def __init__(self, base: Path, sample_conf: Path, name: str = "типовая-копия"):
         self.base, self.package, self.project = base, base / "пакет", base / "копия"
         self.crontab = base / "crontab"
         for folder in (self.package, self.project, base / "bin", base / "журналы", base / "дом", base / "корень"):
@@ -86,7 +97,7 @@ class Stand:
                         '[ "$1" = - ] && exec cat > "$FAKE_CRON"\nexit 1\n', encoding="utf-8")
         tool.chmod(0o755)
         (base / "install.conf").write_text(
-            f'PROJECT_DIR="{self.project}"\nPROJECT_NAME="типовая-копия"\nAGENT_USER="kopiya"\n'
+            f'PROJECT_DIR="{self.project}"\nPROJECT_NAME="{name}"\nAGENT_USER="kopiya"\n'
             f'LOG_DIR="{base}/журналы"\nHEARTBEAT_DIR="{base}/метки"\n', encoding="utf-8")
         conf = re.sub(r'(?m)^BACKUP_DIR=.*$', f'BACKUP_DIR="{base}/копии"',
                       sample_conf.read_text(encoding="utf-8"))
@@ -94,7 +105,8 @@ class Stand:
         self.env = {"PATH": f"{base}/bin:/usr/local/bin:/usr/bin:/bin", "HOME": f"{base}/дом",
                     "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8", "HARNESS_SELFTEST": "1",
                     "HARNESS_HOME": f"{base}/корень", "HARNESS_INSTALL_CONF": f"{base}/install.conf",
-                    "HARNESS_CONF": f"{base}/harness.conf", "HARNESS_STARTER": str(self.package),
+                    "HARNESS_CONF": f"{base}/harness.conf", "HARNESS_DOOR_STAND_HOME": str(base),
+                    "HARNESS_STARTER": str(self.package),
                     "HARNESS_PROCESS_LIBRARY_LOCAL": f"{base}/слой-процессов.json",
                     "FAKE_CRON": str(self.crontab)}
         git(self.package, "init", "-q")
@@ -150,6 +162,39 @@ class Stand:
         (folder / f"{ident}.txt").write_text(text, encoding="utf-8")
         os.utime(folder / f"{ident}.txt", (when, when))
 
+    def add_toy_product(self, base_image: str) -> None:
+        """Продукт-игрушка: свой git, Dockerfile, файл проверок; ключи выката — в конфиг копии."""
+        product = self.base / "product"
+        (product / "deploy").mkdir(parents=True)
+        (product / "Dockerfile").write_text(f'FROM {base_image}\nCMD ["sleep", "300"]\n', encoding="utf-8")
+        (product / "deploy" / "server-checks.yaml").write_text(TOY_CHECKS, encoding="utf-8")
+        git(product, "init", "-q")
+        git(product, "add", "-A")
+        git(product, "commit", "-q", "-m", "игрушка")
+        keys = (f'PRODUCT_REPO="{product}"\nSTACK_IMAGES="{TOY_NAME}"\n'
+                f"STACK_BUILD_CMD='docker build -q -t {TOY_NAME}:${{IMAGE_TAG:-latest}} .'\n"
+                'STACK_HEALTH_CMD="true"\nDEPLOY_HEALTH_WAIT_SEC="4"\n'
+                'STACK_CHECKS_FILE="deploy/server-checks.yaml"\nSTACK_CHECK_MIN_FREE_MB="512"\n'
+                f'STACK_CHECK_UID="{os.getuid()}:{os.getgid()}"\n')
+        conf = self.base / "harness.conf"
+        conf.write_text(conf.read_text(encoding="utf-8") + "\n" + keys, encoding="utf-8")
+        self.env.update({"DEPLOY_CHECK_WORK_ROOT": str(self.base / "копии-проверок"),
+                         "DEPLOY_CHECK_LOG_ROOT": str(self.base / "журналы-проверок")})
+
+    def deploy(self, key: str) -> subprocess.CompletedProcess:
+        return run(["bash", str(self.project / "scripts" / "deploy.sh"), key], self.env, cwd=self.project)
+
+    def clean_docker(self) -> None:
+        """Контейнеры наборов, сети и образы игрушки не остаются: всё — по имени установки."""
+        for listing, remove in ((["ps", "-aq"], ["rm", "-f"]), (["network", "ls", "-q"], ["network", "rm"])):
+            found = run(["docker", *listing, "--filter", f"name={TOY_NAME}"], self.env)
+            ids = found.stdout.split() if found.returncode == 0 else []
+            if ids:
+                run(["docker", *remove, *ids], self.env)
+        images = run(["docker", "images", "-q", TOY_NAME], self.env)
+        if images.returncode == 0 and images.stdout.split():
+            run(["docker", "rmi", "-f", *dict.fromkeys(images.stdout.split())], self.env)
+
     def self_check(self, checks: list) -> str:
         done = run(["bash", str(self.project / "scripts" / "gates.sh"), "--только", "|".join(checks)],
                    self.env, cwd=self.project, timeout=SELF_CHECK_TIMEOUT)
@@ -180,6 +225,43 @@ def reds_parser(tree: Path):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module.красные_из_вывода
+
+
+def docker_has(image: str) -> bool:
+    if not shutil.which("docker"):
+        return False
+    return subprocess.run(["docker", "image", "inspect", image], capture_output=True, timeout=60,
+                          stdin=subprocess.DEVNULL).returncode == 0
+
+
+def toy_product_lines(new: Path, sample_conf: Path, base_image: str) -> list:
+    """Вторая типовая копия: выкат продукта-игрушки на новом выпуске. Строки итога; провал — «новая красная»."""
+    work = Path(tempfile.mkdtemp(prefix="proba-typical-copy-toy-"))
+    stand = None
+    try:
+        stand = Stand(work, sample_conf, name=TOY_NAME)
+        stand.release(new, "новый выпуск")
+        stand.add_toy_product(base_image)
+        plan = stand.deploy("--план")
+        said = plan.stdout + plan.stderr
+        if plan.returncode != 0 or "сборка: docker build" not in said or "тесты (этап T)" not in said:
+            return [f"типовая копия: новая красная «{TOY_RED}»: --план код {plan.returncode}: "
+                    + said.strip()[-300:]]
+        lines = [f"{TOY_LINE}--план код 0, цепочка названа"]
+        if not docker_has(base_image):
+            return lines + [f"{TOY_LINE}--проверка пропущено: нет docker/образа {base_image}"]
+        check = stand.deploy("--проверка")
+        said = check.stdout + check.stderr
+        if check.returncode != 0 or "success" not in said:
+            return lines + [f"типовая копия: новая красная «{TOY_RED}»: --проверка код {check.returncode}: "
+                            + said.strip()[-300:]]
+        return lines + [f"{TOY_LINE}--проверка: тесты success"]
+    except (RuntimeError, OSError, subprocess.SubprocessError) as trouble:
+        return [f"типовая копия: новая красная «{TOY_RED}»: стенд игрушки не собрался — {trouble}"]
+    finally:
+        if stand is not None and shutil.which("docker"):
+            stand.clean_docker()
+        shutil.rmtree(work, ignore_errors=True)
 
 
 def main() -> int:
@@ -215,7 +297,10 @@ def main() -> int:
     fresh = sorted(name for name in after - before if name not in data_checks)
     for name in fresh:
         print(f"типовая копия: новая красная «{name}»: {' | '.join(after.причины.get(name, [])) or 'вывода нет'}")
-    if fresh:
+    toy = toy_product_lines(new, old / "harness" / "config" / "harness.conf",
+                            os.environ.get("TYPICAL_COPY_TOY_IMAGE") or TOY_BASE)
+    print("\n".join(toy))
+    if fresh or any("новая красная" in line for line in toy):
         return 1
     print(f"типовая копия: новых красных нет (харнеса; проверок {len(checks)}, красных до {sum(before.values())}, "
           f"после {sum(after.values())})")
