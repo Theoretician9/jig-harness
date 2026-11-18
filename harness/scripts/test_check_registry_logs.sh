@@ -48,12 +48,21 @@ ok()  { echo "  ✓ $1"; }
 bad() { echo "  ✗ $1"; FAIL=1; }
 
 # Копия корня: судимый скрипт кладётся на своё место, чтобы КОРЕНЬ указал сюда.
+# $2 — корень-источник (по умолчанию живой).
 make_root() {
-    local dst="$1"
+    local dst="$1" src="${2:-$ROOT}"
     mkdir -p "$dst"
-    cp -a "$ROOT/scripts" "$ROOT/harness" "$dst/"
-    [ -d "$ROOT/.claude" ] && cp -a "$ROOT/.claude" "$dst/"
+    cp -a "$src/scripts" "$src/harness" "$dst/"
+    copy_claude "$src/.claude" "$dst/.claude"
     cp "$SRC" "$dst/scripts/check-registry.py"
+}
+
+# .claude без деревьев помощников: они — копии чужих веток (сотни МБ), реестр их
+# не читает, а копия стенда шла час (17.11).
+copy_claude() {  # $1 = источник, $2 = куда
+    [ -d "$1" ] || return 0
+    mkdir -p "$2"
+    find "$1" -mindepth 1 -maxdepth 1 ! -name worktrees -exec cp -a {} "$2/" \;
 }
 
 # Число из строки итога; пусто — строки нет.
@@ -62,6 +71,19 @@ count_missing() {
 }
 
 echo "проба: журналы из реестра существуют"
+
+# ── 0. стенд не тащит деревья помощников ────────────────────────────────────
+mkdir -p "$T/src0/scripts" "$T/src0/harness" "$T/src0/.claude/agents" "$T/src0/.claude/worktrees/agent-x"
+: > "$T/src0/.claude/agents/a.md"
+: > "$T/src0/.claude/worktrees/agent-x/marker"
+make_root "$T/zero" "$T/src0"
+if [ -e "$T/zero/.claude/worktrees" ]; then
+    bad "0. стенд скопировал .claude/worktrees — деревья помощников в копии корня"
+elif [ ! -f "$T/zero/.claude/agents/a.md" ]; then
+    bad "0. стенд не скопировал .claude/agents (условие: остальной .claude нужен)"
+else
+    ok "0. стенд: .claude без worktrees"
+fi
 
 # ── 1. живой реестр ─────────────────────────────────────────────────────────
 make_root "$T/live"

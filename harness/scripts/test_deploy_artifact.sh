@@ -389,7 +389,7 @@ itog "да" "$(same_id "$(id_of proba-api:latest)" "$(id_of "proba-api:${X_TIP:0
 
 echo "── край: ветки нет в хранилище — отказ до ворот, ветка названа ──"
 conf "$BUILD_TAGGED" "$ZHIVO" "$REMOTE_CONF"
-TAGS_DO=$(git -C "$PRODUCT" tag -l 'deploy-*' | grep -c .)
+TAGS_DO=$(git -C "$PRODUCT" tag -l 'deploy-*' | grep -c . || true)
 run_deploy --ветка net-takoj-vetki
 itog "1" "$RC" "нет ветки: код 1"
 itog "да" "$(has "$VYVOD" "net-takoj-vetki")" "нет ветки: отказ называет ветку"
@@ -421,7 +421,7 @@ itog "нет" "$(git -C "$BARE" merge-base --is-ancestor "$MAIN_DO" "$NFF_TIP" &
      "не-ff: условие — main хранилища не предок вершины ветки"
 conf "$BUILD_TAGGED" "$ZHIVO" "$REMOTE_CONF"
 HEAD_DO=$(git -C "$PRODUCT" rev-parse HEAD)
-TAGS_DO=$(git -C "$PRODUCT" tag -l 'deploy-*' | grep -c .)
+TAGS_DO=$(git -C "$PRODUCT" tag -l 'deploy-*' | grep -c . || true)
 run_deploy --ветка vetka-ne-ff
 itog "$MAIN_DO" "$(git -C "$BARE" rev-parse main)" "не-ff: main хранилища остался ${MAIN_DO:0:8}"
 # «не fast-forward» — слова двери; git на отвергнутый пуш скажет «non-fast-forward».

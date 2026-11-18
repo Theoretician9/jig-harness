@@ -258,6 +258,7 @@ SAMPLES = [
     ("log", 'ответы-в-канал.jsonl', {"v": 1, "ts": "2026-11-04T00:14:53+05:00", "src": "scripts/hooks/channel_reply_guard.py", "event": "channel_reply.block", "outcome": "refused", "task": "hr.sample", "task_from": "map", "session": "s-sample"}, '2026-11-03T19:14:53+00:00'),
     ("log", 'роли-помощников.jsonl', {"v": 1, "ts": "2026-11-04T09:26:18+05:00", "src": "scripts/hooks/lead_role_guard.py", "event": "role.decision", "outcome": "ok", "task": "hr.sample", "task_from": "map", "session": "s-sample"}, '2026-11-04T04:26:18+00:00'),
     ("log", 'merge-queue.jsonl', {"v": 1, "ts": "2026-11-13T04:04:22+05:00", "src": "scripts/merge-queue.py", "event": "mq.слито", "outcome": "ok", "task": "hr.sample", "task_from": "arg", "session": None}, '2026-11-12T23:04:22+00:00'),
+    ("log", 'release-train.jsonl', {"v": 1, "ts": "2026-11-17T14:12:27+05:00", "src": "scripts/publish.sh", "event": "train.step", "outcome": "refused", "task": "hr.sample", "task_from": "env", "session": None, "data": {"состояние": "красное ядро", "код": 1}}, '2026-11-17T09:12:27+00:00'),
     ("log", 'account-buttons.jsonl', {"v": 1, "ts": "2026-11-13T11:10:49+05:00", "src": "scripts/lib/account_buttons.py", "event": "account.menu", "outcome": "ok", "task": "hr.sample", "task_from": "arg", "session": None, "data": {"nonce": "RanfbmYrhajlIy6rvP8qEA", "message_id": 13015, "имена": ["acc-a", "login"]}}, '2026-11-13T06:10:49+00:00'),
     ("log", 'режим-скорости.jsonl', {"v": 1, "ts": "2026-11-05T13:20:06+05:00", "at": "2026-11-05T13:20:03+05:00", "src": "harness/demons/speed_mode.py", "event": "blocker.on", "outcome": "ok", "task": "hr.sample", "task_from": "map", "session": None, "data": {"блокер": "sample", "порог": 1}}, '2026-11-05T08:20:03+00:00'),
     ("log", 'тревоги-ждут.jsonl', {"ts": "2026-11-01T09:01:12.345678+05:00", "key": "sample:broken", "title": "образец", "line": "harness", "watcher": "sample"}, '2026-11-01T04:01:12+00:00'),
@@ -297,6 +298,9 @@ SAMPLES = [
     ("log", 'panel-comments-delivered.jsonl', {"ts": "1794634831.250000000", "исход": "доставлено", "доставлено": "2026-11-14T10:20:31+05:00"}, '2026-11-14T05:20:31+00:00'),
     # Писатель — teardown.sh проекта вне дерева харнеса: строка по реестру (поле ts с поясом).
     ("log", 'env-teardown.jsonl', {"ts": "2026-11-14T10:20:31+05:00", "исход": "снято"}, '2026-11-14T05:20:31+00:00'),
+    # events.run (формат v1): строки боевых журналов 16.11 и 13.11.
+    ("log", 'claude-mem-fix.jsonl', {"v": 1, "ts": "2026-11-16T04:37:27+05:00", "src": "scripts/claude-mem-fix.py", "event": "run.start", "outcome": "ok", "task": "hr.sample", "task_from": "history", "session": "s-sample", "data": {"имя": "claude-mem-fix"}}, '2026-11-15T23:37:27+00:00'),
+    ("log", 'evolution-net.jsonl', {"v": 1, "ts": "2026-11-13T19:50:45+05:00", "src": "scripts/evolution-net.py", "event": "run.start", "outcome": "ok", "task": "hr.sample", "task_from": "map", "session": "s-sample", "data": {"имя": "evolution-net-reader"}}, '2026-11-13T14:50:45+00:00'),
 ]
 
 
@@ -528,6 +532,26 @@ def case_secrets(base: Path) -> None:
     check("путь под SECRETS_DIR остался (журнал удалений без пути бесполезен, И-1)", keep_path, d.get("copy"))
     check("каждая замена посчитана как mangled", True,
           sum(1 for x in st.lost() if x.get("kind") == "mangled") >= 1)
+
+
+def case_train_digests(base: Path) -> None:
+    print("── поезд выпусков: срезы и прошлый выпуск — открытые git-хэши, чужой ключ — <СКРЫТО> ──")
+    sys.path.insert(0, str(ROOT / "scripts" / "lib"))
+    import patterns  # noqa: E402 — дверь формы секрета, общая с механизмом
+    commit = hashlib.sha1(os.urandom(16)).hexdigest()
+    if patterns.секреты_в_речи(commit) != [commit]:
+        skip("git-хэш вне digest_keys", "форма не узнаёт 40-hex — случай пустой")
+        return
+    # Краснеет, если ключ выпал из DIGEST_KEYS: журнал поезда теряет срез и прошлый выпуск,
+    # а дверь согласия и диапазон выбора читают их из него.
+    keys = ("срез_проекта", "срез_пакета", "прошлый_sha_проекта")
+    st = Stand(base, "train")
+    rc, res, err = run_child(emit_body(src=SRC, event="train.step", outcome="ok", journal="train",
+                                       data={**{k: commit for k in keys}, "чужой_срез": commit}), st.env())
+    d = json.loads(st.lines("train")[0])["data"] if st.lines("train") else {}
+    for k in keys:
+        check(f"{k}: 40-hex остался как есть", commit, d.get(k))
+    check("тот же хэш под чужим ключом — <СКРЫТО>", "<СКРЫТО>", d.get("чужой_срез"))
 
 
 def case_sizes(base: Path) -> None:
@@ -952,7 +976,7 @@ def main() -> int:
     os.chmod(base, 0o755)
     print(f"стенд: {base}; механизм: {LIB}; группа событий: {GROUP_NAME}")
     cases = [case_secret_forms, case_index_lock, case_lock_timeout, case_unwritable, case_short_write, case_never_raises, case_bad_journal_name,
-             case_secrets, case_sizes, case_writer_inode, case_format, case_modes, case_other_user,
+             case_secrets, case_train_digests, case_sizes, case_writer_inode, case_format, case_modes, case_other_user,
              case_current_task, case_bash_door, case_read, case_samples, case_contract_extras, case_race]
     try:
         for c in cases:

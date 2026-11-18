@@ -29,6 +29,9 @@ export LC_ALL=C.UTF-8
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$HERE/lib/selftest_cases.sh"
+# Писатель тревог отказывает зову с предком claude (г2 судит настоящего писателя).
+source "$HERE/lib/off_session.sh"
+off_session_reexec bash "$HERE/$(basename "${BASH_SOURCE[0]}")" "$@"
 
 WARDEN="${HARNESS_SESSION_WARDEN:-$HERE/../harness/demons/session-warden.sh}"
 [ -r "$WARDEN" ] || WARDEN="$HERE/../demons/session-warden.sh"

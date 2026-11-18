@@ -190,5 +190,18 @@ def main() -> int:
     return 0 if cases.ok else 1
 
 
+def off_session() -> None:
+    """The writer refuses a caller with a `claude` ancestor: under a session the
+    stand would judge that refusal. The probe leaves the session itself
+    (lib/off_session.sh) instead of asking its launcher to."""
+    if os.environ.get("PROBE_OFF_SESSION"):
+        return
+    os.execvp("bash", ["bash", "-c",
+                       'source "$1"; shift; off_session_reexec "$@"; PROBE_OFF_SESSION=1 exec "$@"',
+                       "_", str(HERE / "lib" / "off_session.sh"),
+                       sys.executable, str(Path(__file__).resolve()), *sys.argv[1:]])
+
+
 if __name__ == "__main__":
+    off_session()
     sys.exit(main())

@@ -20,6 +20,9 @@
 # Запуск:
 #   bash scripts/publish.sh            # проверить и опубликовать
 #   bash scripts/publish.sh --проверка # только проверить, ничего не менять
+#   bash scripts/publish.sh [--проверка] --поезд [<sha пакета>]
+#                                       # поезд: ворота по разнице с прошлым выпуском,
+#                                       # согласие и публикация — срез пакета
 #   bash scripts/publish.sh --selftest
 #   bash scripts/publish.sh --переписать-историю <каталог-копии> --бэкап <файл.bundle>
 #                                       # перепись публичной истории (см. ниже)
@@ -30,10 +33,12 @@ set -uo pipefail
 
 # shellcheck disable=SC1091
 source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/lib/config.sh"
+# shellcheck disable=SC1091
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/lib/events.sh"
 # PUBLIC_PASPORT — путь паспорта для сборщика: только от паспорта двери (ниже), не из окружения;
 # самотест называет свой двор присваиванием уже ПОСЛЕ загрузки.
 # Так же TYPICAL_COPY_CHECK — судья замка 6г: из окружения боевой запуск подменил бы его и прошёл замок.
-konf_zagruzit_dveri STARTER_DIR PUBLIC_BRANCH PUBLIC_REMOTE PUBLIC_BUILD_DIR PUBLIC_COMMIT_EMAIL PUBLIC_PASPORT PAKET_SHA PREDMET_ZAMKA TYPICAL_COPY_CHECK
+konf_zagruzit_dveri STARTER_DIR PUBLIC_BRANCH PUBLIC_REMOTE PUBLIC_BUILD_DIR PUBLIC_COMMIT_EMAIL PUBLIC_PASPORT PAKET_SHA PREDMET_ZAMKA TYPICAL_COPY_CHECK MERGE_QUEUE_WAIT_MIN
 
 # Судья слова владельца — рядом с этим скриптом, а не по окружению: путь от реального файла.
 SCRIPTS_REAL="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
@@ -60,12 +65,16 @@ say() { printf '%s\n' "$*"; }
 # Дверь для запроса согласия (ask-consent.py): считает и пишет манифест в пакет.
 # Выпуск его не использует — манифест публичной сборки пишет build-public.py.
 # $1=пакет, $2=прошлый манифест (нет файла — прошлого нет, названы все файлы).
+layer1_sums() { # $1=каталог self → строки sha256sum слоя 1
+    (cd "$1" && find . -type f ! -path ./MANIFEST.sha256 ! -path ./instance.yaml -printf '%P\n' \
+        | LC_ALL=C sort | xargs -d '\n' -r sha256sum)
+}
+
 manifest_sloya1() {
     local self="$1/harness/self" prev="$2" old="" new
     [ -d "$self" ] || { say "ОТКАЗ: у пакета нет каталога $self"; return 1; }
     [ -f "$prev" ] && old="$(LC_ALL=C sort "$prev")"
-    new="$(cd "$self" && find . -type f ! -path ./MANIFEST.sha256 ! -path ./instance.yaml -printf '%P\n' \
-        | LC_ALL=C sort | xargs -d '\n' -r sha256sum)"
+    new="$(layer1_sums "$self")"
     [ -n "$new" ] || { say "ОТКАЗ: в $self нет файлов слоя 1"; return 1; }
     printf '%s\n' "$new" > "$self/.MANIFEST.sha256.new" && mv -f "$self/.MANIFEST.sha256.new" "$self/MANIFEST.sha256" \
         || { say "ОТКАЗ: манифест слоя 1 не записан в $self"; return 1; }
@@ -73,11 +82,29 @@ manifest_sloya1() {
     return 0
 }
 
+# Срез поезда: слой 1 читается из коммита среза. Манифест в пакет не пишется — манифест
+# пакета описывает его рабочее дерево (его сверяет check-self-manifest.py), а не срез.
+# $1=пакет, $2=прошлый манифест, $3=sha среза.
+manifest_sloya1_srez() {
+    local view old="" new=""
+    view=$(mktemp -d) || { say "ОТКАЗ: временный каталог среза не создан"; return 1; }
+    if git -C "$1" archive "$3" harness/self 2>/dev/null | tar -x -C "$view" 2>/dev/null; then
+        new="$(layer1_sums "$view/harness/self")"
+    fi
+    rm -rf "$view"
+    [ -n "$new" ] || { say "ОТКАЗ: в срезе ${3:0:12} пакета нет файлов слоя 1"; return 1; }
+    [ -f "$2" ] && old="$(LC_ALL=C sort "$2")"
+    сказать_смену_слоя1 "$old" "$new"
+}
+
 # Дверь стоит ДО проверки веток: манифест не про публичную ветку, и запрос
 # согласия зовёт её на каждую публикацию.
 if [ "${1:-}" = "--манифест-слоя1" ]; then
-    [ "$#" = 3 ] || { say "ОТКАЗ: нужно --манифест-слоя1 <пакет> <прошлый манифест>"; exit 1; }
-    manifest_sloya1 "$2" "$3" || exit 1
+    case "$#" in
+        3) manifest_sloya1 "$2" "$3" || exit 1 ;;
+        4) manifest_sloya1_srez "$2" "$3" "$4" || exit 1 ;;
+        *) say "ОТКАЗ: нужно --манифест-слоя1 <пакет> <прошлый манифест> [<sha среза>]"; exit 1 ;;
+    esac
     exit 0
 fi
 
@@ -85,10 +112,13 @@ fi
 # Замок «ворота зелёные» поставил владелец и вправе снять его на выпуск; снятие
 # обязано быть законной дверью, а не обходом ([[a-guard-without-a-legal-door]]).
 # Дверь — файл $LOG_DIR/publish-gates-waiver.json: дословная цитата, id входящего,
-# причина, срок. Срок конечный (не больше 6 часов с выдачи): запись без срока или
-# просроченная — не дверь. Окружение дверью быть не может. Вместо полного прогона
-# идёт быстрое подмножество, и пропуск пишется в журнал публикации.
-# Коды: 0 — дверь открыта (цитата в stdout), 3 — записи нет, 1 — запись негодна.
+# причина, срок. Срок конечный (не больше 6 часов с выдачи): запись без срока — не
+# дверь. Окружение дверью быть не может. Вместо полного прогона идёт быстрое
+# подмножество, и пропуск пишется в журнал публикации.
+# Просроченная запись — то же, что записи нет: слово владельца отслужило, и отказ
+# на ней держал бы выпуск до ручной правки файла.
+# Коды: 0 — дверь открыта (цитата в stdout), 3 — записи нет или она просрочена
+# (строка о просрочке в stderr), 1 — запись негодна.
 PRAVO_NA_PROPUSK_MAX=21600
 proverit_zapis_propuska() { # $1=каталог журнала
     python3 -I - "$1/publish-gates-waiver.json" "$PRAVO_NA_PROPUSK_MAX" <<'PY'
@@ -108,7 +138,8 @@ if not all(поля):
 if not 0 < до - выдана <= потолок:
     print(f"срок записи о пропуске вне 0..{потолок} с", file=sys.stderr); sys.exit(1)
 if до < time.time():
-    print("запись о пропуске ворот просрочена", file=sys.stderr); sys.exit(1)
+    срок = time.strftime("%Y-%m-%d %H:%M", time.localtime(до))
+    print(f"пропуск ворот просрочен (до {срок}) — как нет пропуска", file=sys.stderr); sys.exit(3)
 print(поля[0])
 PY
 }
@@ -182,6 +213,7 @@ zamok_vorot() { # $1=каталог журнала [$2=каталог скрип
     local katalog="$1" skripty="${2:-$SCRIPTS_REAL}" slovo rc itog
     slovo=$(proverit_zapis_propuska "$katalog" 2>/tmp/публикация-пропуск.err); rc=$?
     if [ "$rc" = 3 ]; then
+        [ -s /tmp/публикация-пропуск.err ] && say "замок 1 · $(cat /tmp/публикация-пропуск.err)"
         if itog=$(gates_summary_reusable "$katalog"); then
             say "замок 1 · ворота не гоняю: взят зелёный полный итог того же sha ($itog)"; return 0
         fi
@@ -208,6 +240,453 @@ zamok_vorot() { # $1=каталог журнала [$2=каталог скрип
     say "замок 1 · ворота пропущены по слову владельца «$slovo»; быстрое подмножество зелёное"
 }
 
+# ── Уборка на выходе: один обработчик на весь ход ──────────────────────────
+# Шаг, заводящий временное, вписывает его сюда, а не ставит свой trap: второй
+# trap на EXIT молча снимает первый.
+CLEANUP_DIRS=()
+QUEUE_LOCK_HOLDER=""
+cleanup_on_exit() {
+    local rc=$?
+    if [ "${TRAIN:-0}" = 1 ]; then train_record "${LOG_DIR:-}" "$rc"; fi
+    train_slice_tree_remove
+    release_train_lock
+    release_merge_queue_lock
+    local d
+    for d in "${CLEANUP_DIRS[@]}"; do rm -rf "$d"; done
+}
+trap cleanup_on_exit EXIT
+
+# ── Замок очереди слияния на всё время публикации ──────────────────────────
+# Предмет согласия (замок 2) — HEAD пакета, а очередь слияния двигает его, пока идут
+# ворота. Публикация берёт ТОТ ЖЕ файл flock, что take_lock в merge-queue.py, и держит
+# его до выхода — очередь в это время ждёт.
+# Замок держит отдельный процесс-держатель, а не дескриптор этой оболочки: дескриптор
+# унаследовали бы ворота, судьи и tg_send, и их осиротевший потомок держал бы очередь
+# после выхода публикации. Держатель — coproc: его трубу bash детям не передаёт, и
+# держатель отпускает замок, как только трубу закрыл последний её владелец — эта
+# оболочка, даже убитая без обработчика выхода.
+MERGE_QUEUE_LOCK_NAME="merge-queue.lock"
+read -r -d '' MERGE_QUEUE_HOLDER_PY <<'PY' || true
+import fcntl, sys, time
+путь, предел = sys.argv[1], float(sys.argv[2])
+try:
+    замок = open(путь, "a")
+except OSError as беда:
+    print(f"ОТКАЗ: файл замка очереди слияния не открыт: {беда}", flush=True); sys.exit(1)
+начало, сказано = time.monotonic(), False
+while True:
+    try:
+        fcntl.flock(замок, fcntl.LOCK_EX | fcntl.LOCK_NB); break
+    except BlockingIOError:
+        if not сказано:
+            print("занято", flush=True); сказано = True
+        if time.monotonic() - начало > предел:
+            print(f"ОТКАЗ: очередь слияния занята дольше {предел:g} с — публикация не начата", flush=True); sys.exit(1)
+        time.sleep(0.2)
+print("взят", flush=True)
+sys.stdin.read()
+PY
+take_merge_queue_lock() { # $1=каталог журнала $2=предел ожидания, с → 0 взят, 1 отказ
+    local otvet stroka
+    # stderr держателя — в ту же трубу: чужой поток вывода он держал бы открытым, пока жив.
+    coproc QUEUE_LOCK { exec python3 -I -c "$MERGE_QUEUE_HOLDER_PY" "$1/$MERGE_QUEUE_LOCK_NAME" "$2" 2>&1; }
+    # bash снимает имена coproc, когда держатель выходит: номер и pid — в свои переменные.
+    otvet=${QUEUE_LOCK[0]}
+    QUEUE_LOCK_HOLDER=$QUEUE_LOCK_PID
+    while read -r -u "$otvet" stroka; do
+        case "$stroka" in
+            взят) say "замок очереди слияния взят: слияния ждут конца публикации"; return 0 ;;
+            занято) say "очередь слияния занята, жду до $2 с…" ;;
+            *) say "$stroka" ;;
+        esac
+    done
+    QUEUE_LOCK_HOLDER=""
+    return 1
+}
+# Отпускает сразу, не дожидаясь закрытия трубы на выходе оболочки.
+release_merge_queue_lock() {
+    [ -n "$QUEUE_LOCK_HOLDER" ] || return 0
+    kill "$QUEUE_LOCK_HOLDER" 2>/dev/null
+    wait "$QUEUE_LOCK_HOLDER" 2>/dev/null
+    QUEUE_LOCK_HOLDER=""
+}
+
+# ── Поезд выпусков (--поезд): ворота судят разницу с прошлым выпуском, предмет — срез ──
+# Полные ворота судят всё дерево часами: старое красное держит выпуск, а пакет тем временем
+# уходит вперёд и сжигает кнопку. Поезд режет срез — HEAD master проекта и HEAD пакета (или
+# названный sha пакета) — и судит, собирает и публикует именно его; ворота — ядро из
+# release-train.yaml и проверки gates.sh, задетые диапазоном «прошлый выпуск..срез».
+TRAIN=0
+TRAIN_JOURNAL="release-train.jsonl"
+TRAIN_CONFIG="harness/config/release-train.yaml"
+TRAIN_STATE=""
+TRAIN_SLICE_PROJECT="" TRAIN_SLICE_PACKAGE="" TRAIN_PREV_TAG="" TRAIN_PREV_PROJECT="" TRAIN_PREV_LINK=""
+TRAIN_SELECTED="" TRAIN_RED="" TRAIN_RED_NAMES="" TRAIN_QUARANTINED=0 TRAIN_QUARANTINED_NAMES="" TRAIN_CORE="" TRAIN_SEC_CORE="" TRAIN_SEC_SELECTION=""
+TRAIN_GATES=""
+TRAIN_STARTED=0
+TRAIN_TREE="" TRAIN_GATES_LOG=""
+RELEASE_TAG=""
+PACKAGE_VIEW=""
+
+# Замок поезда: второй ход при идущем первом отказывает сразу, а не судит и не пишет вперемешку.
+# Замок держит отдельный процесс, а не дескриптор оболочки — по той же причине, что у очереди
+# (дескриптор унаследовали бы ворота). Держатель живёт, пока жив его родитель-оболочка: убитая
+# без обработчика выхода, она замок не удержит.
+TRAIN_LOCK_NAME="release-train.lock"
+TRAIN_LOCK_HOLDER=""
+read -r -d '' TRAIN_LOCK_HOLDER_PY <<'PY' || true
+import fcntl, os, sys, time
+path, owner = sys.argv[1], int(sys.argv[2])
+try:
+    lock = open(path, "a")
+    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+except BlockingIOError:
+    print("занято", flush=True); sys.exit(1)
+except OSError as error:
+    print(f"не открыт: {error}", flush=True); sys.exit(1)
+print("взят", flush=True)
+sys.stdout.close()
+while os.getppid() == owner:
+    time.sleep(0.2)
+PY
+take_train_lock() { # $1=каталог журнала → 0 взят, 1 отказ
+    # BASHPID — до подстановки процесса: внутри неё он уже pid самого держателя.
+    local fd answer owner=$BASHPID
+    exec {fd}< <(exec python3 -I -c "$TRAIN_LOCK_HOLDER_PY" "$1/$TRAIN_LOCK_NAME" "$owner" 2>&1)
+    TRAIN_LOCK_HOLDER=$!
+    read -r -u "$fd" answer
+    exec {fd}<&-
+    [ "$answer" = взят ] && return 0
+    TRAIN_LOCK_HOLDER=""
+    case "$answer" in
+        занято) say "ОТКАЗ: поезд уже идёт — замок $1/$TRAIN_LOCK_NAME занят другим ходом" ;;
+        *) say "ОТКАЗ: замок поезда $1/$TRAIN_LOCK_NAME ${answer:-не взят}" ;;
+    esac
+    return 1
+}
+release_train_lock() {
+    [ -n "$TRAIN_LOCK_HOLDER" ] || return 0
+    kill "$TRAIN_LOCK_HOLDER" 2>/dev/null
+    wait "$TRAIN_LOCK_HOLDER" 2>/dev/null
+    TRAIN_LOCK_HOLDER=""
+}
+
+# Значения журнала поезда не охраняются, а идут в git и в bash -c ядра: годен только коммит проекта.
+train_commit_ok() { # $1=значение → 0 — 40 hex и коммит проекта
+    [[ "$1" =~ ^[0-9a-f]{40}$ ]] && git -C "$PROJECT_DIR" cat-file -e "$1^{commit}" 2>/dev/null
+}
+
+# Ворота судят срез в своём дереве: живое дерево проекта очередь двигает, пока они идут.
+train_slice_tree() { # → TRAIN_TREE; 1 — отказ
+    local where="$PROJECT_DIR/.claude/worktrees"
+    if ! { mkdir -p "$where" && TRAIN_TREE=$(mktemp -d "$where/release-train-XXXXXX"); }; then
+        TRAIN_TREE=""; say "ОТКАЗ: каталог дерева среза в $where не создан"; return 1
+    fi
+    git -C "$PROJECT_DIR" worktree add -q --detach "$TRAIN_TREE" "$TRAIN_SLICE_PROJECT" > /dev/null 2>&1 && return 0
+    say "ОТКАЗ: дерево проекта на срезе ${TRAIN_SLICE_PROJECT:0:12} не создано"
+    train_slice_tree_remove
+    return 1
+}
+train_slice_tree_remove() {
+    [ -n "$TRAIN_TREE" ] || return 0
+    git -C "$PROJECT_DIR" worktree remove --force "$TRAIN_TREE" > /dev/null 2>&1 \
+        || rmdir "$TRAIN_TREE" 2> /dev/null
+    TRAIN_TREE=""
+}
+# Ход, убитый KILL, ловушку выхода не исполняет, и его дерево среза остаётся. Под замком поезда
+# другого живого хода нет, поэтому каждое release-train-* — сирота: снять его и регистрации без каталога.
+train_sweep_trees() {
+    local tree
+    for tree in "$PROJECT_DIR/.claude/worktrees"/release-train-*; do
+        [ -e "$tree" ] || continue
+        git -C "$PROJECT_DIR" worktree remove --force "$tree" > /dev/null 2>&1 || rmdir "$tree" 2> /dev/null
+    done
+    git -C "$PROJECT_DIR" worktree prune > /dev/null 2>&1
+}
+
+# Потолок из release-train.yaml, минуты → секунды.
+train_ceiling_sec() { # $1=release-train.yaml $2=ключ [$3=вложенный ключ]
+    python3 -I -c 'import sys, yaml
+value = yaml.safe_load(open(sys.argv[1], encoding="utf-8"))
+for key in sys.argv[2:]:
+    value = value[key]
+print(float(value) * 60)' "$@"
+}
+
+# Значение поля из последней строки журнала поезда, где поле_поиска = значение (и состояние, если названо).
+# Строка — событие events.emit: поля хода в data.
+train_journal_find() { # $1=журнал $2=поле $3=значение $4=поле ответа [$5=состояние]
+    python3 -I - "$@" <<'PY'
+import json, sys
+путь, поле, значение, ответ = sys.argv[1:5]
+состояние = sys.argv[5] if len(sys.argv) > 5 else None
+найдено = ""
+try:
+    строки = open(путь, encoding="utf-8").read().splitlines()
+except OSError:
+    строки = []
+for строка in строки:
+    try:
+        з = json.loads(строка)["data"]
+    except (ValueError, KeyError, TypeError):
+        continue
+    if (isinstance(з, dict) and з.get(поле) == значение and з.get(ответ)
+            and состояние in (None, з.get("состояние"))):
+        найдено = str(з[ответ])
+print(найдено)
+PY
+}
+
+# Прошлый выпуск — последний тег публичной ветки; коммит проекта, из которого он собран, —
+# по записи поезда. Выпуски до поезда пары не записали: тогда последний master проекта до
+# времени тега (публикация держит замок очереди, слияний между воротами и тегом нет).
+train_previous_release() { # $1=каталог журнала → TRAIN_PREV_*; 1 — прошлого выпуска нет
+    local sborka="$PUBLIC_BUILD_DIR" data
+    TRAIN_PREV_TAG=$(git -C "$sborka" describe --tags --abbrev=0 "$PUBLIC_REMOTE/$PUBLIC_BRANCH" 2>/dev/null) || return 1
+    TRAIN_PREV_PROJECT=$(train_journal_find "$1/$TRAIN_JOURNAL" тег "$TRAIN_PREV_TAG" срез_проекта выпущен)
+    TRAIN_PREV_LINK="запись"
+    [ -n "$TRAIN_PREV_PROJECT" ] && return 0
+    data=$(git -C "$sborka" log -1 --format=%cI "$TRAIN_PREV_TAG" 2>/dev/null) || return 1
+    TRAIN_PREV_PROJECT=$(git -C "$PROJECT_DIR" rev-list -1 --before="$data" master 2>/dev/null)
+    TRAIN_PREV_LINK="связь по времени"
+    [ -n "$TRAIN_PREV_PROJECT" ]
+}
+
+# Срез пакета — довод (после кнопки) или HEAD; срез проекта — из записи хода, резавшего этот
+# срез, иначе HEAD master. Влитое после среза едет следующим поездом.
+train_cut_slice() { # $1=каталог журнала $2=sha пакета из довода (пусто — HEAD) → 0, 1 отказ
+    local head after
+    head=$(git -C "$PACKAGE_DIR" rev-parse --verify -q HEAD) || { say "ОТКАЗ: HEAD пакета $PACKAGE_DIR не прочитан"; return 1; }
+    if ! TRAIN_SLICE_PACKAGE=$(git -C "$PACKAGE_DIR" rev-parse --verify -q "${2:-HEAD}^{commit}") \
+       || ! git -C "$PACKAGE_DIR" merge-base --is-ancestor "$TRAIN_SLICE_PACKAGE" "$head"; then
+        say "ОТКАЗ: среза пакета «$2» нет в истории пакета"; return 1
+    fi
+    [ -n "$2" ] && TRAIN_SLICE_PROJECT=$(train_journal_find "$1/$TRAIN_JOURNAL" срез_пакета "$TRAIN_SLICE_PACKAGE" срез_проекта)
+    if [ -z "$TRAIN_SLICE_PROJECT" ]; then
+        TRAIN_SLICE_PROJECT=$(git -C "$PROJECT_DIR" rev-parse --verify -q master) \
+            || { say "ОТКАЗ: master проекта $PROJECT_DIR не прочитан"; return 1; }
+    fi
+    say "срез: проект $TRAIN_SLICE_PROJECT, пакет $TRAIN_SLICE_PACKAGE"
+    after=$(git -C "$PACKAGE_DIR" rev-list --count "$TRAIN_SLICE_PACKAGE..$head")
+    [ "$after" = 0 ] || say "после среза влито $after коммит(ов) в пакет — следующий поезд"
+}
+
+# Сборщик, номер выпуска и судья чистоты читают пакет как каталог с HEAD. Срез — не HEAD,
+# поэтому им дан вид пакета на срезе: свой .git на объектах пакета (alternates) и с теми же
+# удалёнными — их адреса судья ищет в сборке. Сам пакет не трогается.
+train_package_view() { # $1=sha среза → PACKAGE_VIEW; 1 — отказ
+    local view objects remote
+    view=$(mktemp -d -t publish-train-package-XXXXXX) || { say "ОТКАЗ: каталог вида пакета не создан"; return 1; }
+    CLEANUP_DIRS+=("$view")
+    objects="$(git -C "$PACKAGE_DIR" rev-parse --path-format=absolute --git-common-dir)/objects"
+    if ! { git init -q "$view" && printf '%s\n' "$objects" > "$view/.git/objects/info/alternates" \
+           && git -C "$view" -c advice.detachedHead=false checkout -q --detach "$1"; }; then
+        say "ОТКАЗ: вид пакета на срезе ${1:0:12} не собран"; return 1
+    fi
+    for remote in $(git -C "$PACKAGE_DIR" remote); do
+        git -C "$view" remote add "$remote" "$(git -C "$PACKAGE_DIR" remote get-url "$remote")" || return 1
+    done
+    PACKAGE_VIEW="$view"
+}
+
+# Ядро — стоп-список release-train.yaml: любой красный — срез не едет.
+train_core() { # $1=корень (release-train.yaml, scripts/) $2=журнал ворот → 0 зелёное, 1 красное, 2 не дошло
+    local spisok imya komanda ceiling rc
+    if ! ceiling=$(train_ceiling_sec "$1/$TRAIN_CONFIG" ядро_потолок_мин 2>&1); then
+        TRAIN_CORE="не прочитано"; say "ОТКАЗ: потолок ядра не прочитан из $TRAIN_CONFIG: ${ceiling:0:200}"; return 1
+    fi
+    if ! spisok=$(python3 -I - "$1/$TRAIN_CONFIG" "$TRAIN_PREV_PROJECT" "$TRAIN_SLICE_PROJECT" 2>&1 <<'PY'
+import sys, yaml
+данные, прошлый, срез = sys.argv[1:4]
+for пункт in (yaml.safe_load(open(данные, encoding="utf-8")) or {}).get("ядро") or []:
+    команда = str(пункт["команда"]).replace("{прошлый}", прошлый).replace("{срез}", срез)
+    print(f"{пункт['имя']}\t{команда}")
+PY
+    ) || [ -z "$spisok" ]; then
+        TRAIN_CORE="не прочитано"; say "ОТКАЗ: ядро поезда не прочитано из $TRAIN_CONFIG: ${spisok:0:200}"; return 1
+    fi
+    while IFS=$'\t' read -r imya komanda; do
+        (cd "$1" && timeout --kill-after=30 "$ceiling" bash -c "$komanda") >> "$2" 2>&1 < /dev/null; rc=$?
+        case "$rc" in
+            0) ;;
+            124|137) TRAIN_CORE="не дошло: $imya"; return 2 ;;
+            *) TRAIN_CORE="красное: $imya"; say "ОТКАЗ: красное ядро — «$imya». Хвост:"; tail -5 "$2"; return 1 ;;
+        esac
+    done <<< "$spisok"
+    TRAIN_CORE="зелёное"
+}
+
+# Выбор — проверки gates.sh, задетые диапазоном (select-checks.py --поезд). Дольше потолка —
+# «не дошли»: молчание ворот не читается успехом. Код ворот не судья: карантин гасит его для
+# старой поломки в дереве, а поезд везёт срез к копиям — красная в диапазоне стоит и в карантине.
+train_selection() { # $1=каталог скриптов $2=журнал ворот → 0 зелёный, 1 красный, 2 не дошли
+    local imena potolok rc nachalo itog krasnye karantin imya held=() fresh=()
+    TRAIN_RED=0
+    imena=$(python3 -I "$1/select-checks.py" --корень "$(dirname "$1")" --поезд --имена \
+                    --диапазон "$TRAIN_PREV_PROJECT..$TRAIN_SLICE_PROJECT" 2>>"$2") || return 2
+    TRAIN_SELECTED=$(printf '%s' "$imena" | tr '|' '\n' | grep -c .)
+    [ -n "$imena" ] || return 0
+    potolok=$(train_ceiling_sec "$(dirname "$1")/$TRAIN_CONFIG" выбор потолок_мин 2>>"$2") || return 2
+    nachalo=$(( $(wc -l < "$2") + 1 ))
+    # --всё: тяжёлую пробу, названную во входы_проб, выбор берёт, а без флага gates.sh её не гонит.
+    timeout --kill-after=30 "$potolok" bash "$1/gates.sh" --только "$imena" --всё >> "$2" 2>&1 < /dev/null; rc=$?
+    case "$rc" in 124|137) return 2 ;; esac
+    itog=$(tail -n +"$nachalo" "$2")
+    TRAIN_RED=$(printf '%s\n' "$itog" | sed -n 's/^=== итог: зелёных [0-9]*, красных \([0-9]*\).*/\1/p' | tail -1)
+    krasnye=$(printf '%s\n' "$itog" | sed -n 's/^  ПЛОХО · \(.*\) (код [0-9]*).*/\1/p' | sort -u)
+    karantin=$(printf '%s\n' "$itog" | sed -n 's/^  карантин · \(.*\) — красный, .*/\1/p' | sort -u)
+    # Красная под годной карточкой карантина срез не держит (просроченная карточка строки «карантин ·»
+    # не получает — красная считается новой), но ходит именем в замок 1, запись хода и просьбу кнопки.
+    while IFS= read -r imya; do
+        [ -n "$imya" ] || continue
+        if grep -qxF -- "$imya" <<< "$karantin"; then held+=("$imya"); else fresh+=("$imya"); fi
+    done <<< "$krasnye"
+    TRAIN_QUARANTINED=${#held[@]}
+    TRAIN_QUARANTINED_NAMES=$(printf '%s\n' "${held[@]}" | paste -sd, - | sed 's/,/, /g')
+    TRAIN_RED_NAMES=$(printf '%s\n' "${fresh[@]}" | paste -sd, - | sed 's/,/, /g')
+    # Счёт итога — до вычета: красная без разобранного имени остаётся новой и стоит.
+    [[ "$TRAIN_RED" =~ ^[0-9]+$ ]] && TRAIN_RED=$(( TRAIN_RED - TRAIN_QUARANTINED ))
+    [ "$rc" = 0 ] && [ "$TRAIN_RED" = 0 ] && return 0
+    return 1
+}
+
+# Ключи двери согласия для поезда: срез и — чтобы владелец видел это на кнопке — карантинные красные выбора.
+train_guard_args() {
+    TRAIN_GUARD_ARGS=(--срез "$TRAIN_SLICE_PACKAGE")
+    [ "$TRAIN_QUARANTINED" -gt 0 ] && TRAIN_GUARD_ARGS+=(--в-карантине "$TRAIN_QUARANTINED_NAMES")
+}
+
+train_gates() { # $1=каталог журнала → 0 пустить, 1 стоп
+    local rc
+    if ! train_commit_ok "$TRAIN_SLICE_PROJECT" || ! train_commit_ok "$TRAIN_PREV_PROJECT"; then
+        TRAIN_GATES="отказ"
+        say "ОТКАЗ: срез «${TRAIN_SLICE_PROJECT:0:48}» или прошлый выпуск «${TRAIN_PREV_PROJECT:0:48}» — не коммит проекта; журнал поезда $1/$TRAIN_JOURNAL не годен"
+        return 1
+    fi
+    train_slice_tree || return 1
+    TRAIN_GATES_LOG="$1/release-train-gates-$(date +%Y%m%d-%H%M%S)-$BASHPID.log"
+    train_judge_slice "$TRAIN_TREE" "$TRAIN_GATES_LOG"; rc=$?
+    train_slice_tree_remove
+    return "$rc"
+}
+
+train_judge_slice() { # $1=дерево проекта на срезе $2=журнал ворот → 0 пустить, 1 стоп
+    local t0 rc quarantined=""
+    # Проверки берут проект по паспорту (PROJECT_DIR), а пакет — через katalog_paketa()
+    # (HARNESS_STARTER): без этих двух они судили бы живые проект и пакет, которые очередь
+    # двигает во время ворот, а не срез.
+    local -x PROJECT_DIR="$1" HARNESS_STARTER="$PACKAGE_VIEW"
+    t0=$(date +%s)
+    train_core "$1" "$2"; rc=$?
+    TRAIN_SEC_CORE=$(( $(date +%s) - t0 ))
+    case "$rc" in
+        1) TRAIN_STATE="красное ядро"; TRAIN_GATES="$TRAIN_STATE"; return 1 ;;
+        2) TRAIN_STATE="не дошли"; TRAIN_GATES="$TRAIN_STATE"
+           say "ОТКАЗ: ядро поезда не дошло за потолок — «${TRAIN_CORE#не дошло: }»; журнал: $2"; return 1 ;;
+    esac
+    t0=$(date +%s)
+    train_selection "$1/scripts" "$2"; rc=$?
+    TRAIN_SEC_SELECTION=$(( $(date +%s) - t0 ))
+    [ "$TRAIN_QUARANTINED" -gt 0 ] && quarantined=", в карантине $TRAIN_QUARANTINED: $TRAIN_QUARANTINED_NAMES"
+    say "замок 1 · ворота поезда: диапазон ${TRAIN_PREV_PROJECT:0:8}..${TRAIN_SLICE_PROJECT:0:8}, выбрано ${TRAIN_SELECTED:-?}, красных ${TRAIN_RED:-?}$quarantined, ядро $TRAIN_CORE, секунд $((TRAIN_SEC_CORE + TRAIN_SEC_SELECTION))"
+    case "$rc" in
+        0) TRAIN_GATES="зелёные"; return 0 ;;
+        2) TRAIN_STATE="не дошли"
+           say "ОТКАЗ: ворота поезда не дошли (предел выбора или сбой выбора) — срез не судим; журнал: $2" ;;
+        *) TRAIN_STATE="красный выбор"
+           say "ОТКАЗ: красные в выборе: ${TRAIN_RED_NAMES:-код ворот без имён, см. $2} — срез не едет" ;;
+    esac
+    TRAIN_GATES="$TRAIN_STATE"
+    return 1
+}
+
+# Посадка поезда: срез, прошлый выпуск, вид пакета на срезе и ворота по разнице.
+# Замок очереди — только на чтение пары HEAD проекта/пакета: очередь коммитит их парой, и срез
+# между ними разорвал бы пару. Дальше он не нужен: ворота идут в своём дереве проекта на срезе,
+# сборка и номер читают вид пакета на срезе, предмет согласия и сверка перед пушем называют срез,
+# а слияния лишь дописывают историю обоих. Держи поезд замок на воротах — очередь ждала бы их и
+# падала кодом 8. Зелёные ворота записываются сразу: дверь согласия этого же хода ищет их в журнале.
+train_board() { # $1=каталог журнала $2=sha пакета из довода $3=предел ожидания замка, с → 0 ехать, 1 стоп
+    local rc
+    TRAIN_STARTED=$(date +%s)
+    take_train_lock "$1" || return 1
+    train_sweep_trees
+    take_merge_queue_lock "$1" "$3" || return 1
+    train_cut_slice "$1" "$2"; rc=$?
+    release_merge_queue_lock
+    [ "$rc" = 0 ] || return 1
+    say "замок очереди слияния отпущен: срез снят, слияния идут, пока судятся ворота"
+    if ! train_previous_release "$1"; then
+        say "ОТКАЗ: прошлого выпуска нет — поезд не идёт; первая публикация — bash scripts/publish.sh --первая"
+        return 1
+    fi
+    say "прошлый выпуск: $TRAIN_PREV_TAG, проект $TRAIN_PREV_PROJECT ($TRAIN_PREV_LINK)"
+    PAKET_SHA="$TRAIN_SLICE_PACKAGE"
+    train_package_view "$PAKET_SHA" || return 1
+    train_gates "$1" || return 1
+    TRAIN_STATE="ворота зелёные"
+    train_record "$1" ""
+    TRAIN_STATE=""
+}
+
+# Одна строка на ход поезда; зовётся из обработчика выхода, поэтому пишет и оборванный ход.
+# Через общую дверь событий: журнал судим реестром, а писатель не дописывает его в обход.
+train_record() { # $1=каталог журнала $2=код хода
+    local seichas pola ishod=refused; seichas=$(date +%s)
+    case "$2" in ""|0) ishod=ok ;; esac
+    pola=$(python3 -I - "${TRAIN_STATE:-отказ}" "$2" "$TRAIN_SLICE_PROJECT" \
+        "$TRAIN_SLICE_PACKAGE" "$TRAIN_PREV_TAG" "$TRAIN_PREV_PROJECT" "$TRAIN_PREV_LINK" "$RELEASE_TAG" \
+        "$TRAIN_SELECTED" "$TRAIN_RED" "$TRAIN_CORE" "$TRAIN_SEC_CORE" "$TRAIN_SEC_SELECTION" \
+        "$(( TRAIN_STARTED > 0 ? seichas - TRAIN_STARTED : 0 ))" "$TRAIN_GATES" "$TRAIN_RED_NAMES" "$TRAIN_QUARANTINED" "$TRAIN_GATES_LOG" "$TRAIN_QUARANTINED_NAMES" \
+        <<'PY'
+import json, sys
+п = sys.argv[1:]
+число = lambda x: int(x) if x.isdigit() else None  # noqa: E731
+print(json.dumps({"состояние": п[0], "код": число(п[1]), "срез_проекта": п[2], "срез_пакета": п[3],
+                  "прошлый_тег": п[4], "прошлый_sha_проекта": п[5], "связь": п[6], "тег": п[7],
+                  "выбрано": число(п[8]), "красных": число(п[9]), "ядро": п[10],
+                  "секунды": {"ядро": число(п[11]), "выбор": число(п[12]), "всего": число(п[13])},
+                  "ворота": п[14], "красные": п[15], "в_карантине": число(п[16]),
+                  "журнал_ворот": п[17], "в_карантине_имена": п[18]}, ensure_ascii=False))
+PY
+    ) || { say "ВНИМАНИЕ: строка хода поезда не собрана"; return 0; }
+    HARNESS_LOG_DIR="$1" harness_event release-train scripts/publish.sh train.step "$ishod" --json "$pola"
+}
+
+# ── Замок 6в: заметки выпуска простым языком и тот же номер, что у тега ─────
+# Слово владельца 24.10.2026: «в релизы харнеса писать человеческим языком что было
+# исправлено добавлено». Судится и до кнопки (обе ветки зовут эту функцию): правка
+# заметок после «Да» сдвигает пакет и сжигает кнопку.
+# Номер считает version.py тем же счётом, что и тег; запись его только называет.
+next_release_number() { # $1=сборка $2=пакет → X.Y.Z; код 1 — причина вместо номера
+    local otvet
+    otvet=$(python3 -I "$SCRIPTS_REAL/version.py" --следующая --пакет "$2" --сборка "$1" \
+                    --удалённый "$PUBLIC_REMOTE" 2>&1) || { printf '%s' "$otvet"; return 1; }
+    printf '%s' "$otvet" | python3 -I -c 'import json,sys; print(json.load(sys.stdin)["следующая"])' 2>/dev/null \
+        || { printf 'ответ version.py не разобран: %s' "${otvet:0:120}"; return 1; }
+}
+
+# Пустой индекс сборки — повтор упавшей отправки или «публиковать нечего»: запись
+# тогда уже вышла по праву, судить нечего.
+judge_release_notes() { # $1=сборка (индекс собран) $2=пакет → 0 годится, 1 отказ
+    local sborka="$1" vyvod nomer nazvan
+    git -C "$sborka" diff --cached --quiet && { say "замок 6в · в сборке нового нет — заметки не судятся"; return 0; }
+    nomer=$(next_release_number "$sborka" "$2") || { say "ОТКАЗ: замок 6в · номер выпуска не посчитан — $nomer"; return 1; }
+    say "номер выпуска: v$nomer"
+    if ! vyvod=$(python3 -I "$SCRIPTS_REAL/check-release-notes.py" "$sborka" 2>&1); then
+        say "ОТКАЗ: релиз без записи простым языком — публикация отменена"
+        printf '%s\n' "$vyvod" | sed 's/^/  /'
+        return 1
+    fi
+    nazvan=$(grep -m1 '^## ' "$sborka/ЧТО-НОВОГО.md" | grep -oE 'Выпуск [0-9]+(\.[0-9]+)+' | head -1)
+    nazvan="${nazvan#Выпуск }"
+    if [ "$nazvan" != "$nomer" ]; then
+        say "ОТКАЗ: замок 6в · верхняя запись ЧТО-НОВОГО называет выпуск ${nazvan:-«без номера»}, а будет поставлен v$nomer — нужно «Выпуск $nomer»"
+        return 1
+    fi
+    say "замок 6в · заметки выпуска простым языком есть, номер v$nomer совпадает"
+}
+
 # ── Задачи, попадающие на витрину, обязаны быть ПРОВЕРЕНЫ владельцем ────────
 # Трейлер «Dev-Map: <id>» стоит в коммитах ПРОЕКТА, а публикуется ПАКЕТ: они
 # коммитятся парой, и связать их можно только временем. Поэтому спрашиваем:
@@ -225,17 +704,18 @@ zamok_vorot() { # $1=каталог журнала [$2=каталог скрип
 # Отказ git и пустая история — РАЗНЫЕ ответы (код 2 против пустого вывода):
 # «не прочитали» ≠ «нечего проверять», и замок, прочитавший отказ как чистоту,
 # выпустил бы наружу непроверенное ([[command-failure-read-as-empty]]).
-ids_iz_istorii() { # $1=момент ISO (пусто — вся история) → id задач из трейлеров
+ids_iz_istorii() { # $1=момент ISO (пусто — вся история) [$2=вершина истории, без неё HEAD] → id задач из трейлеров
     local since="$1" vyvod
     local ogr=()
     [ -n "$since" ] && ogr=(--since="$since")
-    vyvod=$(git -C "$PROJECT_DIR" log "${ogr[@]}" --format=%B 2>/dev/null) || return 2
+    vyvod=$(git -C "$PROJECT_DIR" log "${ogr[@]}" --format=%B "${2:-HEAD}" -- 2>/dev/null) || return 2
     printf '%s' "$vyvod" | sed -n 's/^Dev-Map: *//p' | sort -u
 }
 
 непроверенные_с() { # $1=момент ISO → печатает id задач, не готовых к витрине
     local ids rc
-    ids=$(ids_iz_istorii "$1"); rc=$?
+    # Поезд везёт срез проекта: задача, влитая после среза, едет следующим поездом и здесь не судится.
+    ids=$(ids_iz_istorii "$1" "${TRAIN_SLICE_PROJECT:-}"); rc=$?
     if [ "$rc" = 2 ]; then
         printf 'ОТКАЗ-ИСТОРИИ\n'   # читатель обязан остановиться, а не считать это чистотой
         return 0
@@ -252,11 +732,14 @@ ids_iz_istorii() { # $1=момент ISO (пусто — вся история) 
 # Наружу уезжает не пакет, а СБОРКА: инструмент без нашей мастерской. Порядок
 # замков — единственное, что здесь своё; сборка, поиск секретов и поиск следов
 # зовутся готовыми.
-опубликовать_сборку() {  # [--сухо] — прогнать замки 4-6 и выйти, ничего не отправляя
-    local sborka="$PUBLIC_BUILD_DIR" paket="$PACKAGE_DIR" itog hesh suho=0
-    [ "${1:-}" = "--сухо" ] && suho=1
+# [--сухо] — прогнать замки 4-6 и выйти, ничего не отправляя;
+# [--заметки] — собрать и судить только замок 6в (до кнопки: замки 5-6г тяжелее)
+опубликовать_сборку() {
+    local sborka="$PUBLIC_BUILD_DIR" paket="${PACKAGE_VIEW:-$PACKAGE_DIR}" itog hesh suho=0 rezhim="${1:-}"
+    [ "$rezhim" = "--сухо" ] && suho=1
     # Собирается ровно тот коммит пакета, на который дано согласие (замок 2): HEAD,
-    # прочитанный здесь заново, мог уйти вперёд за время замка 1.
+    # прочитанный здесь заново, мог уйти вперёд за время замка 1. У поезда paket — вид на
+    # срезе: его HEAD и есть срез, а сдвиг самого пакета после среза не мешает.
     local paket_sha="${PAKET_SHA:-$(git -C "$paket" rev-parse HEAD 2>/dev/null)}"
     # Прошлый выпуск — манифест в каталоге сборки: снять ДО сборки, она его заменит.
     local proshlyj=""
@@ -303,6 +786,7 @@ ids_iz_istorii() { # $1=момент ISO (пусто — вся история) 
     fi
     git -C "$sborka" fetch --quiet "$PUBLIC_REMOTE" 2>/dev/null || true
     git -C "$sborka" add -A
+    [ "$rezhim" = "--заметки" ] && { judge_release_notes "$sborka" "$paket"; return; }
 
     # Замок 5 (И-3): у нового репозитория своих хуков нет, и сторож секретов
     # его не сторожит — зовём явно, по временному индексу.
@@ -324,18 +808,7 @@ ids_iz_istorii() { # $1=момент ISO (пусто — вся история) 
     fi
     say "замок 6 · следов установки в сборке нет"
 
-    # Замок 6в: релиз уходит с записью простым языком (слово владельца 24.10.2026:
-    # «в релизы харнеса писать человеческим языком что было исправлено добавлено»).
-    # Судится только когда есть что выпускать: пустой индекс — это повтор упавшей
-    # отправки или «публиковать нечего», и запись тогда уже вышла по праву.
-    if ! git -C "$sborka" diff --cached --quiet; then
-        if ! vyvod=$(python3 -I "$SCRIPTS_REAL/check-release-notes.py" "$sborka" 2>&1); then
-            say "ОТКАЗ: релиз без записи простым языком — публикация отменена"
-            printf '%s\n' "$vyvod" | sed 's/^/  /'
-            return 1
-        fi
-        say "замок 6в · заметки выпуска простым языком есть"
-    fi
+    judge_release_notes "$sborka" "$paket" || return 1
 
     # Замок 6г: типовая чистая копия — прошлый выпуск обновляется до этого сборкой
     # копии (не наш пользователь, не наш tmux, без HARNESS_DEV_GATES), самопроверка без
@@ -436,7 +909,8 @@ ids_iz_istorii() { # $1=момент ISO (пусто — вся история) 
         say "ОТКАЗ: пакет сдвинулся после согласия — не отправлено"; return 1
     fi
     if [ -n "${PREDMET_ZAMKA:-}" ] && ! vyvod=$(python3 -I "$SCRIPTS_REAL/lib/door_subjects.py" \
-            сверить-публикацию "$PREDMET_ZAMKA" "$paket" "$sborka" "$PUBLIC_REMOTE" "$PUBLIC_BRANCH" 2>&1); then
+            сверить-публикацию "$PREDMET_ZAMKA" "$PACKAGE_DIR" "$sborka" "$PUBLIC_REMOTE" "$PUBLIC_BRANCH" \
+            ${PACKAGE_VIEW:+"$paket_sha" "${LOG_DIR:-}/$TRAIN_JOURNAL"} 2>&1); then
         say "ОТКАЗ: предмет публикации изменился после согласия — не отправлено: $vyvod"; return 1
     fi
 
@@ -479,9 +953,27 @@ ids_iz_istorii() { # $1=момент ISO (пусто — вся история) 
             return 1
         fi
         say "релиз помечен: $teg"
+        RELEASE_TAG="$teg"
     fi
     say "опубликовано: $PUBLIC_BRANCH ← сборка из пакета $hesh"
     return 0
+}
+
+# Прогоны до боевой сборки (заметки до кнопки, сухой) собирают в копии каталога сборки:
+# общий PUBLIC_BUILD_DIR хранит манифест прошлого выпуска, по которому просьба кнопки
+# (ask-consent.py) и боевая сборка называют смену личности/стандартов. Копия несёт и
+# .git сборки: номер выпуска и прошлый выпуск для замка 6г считаются по нему.
+build_in_scratch() { # $1=режим опубликовать_сборку → её код
+    local kopiya rc
+    kopiya=$(mktemp -d -t publish-scratch-build-XXXXXX) \
+        || { say "ОТКАЗ: временный каталог сборки не создан"; return 1; }
+    CLEANUP_DIRS+=("$kopiya")
+    if [ -d "$PUBLIC_BUILD_DIR" ] && ! cp -a "$PUBLIC_BUILD_DIR/." "$kopiya/"; then
+        say "ОТКАЗ: каталог сборки не скопирован во временный: $kopiya"; return 1
+    fi
+    PUBLIC_BUILD_DIR="$kopiya" опубликовать_сборку "$1"; rc=$?
+    rm -rf "$kopiya"
+    return "$rc"
 }
 
 # ── Дверь переписи публичной истории ───────────────────────────────────────
@@ -558,12 +1050,7 @@ proverit_chistotu_kopii() { # $1=копия $2=паспорт
 
 # Согласие владельца на перепись — «Да» кнопкой на предмет переписи (вершина удалённого ДО входит
 # в предмет: после переписи прежнее «Да» повторный force-push не откроет). Нет кнопки — ворота
-# сами просят её; рабочий каталог двери убирается на выходе.
-RABOCHIJ_KATALOG_DVERI=""
-zavershit_dver() {
-    [ -z "$RABOCHIJ_KATALOG_DVERI" ] || rm -rf "$RABOCHIJ_KATALOG_DVERI"
-}
-
+# сами просят её; рабочий каталог двери убирает обработчик выхода.
 PREDMET_PEREPISI=""
 vzyat_soglasie_dveri() { # $1=копия
     local otvet
@@ -590,7 +1077,7 @@ perevesti_sborku() { # $1=адрес $2=новый sha ветки
 }
 
 perepisat_istoriyu() { # $1=каталог копии $2=файл бэкапа
-    local kopiya bekap adres pasport tam u_nas refy="" stroka sha ref novyj soobshchenie
+    local kopiya bekap adres pasport tam u_nas refy="" stroka sha ref novyj soobshchenie rabochij
     local -a arendy=() spisok=()
     kopiya=$(readlink -f "$1" 2>/dev/null); bekap=$(readlink -f "$2" 2>/dev/null)
     say "=== перепись публичной истории: копия → $PUBLIC_REMOTE/$PUBLIC_BRANCH ==="
@@ -599,9 +1086,9 @@ perepisat_istoriyu() { # $1=каталог копии $2=файл бэкапа
     git -C "$kopiya" rev-parse -q --verify "refs/heads/$PUBLIC_BRANCH" >/dev/null \
         || { say "ОТКАЗ: в копии нет ветки «$PUBLIC_BRANCH»"; return 1; }
     [ -n "$bekap" ] || { say "ОТКАЗ: не указан бэкап (bundle): --бэкап <файл.bundle>"; return 1; }
-    RABOCHIJ_KATALOG_DVERI=$(mktemp -d)
-    trap zavershit_dver EXIT
-    proverit_bekap "$bekap" "$RABOCHIJ_KATALOG_DVERI" || return 1
+    rabochij=$(mktemp -d)
+    CLEANUP_DIRS+=("$rabochij")
+    proverit_bekap "$bekap" "$rabochij" || return 1
     say "бэкап: $bekap, sha256 $(sha256sum "$bekap" | cut -d' ' -f1)"
 
     adres=$(git -C "$PACKAGE_DIR" remote get-url "$PUBLIC_REMOTE" 2>/dev/null || true)
@@ -717,6 +1204,15 @@ if [ "${1:-}" = "--selftest" ]; then
     else
         echo "  ПЛОХО коммит без трейлера попал в счёт"; ok=0
     fi
+    # Поезд судит замок 3 до СРЕЗА проекта: задача, влитая после среза, едет следующим поездом.
+    DO_SREZA=$(git -C "$ISTORIYA_DVOR" rev-parse HEAD~1)
+    printf 'lines: []\n' > "$ISTORIYA_DVOR/dev-map.yaml"
+    if [ -z "$(PROJECT_DIR="$ISTORIYA_DVOR" TRAIN_SLICE_PROJECT="$DO_SREZA" непроверенные_с "")" ] \
+       && [ -n "$(PROJECT_DIR="$ISTORIYA_DVOR" TRAIN_SLICE_PROJECT="" непроверенные_с "")" ]; then
+        echo "  ок    БОЛЬНОЙ СЛУЧАЙ: поезд — замок 3 читает трейлеры до среза проекта, не до HEAD"
+    else
+        echo "  ПЛОХО поезд: замок 3 судит трейлер, влитый после среза проекта"; ok=0
+    fi
     # ОТКАЗ git ≠ пустая история: замок, прочитавший отказ как чистоту, выпустил
     # бы наружу непроверенное.
     PROJECT_DIR="$ISTORIYA_DVOR/нет-такого" ids_iz_istorii "" >/dev/null 2>&1
@@ -763,7 +1259,7 @@ if [ "${1:-}" = "--selftest" ]; then
         printf 'исключить: []\nзаменить_шаблоном:\n  harness/память/TONE.md: harness/шаблоны-задач/ТОН-заготовка.md\nобезличить_ключи: [PROJECT_DIR]\nоставить: [harness/CLAUDE.md]\n' \
             > "$dvor/пакет/harness/config/public-build.yaml"
         : > "$dvor/пакет/ЧТО-НОВОГО.md"
-        proba_zapis "$dvor" "Первый выпуск"
+        proba_zapis "$dvor" "${2:-Выпуск 0.1.0: первый}"
         git -C "$dvor/пакет" init -q -b master
         git -C "$dvor/пакет" add -A
         git -C "$dvor/пакет" -c user.name=t -c user.email=t@t commit -qm проба
@@ -827,9 +1323,12 @@ if [ "${1:-}" = "--selftest" ]; then
        && grep -q build "$T/в2/звали" && grep -q 'ворота пропущены по слову владельца «без прогона полного»' "$T/в2/лог/publish.log"; then
         echo "  ок    запись о пропуске — быстрое подмножество и строка в журнале публикации"
     else echo "  ПЛОХО запись о пропуске не открыла быструю дверь: ${OUT:0:150}"; ok=0; fi
-    OUT=$(proba_vorota "$T/в3" "$(zapis_propuska -7200 -60)"); if printf '%s' "$OUT" | grep -q 'rc=1' \
-       && printf '%s' "$OUT" | grep -q 'просрочена' && [ ! -e "$T/в3/звали" ]; then
-        echo "  ок    БОЛЬНОЙ СЛУЧАЙ: просроченная запись о пропуске — отказ, ворота не звались"
+    # Просроченная запись — записи нет: полный прогон, как без неё, а не отказ.
+    OUT=$(proba_vorota "$T/в3" "$(zapis_propuska -7200 -60)"); if printf '%s' "$OUT" | grep -q 'rc=0' \
+       && printf '%s' "$OUT" | grep -q 'пропуск ворот просрочен (до .*) — как нет пропуска' \
+       && ! printf '%s' "$OUT" | grep -q 'ОТКАЗ' \
+       && grep -qx 'gates ' "$T/в3/звали" && ! grep -q -- 'хакатон' "$T/в3/звали"; then
+        echo "  ок    БОЛЬНОЙ СЛУЧАЙ: просроченная запись о пропуске — полный прогон, не отказ"
     else echo "  ПЛОХО просроченная запись: ${OUT:0:150}"; ok=0; fi
     OUT=$(proba_vorota "$T/в4" "$(zapis_propuska -60 999999)"); if printf '%s' "$OUT" | grep -q 'rc=1' \
        && printf '%s' "$OUT" | grep -q 'срок' && [ ! -e "$T/в4/звали" ]; then
@@ -857,6 +1356,44 @@ if [ "${1:-}" = "--selftest" ]; then
        && grep -q 'задача-а, задача-б' "$T/с3/ушло" && grep -q 'статусы пропущены по слову владельца «без прогона полного»' "$T/с3/лог/publish.log"; then
         echo "  ок    запись о пропуске — статусы пропущены, список ушёл владельцу, строка в журнале"
     else echo "  ПЛОХО статусы по записи: ${OUT:0:150}"; ok=0; fi
+
+    # ЗАМОК ОЧЕРЕДИ СЛИЯНИЯ: пока публикация его держит, take_lock самой очереди
+    # (merge-queue.py, не копия правила) не берёт его; занятый — ожидание и отказ вслух.
+    queue_takes_lock() { # $1=каталог журнала → код take_lock очереди за 1 с: 0 взяла, 8 занято
+        python3 -I - "$SCRIPTS_REAL/merge-queue.py" "$1" <<'PY'
+import importlib.util, sys, types
+from pathlib import Path
+spec = importlib.util.spec_from_file_location("queue", sys.argv[1]); queue = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(queue)
+try:
+    queue.take_lock(types.SimpleNamespace(log_dir=Path(sys.argv[2]), wait_seconds=1))[0].close()
+except queue.Stop as stop:
+    sys.exit(stop.code)
+PY
+    }
+    mkdir -p "$T/очередь"
+    flock -x "$T/очередь/merge-queue.lock" sleep 5 &
+    HOLDER_PID=$!
+    sleep 1
+    OUT=$( (take_merge_queue_lock "$T/очередь" 1; echo "rc=$?") 2>&1 )
+    if printf '%s' "$OUT" | grep -q 'rc=1' && printf '%s' "$OUT" | grep -q 'очередь слияния занята, жду' \
+       && printf '%s' "$OUT" | grep -q 'ОТКАЗ'; then
+        echo "  ок    БОЛЬНОЙ СЛУЧАЙ: очередь сливает — публикация ждёт и отказывает вслух по пределу"
+    else echo "  ПЛОХО занятая очередь: ${OUT:0:150}"; ok=0; fi
+    wait "$HOLDER_PID"
+    OUT=$( (take_merge_queue_lock "$T/очередь" 60 && queue_takes_lock "$T/очередь"; echo "rc=$?") 2>&1 )
+    AFTER_EXIT=$(queue_takes_lock "$T/очередь" >/dev/null 2>&1; echo $?)
+    if printf '%s' "$OUT" | grep -q 'rc=8' && [ "$AFTER_EXIT" = 0 ]; then
+        echo "  ок    публикация держит замок очереди слияния: очередь не сливает, после выхода замок свободен"
+    else echo "  ПЛОХО замок очереди: пока держит публикация — ${OUT:0:120}; после выхода — код $AFTER_EXIT"; ok=0; fi
+    # Осиротевший потомок публикации (setsid, переживает её) замка не держит: обработчик
+    # выхода в подоболочке не стоит, отпускает только закрытая труба держателя.
+    ( take_merge_queue_lock "$T/очередь" 5 && { setsid sleep 30 & echo "$!" > "$T/очередь/сирота"; } ) >/dev/null 2>&1
+    AFTER_ORPHAN=$(queue_takes_lock "$T/очередь" >/dev/null 2>&1; echo $?)
+    kill "$(cat "$T/очередь/сирота" 2>/dev/null)" 2>/dev/null
+    if [ -s "$T/очередь/сирота" ] && [ "$AFTER_ORPHAN" = 0 ]; then
+        echo "  ок    БОЛЬНОЙ СЛУЧАЙ: потомок пережил публикацию — очередь берёт замок сразу"
+    else echo "  ПЛОХО осиротевший потомок держит очередь: код take_lock $AFTER_ORPHAN"; ok=0; fi
 
     # СУХОЙ ПРОГОН: замки 4-6 обязаны выполниться, а коммита и отправки быть не
     # должно. Прежде «--проверка» печатала «публиковать можно», не выполнив ни
@@ -947,7 +1484,7 @@ if [ "${1:-}" = "--selftest" ]; then
     mkdir -p "$T/здоровый/пакет/harness/demons"
     printf '#!/bin/sh\necho второй демон присмотра\n' \
         > "$T/здоровый/пакет/harness/demons/новый.sh"
-    proba_zapis "$T/здоровый" "Второй выпуск"
+    proba_zapis "$T/здоровый" "Выпуск 0.2.0: второй"
     git -C "$T/здоровый/пакет" add -A
     git -C "$T/здоровый/пакет" -c user.name=t -c user.email=t@t commit -qm "новый демон"
     OUT=$(proba_publ "$T/здоровый"); RC=$?
@@ -966,7 +1503,7 @@ if [ "${1:-}" = "--selftest" ]; then
     # БОЛЬНОЙ (замок 6г): типовая чистая копия нашла новую красную — выпуск не уходит,
     # в отказе имя проверки и причина; судье дан прошлый выпуск с удалённого.
     printf 'ещё механизм\n' > "$T/здоровый/пакет/harness/demons/третий.sh"
-    proba_zapis "$T/здоровый" "Выпуск с красной копии"
+    proba_zapis "$T/здоровый" "Выпуск 0.3.0: с красной копии"
     git -C "$T/здоровый/пакет" add -A
     git -C "$T/здоровый/пакет" -c user.name=t -c user.email=t@t commit -qm "красная копии"
     BYLO=$(kommitov "$T/здоровый/удалённый.git")
@@ -991,7 +1528,7 @@ if [ "${1:-}" = "--selftest" ]; then
     git -C "$CHUZHOJ/копия" push -q origin master
     BYLO=$(kommitov "$T/здоровый/удалённый.git")
     printf 'ещё\n' > "$T/здоровый/пакет/новое.txt"
-    proba_zapis "$T/здоровый" "Третий выпуск"
+    proba_zapis "$T/здоровый" "Выпуск 0.3.0: третий"
     git -C "$T/здоровый/пакет" add -A
     git -C "$T/здоровый/пакет" -c user.name=t -c user.email=t@t commit -qm ещё
     OUT=$(proba_publ "$T/здоровый"); RC=$?
@@ -1070,6 +1607,520 @@ if [ "${1:-}" = "--selftest" ]; then
     else
         echo "  ПЛОХО релиз без записи не остановлен: код $RC, коммитов было $BYLO, ${OUT:0:120}"; ok=0
     fi
+
+    # ЗАМОК 6в В «--проверка»: заметки и номер выпуска судятся ДО кнопки — правка заметок
+    # после «Да» сдвигает пакет и сжигает кнопку.
+    # Стенд — копия двери со своим паспортом; судья согласия подставной и оставляет след.
+    # Временное стенда — в своём TMPDIR: проба видит, убрано ли оно.
+    proba_stend() { # $1=двор $2=тело deploy_guard.py, дальше — доводы двери → вывод и rc
+        local d="$1" s="$1/стенд" telo="$2" f
+        shift 2
+        mkdir -p "$s/scripts" "$d/tmp"
+        cp "$SCRIPTS_REAL/publish.sh" "$s/scripts/publish.sh"
+        ln -s "$SCRIPTS_REAL/lib" "$s/scripts/lib"
+        for f in build-public.py version.py check-release-notes.py; do ln -s "$SCRIPTS_REAL/$f" "$s/scripts/$f"; done
+        printf '%s\n' "$telo" > "$s/scripts/deploy_guard.py"
+        { cat "$d/паспорт.conf"; printf 'STARTER_DIR="%s"\n' "$d/пакет"; } > "$s/install.conf"
+        cp "$d/харнес.conf" "$s/harness.conf"
+        TMPDIR="$d/tmp" HARNESS_DOOR_STAND_HOME="$s" bash "$s/scripts/publish.sh" "$@" 2>&1; echo "rc=$?"
+    }
+    read -r -d '' SUDYA_NET <<'PY' || true
+import pathlib, sys
+(pathlib.Path(__file__).resolve().parents[2] / "согласие-звали").touch()
+print("согласия нет (подставной судья)")
+sys.exit(1)
+PY
+    proba_proverki() { proba_stend "$1" "$SUDYA_NET" --проверка; }
+    proba_dvor "$T/номер" "Выпуск 0.2.0: не тот номер"
+    OUT=$(proba_proverki "$T/номер")
+    if printf '%s' "$OUT" | grep -q 'номер выпуска: v0.1.0' && printf '%s' "$OUT" | grep -q 'ОТКАЗ.*0\.2\.0.*v0\.1\.0' \
+       && ! printf '%s' "$OUT" | grep -q 'rc=0' && [ ! -e "$T/номер/согласие-звали" ]; then
+        echo "  ок    БОЛЬНОЙ СЛУЧАЙ: --проверка: запись называет не тот номер — красный 6в с обоими номерами, до кнопки"
+    else echo "  ПЛОХО номер в заметках не сверен до кнопки: $(printf '%s' "$OUT" | tail -4 | tr '\n' ' ')"; ok=0; fi
+    # Манифест прошлого выпуска в общем каталоге сборки — опора строки «меняются
+    # личность/стандарты» в просьбе кнопки: ранний суд обязан его не тронуть.
+    proba_manifest() { # $1=двор: кладёт манифест «прошлого выпуска» в каталог сборки с меткой
+        mkdir -p "$1/сборка/harness/self"
+        : > "$1/сборка/.публичная-сборка"
+        printf 'прошлый выпуск  harness/self/core.json\n' > "$1/сборка/harness/self/MANIFEST.sha256"
+        cp "$1/сборка/harness/self/MANIFEST.sha256" "$1/манифест-до"
+    }
+    sborka_ne_tronuta() { # $1=двор → 0, если в каталоге сборки только метка и манифест-до, временное убрано
+        cmp -s "$1/сборка/harness/self/MANIFEST.sha256" "$1/манифест-до" \
+            && [ "$(find "$1/сборка" -type f | wc -l)" = 2 ] && [ -z "$(ls -A "$1/tmp")" ]
+    }
+    proba_dvor "$T/проверка"
+    proba_manifest "$T/проверка"
+    OUT=$(proba_proverki "$T/проверка")
+    if printf '%s' "$OUT" | grep -q 'номер выпуска: v0.1.0' \
+       && printf '%s' "$OUT" | grep -q 'замок 6в · заметки выпуска простым языком есть' \
+       && [ -e "$T/проверка/согласие-звали" ]; then
+        echo "  ок    --проверка: заметки и номер судятся до кнопки, затем спрашивается согласие"
+    else echo "  ПЛОХО --проверка не судит заметки до кнопки: $(printf '%s' "$OUT" | tail -4 | tr '\n' ' ')"; ok=0; fi
+    if sborka_ne_tronuta "$T/проверка"; then
+        echo "  ок    БОЛЬНОЙ СЛУЧАЙ: ранний суд заметок собирает во временном — манифест прошлого выпуска цел, временное убрано"
+    else echo "  ПЛОХО ранний суд тронул общий каталог сборки или не убрал временное: $(find "$T/проверка/сборка" "$T/проверка/tmp" -maxdepth 3 | head -5 | tr '\n' ' ')"; ok=0; fi
+
+    # Ранняя сборка упала — отказ сразу, с причиной, до кнопки.
+    proba_dvor "$T/несборка"
+    printf 'исключить: [\n' > "$T/несборка/пакет/harness/config/public-build.yaml"
+    git -C "$T/несборка/пакет" -c user.name=t -c user.email=t@t commit -qam "сломанный конфиг сборки"
+    OUT=$(proba_proverki "$T/несборка")
+    if printf '%s' "$OUT" | grep -q 'ОТКАЗ: сборка не прошла' && printf '%s' "$OUT" | grep -q 'rc=1' \
+       && [ ! -e "$T/несборка/согласие-звали" ]; then
+        echo "  ок    БОЛЬНОЙ СЛУЧАЙ: ранняя сборка упала — отказ с причиной до кнопки"
+    else echo "  ПЛОХО упавшая ранняя сборка не отказала: $(printf '%s' "$OUT" | tail -3 | tr '\n' ' ')"; ok=0; fi
+
+    # БОЕВОЙ ХОД держит замок очереди, пока зовёт ворота: подставной судья согласия сам
+    # пробует замок и оставляет потомка, переживающего публикацию. После выхода очередь
+    # берёт замок сразу.
+    read -r -d '' SUDYA_ZAMOK <<'PY' || true
+import fcntl, pathlib, subprocess, sys
+двор = pathlib.Path(__file__).resolve().parents[2]
+(двор / "согласие-звали").touch()
+сирота = subprocess.Popen(["sleep", "30"], start_new_session=True, close_fds=False,
+                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+(двор / "сирота").write_text(str(сирота.pid))
+with open(двор / "merge-queue.lock", "a") as замок:
+    try:
+        fcntl.flock(замок, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        print("замок очереди свободен (подставной судья)")
+    except BlockingIOError:
+        print("замок очереди держится (подставной судья)")
+sys.exit(1)
+PY
+    proba_dvor "$T/боевой"
+    proba_manifest "$T/боевой"
+    OUT=$(proba_stend "$T/боевой" "$SUDYA_ZAMOK")
+    AFTER_RUN=$(queue_takes_lock "$T/боевой" >/dev/null 2>&1; echo $?)
+    kill "$(cat "$T/боевой/сирота" 2>/dev/null)" 2>/dev/null
+    if printf '%s' "$OUT" | grep -q 'замок очереди держится' && [ "$AFTER_RUN" = 0 ]; then
+        echo "  ок    боевой ход: ворота зовутся под замком очереди, после выхода замок свободен при живом потомке"
+    else echo "  ПЛОХО боевой ход и замок очереди: take_lock после выхода $AFTER_RUN; $(printf '%s' "$OUT" | tail -3 | tr '\n' ' ')"; ok=0; fi
+    if sborka_ne_tronuta "$T/боевой"; then
+        echo "  ок    боевой ход до кнопки не трогает общий каталог сборки"
+    else echo "  ПЛОХО боевой ход тронул каталог сборки до кнопки"; ok=0; fi
+
+    # Предел ожидания очереди не целый — отказ «не настроено», а не синтаксическая ошибка bash.
+    proba_dvor "$T/предел"
+    printf 'MERGE_QUEUE_WAIT_MIN="0.5"\n' >> "$T/предел/харнес.conf"
+    OUT=$(proba_stend "$T/предел" "$SUDYA_NET")
+    if printf '%s' "$OUT" | grep -q 'MERGE_QUEUE_WAIT_MIN=«0.5».*целое число минут' && printf '%s' "$OUT" | grep -q 'rc=2' \
+       && ! printf '%s' "$OUT" | grep -qi 'syntax\|синтакс' && [ ! -e "$T/предел/согласие-звали" ]; then
+        echo "  ок    БОЛЬНОЙ СЛУЧАЙ: дробный предел ожидания очереди — понятный отказ, кнопку не просили"
+    else echo "  ПЛОХО дробный предел очереди: $(printf '%s' "$OUT" | tail -3 | tr '\n' ' ')"; ok=0; fi
+
+    # ── ПОЕЗД ВЫПУСКОВ: ворота судят разницу с прошлым выпуском, согласие и публикация — срез ──
+    # Двор поезда — git-проект с двумя проверками: «правленая» (её файл в диапазоне) и «старая
+    # красная» (красная, файл вне диапазона). Выбор считает НАСТОЯЩИЙ select-checks.py по
+    # подставному gates.sh; ядро — подставной скрипт, код берёт из файла двора.
+    proba_poezd_dvor() { # $1=двор → проект: прошлый выпуск, правка a.sh, документ, правка old-red.sh
+        local d="$1" p="$1/проект"
+        mkdir -p "$p/scripts" "$p/harness/config" "$p/docs" "$d/лог"
+        # Пути двора — абсолютные: ворота идут во временном дереве проекта, а не в нём самом.
+        { printf 'D="%s"\n' "$d"; cat <<'SH'
+    echo "gates $*" >> "$D/звали"
+    ONLY="${2:-}"; GREEN=0; RED=0
+    cd "$(dirname "$0")/.." || exit 2
+    проверка() {
+        local n="$1"; shift
+        case "|$ONLY|" in *"|$n|"*) ;; *) return ;; esac
+        if "$@" > /dev/null 2>&1; then GREEN=$((GREEN + 1)); else RED=$((RED + 1)); printf '  ПЛОХО · %s (код 1)\n' "$n"; fi
+    }
+    проверка "правленая" bash scripts/a.sh
+    проверка "старая красная" bash scripts/old-red.sh
+    echo "=== итог: зелёных $GREEN, красных $RED ==="
+    # Просроченный срок gates-quarantine.py судит как беду карантина: строки «карантин ·» нет, код 1.
+    if [ -e "$D/карантин-просрочен" ] && [ "$RED" != 0 ]; then
+        echo "  ПЛОХО · карантин: старая красная — срок карточки hr.proba истёк 2000-01-01"; exit 1
+    fi
+    if [ -e "$D/карантин" ] && [ "$RED" != 0 ]; then
+        echo "  карантин · старая красная — красный, карточка hr.proba, до 2099-01-01"; exit 0
+    fi
+    # Беда карантина: красная названа под карточкой, а судья всё равно вернул ненулевой код.
+    if [ -e "$D/карантин-беда" ] && [ "$RED" != 0 ]; then
+        echo "  карантин · старая красная — красный, карточка hr.proba, до 2099-01-01"; exit 1
+    fi
+    [ "$RED" = 0 ]
+SH
+        } > "$p/scripts/gates.sh"
+        printf '[ -e "%s/медленно" ] && sleep 30\n[ -f "%s/по-паспорту" ] && { bash "%s/по-паспорту" || exit 1; }\nexit 0\n' \
+            "$d" "$d" "$d" > "$p/scripts/a.sh"
+        printf 'exit 1\n' > "$p/scripts/old-red.sh"
+        printf 'echo "ядро $*" >> "%s/звали"\n' "$d" > "$p/scripts/core.sh"
+        printf '[ -f "%s/очередь-путь" ] && { flock -n "$(cat "%s/очередь-путь")" true; echo "очередь во время ворот: $?" >> "%s/звали"; }\n' \
+            "$d" "$d" "$d" >> "$p/scripts/core.sh"
+        printf '[ -f "%s/поезд-путь" ] && { flock -n "$(cat "%s/поезд-путь")" true; echo "поезд во время ворот: $?" >> "%s/звали"; }\n' \
+            "$d" "$d" "$d" >> "$p/scripts/core.sh"
+        printf '[ -f "%s/во-время-ядра" ] && bash "%s/во-время-ядра"\n[ -e "%s/ядро-медленно" ] && sleep 30\n' \
+            "$d" "$d" "$d" >> "$p/scripts/core.sh"
+        printf '[ -f "%s/по-паспорту" ] && { bash "%s/по-паспорту" || exit 1; }\n' "$d" "$d" >> "$p/scripts/core.sh"
+        printf 'exit "$(cat "%s/ядро-код" 2>/dev/null || echo 0)"\n' "$d" >> "$p/scripts/core.sh"
+        printf 'ядро:\n  - имя: секреты по диапазону\n    команда: "bash scripts/core.sh {прошлый}..{срез}"\nядро_потолок_мин: 0.05\nвыбор: { потолок_мин: 0.05 }\n' \
+            > "$p/harness/config/release-train.yaml"
+        printf 'механизмы: []\n' > "$p/harness/config/mechanisms.yaml"
+        ln -s "$SCRIPTS_REAL/select-checks.py" "$p/scripts/select-checks.py"
+        git -C "$p" init -q -b master
+        git -C "$p" add -A && git -C "$p" -c user.name=t -c user.email=t@t commit -qm "прошлый выпуск"
+        printf '# правка\n' >> "$p/scripts/a.sh"
+        git -C "$p" -c user.name=t -c user.email=t@t commit -qam "правка a.sh"
+        printf 'документ\n' > "$p/docs/readme.md"
+        git -C "$p" add -A && git -C "$p" -c user.name=t -c user.email=t@t commit -qm "документ"
+        printf '# правка\n' >> "$p/scripts/old-red.sh"
+        git -C "$p" -c user.name=t -c user.email=t@t commit -qam "правка old-red.sh"
+    }
+    proba_poezd_vorota() { # $1=двор $2=прошлый $3=срез → вывод замка 1, rc и состояние поезда
+        rm -f "$1/звали"
+        ( PROJECT_DIR="$1/проект"; TRAIN_PREV_PROJECT="$2"; TRAIN_SLICE_PROJECT="$3"
+          train_gates "$1/лог" 2>&1; echo "rc=$? состояние=${TRAIN_STATE:-} ворота=${TRAIN_GATES:-} ядро=${TRAIN_CORE:-} красных=${TRAIN_RED:-} карантин=${TRAIN_QUARANTINED:-}: ${TRAIN_QUARANTINED_NAMES:-}" )
+    }
+    PD="$T/поезд"
+    proba_poezd_dvor "$PD"
+    S0=$(git -C "$PD/проект" rev-parse HEAD~3); S1=$(git -C "$PD/проект" rev-parse HEAD~2)
+    S2=$(git -C "$PD/проект" rev-parse HEAD~1); S3=$(git -C "$PD/проект" rev-parse HEAD)
+    OUT=$(proba_poezd_vorota "$PD" "$S0" "$S2")
+    if printf '%s' "$OUT" | grep -q 'rc=0 состояние= ворота=зелёные' \
+       && printf '%s' "$OUT" | grep -q "замок 1 · ворота поезда: диапазон ${S0:0:8}..${S2:0:8}, выбрано 1, красных 0, ядро зелёное, секунд [0-9]" \
+       && grep -qx 'gates --только правленая --всё' "$PD/звали" && grep -qx "ядро $S0..$S2" "$PD/звали"; then
+        echo "  ок    БОЛЬНОЙ СЛУЧАЙ: поезд — красное вне диапазона не останавливает, выбор по диапазону и ядро"
+    else echo "  ПЛОХО поезд: красное вне диапазона: $(printf '%s' "$OUT" | tail -3 | tr '\n' ' ') | $(tr '\n' ' ' < "$PD/звали" 2>/dev/null)"; ok=0; fi
+    echo 1 > "$PD/ядро-код"
+    OUT=$(proba_poezd_vorota "$PD" "$S0" "$S2")
+    rm -f "$PD/ядро-код"
+    if printf '%s' "$OUT" | grep -q 'rc=1 состояние=красное ядро' && printf '%s' "$OUT" | grep -q 'ОТКАЗ: красное ядро — «секреты по диапазону»' \
+       && ! grep -q '^gates' "$PD/звали"; then
+        echo "  ок    БОЛЬНОЙ СЛУЧАЙ: поезд — красное ядро останавливает, выбор не гоняется"
+    else echo "  ПЛОХО поезд: красное ядро: $(printf '%s' "$OUT" | tail -3 | tr '\n' ' ')"; ok=0; fi
+    touch "$PD/медленно"
+    OUT=$(proba_poezd_vorota "$PD" "$S0" "$S2")
+    rm -f "$PD/медленно"
+    if printf '%s' "$OUT" | grep -q 'rc=1 состояние=не дошли' && printf '%s' "$OUT" | grep -q 'ворота поезда не дошли' \
+       && ! printf '%s' "$OUT" | grep -q 'красные в выборе'; then
+        echo "  ок    БОЛЬНОЙ СЛУЧАЙ: поезд — выбор дольше потолка: «не дошли», а не «красные» и не «зелёные»"
+    else echo "  ПЛОХО поезд: выбор дольше потолка: $(printf '%s' "$OUT" | tail -3 | tr '\n' ' ')"; ok=0; fi
+    OUT=$(proba_poezd_vorota "$PD" "$S2" "$S3")
+    if printf '%s' "$OUT" | grep -q 'rc=1 состояние=красный выбор' && printf '%s' "$OUT" | grep -q 'красные в выборе: старая красная'; then
+        echo "  ок    БОЛЬНОЙ СЛУЧАЙ: поезд — красное в диапазоне останавливает срез с именем проверки"
+    else echo "  ПЛОХО поезд: красное в диапазоне: $(printf '%s' "$OUT" | tail -3 | tr '\n' ' ')"; ok=0; fi
+    # Красная под годной карточкой карантина срез не держит, но и не прячется: имя — в замке 1,
+    # в записи хода и в просьбе кнопки. Новая и просроченная красные по-прежнему стоят.
+    touch "$PD/карантин"
+    OUT=$(proba_poezd_vorota "$PD" "$S2" "$S3")
+    rm -f "$PD/карантин"
+    if printf '%s' "$OUT" | grep -q 'rc=0 состояние= ворота=зелёные' \
+       && printf '%s' "$OUT" | grep -q 'красных 0, в карантине 1: старая красная, ядро' \
+       && printf '%s' "$OUT" | grep -q 'красных=0 карантин=1: старая красная$' \
+       && ! printf '%s' "$OUT" | grep -q 'ОТКАЗ'; then
+        echo "  ок    БОЛЬНОЙ СЛУЧАЙ: поезд — красная в карантине срез не держит, но названа: замок 1 и поля хода"
+    else echo "  ПЛОХО поезд: красная в карантине: $(printf '%s' "$OUT" | tail -3 | tr '\n' ' ')"; ok=0; fi
+    # Код ворот ≠ 0 при всех красных под карантином — беда самого карантина, а не «чисто»: ход отказывает.
+    touch "$PD/карантин-беда"
+    OUT=$(proba_poezd_vorota "$PD" "$S2" "$S3")
+    rm -f "$PD/карантин-беда"
+    if printf '%s' "$OUT" | grep -q 'rc=1 состояние=красный выбор' \
+       && printf '%s' "$OUT" | grep -q 'красные в выборе: код ворот без имён' \
+       && printf '%s' "$OUT" | grep -q 'красных=0 карантин=1: старая красная$'; then
+        echo "  ок    БОЛЬНОЙ СЛУЧАЙ: поезд — все красные в карантине, но код ворот ненулевой: ход отказывает"
+    else echo "  ПЛОХО поезд: беда карантина: $(printf '%s' "$OUT" | tail -3 | tr '\n' ' ')"; ok=0; fi
+    touch "$PD/карантин-просрочен"
+    OUT=$(proba_poezd_vorota "$PD" "$S2" "$S3")
+    rm -f "$PD/карантин-просрочен"
+    if printf '%s' "$OUT" | grep -q 'rc=1 состояние=красный выбор' \
+       && printf '%s' "$OUT" | grep -q 'красные в выборе: старая красная — срез не едет' \
+       && printf '%s' "$OUT" | grep -q 'красных=1 карантин=0:'; then
+        echo "  ок    БОЛЬНОЙ СЛУЧАЙ: поезд — красная с просроченным карантином останавливает срез"
+    else echo "  ПЛОХО поезд: просроченный карантин: $(printf '%s' "$OUT" | tail -3 | tr '\n' ' ')"; ok=0; fi
+    # Имена карантина — в просьбе кнопки.
+    ASKTXT=$(python3 -I - "$SCRIPTS_REAL" 2>&1 <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1])
+import deploy_guard
+print(deploy_guard._почему("публикацию проверенного", ["старая красная", "ещё одна"]))
+print(deploy_guard._почему("публикацию проверенного", []))
+PY
+)
+    if [ "$(printf '%s\n' "$ASKTXT" | sed -n 1p)" = "скрипт просит: публикацию проверенного; в карантине 2: старая красная, ещё одна" ] \
+       && [ "$(printf '%s\n' "$ASKTXT" | sed -n 2p)" = "скрипт просит: публикацию проверенного" ] \
+       && [ "$( TRAIN_SLICE_PACKAGE=abc TRAIN_QUARANTINED=2 TRAIN_QUARANTINED_NAMES="старая красная, ещё одна"
+                train_guard_args; printf '%s|' "${TRAIN_GUARD_ARGS[@]}" )" = "--срез|abc|--в-карантине|старая красная, ещё одна|" ] \
+       && [ "$( TRAIN_SLICE_PACKAGE=abc TRAIN_QUARANTINED=0 train_guard_args; printf '%s|' "${TRAIN_GUARD_ARGS[@]}" )" = "--срез|abc|" ]; then
+        echo "  ок    поезд — просьба кнопки называет карантинные красные («в карантине K: имена»)"
+    else echo "  ПЛОХО просьба кнопки не называет карантин: $(printf '%s' "$ASKTXT" | tail -3 | tr '\n' ' ')"; ok=0; fi
+    OUT=$(proba_poezd_vorota "$PD" "$S1" "$S2")
+    if printf '%s' "$OUT" | grep -q 'rc=0' && printf '%s' "$OUT" | grep -q 'выбрано 0, красных 0' \
+       && ! grep -q '^gates' "$PD/звали"; then
+        echo "  ок    поезд — диапазон без задетых проверок: «выбрано 0», ворота не гоняются"
+    else echo "  ПЛОХО поезд: пустой выбор: $(printf '%s' "$OUT" | tail -3 | tr '\n' ' ')"; ok=0; fi
+    touch "$PD/ядро-медленно"
+    OUT=$(proba_poezd_vorota "$PD" "$S0" "$S2")
+    rm -f "$PD/ядро-медленно"
+    if printf '%s' "$OUT" | grep -q 'rc=1 состояние=не дошли ворота=не дошли ядро=не дошло: секреты по диапазону' \
+       && ! grep -q '^gates' "$PD/звали"; then
+        echo "  ок    БОЛЬНОЙ СЛУЧАЙ: поезд — ядро дольше потолка: «не дошли», выбор не гоняется"
+    else echo "  ПЛОХО поезд: ядро дольше потолка: $(printf '%s' "$OUT" | tail -3 | tr '\n' ' ')"; ok=0; fi
+
+    # Ворота судят СРЕЗ: очередь сливает в живое дерево проекта, пока они идут, и вердикт среза
+    # от этого не меняется ни в красный (поломка после среза), ни в зелёный (починка после среза).
+    PK="$T/поезд-срез"
+    proba_poezd_dvor "$PK"
+    K0=$(git -C "$PK/проект" rev-parse HEAD~3); K2=$(git -C "$PK/проект" rev-parse HEAD~1); K3=$(git -C "$PK/проект" rev-parse HEAD)
+    proba_vlit() { # $1=файл скрипта $2=код выхода → во время ядра очередь вливает его в живое дерево проекта
+        printf 'printf "exit %s\\n" > "%s/проект/scripts/%s"\ngit -C "%s/проект" -c user.name=q -c user.email=q@q commit -qam "очередь: %s"\n' \
+            "$2" "$PK" "$1" "$PK" "$1" > "$PK/во-время-ядра"
+    }
+    proba_vlit a.sh 1
+    OUT=$(proba_poezd_vorota "$PK" "$K0" "$K2")
+    VLITO=$(git -C "$PK/проект" log -1 --format=%s)
+    if printf '%s' "$OUT" | grep -q 'rc=0 состояние= ворота=зелёные' && [ "$VLITO" = "очередь: a.sh" ] \
+       && grep -qx 'gates --только правленая --всё' "$PK/звали"; then
+        echo "  ок    БОЛЬНОЙ СЛУЧАЙ: поезд — поломка, влитая в проект во время ворот, не красит срез"
+    else echo "  ПЛОХО поезд: поломка после среза судилась: «$VLITO» $(printf '%s' "$OUT" | tail -3 | tr '\n' ' ')"; ok=0; fi
+    proba_vlit old-red.sh 0
+    OUT=$(proba_poezd_vorota "$PK" "$K2" "$K3")
+    rm -f "$PK/во-время-ядра"
+    DEREVYA=$(git -C "$PK/проект" worktree list --porcelain | grep -c '^worktree ')
+    if printf '%s' "$OUT" | grep -q 'rc=1 состояние=красный выбор' && printf '%s' "$OUT" | grep -q 'красные в выборе: старая красная' \
+       && [ "$(git -C "$PK/проект" log -1 --format=%s)" = "очередь: old-red.sh" ] && [ "$DEREVYA" = 1 ]; then
+        echo "  ок    БОЛЬНОЙ СЛУЧАЙ: поезд — починка, влитая после среза, не делает срез зелёным; дерево среза убрано"
+    else echo "  ПЛОХО поезд: починка после среза судилась (деревьев $DEREVYA): $(printf '%s' "$OUT" | tail -3 | tr '\n' ' ')"; ok=0; fi
+
+    # Проверка, читающая проект и пакет по паспорту, судит срез: поломка, влитая очередью в живые
+    # проект и пакет во время ядра, не красит ни ядро, ни выбор. Места спрашиваются у НАСТОЯЩИХ
+    # загрузчиков (konf_zagruzit, конфиг(), katalog_paketa()) и у искателей пакета проверок ворот:
+    # паспорт стенда называет живое, и только окружение поезда, старшее файла, ведёт их на срез.
+    PP="$T/поезд-паспорт"
+    proba_poezd_dvor "$PP"
+    P0=$(git -C "$PP/проект" rev-parse HEAD~3); P2=$(git -C "$PP/проект" rev-parse HEAD~1)
+    mkdir -p "$PP/пакет" "$PP/вид-пакета"
+    touch "$PP/пакет/USTANOVIT.sh" "$PP/вид-пакета/USTANOVIT.sh"
+    printf 'PROJECT_DIR="%s/проект"\n' "$PP" > "$PP/install.conf"
+    printf 'STARTER_DIR="%s/пакет"\n' "$PP" > "$PP/harness.conf"
+    cat > "$PP/по-паспорту" <<SH
+export HARNESS_INSTALL_CONF="$PP/install.conf" HARNESS_CONF="$PP/harness.conf"
+source "$SCRIPTS_REAL/lib/config.sh" && konf_zagruzit || { echo "по паспорту: konf_zagruzit упал"; exit 1; }
+sudili=\$(python3 -I - "$SCRIPTS_REAL" <<'PY'
+import importlib.util, sys
+from pathlib import Path
+scripts = Path(sys.argv[1])
+sys.path.insert(0, str(scripts / "lib"))
+import config
+def load(name):
+    spec = importlib.util.spec_from_file_location(name.replace("-", "_"), scripts / (name + ".py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+print(config.конфиг()["PROJECT_DIR"])
+print(config.katalog_paketa())
+print(load("compare-with-package").найти_пакет()[0])
+print(load("check-stack-registry").installer_candidates()[0])
+print(Path(load("check-cyrillic-in-names").файлы_пакета()[0]).parent)
+PY
+) || { echo "по паспорту: загрузчик упал"; exit 1; }
+n=0
+while IFS= read -r where; do
+    n=\$((n + 1))
+    [ ! -e "\$where/сломано" ] || { echo "по паспорту: живое \$where"; exit 1; }
+done < <(printf '%s\n' "\$PROJECT_DIR" "\$sudili")
+[ "\$n" = 6 ] || { echo "по паспорту: спрошено мест \$n из 6"; exit 1; }
+SH
+    printf 'touch "%s/проект/сломано" "%s/пакет/сломано"\ngit -C "%s/проект" add сломано\ngit -C "%s/проект" -c user.name=q -c user.email=q@q commit -qm "очередь: сломано"\n' \
+        "$PP" "$PP" "$PP" "$PP" > "$PP/во-время-ядра"
+    OUT=$(PACKAGE_VIEW="$PP/вид-пакета" proba_poezd_vorota "$PP" "$P0" "$P2")
+    if printf '%s' "$OUT" | grep -q 'rc=0 состояние= ворота=зелёные' && [ -e "$PP/пакет/сломано" ] \
+       && [ "$(git -C "$PP/проект" log -1 --format=%s)" = "очередь: сломано" ] && grep -qx 'gates --только правленая --всё' "$PP/звали"; then
+        echo "  ок    БОЛЬНОЙ СЛУЧАЙ: поезд — проверка по паспорту и по каталогу пакета судит срез: поломка, влитая в живые проект и пакет во время ворот, не красит срез"
+    else echo "  ПЛОХО поезд: проверка по паспорту судила живое: $(printf '%s' "$OUT" | tail -3 | tr '\n' ' ') | $(tr '\n' ' ' < "$PP/звали" 2>/dev/null)"; ok=0; fi
+
+    # Согласие — на СРЕЗ пакета: пакет ушёл вперёд после кнопки, а публикуется срез, не HEAD.
+    proba_dvor "$T/срез"
+    proba_publ "$T/срез" > /dev/null 2>&1
+    mkdir -p "$T/срез/пакет/harness/demons"
+    printf 'срез\n' > "$T/срез/пакет/harness/demons/srez.sh"
+    proba_zapis "$T/срез" "Выпуск 0.2.0: срез"
+    git -C "$T/срез/пакет" add -A && git -C "$T/срез/пакет" -c user.name=t -c user.email=t@t commit -qm "срез"
+    SREZ=$(git -C "$T/срез/пакет" rev-parse HEAD)
+    PREDMET_SREZA=$(python3 -I - "$SCRIPTS_REAL/lib" "$T/срез/пакет" "$T/срез/сборка" "$SREZ" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1])
+import door_subjects
+print(door_subjects.publish_subject(sys.argv[2], sys.argv[3], "jig", "master", sys.argv[4]))
+PY
+)
+    printf 'после\n' > "$T/срез/пакет/posle-sreza.txt"
+    git -C "$T/срез/пакет" add -A && git -C "$T/срез/пакет" -c user.name=t -c user.email=t@t commit -qm "после среза"
+    OUT=$( ( PACKAGE_DIR="$T/срез/пакет"; CLEANUP_DIRS=(); LOG_DIR="$T/срез"
+             TRAIN_STATE="проверка"; TRAIN_GATES="зелёные"; TRAIN_SLICE_PACKAGE="$SREZ"; train_record "$LOG_DIR" 0
+             train_package_view "$SREZ" || exit 1
+             PAKET_SHA="$SREZ" PREDMET_ZAMKA="$PREDMET_SREZA" proba_publ "$T/срез"; rc=$?
+             rm -rf "$PACKAGE_VIEW"; exit "$rc" ) 2>&1 ); RC=$?
+    OPUBL=$(git -C "$T/срез/удалённый.git" ls-tree -r --name-only master 2>/dev/null)
+    SOOBSH=$(git -C "$T/срез/удалённый.git" log -1 --format=%s master 2>/dev/null)
+    if [ "$RC" = 0 ] && [ -n "$PREDMET_SREZA" ] && printf '%s\n' "$OPUBL" | grep -qx 'harness/demons/srez.sh' \
+       && ! printf '%s\n' "$OPUBL" | grep -q 'posle-sreza.txt' \
+       && printf '%s' "$SOOBSH" | grep -q "$(git -C "$T/срез/пакет" rev-parse --short "$SREZ")"; then
+        echo "  ок    БОЛЬНОЙ СЛУЧАЙ: поезд — согласие на срез переживает сдвиг пакета, опубликован срез, а не HEAD"
+    else echo "  ПЛОХО поезд: согласие на срез: код $RC, «$SOOBSH», $(printf '%s' "$OUT" | tail -3 | tr '\n' ' ')"; ok=0; fi
+
+    # Прошлый выпуск: без записи поезда — коммит проекта по времени тега; с записью — по записи.
+    proba_proshlyj() { # $1=каталог журнала → «тег проект связь»
+        ( PROJECT_DIR="$PD/проект"; PUBLIC_BUILD_DIR="$T/срез/сборка"; PUBLIC_REMOTE=jig; PUBLIC_BRANCH=master
+          train_previous_release "$1" && echo "$TRAIN_PREV_TAG $TRAIN_PREV_PROJECT $TRAIN_PREV_LINK" )
+    }
+    TEG_SREZA=$(git -C "$T/срез/сборка" describe --tags --abbrev=0 jig/master 2>/dev/null)
+    mkdir -p "$T/журнал-поезда"
+    PO_VREMENI=$(proba_proshlyj "$T/журнал-поезда")
+    ( TRAIN_STATE="выпущен"; RELEASE_TAG="$TEG_SREZA"; TRAIN_SLICE_PROJECT="$S1"; TRAIN_SLICE_PACKAGE="$SREZ"
+      train_record "$T/журнал-поезда" 0 )
+    PO_ZAPISI=$(proba_proshlyj "$T/журнал-поезда")
+    if [ -n "$TEG_SREZA" ] && [ "$PO_VREMENI" = "$TEG_SREZA $S3 связь по времени" ] \
+       && [ "$PO_ZAPISI" = "$TEG_SREZA $S1 запись" ]; then
+        echo "  ок    поезд — прошлый выпуск: по записи release-train.jsonl, без неё — по времени тега с пометкой"
+    else echo "  ПЛОХО поезд: прошлый выпуск: по времени «$PO_VREMENI», по записи «$PO_ZAPISI» (тег «$TEG_SREZA»)"; ok=0; fi
+
+    # Замок очереди у поезда — только на срез: ворота судят срез, и слияния в это время идут.
+    proba_posadka() { # $1=предел ожидания замка, с [$2=каталог журнала поезда] [$3=sha пакета из довода] [$4=проект] → вывод и rc
+        ( PROJECT_DIR="$PD/проект"; PACKAGE_DIR="$T/срез/пакет"; PUBLIC_BUILD_DIR="$T/срез/сборка"
+          PUBLIC_REMOTE=jig; PUBLIC_BRANCH=master; CLEANUP_DIRS=(); TRAIN_SLICE_PROJECT=""
+          PROJECT_DIR="${4:-$PROJECT_DIR}"
+          train_board "${2:-$T/журнал-поезда}" "${3:-}" "$1" 2>&1; echo "rc=$?"
+          release_train_lock; rm -rf "${CLEANUP_DIRS[@]}" )
+    }
+    printf '%s\n' "$T/журнал-поезда/$MERGE_QUEUE_LOCK_NAME" > "$PD/очередь-путь"
+    printf '%s\n' "$T/журнал-поезда/release-train.lock" > "$PD/поезд-путь"
+    rm -f "$PD/звали"
+    OUT=$(proba_posadka 5)
+    rm -f "$PD/поезд-путь"
+    if grep -qx 'очередь во время ворот: 0' "$PD/звали" 2>/dev/null && printf '%s' "$OUT" | grep -q 'замок очереди слияния взят' \
+       && printf '%s' "$OUT" | grep -q "срез: проект $S3"; then
+        echo "  ок    БОЛЬНОЙ СЛУЧАЙ: поезд — замок очереди взят на срез и отпущен: во время ворот очередь берёт замок"
+    else echo "  ПЛОХО поезд: замок очереди во время ворот: $(tr '\n' ' ' < "$PD/звали" 2>/dev/null) | $(printf '%s' "$OUT" | tail -3 | tr '\n' ' ')"; ok=0; fi
+    if grep -qx 'поезд во время ворот: 1' "$PD/звали" 2>/dev/null; then
+        echo "  ок    БОЛЬНОЙ СЛУЧАЙ: поезд — замок поезда держится и во время ворот"
+    else echo "  ПЛОХО поезд: замок поезда во время ворот не держится: $(tr '\n' ' ' < "$PD/звали" 2>/dev/null)"; ok=0; fi
+    rm -f "$PD/звали"
+    flock -x "$T/журнал-поезда/$MERGE_QUEUE_LOCK_NAME" sleep 4 &
+    HOLDER_PID=$!
+    sleep 1
+    OUT=$(proba_posadka 1)
+    wait "$HOLDER_PID"
+    if printf '%s' "$OUT" | grep -q 'rc=1' && printf '%s' "$OUT" | grep -q 'очередь слияния занята' \
+       && ! printf '%s' "$OUT" | grep -q 'срез: проект' && ! grep -q '^ядро' "$PD/звали" 2>/dev/null; then
+        echo "  ок    БОЛЬНОЙ СЛУЧАЙ: поезд — очередь сливает: срез не режется, пока пара проект/пакет движется"
+    else echo "  ПЛОХО поезд: срез при занятой очереди: $(printf '%s' "$OUT" | tail -3 | tr '\n' ' ')"; ok=0; fi
+    rm -f "$PD/очередь-путь"
+
+    # Второй ход поезда при идущем первом — отказ сразу: ни среза, ни замка очереди, ни ворот,
+    # и дерево среза первого хода цело: подметание идёт только под замком поезда.
+    mkdir -p "$T/журнал-замок"
+    ZHIVOE="$PD/проект/.claude/worktrees/release-train-живое"
+    git -C "$PD/проект" worktree add -q --detach "$ZHIVOE" HEAD > /dev/null 2>&1
+    flock -x "$T/журнал-замок/release-train.lock" sleep 4 &
+    HOLDER_PID=$!
+    sleep 1
+    rm -f "$PD/звали"
+    OUT=$(proba_posadka 5 "$T/журнал-замок")
+    wait "$HOLDER_PID"
+    if printf '%s' "$OUT" | grep -q 'rc=1' && printf '%s' "$OUT" | grep -q 'поезд уже идёт' \
+       && ! printf '%s' "$OUT" | grep -q 'срез: проект' && ! printf '%s' "$OUT" | grep -q 'замок очереди слияния взят' \
+       && ! grep -q '^ядро' "$PD/звали" 2>/dev/null && [ -e "$ZHIVOE/.git" ]; then
+        echo "  ок    БОЛЬНОЙ СЛУЧАЙ: поезд — второй ход при идущем первом: отказ «поезд уже идёт» до среза, дерево первого хода цело"
+    else echo "  ПЛОХО поезд: второй ход при занятом замке поезда (дерево первого хода: $([ -e "$ZHIVOE/.git" ] && echo цело || echo СНЯТО)): $(printf '%s' "$OUT" | tail -3 | tr '\n' ' ')"; ok=0; fi
+    git -C "$PD/проект" worktree remove --force "$ZHIVOE" > /dev/null 2>&1
+
+    # Ход, убитый KILL, оставляет дерево среза — и зарегистрированным, и с регистрацией без
+    # каталога: следующий ход под замком поезда снимает оба. Чужое рядом цело: дерево помощника
+    # с незакоммиченной работой и обычный каталог под именем release-train-* с файлом (И-1).
+    OSTAVLENO="$PD/проект/.claude/worktrees/release-train-ostavleno"
+    USHLO="$PD/проект/.claude/worktrees/release-train-ushlo"
+    CHUZHOE="$PD/проект/.claude/worktrees/agent-чужое"
+    NE_DEREVO="$PD/проект/.claude/worktrees/release-train-не-дерево"
+    git -C "$PD/проект" worktree add -q --detach "$OSTAVLENO" HEAD > /dev/null 2>&1
+    git -C "$PD/проект" worktree add -q --detach "$USHLO" HEAD > /dev/null 2>&1
+    git -C "$PD/проект" worktree add -q --detach "$CHUZHOE" HEAD > /dev/null 2>&1
+    printf 'работа помощника\n' > "$CHUZHOE/незакоммиченное.txt"
+    mkdir -p "$NE_DEREVO" && printf 'данные\n' > "$NE_DEREVO/файл.txt"
+    rm -rf "$USHLO"
+    DO_HODA=$(git -C "$PD/проект" worktree list --porcelain | grep -c '^worktree ')
+    mkdir -p "$T/журнал-сироты"
+    OUT=$(proba_posadka 5 "$T/журнал-сироты")
+    DEREVYA=$(git -C "$PD/проект" worktree list --porcelain | grep -c '^worktree ')
+    if [ "$DO_HODA" = 4 ] && [ ! -e "$OSTAVLENO" ] && [ "$DEREVYA" = 2 ] \
+       && [ "$(ls -A "$PD/проект/.claude/worktrees" | sort | tr '\n' ' ')" = "agent-чужое release-train-не-дерево " ] \
+       && [ -f "$CHUZHOE/незакоммиченное.txt" ] && [ -f "$NE_DEREVO/файл.txt" ]; then
+        echo "  ок    БОЛЬНОЙ СЛУЧАЙ: поезд — дерево среза, оставленное убитым ходом, снято следующим ходом; чужое дерево и каталог с файлом целы"
+    else echo "  ПЛОХО поезд: подметание деревьев (до хода $DO_HODA, после $DEREVYA): $(ls -A "$PD/проект/.claude/worktrees" | tr '\n' ' ') | $(printf '%s' "$OUT" | tail -2 | tr '\n' ' ')"; ok=0; fi
+    git -C "$PD/проект" worktree remove --force "$CHUZHOE" > /dev/null 2>&1
+    rm -rf "$NE_DEREVO"
+
+    # Журнал поезда не охраняется: его значения — только коммиты проекта, иначе отказ до git и до bash -c.
+    VNEDRENO="$T/внедрено"
+    HEAD_PAKETA=$(git -C "$T/срез/пакет" rev-parse HEAD)
+    proba_podlog() { # $1=каталог журнала $2=json строки журнала $3=sha пакета из довода → вывод посадки
+        mkdir -p "$1" && printf '{"v": 1, "event": "train.step", "data": %s}\n' "$2" > "$1/release-train.jsonl"
+        rm -f "$PD/звали"
+        proba_posadka 5 "$1" "$3"
+    }
+    for PODLOG in "{\"срез_пакета\": \"$HEAD_PAKETA\", \"срез_проекта\": \"--output=$VNEDRENO\"}|$HEAD_PAKETA|срез проекта «--output=…»" \
+                  "{\"состояние\": \"выпущен\", \"тег\": \"$TEG_SREZA\", \"срез_проекта\": \"x;touch $VNEDRENO;\"}||прошлый выпуск «x;touch …;»" \
+                  "{\"состояние\": \"выпущен\", \"тег\": \"$TEG_SREZA\", \"срез_проекта\": \"$(printf '0%.0s' {1..40})\"}||прошлый выпуск — 40 нулей, не коммит" \
+                  "{\"состояние\": \"выпущен\", \"тег\": \"$TEG_SREZA\", \"срез_проекта\": \"HEAD\"}||прошлый выпуск — имя ссылки, а не sha"; do
+        IFS='|' read -r STROKA DOVOD CHTO <<< "$PODLOG"
+        OUT=$(proba_podlog "$T/журнал-подлог-$RANDOM" "$STROKA" "$DOVOD")
+        if printf '%s' "$OUT" | grep -q 'rc=1' && printf '%s' "$OUT" | grep -q 'не коммит проекта' \
+           && [ ! -e "$VNEDRENO" ] && ! grep -q '^ядро' "$PD/звали" 2>/dev/null; then
+            echo "  ок    БОЛЬНОЙ СЛУЧАЙ: поезд — подлог журнала ($CHTO): отказ, команда не исполнена"
+        else echo "  ПЛОХО поезд: подлог журнала ($CHTO): $([ -e "$VNEDRENO" ] && echo 'ВНЕДРЕНО') $(printf '%s' "$OUT" | tail -3 | tr '\n' ' ')"; ok=0; fi
+        rm -f "$VNEDRENO"
+    done
+
+    # Вердикт ворот виден двери в ТОМ ЖЕ ходе: пакет ушёл за время ворот, а кнопка просится на срез.
+    mkdir -p "$T/журнал-в2"
+    # Прошлый выпуск — до починки old-red.sh: диапазон задевает только её, и ворота зелёные.
+    printf '{"v": 1, "event": "train.step", "data": {"состояние": "выпущен", "тег": "%s", "срез_проекта": "%s"}}\n' "$TEG_SREZA" \
+        "$(git -C "$PK/проект" rev-parse HEAD~1)" > "$T/журнал-в2/release-train.jsonl"
+    git -C "$T/срез/пакет" -c user.name=t -c user.email=t@t commit --allow-empty -qm "срез хода"
+    SREZ_HODA=$(git -C "$T/срез/пакет" rev-parse HEAD)
+    printf 'git -C "%s" -c user.name=q -c user.email=q@q commit --allow-empty -qm "слияние во время ворот"\n' "$T/срез/пакет" > "$PK/во-время-ядра"
+    OUT=$(proba_posadka 5 "$T/журнал-в2" "" "$PK/проект")
+    rm -f "$PK/во-время-ядра"
+    PREDMET_HODA=$(python3 -I - "$SCRIPTS_REAL/lib" "$T/срез/пакет" "$T/срез/сборка" "$SREZ_HODA" "$T/журнал-в2/release-train.jsonl" 2>&1 <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1])
+import door_subjects
+print(door_subjects.publish_subject(sys.argv[2], sys.argv[3], "jig", "master", sys.argv[4], sys.argv[5]))
+PY
+)
+    if printf '%s' "$OUT" | grep -q 'rc=0' && [ "${PREDMET_HODA%% *}" = "$SREZ_HODA" ] \
+       && [ "$(git -C "$T/срез/пакет" rev-parse HEAD)" != "$SREZ_HODA" ]; then
+        echo "  ок    БОЛЬНОЙ СЛУЧАЙ: поезд — пакет ушёл за время ворот: кнопка в том же ходе просится на срез"
+    else echo "  ПЛОХО поезд: дверь не видит зелёных ворот хода: «${PREDMET_HODA:0:160}» $(printf '%s' "$OUT" | tail -3 | tr '\n' ' ')"; ok=0; fi
+
+    # Каждый ход поезда оставляет строку в release-train.jsonl — и оборванный отказом.
+    mkdir -p "$T/журнал-хода"
+    ( CLEANUP_DIRS=(); TRAIN=1; LOG_DIR="$T/журнал-хода"; TRAIN_STATE="красное ядро"
+      TRAIN_SLICE_PROJECT="$S2"; TRAIN_SLICE_PACKAGE="$SREZ"; TRAIN_PREV_TAG="v0.1.0"; TRAIN_PREV_PROJECT="$S0"
+      TRAIN_GATES="красный выбор"; TRAIN_RED=1; TRAIN_RED_NAMES="новая красная"; TRAIN_QUARANTINED=1; TRAIN_QUARANTINED_NAMES="старая красная"
+      trap cleanup_on_exit EXIT; exit 1 ) > /dev/null 2>&1
+    python3 -I - "$T/журнал-хода/release-train.jsonl" "$S2" "$SREZ" "$S0" <<'PY'
+import json, sys
+try:
+    строка = json.loads(open(sys.argv[1], encoding="utf-8").read().splitlines()[-1])
+    з = строка["data"]
+except (OSError, ValueError, IndexError, KeyError, TypeError):
+    sys.exit(1)
+# Строка — событие events.emit: поля хода в data, время и исход в корне.
+годна = (строка.get("event") == "train.step" and строка.get("outcome") == "refused" and bool(строка.get("ts"))
+         and з.get("состояние") == "красное ядро" and з.get("код") == 1 and з.get("срез_проекта") == sys.argv[2]
+         and з.get("срез_пакета") == sys.argv[3] and з.get("прошлый_тег") == "v0.1.0"
+         and з.get("прошлый_sha_проекта") == sys.argv[4] and "секунды" in з
+         and з.get("ворота") == "красный выбор" and з.get("красных") == 1
+         and з.get("красные") == "новая красная" and з.get("в_карантине") == 1
+         and з.get("в_карантине_имена") == "старая красная")
+sys.exit(0 if годна else 1)
+PY
+    if [ $? = 0 ]; then
+        echo "  ок    поезд — ход, оборванный отказом, записан в release-train.jsonl: состояние, код, срезы, прошлый выпуск"
+    else echo "  ПЛОХО поезд: строки хода нет или она неполна: $(tail -1 "$T/журнал-хода/release-train.jsonl" 2>/dev/null | cut -c1-200)"; ok=0; fi
     rm -rf "$T"
 
     PUTEJ=$(grep -c '^\s*echo "  ок    ' "$0" || true)
@@ -1095,6 +2146,12 @@ fi
 CHECK_ONLY=0
 FIRST=0
 [ "${1:-}" = "--проверка" ] && CHECK_ONLY=1
+TRAIN_ARG=""
+if [ "${1:-}" = "--поезд" ]; then
+    TRAIN=1; TRAIN_ARG="${2:-}"
+elif [ "$CHECK_ONLY" = 1 ] && [ "${2:-}" = "--поезд" ]; then
+    TRAIN=1; TRAIN_ARG="${3:-}"
+fi
 # Первая публикация — особый случай, и решает его владелец, а не скрипт.
 # Публичной ветки ещё нет: отсекать нечего, и замок 3 судить не по чему.
 # 11.09.2026 владелец сказал: «1 публикуй как есть, проверю — обновим если
@@ -1111,6 +2168,34 @@ PO_SLOVU=0
 
 say "=== публикация: сборка → $PUBLIC_REMOTE/$PUBLIC_BRANCH ==="
 
+# Замок очереди закрывает окно «кнопка нажата → ворота → push»: слияние в нём сдвинуло
+# бы пакет и сожгло нажатую кнопку. Окно «кнопка прислана → нажата» он не закрывает —
+# слияния до нажатия меняют предмет согласия; его закрывает предмет-срез поезда, и поезд
+# берёт замок только на срез (train_board) — и в проверке: её зелёный срез годен для кнопки.
+# Проверка без поезда ничего не отправляет и слияний не держит. Предел ожидания — тот же, что у очереди.
+if [ "$CHECK_ONLY" = 0 ] || [ "$TRAIN" = 1 ]; then
+    [[ "${MERGE_QUEUE_WAIT_MIN:-30}" =~ ^[0-9]+$ ]] || {
+        say "не настроено: MERGE_QUEUE_WAIT_MIN=«$MERGE_QUEUE_WAIT_MIN» в harness.conf — нужно целое число минут"
+        exit 2; }
+fi
+if [ "$CHECK_ONLY" = 0 ] && [ "$TRAIN" = 0 ]; then
+    take_merge_queue_lock "${LOG_DIR:?пуст LOG_DIR — не прочитан паспорт установки}" \
+        "$(( ${MERGE_QUEUE_WAIT_MIN:-30} * 60 ))" || exit 1
+fi
+# Поезд: срез, прошлый выпуск и ворота по разнице — первыми. Кнопка просится после зелёных
+# ворот и на срез, а не на HEAD, поэтому слияния после среза её не сжигают.
+# Почему у поезда ворота идут ДО замка 6в (у обычного хода — после): ворота поезда судят срез
+# минуты, а не часы, и их вердикт нужен при любом исходе заметок. Отказ 6в («нет записи»,
+# «не тот номер») чинится правкой пакета и новым срезом; стой ворота за ним, вердикт среза
+# прятался бы за отказом заметок, и о красном коде узнавали бы лишь после правки заметок.
+if [ "$TRAIN" = 1 ]; then
+    train_board "${LOG_DIR:?пуст LOG_DIR — не прочитан паспорт установки}" "$TRAIN_ARG" \
+        "$(( ${MERGE_QUEUE_WAIT_MIN:-30} * 60 ))" || exit 1
+fi
+# Заметки и номер выпуска — до кнопки и до ворот: правка заметок после «Да» сдвигает
+# пакет и сжигает кнопку, а ворота идут десятки минут.
+build_in_scratch --заметки || exit 1
+
 # ── Замок 1: ворота ────────────────────────────────────────────────────────
 # Свежесть согласия спрашивается ДО ворот (не тратя «да»), а тратится после:
 # ворота идут 10–40 минут, и «да», полученное перед запуском, к замку 2 иначе
@@ -1120,20 +2205,25 @@ POPYTKA_NACHATA=$(date +%s)
 # Нет кнопки — ворота просят её сами (--просить), но не в проверке: --проверка сеть и владельца не трогает.
 PREFLIGHT_ASK=""
 [ "$CHECK_ONLY" = 1 ] || PREFLIGHT_ASK="--просить"
+TRAIN_GUARD_ARGS=()
+[ "$TRAIN" = 1 ] && train_guard_args
 PREFLIGHT_REFUSAL=$(HARNESS_LOG_DIR="$LOG_DIR" python3 -I "$SCRIPTS_REAL/deploy_guard.py" --действие публикация --только-согласие \
-        --публикация "$PACKAGE_DIR" $PREFLIGHT_ASK 2>&1) || {
+        --публикация "$PACKAGE_DIR" "${TRAIN_GUARD_ARGS[@]}" $PREFLIGHT_ASK 2>&1) || {
     say "ОТКАЗ: $PREFLIGHT_REFUSAL"
+    [ "$TRAIN" = 1 ] && say "после кнопки «Да» — тот же срез: bash scripts/publish.sh --поезд $TRAIN_SLICE_PACKAGE"
     exit 1
 }
-zamok_vorot "${LOG_DIR:?пуст LOG_DIR — не прочитан паспорт установки}" || exit 1
+[ "$TRAIN" = 1 ] || zamok_vorot "${LOG_DIR:?пуст LOG_DIR — не прочитан паспорт установки}" || exit 1
 
 # ── Замок 2: согласие владельца ИМЕННО на публикацию ───────────────────────
 # Судит КОД ВОЗВРАТА ворот: 0 — согласие есть, любой другой (1, 2, упавший python) — стоп.
 # Суд по тексту ответа пропускал всякий отказ, сказанный другими словами.
-PAKET_SHA=$(git -C "$PACKAGE_DIR" rev-parse HEAD 2>/dev/null) \
-    || { say "ОТКАЗ: HEAD пакета $PACKAGE_DIR не прочитан — публиковать нечего"; exit 1; }
+if [ "$TRAIN" = 0 ]; then
+    PAKET_SHA=$(git -C "$PACKAGE_DIR" rev-parse HEAD 2>/dev/null) \
+        || { say "ОТКАЗ: HEAD пакета $PACKAGE_DIR не прочитан — публиковать нечего"; exit 1; }
+fi
 if ! REFUSAL=$(HARNESS_LOG_DIR="$LOG_DIR" python3 -I "$SCRIPTS_REAL/deploy_guard.py" --действие публикация --только-согласие \
-        --публикация "$PACKAGE_DIR" --свежесть-на "$POPYTKA_NACHATA" 2>&1); then
+        --публикация "$PACKAGE_DIR" "${TRAIN_GUARD_ARGS[@]}" --свежесть-на "$POPYTKA_NACHATA" 2>&1); then
     say "ОТКАЗ: $REFUSAL"
     exit 1
 fi
@@ -1208,10 +2298,13 @@ else
 fi
 
 if [ "$CHECK_ONLY" = 1 ]; then
-    опубликовать_сборку --сухо || exit 1
+    build_in_scratch --сухо || exit 1
+    TRAIN_STATE="проверка"
     exit 0
 fi
 
 # ── Публикация: собранное дерево, а не пакет ───────────────────────────────
 опубликовать_сборку || exit 1
+TRAIN_STATE="нечего везти"
+[ -z "$RELEASE_TAG" ] || TRAIN_STATE="выпущен"
 

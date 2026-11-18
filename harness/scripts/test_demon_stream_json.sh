@@ -24,6 +24,9 @@ export LC_ALL=C.UTF-8
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WRAPPER="$HERE/claude-demon.sh"
+# Обёртка берёт носитель и судью из PROJECT_DIR (окружение старше паспорта):
+# проба судит своё дерево, а не дерево паспорта.
+export PROJECT_DIR="$(dirname "$HERE")"
 JUDGE="$HERE/limit-in-log.py"
 ASK="$HERE/ask-the-model.py"
 FIXTURE="$HERE/fixtures/stream-json-sample.jsonl"
@@ -55,6 +58,23 @@ export LOG_DIR="$STAND/log" HEARTBEAT_DIR="$STAND/heartbeat"
 export TG_SEND="$STAND/bin/tg_send.sh" TG_OUT="$STAND/told.txt"
 export PYTHONDONTWRITEBYTECODE=1
 : > "$TG_OUT"
+
+# Аккаунты — свои. При отказе по лимиту обёртка зовёт дверь автоперехода
+# account-switch.py --авто, если в каталоге аккаунтов лежит profiles.json; без
+# строки ниже каталог — боевой ($STATE_DIR/account паспорта), и 18.11.2026 19:49
+# прогон ворот записал в боевой state.json ложный лимит и начал переход.
+# Дверь — HARNESS_ACCOUNT_DIR (её читают и обёртка, и accounts.py); STATE_DIR —
+# чтобы и прочее под корнем состояния было своим.
+export HARNESS_ACCOUNT_DIR="$STAND/account" STATE_DIR="$STAND/state"
+mkdir -p "$HARNESS_ACCOUNT_DIR" "$STATE_DIR"
+
+# Сторож стенда: каталог аккаунтов судится тем же разбором конфига, что у
+# обёртки. Вне стенда — дальше не играть: любой случай лимита дошёл бы до боевой двери.
+echo "── стенд: каталог аккаунтов обёртки — свой ──"
+AKK_DVOR="$(bash -c 'source "$1/lib/config.sh"; konf_zagruzit; printf %s "${HARNESS_ACCOUNT_DIR:-${STATE_DIR:-}/account}"' _ "$HERE")"
+AKK_SVOJ="$(case "$AKK_DVOR" in "$STAND"/*) echo да ;; *) echo нет ;; esac)"
+case_check "каталог аккаунтов обёртки лежит в стенде" да "$AKK_SVOJ"
+[ "$AKK_SVOJ" = да ] || { echo "СТЕНД: обёртка дошла бы до боевых аккаунтов — дальше не играю" >&2; exit 1; }
 
 cat > "$STAND/bin/tg_send.sh" <<'SEND'
 #!/usr/bin/env bash
@@ -292,6 +312,9 @@ flow plain-limit.txt 1
 bash "$WRAPPER" проба-демон -p "задание" >/dev/null 2>&1; RC=$?
 case_check "Л9 текст лимита без JSON — код 77" 77 "$RC"
 case_check "Л10 час из текста" да "$(yes_no grep -q 'обновится в Sep 16, 18:00' "$TG_OUT")"
+# В стенде profiles.json нет: дверь, званная здесь, — дверь чужого каталога аккаунтов.
+case_check "Л11 лимиты на стенде: дверь автоперехода не звана ни разу" 0 \
+    "$(grep -c 'дверь автоперехода ответила' "$LOG_DIR/claude-demon.log")"
 
 for code in 0 1; do
     echo "── обёртка: is_error без лимита, код CLI $code ──"

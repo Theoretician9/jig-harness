@@ -1462,6 +1462,160 @@ def check_gates_summary_log_writes() -> tuple[int, int]:
         return bad, paths
 
 
+def check_train_log_writes() -> tuple[int, int]:
+    """К-2 ревью спеки поезда выпусков: release-train.jsonl несёт срез и прошлый
+    выпуск (ширину диапазона ворот и предмет кнопки), release-train-consent.json — согласие
+    на выпуски поездом. Строка из оболочки сузила бы ворота до нуля или дала месяц выпусков
+    без владельца. Пишет журнал publish.sh своим процессом; чтение свободно."""
+    with tempfile.TemporaryDirectory(prefix="проба-журнала-поезда-") as yard:
+        logs = pathlib.Path(yard, "log")
+        logs.mkdir()
+        install = pathlib.Path(yard, "install.conf")
+        install.write_text(f'LOG_DIR="{logs}"\nAUTONOMY="semi"\n', encoding="utf-8")
+        harness = pathlib.Path(yard, "harness.conf")
+        harness.write_text("", encoding="utf-8")
+        env = dict(os.environ, HARNESS_INSTALL_CONF=str(install), HARNESS_CONF=str(harness))
+        row = '{"срез_пакета":"x","ворота":"зелёные"}'
+        cases = []
+        for name in ("release-train.jsonl", "release-train-consent.json"):
+            f = logs / name
+            f.write_text("{}\n", encoding="utf-8")
+            cases += [
+                (2, f"printf >> {name}", f"printf '%s\\n' '{row}' >> {f}"),
+                (2, f"echo > {name}", f"echo '{row}' > {f}"),
+                (2, f"tee -a {name}", f"echo '{row}' | tee -a {f}"),
+                (2, f"cp поверх {name}", f"cp /tmp/x {f}"),
+                (2, f"python3 -c open(..., 'a') {name}",
+                 f"python3 -c \"open('{f}', 'a').write('{{}}\\n')\""),
+                (2, f"дописка по куску имени: >> \"$L/{name}\"", f"L={logs}; echo '{row}' >> \"$L/{name}\""),
+                (0, f"cat {name}", f"cat {f}"),
+                (0, f"tail {name}", f"tail -n 3 {f}"),
+                (0, f"grep {name}", f"grep ворота {f}"),
+            ]
+        cases += [(0, "журнал ворот поезда (не журнал поезда)", f"echo x >> {logs}/release-train-gates-1.log")]
+        bad, paths = 0, 0
+        прежний = ГВАРД.ПОМОЩНИК
+        try:
+            for helper, who in ((False, "оркестратор"), (True, "помощник")):
+                ГВАРД.ПОМОЩНИК = helper
+                b, p = _judge_cases(cases, env, f"журнал поезда ({who})")
+                bad, paths = bad + b, paths + p
+        finally:
+            ГВАРД.ПОМОЩНИК = прежний
+        return bad, paths
+
+
+def check_events_door_consent_logs() -> tuple[int, int]:
+    """Н-14 ревью интеграции поезда: общая дверь событий пишет в $LOG_DIR/<журнал>.jsonl,
+    и журнал там назван ОСНОВОЙ имени (release-train, gates, ворота-итог…), а не путём.
+    Охрана К-2 судит запись в файл по имени и дверь не видит: `events.py emit
+    release-train … train.step ok --json '{"срез_пакета":…}'` давал зелёный ход на любой
+    срез или «выпущен» с пустым диапазоном ворот. Законные писатели (publish.sh, gates.sh)
+    зовут дверь своим процессом — сторож видит только команду их запуска. Дверь в обычные
+    журналы и чтение событий свободны."""
+    with tempfile.TemporaryDirectory(prefix="проба-двери-событий-") as yard:
+        logs = pathlib.Path(yard, "log")
+        logs.mkdir()
+        install = pathlib.Path(yard, "install.conf")
+        install.write_text(f'LOG_DIR="{logs}"\nAUTONOMY="semi"\n', encoding="utf-8")
+        harness = pathlib.Path(yard, "harness.conf")
+        harness.write_text("", encoding="utf-8")
+        env = dict(os.environ, HARNESS_INSTALL_CONF=str(install), HARNESS_CONF=str(harness))
+        data = '{"срез_пакета":"x","ворота":"зелёные"}'
+        lib = "scripts/lib"
+        root = _BASE.parents[1]
+        src = f"source {lib}/events.sh; "
+        path_in = f'import sys; sys.path.insert(0, "{lib}"); '
+
+        def py_emit(journal: str) -> str:
+            return ('emit("scripts/publish.sh", "train.step", "ok", journal=' + journal
+                    + ', data={"срез_пакета": "x"})')
+
+        emit_train = py_emit('"release-train"')
+        emit_spliced = py_emit('"release-tr" + "ain"')
+        emit_buttons = py_emit('"consent-buttons"')
+        emit_plain = py_emit('"agent-runs"')
+
+        # Три двери × журнал поезда: bash-дверь events.py, функция harness_event, emit из python.
+        cases = [
+            (2, "events.py emit release-train",
+             f"python3 {lib}/events.py emit release-train scripts/publish.sh train.step ok --json '{data}'"),
+            (2, "python3 -I абсолютный путь events.py emit release-train",
+             f"python3 -I {root}/{lib}/events.py emit release-train scripts/publish.sh train.step ok"),
+            (2, "HARNESS_LOG_DIR=… events.py emit release-train",
+             f"HARNESS_LOG_DIR={logs} python3 {lib}/events.py emit release-train p train.step ok"),
+            (2, "source events.sh; harness_event release-train",
+             f"{src}harness_event release-train scripts/publish.sh train.step ok --json '{data}'"),
+            (2, ". events.sh && harness_event release-train",
+             f". {lib}/events.sh && harness_event release-train scripts/publish.sh train.step ok"),
+            (2, "python3 -c from events import emit; journal=release-train",
+             f"python3 -c '{path_in}from events import emit; {emit_train}'"),
+            (2, "python3 -c from lib.events import emit",
+             f"cd scripts && python3 -c 'from lib.events import emit; {emit_train}'"),
+            (2, "python3 -c import events; events.emit",
+             f"python3 -c '{path_in}import events; events.{emit_train}'"),
+            (2, "heredoc python3 - <<EOF events.emit release-train",
+             f"python3 - <<'EOF'\nimport sys\nsys.path.insert(0, \"{lib}\")\nimport events\n"
+             f"events.{emit_train}\nEOF"),
+            (2, "python3 -c events.run(journal=release-train)",
+             f"python3 -c '{path_in}import events; "
+             "events.run(\"p\", lambda: 0, journal=\"release-train\", name=\"x\")'"),
+        ]
+        # Склейка имени: буквально «release-train» в команде нет.
+        cases += [
+            (2, "склейка кавычками: harness_event 'release-tr''ain'",
+             f"{src}harness_event 'release-tr''ain' scripts/publish.sh train.step ok"),
+            (2, "склейка кавычками: events.py emit \"release-\"\"train\"",
+             f"python3 {lib}/events.py emit \"release-\"\"train\" p train.step ok"),
+            (2, "переменная: j=release-train; harness_event $j",
+             f"j=release-train; {src}harness_event $j scripts/publish.sh train.step ok"),
+            (2, "переменная из склейки: j=release-tr; harness_event \"${j}ain\"",
+             f"j=release-tr; {src}harness_event \"${{j}}ain\" p train.step ok"),
+            (2, "python склейка: journal=\"release-tr\"+\"ain\"",
+             f"python3 -c '{path_in}from events import emit; {emit_spliced}'"),
+        ]
+        # Другие журналы списка, куда дверь пишет так же (основа имени без .jsonl).
+        cases += [
+            (2, "events.py emit gates", f"python3 {lib}/events.py emit gates scripts/gates.sh gates.run ok"),
+            (2, "harness_event ворота-итог", f"{src}harness_event ворота-итог scripts/gates.sh итог ok"),
+            (2, "python3 -c emit journal=consent-buttons",
+             f"python3 -c '{path_in}from events import emit; {emit_buttons}'"),
+            (2, "events.py emit confirmations", f"python3 {lib}/events.py emit confirmations p consent.yes ok"),
+            (2, "harness_event deploy-releases", f"{src}harness_event deploy-releases p release ok"),
+        ]
+        # Законное: запуск писателей, дверь в обычные журналы, чтение событий.
+        cases += [
+            (0, "bash scripts/gates.sh (пишет итог своим процессом)", "bash scripts/gates.sh --хакатон"),
+            (0, "events.py emit в обычный журнал", f"python3 {lib}/events.py emit agent-runs p run.start ok"),
+            (0, "harness_event в обычный журнал", f"{src}harness_event deploy p step ok"),
+            (0, "журнал с похожим именем вне списка: release-train-gates",
+             f"python3 {lib}/events.py emit release-train-gates p step ok"),
+            (0, "ворота и дверь в обычный журнал в одной команде",
+             f"bash scripts/gates.sh --хакатон; {src}harness_event deploy p step ok"),
+            (0, "python3 -c emit в обычный журнал",
+             f"python3 -c '{path_in}from events import emit; {emit_plain}'"),
+            (0, "чтение: scripts/events.py status", "python3 scripts/events.py status"),
+            (0, "чтение: scripts/events.py task", "python3 scripts/events.py task hr.example"),
+            (0, "чтение журнала поезда через events.read",
+             f"python3 -c '{path_in}import events, datetime as d; "
+             "print(list(events.read(d.datetime.min, d.datetime.max, journals=[\"release-train\"])))'"),
+            (0, "grep train.step по журналу поезда", f"grep train.step {logs}/release-train.jsonl"),
+        ]
+        bad, paths = 0, 0
+        прежний = ГВАРД.ПОМОЩНИК
+        try:
+            for helper, who in ((False, "оркестратор"), (True, "помощник")):
+                ГВАРД.ПОМОЩНИК = helper
+                # Публикация — только оркестратору (И-2): помощнику publish.sh отказан другим правилом.
+                own = [] if helper else [
+                    (0, "bash scripts/publish.sh (пишет поезд своим процессом)", "bash scripts/publish.sh --help")]
+                b, p = _judge_cases(cases + own, env, f"дверь событий ({who})")
+                bad, paths = bad + b, paths + p
+        finally:
+            ГВАРД.ПОМОЩНИК = прежний
+        return bad, paths
+
+
 def проверить_дверь_previous() -> tuple[int, int]:
     """Дверь удаления образа отката закрыта наглухо; заодно — дверь чтения живого учёта.
 
@@ -2679,7 +2833,8 @@ def main() -> int:
     bad += _плохо_дан
     total += _путей_дан
     for check_holes in (check_protected_paths, check_delete_door_targets,
-                        check_consent_log_writes, check_gates_summary_log_writes):
+                        check_consent_log_writes, check_gates_summary_log_writes,
+                        check_train_log_writes, check_events_door_consent_logs):
         holes_bad, holes_paths = check_holes()
         bad += holes_bad
         total += holes_paths

@@ -104,14 +104,32 @@ def judge(args) -> int:
     return min(new + bad, 255)
 
 
+def judge_gate(args) -> int:
+    """pre-commit копии: прикрыт ли карантином один гейт (имя через «_» — пробелы имени ворот)."""
+    entries = load_entries(Path(args.quarantine))
+    today = date.fromisoformat(args.today) if args.today else date.today()
+    devmap = yaml.safe_load(Path(args.devmap).read_text(encoding="utf-8")) or {}
+    card_ids, names = cards.task_ids(devmap), [e.get("гейт") for e in entries]
+    wanted = {args.gate, args.gate.replace("_", " ")}
+    for e in entries:
+        if e.get("гейт") in wanted and not defect(e, today, card_ids, names):
+            print(f"  карантин · {e['гейт']} — карточка {e['карточка']}, до {e['срок']}")
+            return 0
+    return 1
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
+    ap.add_argument("--гейт", dest="gate")
     for flag, dest in (("--карантин", "quarantine"), ("--карта", "devmap"), ("--журнал", "journal"),
                        ("--прогон", "run"), ("--сегодня", "today")):
         ap.add_argument(flag, dest=dest)
-    ap.add_argument("--красных", dest="red", type=int, required=True)
+    ap.add_argument("--красных", dest="red", type=int)
+    args = ap.parse_args()
+    if args.gate is None and args.red is None:
+        ap.error("нужен --красных (суд прогона) или --гейт (суд одного имени)")
     try:
-        return judge(ap.parse_args())
+        return judge_gate(args) if args.gate else judge(args)
     except Exception as err:  # суд упал — это красный, а не молчание
         print(f"ПЛОХО · суд карантина упал: {err}")
         return 1

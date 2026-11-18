@@ -90,6 +90,15 @@ def run_gate(args: list[str]) -> tuple[int, str]:
     return done.returncode, done.stdout + done.stderr
 
 
+def peak_rss_kb(args: list[str]) -> int:
+    """Пик памяти одного прогона гейта: у отдельного родителя RUSAGE_CHILDREN — ровно он."""
+    meter = ("import resource, subprocess, sys; subprocess.run(sys.argv[1:], capture_output=True, timeout=300); "
+             "print(resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss)")
+    done = subprocess.run([sys.executable, "-c", meter, sys.executable, str(GATE), *args],
+                          capture_output=True, text=True, timeout=320)
+    return int(done.stdout.strip() or 0)
+
+
 def finding(out: str, key: str, word: str) -> bool:
     return any(re.search(rf"(?<![A-Z0-9_]){key}(?![A-Z0-9_])", line) and word in line
                for line in out.splitlines())
@@ -156,6 +165,29 @@ def stand_cases() -> None:
     rc, out = case(sample=HEALTHY_SAMPLE + 'GONE_KEY="x"\n')
     check("БОЛЬНОЙ: ключ из «снять_ключи:» стоит в образце — назван со словом «снят»",
           rc == 1 and finding(out, "GONE_KEY", "снят"), f"rc {rc}: {out.strip()[:300]}")
+
+    # Деревья помощников .claude/worktrees/<x>/ — копии чужих веток, а не код этого
+    # корня: 122 дерева давали гейту 2 ГБ памяти и час (17.11). Ключ, который читает
+    # только такое дерево, кодом корня не прочитан.
+    rc, out = case(live=HEALTHY_LIVE + 'BRANCH_ONLY_KEY="1"\n',
+                   extra={".claude/worktrees/agent-x/scripts/reader.py": 'v = conf.get("BRANCH_ONLY_KEY")\n'})
+    check("здоровый: ключ читает только дерево помощника .claude/worktrees — не находка",
+          rc == 0 and "BRANCH_ONLY_KEY" not in out, f"rc {rc}: {out.strip()[:300]}")
+    # Контроль: прочий .claude/ — код корня (хуки), его читатель находку даёт.
+    rc, out = case(live=HEALTHY_LIVE + 'HOOK_KEY="1"\n',
+                   extra={".claude/hooks/reader.py": 'v = conf.get("HOOK_KEY")\n'})
+    check("БОЛЬНОЙ: ключ читает хук в .claude/hooks, в образце нет — назван",
+          rc == 1 and finding(out, "HOOK_KEY", "нет в образце"), f"rc {rc}: {out.strip()[:300]}")
+
+    # Память гейта не растёт с объёмом кода: код читается по строке, а не склеивается
+    # в одну строку. 12 МБ кода (2 млн строк) — прирост пика меньше 20 МБ.
+    big = {"scripts/big.py": "x = 1\n" * 2_000_000}
+    with tempfile.TemporaryDirectory() as tmp:
+        small_rss = peak_rss_kb(stand(Path(tmp) / "small", HEALTHY_SAMPLE, HEALTHY_LIVE, HEALTHY_JOBS, HEALTHY_CODE))
+        big_rss = peak_rss_kb(stand(Path(tmp) / "big", HEALTHY_SAMPLE, HEALTHY_LIVE, HEALTHY_JOBS,
+                                    dict(HEALTHY_CODE, **big)))
+    check("память: 12 МБ кода прибавляют к пику гейта меньше 20 МБ",
+          small_rss > 0 and big_rss - small_rss < 20_000, f"пик {small_rss} КБ → {big_rss} КБ")
 
     # Названный явно живой конфиг не прочитан — это не «ключей нет».
     with tempfile.TemporaryDirectory() as tmp:

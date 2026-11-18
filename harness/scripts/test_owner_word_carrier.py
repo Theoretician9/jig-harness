@@ -588,6 +588,28 @@ def repo_with_commit(path: Path, branch: str = "main") -> Path:
     return path
 
 
+# Пакет, который настоящий сборщик соберёт: publish.sh собирает его до ворот (ранний суд
+# заметок), и несобираемый пакет дал бы отказ раньше двери, которую судит проба.
+BUILDABLE_FILES = (
+    ("harness/CLAUDE.md", "# харнес\n@STATE.md\n"), ("harness/STATE.md", "состояние\n"),
+    ("harness/память/TONE.md", "# ТОН\nзамер речи\n"),
+    ("harness/шаблоны-задач/ТОН-заготовка.md", "# ТОН\n\n<!-- потолки: мягкий=700 жёсткий=1500 -->\n"),
+    ("harness/config/public-build.yaml",
+     "исключить: []\nзаменить_шаблоном:\n  harness/память/TONE.md: harness/шаблоны-задач/ТОН-заготовка.md\n"
+     "обезличить_ключи: [PROJECT_DIR]\nоставить: [harness/CLAUDE.md]\n"),
+    ("ЧТО-НОВОГО.md", "# Что нового\n\n## 2026-11-17 — Выпуск 0.1.0: стенд\n\n### Исправлено\n\n"
+     "- Сессия больше не обрывается.\n\n### Что изменилось для вас\n\n- Ничего делать не нужно.\n"))
+
+
+def buildable_package(package: Path, build: Path) -> None:
+    for rel, text in BUILDABLE_FILES:
+        (package / rel).parent.mkdir(parents=True, exist_ok=True)
+        (package / rel).write_text(text, encoding="utf-8")
+    git("add", "-A", cwd=package)
+    git("commit", "-q", "-m", "стенд: данные сборки", cwd=package)
+    (build / ".публичная-сборка").write_text("", encoding="utf-8")
+
+
 # Заглушка программы просьбы: пишет свой зов рядом с собой и отвечает «кнопка уже ушла» (код 3).
 REQUEST_STUB = '''import json, os, sys
 from pathlib import Path
@@ -617,6 +639,11 @@ class BashGateStand:
         self.root = new_stand()
         self.real = self.root / "real" / "scripts"
         shutil.copytree(SCRIPTS, self.real, ignore=shutil.ignore_patterns("__pycache__"))
+        # Данные релиза version.py ищет у корня копии: ранний суд заметок publish.sh считает номер выпуска.
+        release = self.real.parent / "harness" / "config" / "release.yaml"
+        release.parent.mkdir(parents=True)
+        shutil.copyfile(next(p for p in (SCRIPTS.parent / "harness" / "config" / "release.yaml",
+                                         SCRIPTS.parent / "config" / "release.yaml") if p.exists()), release)
         if SCRIPTS not in HOOKS.parents and HOOKS != SCRIPTS:
             shutil.copytree(HOOKS, self.real / "hooks", ignore=shutil.ignore_patterns("__pycache__"))
         shutil.copyfile(JUDGE_PATH, self.real / "lib" / "owner_word.py")
@@ -644,6 +671,7 @@ class BashGateStand:
         git("remote", "add", "nrp-stand-pub", str(self.bare), cwd=self.package)
         self.build = self.root / "build"
         git("clone", "-q", "-b", "pubb", str(self.bare), str(self.build))
+        buildable_package(self.package, self.build)
         write_conf(self.etc / "install.conf", {
             "LOG_DIR": self.log, "TG_CHAT_ID": OWNER, "PROJECT_DIR": self.fake, "AGENT_USER": "nrp",
             "BACKUP_DIR": self.root / "backup", "AUTONOMY": "semi"})
@@ -827,6 +855,8 @@ answer = json.loads(%r).get(key.rsplit("/", 1)[-1], "")
 if answer == "собрано":
     куда = Path(args[args.index("--куда") + 1])
     (куда / f"стенд-{uuid.uuid4().hex}.txt").write_text("сборка стенда\\n", encoding="utf-8")
+    # Замок 6в сверяет номер верхней записи с ответом version.py стенда (0.0.1).
+    (куда / "ЧТО-НОВОГО.md").write_text("## 2026-11-17 — Выпуск 0.0.1: стенд\\n", encoding="utf-8")
     answer = json.dumps({"пакет": "стенд"})
 if answer:
     print(answer)

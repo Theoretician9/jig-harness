@@ -38,6 +38,7 @@ import json
 import os
 import re
 import shlex
+import signal
 import subprocess
 import sys
 import tempfile
@@ -103,14 +104,19 @@ def прогон(слова: list[str], окружение: dict | None, чис�
                + слова) if чистое else слова
     среда = None if чистое else {**os.environ, **(окружение or {})}
     try:
-        итог = subprocess.run(команда, stdout=subprocess.DEVNULL,
-                              stderr=subprocess.DEVNULL, timeout=потолок,
-                              cwd=str(КОРЕНЬ), env=среда, stdin=subprocess.DEVNULL)
-        return итог.returncode
-    except subprocess.TimeoutExpired:
-        return -9
+        # Своя сессия: по потолку убивается вся группа — bash пробы умирает без
+        # ловушки EXIT, и его внуки (стенды, api, tmux) иначе остаются сиротами.
+        процесс = subprocess.Popen(команда, stdout=subprocess.DEVNULL,
+                                   stderr=subprocess.DEVNULL, cwd=str(КОРЕНЬ), env=среда,
+                                   stdin=subprocess.DEVNULL, start_new_session=True)
     except OSError:
         return -2
+    try:
+        return процесс.wait(timeout=потолок)
+    except subprocess.TimeoutExpired:
+        os.killpg(процесс.pid, signal.SIGKILL)
+        процесс.wait()
+        return -9
 
 
 def объявленное(путь_данных: Path) -> tuple[dict, dict, int, str]:
@@ -486,6 +492,13 @@ def селфтест() -> int:
         if not условие:
             ok = False
 
+    def жив(pid: int) -> bool:
+        """Процесс есть и не зомби: зомби уже убит, его лишь не прибрали."""
+        try:
+            return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] != "Z"
+        except OSError:
+            return False
+
     with tempfile.TemporaryDirectory() as врем, свой_дом(врем):
         двор = Path(врем)
         # ДОМ стенда — свой. Прежде проба брала дом хозяина как есть, и сам
@@ -645,6 +658,20 @@ def селфтест() -> int:
         долгая.write_text("#!/bin/bash\nsleep 5\n", encoding="utf-8")
         проба(прогон(["bash", str(долгая)], None, False, 1) == -9,
               "не дождались прогона — отдельный код, не успех")
+
+        # Потолок убивает всю группу прогона: внук (стенд пробы, поднятый через &)
+        # иначе переживает убитый bash и копится сиротой.
+        внук = двор / "vnuk.pid"
+        с_внуком = двор / "s-vnukom.sh"
+        с_внуком.write_text(f'#!/bin/bash\nsleep 60 &\necho $! > {внук}\nsleep 5\n', encoding="utf-8")
+        код = прогон(["bash", str(с_внуком)], None, False, 1)
+        pid_внука = int(внук.read_text(encoding="utf-8")) if внук.exists() else 0
+        time.sleep(0.3)
+        выжил = pid_внука > 0 and жив(pid_внука)
+        if выжил:
+            os.kill(pid_внука, 9)
+        проба(код == -9 and pid_внука > 0 and not выжил,
+              f"не дождались — внук прогона убит вместе с ним (код {код}, внук {pid_внука}, выжил {выжил})")
 
         # Прибор судит только код: вывод проверки бывает оборван посреди буквы.
         битая = двор / "bitaya.sh"

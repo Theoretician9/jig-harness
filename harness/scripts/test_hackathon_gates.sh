@@ -233,9 +233,16 @@ for repo in "$HARNESS" "$PRODUCT"; do
     git -C "$repo" -c user.email="proba@stend" -c user.name="проба" add -A
     git -C "$repo" -c user.email="proba@stend" -c user.name="проба" commit -qm "стенд"
 done
+# Выкат сверяет id образа под :<sha12> после сборки: у каждой ссылки — свой id,
+# иначе «сборка не дала образа» и выкат отменён до дампа. Какой образ куда
+# ставится, судит test_deploy_artifact.sh; здесь — только порядок шагов.
 cat > "$FAKEBIN/docker" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "${DOCKER_JOURNAL:-/dev/null}"
+if [ "${1:-}" = image ] && [ "${2:-}" = inspect ]; then
+    for ref in "$@"; do :; done
+    printf 'sha256:%s\n' "$(printf '%s' "$ref" | sha256sum | cut -c1-64)"
+fi
 exit 0
 SH
 chmod +x "$FAKEBIN/docker"

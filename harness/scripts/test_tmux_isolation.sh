@@ -20,6 +20,9 @@ export LC_ALL=C.UTF-8
 HERE="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 WAVE3="${HARNESS_WAVE3:-$HERE/test_watchers_wave3.sh}"
 STAND_NAME="${1:-session-warden}"
+# Волна 3 ведёт настоящего писателя тревог и под предком claude отказывает (код 2).
+source "$HERE/lib/off_session.sh"
+off_session_reexec bash "$HERE/$(basename "${BASH_SOURCE[0]}")" "$@"
 
 # Свой tmux пробы — только по явному сокету и без унаследованной TMUX:
 # сама проба тоже бывает запущена из панели. Свой сервер — без TMUX_TMPDIR

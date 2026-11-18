@@ -23,6 +23,7 @@ STATE.md, dev-map.yaml, память/, docs/, .tasks/, UNIFIED/.
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import sys
@@ -99,30 +100,14 @@ def _журнал_пробы(корень):
 }
 
 
-def найти_пакет(конф: str | None = None) -> tuple[Path | None, str]:
-    """(каталог пакета, причина отсутствия). STARTER_DIR → поиск по домам.
-
-    Путь считается ПРИ ВЫЗОВЕ, а не в умолчании аргумента: умолчание вычисляется
-    один раз при импорте, и проба, выставившая окружение после него, судила бы
-    боевую установку ([[the-probe-played-on-production]])."""
-    конф = конф or конф_модуль.путь_harness_conf()
-    значение = конф_модуль.из_файла(конф).get("STARTER_DIR", "")
-    if значение:
-        p = Path(значение)
-        if p.is_dir():
-            return p, ""
-        return None, f"STARTER_DIR={значение} в {конф} указывает на несуществующий каталог"
-    # STARTER_DIR пуст — ищем по конвенции установки, у АГЕНТА.
-    # Не перебором /home/*: чужие домашние каталоги закрыты на чтение, и обход
-    # падал PermissionError на первом же соседе (поймано первым прогоном).
-    агент = конф_модуль.из_файла(конф_модуль.путь_install_conf()).get("AGENT_USER", "")
-    if агент:
-        p = Path("/home") / агент / "starter" / "STARTER-PACKAGE"
-        if p.is_dir():
-            return p, ""
-        return None, f"каталог пакета не найден: STARTER_DIR пуст, и {p} не существует"
-    return None, (f"каталог пакета не найден: STARTER_DIR в {конф_модуль.путь_harness_conf()} "
-                  f"пуст, AGENT_USER в {конф_модуль.путь_install_conf()} тоже")
+def найти_пакет() -> tuple[Path | None, str]:
+    """(каталог пакета, причина отсутствия) по общему правилу katalog_paketa():
+    окружение поезда ведёт сверку на срез пакета, а не на живой пакет."""
+    пакет = конф_модуль.katalog_paketa()
+    if пакет.is_dir():
+        return пакет, ""
+    return None, (f"каталог пакета {пакет} не найден: его называют HARNESS_STARTER, STARTER_DIR "
+                  f"в {конф_модуль.путь_harness_conf()} или конвенция /home/<AGENT_USER>/starter")
 
 
 def место_в_пакете(путь: str) -> str | None:
@@ -667,9 +652,16 @@ def селфтест() -> int:
     проба("БОЛЬНОЙ: скил харнеса без пары в пакете — красный", 1, rc)
 
     # Пакет не найден — сверка невозможна, но НЕ молча и не красным.
-    отсутствует, причина = найти_пакет("/несуществующий/harness.conf")
-    проба("нет STARTER_DIR и нет /home/*/starter — сверка невозможна с адресом",
-          True, отсутствует is None or "starter" in str(отсутствует))
+    прежний = os.environ.get("HARNESS_STARTER")
+    os.environ["HARNESS_STARTER"] = str(T / "нет-пакета")
+    try:
+        отсутствует, причина = найти_пакет()
+    finally:
+        os.environ.pop("HARNESS_STARTER")
+        if прежний is not None:
+            os.environ["HARNESS_STARTER"] = прежний
+    проба("каталога пакета нет — сверка невозможна, причина называет каталог",
+          (None, True), (отсутствует, str(T / "нет-пакета") in причина))
 
     # БОЛЬНОЙ СЛУЧАЙ 10.09.2026: содержимое пакета сходится, а история в нём не
     # ведётся — 38 незакоммиченных правок при последнем коммите двухнедельной

@@ -194,8 +194,10 @@ vyzov_modeli() {
     # tee: сырой поток ложится в файл демона ПО ХОДУ, байт в байт; stderr отдельно,
     # чтобы его строки не попали в поток. Код берётся у первого звена конвейера.
     # Модель зовётся только через носитель: он собирает личность класса «демон» и
-    # сам шлёт сигнал, если не собрал.
-    bash "$PROJECT_DIR/scripts/claude-run.sh" --класс демон "${ZAPUSK[@]}" 2>"$OSHIBKI_FAJL" | tee -a "$POTOK_KAT/$DEMON.jsonl" >"$VYVOD_FAJL"
+    # сам шлёт сигнал, если не собрал. Метка аккаунта носителя нужна только файлу
+    # потока (её читает check-login-expiry.py): судье и демону она не вывод модели.
+    bash "$PROJECT_DIR/scripts/claude-run.sh" --класс демон "${ZAPUSK[@]}" 2>"$OSHIBKI_FAJL" | tee -a "$POTOK_KAT/$DEMON.jsonl" \
+        | grep -v '^{"type": *"harness_account"' >"$VYVOD_FAJL"
     KOD=${PIPESTATUS[0]}
 
     # 79: личность не собрана, модель не запускалась. Это не отказ API и не лимит:

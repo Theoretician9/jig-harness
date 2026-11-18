@@ -55,12 +55,7 @@ def registry_path():
 def installer_candidates():
     if os.environ.get("HARNESS_STACK_INSTALLER"):
         return [Path(os.environ["HARNESS_STACK_INSTALLER"])]
-    starter = config.из_файла(config.путь_harness_conf()).get("STARTER_DIR", "").strip()
-    user = config.из_файла(config.путь_install_conf()).get("AGENT_USER", "").strip()
-    found = [Path(starter)] if starter else []
-    if user:
-        found += [Path(f"/home/{user}/starter/STARTER-PACKAGE"), Path(f"/home/{user}/STARTER-PACKAGE")]
-    return found + [HERE.parent, HERE.parent.parent]    # корень раскладки пакета: рядом с harness/
+    return [config.katalog_paketa(), HERE.parent, HERE.parent.parent]    # корень раскладки пакета: рядом с harness/
 
 
 def installer_texts():

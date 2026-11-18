@@ -155,6 +155,17 @@ konf_iz_fajla() {  # $1 = ключ; печатает значение или п�
         "${HARNESS_CONF:-$(konf_koren)/harness.conf}" 2>/dev/null | tail -1
 }
 
+# Каталог пакета-источника — тот же порядок, что у katalog_paketa() в config.py:
+# HARNESS_STARTER (поезд ведёт ворота на срез) → STARTER_DIR (окружение старше файла) →
+# конвенция установки по AGENT_USER. STARTER_DIR здесь — сам пакет, не его родитель.
+# Читать ключ мимо этой функции — значит судить в поезде живой пакет вместо среза.
+konf_katalog_paketa() {  # печатает путь
+    local nazvannyj="${HARNESS_STARTER:-${STARTER_DIR:-$(konf_iz_fajla STARTER_DIR)}}" agent
+    if [ -n "$nazvannyj" ]; then printf '%s' "$nazvannyj"; return 0; fi
+    agent="$(konf_iz_fajla AGENT_USER)"
+    printf '/home/%s/starter/STARTER-PACKAGE' "${agent:-agent}"
+}
+
 # ── ЧЕМ ВХОДИТ АГЕНТ ────────────────────────────────────────────────────────
 # Команда подъёма агента со СОРВАННЫМ носителем чужого входа.
 #
@@ -256,6 +267,18 @@ konf_selftest() {
     case_check "отсутствующего ключа нет и в ответе — пусто, а не мусор" "" \
           "$(HARNESS_INSTALL_CONF="$T/i.conf" HARNESS_CONF="$T/h.conf" \
              bash -c 'source "$1"; konf_iz_fajla NO_SUCH_KEY' _ "$lib")"
+    # Каталог пакета: срез поезда старше ключа файла, ключ файла старше конвенции.
+    printf 'AGENT_USER="kopiya"\n' >> "$T/i.conf"
+    case_check "konf_katalog_paketa: срез поезда (HARNESS_STARTER) старше всего" "/срез" \
+          "$(HARNESS_INSTALL_CONF="$T/i.conf" HARNESS_CONF="$T/h.conf" HARNESS_STARTER=/срез STARTER_DIR=/живой \
+             bash -c 'source "$1"; konf_katalog_paketa' _ "$lib")"
+    case_check "konf_katalog_paketa: STARTER_DIR из файла — сам пакет" "/из-файла" \
+          "$(printf 'STARTER_DIR="/из-файла"\n' | cat "$T/h.conf" - > "$T/h2.conf"
+             HARNESS_INSTALL_CONF="$T/i.conf" HARNESS_CONF="$T/h2.conf" \
+             bash -c 'source "$1"; konf_katalog_paketa' _ "$lib")"
+    case_check "konf_katalog_paketa: ключа нет — конвенция по AGENT_USER паспорта" "/home/kopiya/starter/STARTER-PACKAGE" \
+          "$(HARNESS_INSTALL_CONF="$T/i.conf" HARNESS_CONF="$T/h.conf" \
+             bash -c 'source "$1"; konf_katalog_paketa' _ "$lib")"
     # БОЛЬНОЙ СЛУЧАЙ АР-4: режим двери — окружение не доживает до двери, ключ только из паспорта.
     printf 'DB_ADMIN_EXEC="из-паспорта"\n' >> "$T/h.conf"
     case_check "БОЛЬНОЙ СЛУЧАЙ АР-4: DB_ADMIN_EXEC окружением в режиме двери не доживает" "из-паспорта|пусто|$T/дверь/log" \

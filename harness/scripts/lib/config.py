@@ -453,6 +453,39 @@ def _selftest() -> int:
             if v is not None:
                 os.environ[k] = v
 
+    # Пакет ищется одним правилом: STARTER_DIR, взятый мимо katalog_paketa()/konf_katalog_paketa(),
+    # не видит HARNESS_STARTER, и в поезде проверка судит живой пакет вместо среза. Читатель
+    # опознаётся по тексту, а не по одной форме: словарь из файла, регулярка по тексту конфига,
+    # bash-умолчание `${STARTER_DIR:-`; все .py и .sh в scripts/, включая lib.
+    формы = [re.compile(р) for р in (
+        r"из_файла\([^\n]*\)\s*(?:\.get\(\s*|\[\s*)[\"']STARTER_DIR",
+        r"STARTER_DIR\\s\*=",
+        r"\$\{STARTER_DIR:-")]
+
+    def читает_мимо(текст: str) -> bool:
+        return any(ф.search(текст) for ф in формы)
+
+    for форма, образец in (
+            ("из_файла(...)[ключ]", 'x = из_файла(п)["STARTER_DIR"]\n'),
+            ("из_файла(...).get", "x = из_файла(п).get('STARTER_DIR', '')\n"),
+            ("регулярка по тексту конфига", "re.match(r'\\s*STARTER_DIR\\s*=\\s*(.*)', строка)\n"),
+            ("bash-умолчание", 'P="${STARTER_DIR:-$HOME/starter}"\n')):
+        проба(f"читатель мимо искателя опознан: {форма}", True, читает_мимо(образец))
+    проба("через искатель — не читатель мимо", False,
+          читает_мимо('P="$(konf_katalog_paketa)"\nx = config.katalog_paketa()\n'))
+
+    # Долг поимённо и со сроком годности: имя, которое больше так не читает, прикрыло бы будущий
+    # возврат читателя в этот же файл. Два теста читают пакет сами; publish.sh публикует В живой
+    # пакет (цель хода), а не судит его. Сами искатели не судятся.
+    долг = {"test_panel_install.py", "test_evolution_net.py", "publish.sh"}
+    искатели = {"config.py", "config.sh"}
+    читатели = [п for п in sorted(Path(__file__).resolve().parent.parent.rglob("*"))
+                if п.is_file() and п.suffix in (".py", ".sh") and п.name not in искатели]
+    мимо = {п.name for п in читатели if читает_мимо(п.read_text(encoding="utf-8"))}
+    проба("пакет — через искатель: STARTER_DIR мимо него не читает ни одна проверка (.py и .sh)",
+          (True, set()), (bool(читатели), мимо - долг))
+    проба("долг свеж: каждое имя долга всё ещё читает пакет мимо искателя", set(), долг - мимо)
+
     print(f"SELFTEST: {'зелёный' if случаи.ok else 'КРАСНЫЙ'} ({случаи.paths} путей; "
           "среди них больной случай «решётка внутри кавычек»)")
     return 0 if случаи.ok else 1

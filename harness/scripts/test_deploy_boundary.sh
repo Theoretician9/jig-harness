@@ -98,7 +98,7 @@ PRODUCT_PATH=""
 STACK_BUILD_CMD=""'
 itog "да" "$([ -f "$HARNESS/docker-compose.yml" ] && echo да || echo нет)" "1 условие: compose в PROJECT_DIR стенда есть"
 run_deploy
-itog "0" "$RC" "1 код выхода 0: файл харнеса не объявляет продукт"
+itog "0" "$RC" "1 код выхода 0: compose в каталоге харнеса не объявляет продукт"
 itog "да" "$(has "$VYVOD" "продукта нет")" "1 вывод называет «продукта нет»"
 itog "нет" "$(gate_called)" "1 ворота не звались"
 itog "0" "$(harness_tags)" "1 в репозитории харнеса тега выката нет"

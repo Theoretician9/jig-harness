@@ -533,7 +533,8 @@ def tracked_library(w: "World") -> bool:
 
 
 def dirty_library(w: "World") -> str:
-    return subprocess.run(["git", "-C", str(w.dir), "status", "--porcelain", "--", w.library_path.name],
+    return subprocess.run(["git", "-c", "core.quotepath=false", "-C", str(w.dir),
+                           "status","--porcelain", "--", w.library_path.name],
                           capture_output=True, text=True).stdout.strip()
 
 

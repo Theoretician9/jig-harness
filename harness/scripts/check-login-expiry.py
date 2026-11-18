@@ -34,8 +34,8 @@ import urllib.parse
 import urllib.request
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib"))
-from config import (heartbeat_dir, log_dir, конфиг, из_файла,  # noqa: E402
-                    путь_harness_conf, путь_install_conf)
+from config import (heartbeat_dir, katalog_paketa, log_dir, конфиг,  # noqa: E402
+                    путь_harness_conf)
 import accounts  # noqa: E402
 
 ФАЙЛ = os.path.expanduser(os.environ.get("CLAUDE_CREDENTIALS")
@@ -1199,21 +1199,11 @@ def самотест():
     # Проба судит СОГЛАСИЕ: что принимает образец, то и читает набором.
     один = "feaf1d3b-0019-4bf8-944d-69d4e645731f"
     два = "5534b44f-51f5-424c-ae17-55043cac3e12"
-    # Где лежит пакет — ДАННЫЕ, а не литерал: STARTER_DIR в harness.conf, а
-    # пустой ключ означает конвенцию установки (дом АГЕНТА из паспорта) — так
-    # же его читают сверка с пакетом и гейт кириллицы. Прежний вызов спрашивал
-    # ключ у install.conf, где его нет вовсе, и уходил в умолчание
-    # `/home/<наш агент>/starter/…`: случай держался вшитым следом НАШЕЙ
-    # установки, и гейт чистоты нашёл этот след в публичной сборке
-    # (17.10.2026). Не нашли ни ключа, ни имени агента — «искать негде», и
-    # случай обязан сказать это вслух, а не искать в текущем каталоге.
-    каталог_пакета = (из_файла(путь_harness_conf()).get("STARTER_DIR") or "").strip()
-    if not каталог_пакета:
-        агент = (из_файла(путь_install_conf()).get("AGENT_USER") or "").strip()
-        каталог_пакета = f"/home/{агент}/starter/STARTER-PACKAGE" if агент else ""
-    устан = pathlib.Path(каталог_пакета) / "USTANOVIT.sh" if каталог_пакета else None
+    # Где лежит пакет — одно правило для всех читателей (katalog_paketa): окружение
+    # поезда ведёт его на срез, иначе STARTER_DIR и конвенция установки.
+    устан = katalog_paketa() / "USTANOVIT.sh"
     образец_случаи = []
-    if устан is not None and устан.is_file():
+    if устан.is_file():
         найден = re.search(r"grep -qE '\^LOGIN_EXPECTED_ORG=([^']+)'",
                            устан.read_text(encoding="utf-8", errors="replace"))
         образец = найден.group(1).replace('\\"', '"') if найден else ""
@@ -1233,9 +1223,8 @@ def самотест():
                 образец_случаи.append((принял is ждём and (прочёл > 0) is ждём,
                                        f"образец и читатель согласны: {зачем}"))
     else:
-        где = устан if устан is not None else "STARTER_DIR в паспорте не задан"
         образец_случаи.append((False,
-                               f"установщик не найден ({где}) — согласие образца "
+                               f"установщик не найден ({устан}) — согласие образца "
                                "и читателя НЕ проверено"))
     for хорошо, зачем in образец_случаи:
         ok = ok and хорошо

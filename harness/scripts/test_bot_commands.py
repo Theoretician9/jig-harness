@@ -117,6 +117,27 @@ if пусто.returncode == 1 and not пусто.stdout.strip():
 else:
     путь_плохо(f"постороннее слово разобрано как команда: «{пусто.stdout.strip()}» (код {пусто.returncode})")
 
+print("── команда с суффиксом @имя_бота — та же команда (просьба bkb 17.11) ──")
+# В группе и из меню Telegram шлёт «/pause@bkb_bot»: суффикс адресует бота и
+# частью команды не является. Без него разбор отдавал пусто, и /pause уходил
+# агенту обычным сообщением. Зелёным оставит: срезание «@…» в tg-dispatcher.sh
+# мимо --какая (этот путь проба не видит) — поэтому судья один, bot-commands.py.
+for слово, ждём in [("/pause@bkb_bot", ["pause", ""]), ("/Status@Some_Bot", ["status", ""]),
+                    ("/panel_out@bkb_bot my.example.com", ["panel_out", "my.example.com"])]:
+    вышло = subprocess.run([sys.executable, СКРИПТ, "--какая", слово],
+                           capture_output=True, text=True, timeout=60)
+    if вышло.returncode == 0 and вышло.stdout.split("\n")[:2] == ждём:
+        путь_ок(f"суффикс бота срезан: «{слово}» → {ждём}")
+    else:
+        путь_плохо(f"«{слово}» → {вышло.stdout.split(chr(10))[:2]} (код {вышло.returncode}), ждали {ждём}")
+for слово in ("напиши на admin@bkb_bot", "pause@bkb_bot"):
+    вышло = subprocess.run([sys.executable, СКРИПТ, "--какая", слово],
+                           capture_output=True, text=True, timeout=60)
+    if вышло.returncode == 1 and not вышло.stdout.strip():
+        путь_ок(f"«@» вне слэш-команды командой не делает: «{слово}»")
+    else:
+        путь_плохо(f"«{слово}» разобрано как команда «{вышло.stdout.strip()}» (код {вышло.returncode})")
+
 ДИСПЕТЧЕР = (КОРЕНЬ / "scripts" / "tg-dispatcher.sh").read_text(encoding="utf-8")
 print("── команда с ИМЕНЕМ в сообщении ──")
 # БОЛЬНОЙ СЛУЧАЙ 13.09.2026 (ревью кода, F-06): «панель наружу my.example.com»

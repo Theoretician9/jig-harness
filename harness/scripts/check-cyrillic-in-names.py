@@ -139,16 +139,10 @@ def файлы_пакета() -> list[str]:
     вторым.
     """
     sys.path.insert(0, str(КОРЕНЬ / "lib"))
-    from config import из_файла, путь_harness_conf, путь_install_conf
-    каталог = из_файла(путь_harness_conf()).get("STARTER_DIR", "").strip()
-    кандидаты = [Path(каталог)] if каталог else []
-    пользователь = из_файла(путь_install_conf()).get("AGENT_USER", "").strip()
-    if пользователь:
-        дом = Path(f"/home/{пользователь}")
-        кандидаты += [дом / "starter" / "STARTER-PACKAGE", дом / "STARTER-PACKAGE"]
-    for путь in кандидаты:
-        if (путь / "USTANOVIT.sh").is_file():
-            return [str(ф) for ф in sorted(путь.rglob("*.sh"))]
+    from config import katalog_paketa
+    путь = katalog_paketa()
+    if (путь / "USTANOVIT.sh").is_file():
+        return [str(ф) for ф in sorted(путь.rglob("*.sh"))]
     return []
 
 

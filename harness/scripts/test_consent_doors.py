@@ -219,12 +219,20 @@ class Stand:
     def deploy_subject(self) -> str:
         return f"{self.prod_head()} {os.path.realpath(self.prod)}"
 
-    def publish_subject(self) -> str:
-        pkg_head = git("rev-parse", "HEAD", cwd=self.pkg)
+    def publish_subject(self, pkg_sha: str | None = None) -> str:
+        pkg_head = pkg_sha or git("rev-parse", "HEAD", cwd=self.pkg)
         tip = git("ls-remote", self.url, "refs/heads/master", cwd=self.pkg).split("\t")[0]
         build_tip = git("rev-parse", "refs/heads/master", cwd=self.build)
         return " ".join([pkg_head, self.url, "refs/heads/master", tip, build_tip,
                          os.path.realpath(self.pkg), os.path.realpath(self.build)])
+
+    def train_run(self, pkg_slice: str, gates: str = "зелёные", ago_s: float = 0) -> None:
+        """Строка хода поезда — так её пишет publish.sh через events.emit: время в корне, срез и вердикт в data."""
+        with open(self.log / "release-train.jsonl", "a", encoding="utf-8") as fh:
+            fh.write(json.dumps({"v": 1, "ts": now_iso(ago_s), "src": "scripts/publish.sh", "event": "train.step",
+                                 "outcome": "ok", "data": {"состояние": "проверка", "код": 0,
+                                                           "срез_пакета": pkg_slice, "ворота": gates}},
+                                ensure_ascii=False) + "\n")
 
     # ── слова владельца ────────────────────────────────────────────────────
     def button(self, event: str, kind: str, target: str, ago_s: float) -> None:
@@ -387,6 +395,8 @@ def probe_requests(yard: Yard) -> None:
     check(f"1д) --вид публикация → rc 0 [{short(out)}]", 0, rc)
     check("1д) цель — 7 полей: пакет, адрес, ветка, вершина, вершина сборки, пакет, сборка",
           s.publish_subject(), got[-1].get("цель") if got else None)
+    check("1д) слоя 1 в пакете нет — «почему» запроса без строки о личности", "проба публикации",
+          got[-1].get("почему") if got else None)
     rc, out, _ = s.ask("--вид", "публикация", "--предмет", "x", "--почему", "проба")
     check(f"1д) --вид публикация --предмет x → rc 2 [{short(out)}]", 2, rc)
     spoilers = (("pushurl в сборке", lambda b: git("config", "remote.origin.pushurl", b.url, cwd=b.build), "перенаправлен"),
@@ -400,6 +410,35 @@ def probe_requests(yard: Yard) -> None:
         spoil(s)
         rc, out, _ = s.ask("--вид", "публикация", "--репо", str(s.pkg), "--почему", "проба")
         check(f"1е) {label} → rc 2 «{reason}» [{short(out)}]", (2, True), (rc, reason in out))
+
+    # Слой 1 едет в публикации: владелец видит это в кнопке, строка идёт ПЕРВОЙ в «почему».
+    s = yard.stand(publish=True)
+    (s.pkg / "harness" / "self").mkdir(parents=True)
+    (s.pkg / "harness" / "self" / "standards.md").write_text("стандарты\n", encoding="utf-8")
+    commit(s.pkg, "пакет 3: слой 1", "harness/self/core.json", '{"смысл": "новый"}\n')
+    (s.build / "harness" / "self").mkdir(parents=True)
+    was = {"core.json": '{"смысл": "прежний"}\n', "standards.md": "стандарты\n"}
+    commit(s.build, "манифест прошлой публикации", "harness/self/MANIFEST.sha256",
+           "".join(f"{hashlib.sha256(text.encode()).hexdigest()}  {name}\n" for name, text in was.items()))
+    git("push", "-q", "origin", "HEAD:refs/heads/master", cwd=s.build)
+    rc, out, _ = s.ask("--вид", "публикация", "--репо", str(s.pkg), "--почему", "проба слоя 1")
+    got = s.requests()
+    line = "меняются личность/стандарты: core.json"
+    check(f"1ж) слой 1 изменён → rc 0, «почему»: сперва «{line}», затем довод [{short(out)}]",
+          (0, [line, "проба слоя 1"]), (rc, str(got[-1].get("почему")).split("\n") if got else None))
+    check("1ж) строка о личности напечатана в выводе запроса", True, line in out.splitlines())
+
+    # Предмет слоя человека — «поле=значение»: без «=» или с пустой стороной кнопки нет.
+    s = yard.stand()
+    for subject in ("цель", "цель=", "=агент склада"):
+        rc, out, _ = s.ask("--вид", "слой-человека", "--предмет", subject, "--почему", "проба")
+        check(f"1з) слой-человека --предмет {subject!r} → rc 2 «поле=значение» [{short(out)}]",
+              (2, True), (rc, "«поле=значение»" in out))
+    rc, out, _ = s.ask("--вид", "слой-человека", "--предмет", "цель=агент склада", "--почему", "проба")
+    got = s.requests()
+    check(f"1з) слой-человека --предмет «цель=агент склада» → rc 0, запрос на этот предмет [{short(out)}]",
+          (0, "слой-человека", "цель=агент склада"),
+          (rc, *((got[-1].get("вид"), got[-1].get("цель")) if got else (None, None))))
 
 
 # ── 2. тексты владельцу ──────────────────────────────────────────────────────
@@ -676,6 +715,79 @@ def probe_publish(yard: Yard) -> None:
           ("Принято", 0), (answer, rc))
 
 
+# ── 4ср. поезд: предмет — срез пакета, но не любой коммит его истории ──────────
+def probe_slice(yard: Yard) -> None:
+    print("— 4ср. --срез: HEAD пакета или срез зелёного хода поезда в сроке; строка личности — по срезу")
+    refused = "нет зелёного хода поезда"
+    s = yard.stand(publish=True)
+    old = git("rev-parse", "HEAD~1", cwd=s.pkg)
+    s.yes("публикация", s.publish_subject(old))
+    rc, out = s.gate_publish("--срез", old)
+    check(f"4р) БОЛЬНОЙ СЛУЧАЙ: старый коммит пакета, не названный ходом поезда → rc 1 «{refused}» "
+          f"[{short(out)}]", (1, True), (rc, refused in out))
+    s.train_run(old)
+    rc, out = s.gate_publish("--срез", old)
+    check(f"4р2) тот же коммит — срез зелёного хода поезда → rc 0 [{short(out)}]", 0, rc)
+    s.train_run(git("rev-parse", "HEAD", cwd=s.pkg))
+    rc, out = s.gate_publish("--срез", old)
+    check(f"4р3) БОЛЬНОЙ СЛУЧАЙ: кнопка на срез A, затем ход --проверка --поезд на срезе B → A принят "
+          f"[{short(out)}]", 0, rc)
+    for gates, ago_s, what in (("красный выбор", 0, "у среза только ход с красными воротами"),
+                               ("зелёные", 25 * 3600, "зелёный ход среза старше суток")):
+        s = yard.stand(publish=True)
+        old = git("rev-parse", "HEAD~1", cwd=s.pkg)
+        s.yes("публикация", s.publish_subject(old))
+        s.train_run(old, gates, ago_s)
+        rc, out = s.gate_publish("--срез", old)
+        check(f"4р4) БОЛЬНОЙ СЛУЧАЙ: {what} → rc 1 «{refused}» [{short(out)}]", (1, True), (rc, refused in out))
+
+    # Журнал поезда не охраняется: запись из будущего не годна бессрочно.
+    s = yard.stand(publish=True)
+    old = git("rev-parse", "HEAD~1", cwd=s.pkg)
+    s.yes("публикация", s.publish_subject(old))
+    s.train_run(old, "зелёные", -3600)
+    rc, out = s.gate_publish("--срез", old)
+    check(f"4р5) БОЛЬНОЙ СЛУЧАЙ: зелёный ход среза записан на час вперёд → rc 1 «{refused}» [{short(out)}]",
+          (1, True), (rc, refused in out))
+
+    # Срез старше уже опубликованного — откат копий: прошлый выпуск собран из HEAD пакета, срез — его предок.
+    s = yard.stand(publish=True)
+    old = git("rev-parse", "HEAD~1", cwd=s.pkg)
+    head = git("rev-parse", "HEAD", cwd=s.pkg)
+    commit(s.build, f"версия от 2026-11-02, пакет {head[:7]}", "README.md", "сборка 2\n")
+    git("push", "-q", "origin", "HEAD:refs/heads/master", cwd=s.build)
+    s.train_run(old)
+    s.yes("публикация", s.publish_subject(old))
+    rc, out = s.gate_publish("--срез", old)
+    check(f"4р6) БОЛЬНОЙ СЛУЧАЙ: срез старше прошлого выпуска → rc 1 «не потомок прошлого выпуска» [{short(out)}]",
+          (1, True), (rc, "не потомок прошлого выпуска" in out))
+
+    s = yard.stand(publish=True)
+    git("switch", "-q", "-c", "side", cwd=s.pkg)
+    side = commit(s.pkg, "боковая ветка пакета")
+    git("switch", "-q", "master", cwd=s.pkg)
+    s.train_run(side)
+    s.yes("публикация", s.publish_subject(side))
+    rc, out = s.gate_publish("--срез", side)
+    check(f"4с) БОЛЬНОЙ СЛУЧАЙ: срез хода поезда не в истории пакета → rc 1 «нет в истории» [{short(out)}]",
+          (1, True), (rc, "нет в истории" in out))
+
+    # Просьба кнопки называет смену личности СРЕЗА: HEAD пакета после среза едет следующим поездом.
+    for published, want, what in (("ядро 1\n", False, "срез без смены личности, HEAD со сменой → строки нет"),
+                                  ("ядро 2\n", True, "срез со сменой личности, HEAD без → строка есть")):
+        s = yard.stand(publish=True)
+        (s.pkg / "harness" / "self").mkdir(parents=True)
+        cut = commit(s.pkg, "срез: слой 1", "harness/self/core.json", "ядро 1\n")
+        commit(s.pkg, "после среза: правка личности", "harness/self/core.json", "ядро 2\n")
+        manifest = s.build / "harness" / "self" / "MANIFEST.sha256"
+        manifest.parent.mkdir(parents=True)
+        manifest.write_text(f"{hashlib.sha256(published.encode()).hexdigest()}  core.json\n", encoding="utf-8")
+        s.train_run(cut)
+        rc, out, _nonce = s.ask("--вид", "публикация", "--предмет-двери", s.publish_subject(cut),
+                                "--почему", "проба среза")
+        check(f"4т) {what} [{short(out)}]", (0, want), (rc, "меняются личность/стандарты: core.json" in out))
+
+
 # ── 5. сверка перед пушем (Н-6) ──────────────────────────────────────────────
 def probe_verify(yard: Yard) -> None:
     print("— 5. door_subjects.py сверить-публикацию: перед пушем предмет тот же, чужих коммитов нет")
@@ -759,6 +871,7 @@ def door_project(project: Path) -> Path:
 def probe_lock(yard: Yard) -> None:
     print("— 6. publish.sh: замок 2 судит код возврата ворот (hr.publish-judges-gate-by-text)")
     s = yard.stand(publish=True)
+    publish_stand(s)   # ранний суд заметок собирает пакет до ворот: пакет обязан собираться
     project = s.root / "project"
     (project / "scripts").mkdir(parents=True, exist_ok=True)
     (project / "scripts" / "gates.sh").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
@@ -795,7 +908,7 @@ def publish_stand(s: Stand) -> dict:
                       ("harness/config/public-build.yaml",
                        "исключить: []\nзаменить_шаблоном:\n  harness/память/TONE.md: harness/шаблоны-задач/ТОН-заготовка.md\n"
                        "обезличить_ключи: [PROJECT_DIR]\nоставить: [harness/CLAUDE.md]\n"),
-                      ("ЧТО-НОВОГО.md", "# Что нового\n\n## 2026-11-05 — Кнопки на двери\n\n### Исправлено\n\n"
+                      ("ЧТО-НОВОГО.md", "# Что нового\n\n## 2026-11-05 — Выпуск 0.1.0: кнопки на двери\n\n### Исправлено\n\n"
                        "- Сессия больше не обрывается.\n\n### Что изменилось для вас\n\n- Ничего делать не нужно.\n")):
         path = pkg / rel
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -857,7 +970,7 @@ sys.exit(rc)
 
 PUBLISH_FN = """set -uo pipefail
 say() { printf '%s\\n' "$*"; }
-eval "$(sed -n '/^опубликовать_сборку() {/,/^}/p' "$1")"
+eval "$(sed -n '/^опубликовать_сборку() {/,/^}/p; /^judge_release_notes() {/,/^}/p; /^next_release_number() {/,/^}/p' "$1")"
 опубликовать_сборку
 """
 
@@ -1177,6 +1290,7 @@ LOCK2_PASSED = "замок 2 · согласие владельца на пуб�
 
 def window_stand(yard: Yard) -> tuple[Stand, dict]:
     s = yard.stand(publish=True)
+    publish_stand(s)   # ранний суд заметок собирает пакет до ворот: пакет обязан собираться
     project = s.root / "project"
     (project / "scripts").mkdir(parents=True, exist_ok=True)
     (project / "scripts" / "gates.sh").write_text(WINDOW_GATES, encoding="utf-8")
@@ -1385,7 +1499,7 @@ def probe_window(yard: Yard) -> None:
 
 
 CASE_NAMES = ("запрос", "текст", "выкат", "публикация", "сверка", "замок", "пуш", "сборка", "спека", "сторож",
-              "окно")
+              "окно", "срез")
 
 
 def main() -> int:
@@ -1395,7 +1509,7 @@ def main() -> int:
     yard = Yard()
     for name, run in zip(CASE_NAMES, (probe_requests, probe_texts, probe_deploy, probe_publish, probe_verify,
                                       probe_lock, probe_before_push, probe_build, probe_spec, probe_guard,
-                                      probe_window)):
+                                      probe_window, probe_slice)):
         if name not in only:
             continue
         try:

@@ -410,7 +410,7 @@ dchk_run() {  # $1 = sha, $2 = ветка, $3 = образ-артефакт
     dchk_lock || return 1
     DCHK_ID="${DEPLOY_CHECK_RUN_ID:-$$-$(date +%s)}"
     DCHK_WORK_ROOT="${DEPLOY_CHECK_WORK_ROOT:-/var/tmp/door-checks}"
-    DCHK_LOG_ROOT="${DEPLOY_CHECK_LOG_ROOT:-/var/log/harness/door-checks}"
+    DCHK_LOG_ROOT="${DEPLOY_CHECK_LOG_ROOT:-$LOG_DIR/door-checks}"
     DCHK_RESULTS="[]"; DCHK_MEM_MIN=""; DCHK_LOAD_MAX=0
     DCHK_PREFIX=$(dchk_prefix)
     trap dchk_cleanup EXIT

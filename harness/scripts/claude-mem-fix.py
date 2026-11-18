@@ -30,4 +30,5 @@ def fix() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(events.run(SRC, fix, journal="claude-mem-fix", name="claude-mem-fix"))
+    sys.exit(events.run(SRC, fix, journal="claude-mem-fix", name="claude-mem-fix",
+                        heartbeat="claude-mem-fix"))

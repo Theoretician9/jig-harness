@@ -16,6 +16,7 @@
 Итог: «КАРАНТИН ВОРОТ: случаев N, неудач M», код 0/1.
 """
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -237,6 +238,105 @@ def case_s_solo_recheck_last_verdict(stand):
     assert rc2 == 0 and "в карантине 1" in summary(out2), f"красный и соло не прикрыт: «{summary(out2)}»\n{out2}"
 
 
+def gate_mode(stand: Path, entries: list[str], name: str):
+    """Суд одного имени для pre-commit: «--гейт <имя>» без журнала и счёта прогона.
+    Карта та же, что у judge: условие строит сам случай."""
+    judge(stand, entries, [], 0, need_summary=False)
+    proc = subprocess.run(
+        [sys.executable, str(JUDGE), "--гейт", name, "--карантин", str(stand / "gates-quarantine.yaml"),
+         "--карта", str(stand / "dev-map.yaml"), "--сегодня", TODAY.isoformat()],
+        capture_output=True, text=True, timeout=60)
+    return proc.returncode, proc.stdout + proc.stderr
+
+
+def case_t_gate_mode_for_pre_commit(stand):
+    # Карантин копии гасит красную и в pre-commit на срок (пятый откат bkb, 17.11):
+    # обновление ставится с известной неглавной красной, и если она стоит в pre-commit
+    # копии, коммиты встают (у bkb так было после строки crontab). pre-commit зовёт
+    # суд по имени: «_» его имени — пробел имени ворот («библиотека_процессов»).
+    # Зелёным оставит: режим, который отвечает 0 на любое имя, — ловят просрочка,
+    # чужое имя и карточка вне карты ниже.
+    rc, out = gate_mode(stand, [entry("библиотека процессов")], "библиотека_процессов")
+    assert rc == 0, f"годная запись не прикрыла имя pre-commit, код {rc}:\n{out}"
+    assert "карантин" in out and CARD in out, f"прикрытие не названо с карточкой:\n{out}"
+    rc, out = gate_mode(stand, [entry("библиотека процессов")], "секреты")
+    assert rc == 1, f"имя вне карантина прикрыто, код {rc}:\n{out}"
+    rc, out = gate_mode(stand, [entry("библиотека процессов", made=day(-8), due=day(-1))],
+                        "библиотека_процессов")
+    assert rc == 1, f"просроченная запись прикрыла pre-commit, код {rc}:\n{out}"
+    rc, out = gate_mode(stand, [entry("библиотека процессов", card="hr.no-such-card")],
+                        "библиотека_процессов")
+    assert rc == 1, f"запись без карточки в карте прикрыла pre-commit, код {rc}:\n{out}"
+
+
+# Хук под пробой: дверь — для мутации КОПИИ хука, живой файл не правится.
+PRE_COMMIT = Path(os.environ.get("PRE_COMMIT_GATE_UNDER_TEST") or HERE / "pre-commit-gate.sh")
+HOOK_FUNCTIONS = ("journal", "fail", "подвести", "гейт")
+
+
+def hook_functions() -> str:
+    """Функции хука, которыми коммит судит гейт: «имя() {» … первая «}» с начала строки.
+    Весь хук здесь не гоняется: он судит индекс настоящего репозитория минутами."""
+    lines = PRE_COMMIT.read_text(encoding="utf-8").splitlines()
+    parts = [l for l in lines if l.startswith(("YELLOW_CODE=", "GATE_FAILURES=("))]
+    assert len(parts) == 2, f"в {PRE_COMMIT.name} нет ровно одной YELLOW_CODE= и GATE_FAILURES=(: {parts!r}"
+    for name in HOOK_FUNCTIONS:
+        start = next((i for i, l in enumerate(lines) if l.startswith(f"{name}() {{")), None)
+        assert start is not None, f"в {PRE_COMMIT.name} нет функции {name}()"
+        end = next(i for i in range(start + 1, len(lines)) if lines[i] == "}")
+        parts += lines[start:end + 1]
+    return "\n".join(parts)
+
+
+def commit_gate(stand: Path, entries: list[str] | None, name: str):
+    """Красный гейт `name` через функцию гейт() хука на своём проекте → (код, вывод).
+    Карантин и карта — в PROJECT_DIR стенда, даты — от сегодняшних часов: хук суду
+    «--сегодня» не передаёт. Суд карантина хук ищет рядом с собой — рядом с раннером
+    лежит ссылка на настоящий gates-quarantine.py."""
+    project = stand / "проект"
+    (project / "harness" / "config").mkdir(parents=True)
+    if entries is not None:
+        (project / "harness" / "config" / "gates-quarantine.yaml").write_text(
+            "карантин:\n" + "\n".join(entries) + "\n", encoding="utf-8")
+    (project / "dev-map.yaml").write_text(
+        f"version: 1\nmilestones:\n  - id: {MILESTONE_ID}\nlines:\n  - id: {LINE_ID}\n    tasks:\n"
+        f"      - id: {CARD}\n        status: plan\n        title: проба\n", encoding="utf-8")
+    scripts = stand / "scripts"
+    scripts.mkdir()
+    (scripts / "gates-quarantine.py").symlink_to(JUDGE)
+    runner = scripts / "commit-gate-runner.sh"
+    runner.write_text(
+        "set -euo pipefail\n"
+        f"LOG_DIR='{stand / 'log'}'\nGATES_LOG=\"$LOG_DIR/gates.jsonl\"\nCHANGED=''\nHEAD_SHA=probe\n"
+        + hook_functions()
+        + f"\nгейт '{name}' bash -c 'echo сломалось; exit 1'\nподвести\necho ДОШЁЛ_ДО_КОНЦА\n",
+        encoding="utf-8")
+    proc = subprocess.run(["bash", str(runner)], capture_output=True, text=True, timeout=60, cwd=stand,
+                          env={**os.environ, "PROJECT_DIR": str(project)})
+    return proc.returncode, proc.stdout + proc.stderr
+
+
+def case_u_commit_hook_under_quarantine(stand):
+    # Связка хука с карантином копии: красный гейт pre-commit под годной записью
+    # не останавливает коммит; без записи, с просроченной, без файла — останавливает.
+    # Зелёным оставит: хук, гасящий любую красную при НАЛИЧИИ файла карантина, —
+    # ловит чужое имя; суд по имени без «_»→пробел — ловит имя с «_».
+    today = date.today()
+    fresh = entry("библиотека процессов", made=(today - timedelta(days=1)).isoformat(),
+                  due=(today + timedelta(days=6)).isoformat())
+    rc, out = commit_gate(stand / "годная", [fresh], "библиотека_процессов")
+    assert rc == 0 and "под карантином" in out and "ДОШЁЛ_ДО_КОНЦА" in out, \
+        f"годная запись: коммит остановлен (код {rc}):\n{out}"
+    stale = entry("библиотека процессов", made=(today - timedelta(days=8)).isoformat(),
+                  due=(today - timedelta(days=1)).isoformat())
+    for label, entries, name in (("чужое имя", [fresh], "секреты"),
+                                 ("просроченная запись", [stale], "библиотека_процессов"),
+                                 ("файла карантина нет", None, "библиотека_процессов")):
+        rc, out = commit_gate(stand / label.replace(" ", "-"), entries, name)
+        assert rc == 1 and "КОММИТ ОСТАНОВЛЕН" in out and "под карантином" not in out, \
+            f"{label}: красный гейт не остановил коммит (код {rc}):\n{out}"
+
+
 CASES = [
     ("а) свежий карантин → зелёный", case_a_fresh_quarantine_green),
     ("б) новый красный вне карантина", case_b_new_red_outside),
@@ -257,6 +357,8 @@ CASES = [
     ("с) карточка — только id задачи", case_q_card_is_task_only),
     ("т) оборванная строка журнала пропускается", case_r_torn_journal_line_skipped),
     ("у) перепрогон соло: судит последний вердикт", case_s_solo_recheck_last_verdict),
+    ("ф) имя pre-commit под карантином копии", case_t_gate_mode_for_pre_commit),
+    ("х) хук pre-commit: красный гейт под карантином копии", case_u_commit_hook_under_quarantine),
 ]
 
 

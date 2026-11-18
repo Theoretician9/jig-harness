@@ -553,6 +553,9 @@ class GatesStand:
         self.home = self.base / "home"
         self.trace = self.base / "trace"
         write(self.root / "scripts/gates.sh", GATES_SH.read_text(encoding="utf-8"))
+        # Итог ворот судит карантин: без своего суда настоящий gates.sh падает в конце.
+        write(self.root / "scripts/gates-quarantine.py",
+              (ROOT / "scripts/gates-quarantine.py").read_text(encoding="utf-8"))
         copy_lib(self.root)
         write(self.root / INSTRUMENT, trace_writer(self.trace, "заглушка"))
         write(self.home / "install.conf",

@@ -415,6 +415,12 @@ journals:
     time_field: ts
     time_kind: tz
     event_from: "field:event"
+  evolution-net:
+    file: evolution-net.jsonl
+    writers: [scripts/evolution-net.py]
+    time_field: ts
+    time_kind: tz
+    event_from: "field:event"
   "уборка-tmp":
     file: "уборка-tmp.jsonl"
     writers: [scripts/tmp-sweep.py]
@@ -467,6 +473,12 @@ journals:
   "merge-queue":
     file: "merge-queue.jsonl"
     writers: [scripts/merge-queue.py]
+    time_field: ts
+    time_kind: tz
+    event_from: "field:event"
+  "release-train":
+    file: "release-train.jsonl"
+    writers: [scripts/publish.sh]
     time_field: ts
     time_kind: tz
     event_from: "field:event"

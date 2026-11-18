@@ -268,6 +268,11 @@ fi
 echo "автономия: $autonomy"
 [ "$autonomy" = "semi" ] && echo "  (полуавтомат: деплой и push — через ворота; владелец подтверждает в Telegram)"
 
+# --- на каком аккаунте смена, помощники и демоны (молчит, если профили не заведены) ---
+if [ -n "$project_dir" ]; then
+  python3 "$project_dir/scripts/account-switch.py" --сейчас 2>/dev/null | head -1
+fi
+
 # --- git-состояние и настройки проекта ---
 if [ -n "$project_dir" ] && cd "$project_dir" 2>/dev/null; then
   if git rev-parse --git-dir >/dev/null 2>&1; then

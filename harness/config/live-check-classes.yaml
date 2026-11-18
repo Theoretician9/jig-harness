@@ -1093,6 +1093,8 @@
     класс: D
   "scripts/lib/stand_sweep.sh":
     класс: C2
+  "scripts/lib/off_session.sh":
+    класс: C2
   "scripts/precheck.py":
     класс: C1
   "scripts/test_precheck.py":

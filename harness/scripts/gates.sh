@@ -40,6 +40,10 @@ export TMPDIR="$RUN_TMP"
 chmod 711 "$RUN_TMP"
 trap 'rm -rf "$RUN_TMP"' EXIT
 
+# Пробу, убитую KILL-ом (потолок ворот), ловушка не убирает: её стенды в своих сессиях
+# живут, пока та же проба не пойдёт снова. Мёртвых хозяев подметают ворота — все пробы разом.
+( . "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/lib/stand_sweep.sh"; sweep_dead_stands "${GATES_STAND_PREFIX:-/tmp/proba-}" )
+
 # Обёртка проверки и счётчики зелёных/красных/жёлтых — scripts/lib/gates_check.sh.
 # shellcheck disable=SC1091
 . "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/lib/gates_check.sh"
@@ -205,6 +209,7 @@ done
 # (курсор отстал, первый запуск, пометка второй раз) живут в самотесте
 # модуля, а не в каждом стороже по копии.
 проверка "чтение настроек" python3 scripts/lib/config.py --selftest
+проверка "выбор проверок" python3 scripts/select-checks.py --selftest
 проверка "дверь укладки" python3 scripts/test_layout_door.py
 проверка "опись раскладки" python3 scripts/test_layout_manifest.py
 проверка "журнал раскладки" python3 scripts/test_layout_journal.py
@@ -380,6 +385,7 @@ done
 # Середина пайплайна: спека и её ревью у крупной задачи (первый пункт владельца
 # 11.09). Уровень задачи — из замера индекса, а не из заявленного объёма.
 проверка "пайплайн-гейт"  python3 scripts/check-pipeline.py
+проверка "пайплайн по трейлеру" python3 scripts/test_pipeline_trailer_card.py
 # Дубль той же проверки ПО ИСТОРИИ задачи: pre-commit обходится одним
 # `--no-verify`, и у пайплайна, в отличие от секретов, дубля не было вовсе
 # (ревью спеки 23.09.2026). Здесь работа судится целиком по трейлерам
@@ -441,6 +447,7 @@ done
 # Канбан: снимок доски, её страницы в панели и приём комментариев с карточки.
 проверка "снимок доски"   python3 scripts/test_build_board.py
 проверка "очередь по статусам" python3 scripts/test_work_queue.py
+проверка "очередь: ждёт внешнего" python3 scripts/test_work_queue_external_wait.py
 проверка "очередь по важности" python3 scripts/test_queue_importance.py
 проверка "доска панели"   python3 harness/panel/test_task_board.py
 проверка "приём комментариев" python3 scripts/test_comments_intake.py
@@ -463,6 +470,7 @@ done
 # донос в sentinel и общий писатель lib/cards.py.
 проверка "писатель тревог"  python3 scripts/test_alert_task.py
 проверка "форма --is-green" python3 scripts/test_acceptance_is_green.py
+проверка "приёмка одной карточки" python3 scripts/test_acceptance_one_task.py
 проверка "мутации до принятия" python3 scripts/test_mutations_before_accept.py
 проверка "писатели карты в библиотеке" python3 scripts/test_map_writers_library.py
 проверка "снятие из карты"  python3 scripts/test_archive_map.py
@@ -518,6 +526,7 @@ done
 # здесь — его самотест, иначе сторож канала стоит без проверки.
 проверка "переписка"       python3 scripts/check-channel-messages.py --selftest
 проверка "карта"          bash scripts/pre-commit-gate.sh --selftest-devmap
+проверка "схема карты"    python3 scripts/test_devmap_schema.py
 проверка "потеря задач"   python3 scripts/check-map-keeps-tasks.py --selftest
 # Замки публикации: их самотест не звал никто, и он молча падал — проба
 # задавала настройки окружением, а скрипт перечитывал их из harness.conf.

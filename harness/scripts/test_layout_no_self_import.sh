@@ -17,7 +17,7 @@
 # BACKUP_DIR окружения сняты. Живой проект не трогается.
 #
 # Где раскладчик: в пакете — рядом (harness/razlozhit-harnes.sh), в проекте —
-# в пакете ${STARTER_DIR:-$HOME/starter/STARTER-PACKAGE}. Двери мутаций:
+# в пакете, найденном konf_katalog_paketa. Двери мутаций:
 # LAYOUT_UNDER_TEST (раскладчик), BUILD_CLAUDE_MD_UNDER_TEST (сборщик CLAUDE.md).
 #
 #   bash scripts/test_layout_no_self_import.sh
@@ -26,11 +26,12 @@ set -uo pipefail
 export LC_ALL=C.UTF-8
 
 HERE="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+source "$HERE/lib/config.sh"
 source "$HERE/lib/selftest_cases.sh"
 
 LAYOUT="${LAYOUT_UNDER_TEST:-}"
 if [ -z "$LAYOUT" ]; then
-    for cand in "$HERE/../razlozhit-harnes.sh" "${STARTER_DIR:-$HOME/starter/STARTER-PACKAGE}/harness/razlozhit-harnes.sh"; do
+    for cand in "$HERE/../razlozhit-harnes.sh" "$(konf_katalog_paketa)/harness/razlozhit-harnes.sh"; do
         [ -f "$cand" ] && { LAYOUT="$(readlink -f "$cand")"; break; }
     done
 fi

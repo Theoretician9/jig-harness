@@ -334,6 +334,68 @@ def probe_batch(cp, stand: Stand, tmp: Path) -> None:
           (debts(cp, root, "hr.a"), debts(cp, root, "hr.b")))
 
 
+def probe_foreign_lines(acc, stand: Stand) -> None:
+    """Строки задачи — только её: правка другой задачи ПОСЛЕ первого коммита
+    задачи в тот же файл в её набор не входит. Иначе шаг судил задаче чужие
+    строки (журнал 16.11: задача — 35 из 41 строки реестра журналов
+    чужие)."""
+    stand.commit("hr.own", MECHANISM)          # строка 2: задача
+    stand.commit("hr.other", MECHANISM)        # строка 3: другая задача
+    stand.commit("hr.own", MECHANISM)          # строка 4: снова задача
+    stand.write(MECHANISM)                     # строка 5: правка в работе, ещё без коммита
+    got = acc.task_changed_lines("hr.own", stand.root, MECHANISM)
+    check("34 строки задачи без строки другой задачи между её коммитами", "2,4,5", got)
+
+
+def probe_deleted_lines(acc, stand: Stand) -> None:
+    """Чистое удаление строк не оставляет за задачей строки по blame: стык
+    удаления — её, хотя соседние строки старше задачи."""
+    stand.commit("hr.base", MECHANISM)         # строка 2
+    path = stand.root / MECHANISM
+    path.write_text("x = 1\n", encoding="utf-8")
+    stand.git("commit", "-q", "-am", "удаление\n\nDev-Map: hr.gone")
+    check("35 чистое удаление задачей — стык строк 1,2 остаётся её", "1,2",
+          acc.task_changed_lines("hr.gone", stand.root, MECHANISM))
+
+
+def set_lines(stand: Stand, task: str, *lines: str) -> None:
+    """Файл механизма — ровно эти строки; task пуст — правка остаётся в работе."""
+    (stand.root / MECHANISM).write_text("".join(f"{x}\n" for x in lines), encoding="utf-8")
+    if task:
+        stand.git("commit", "-q", "-am", f"правка\n\nDev-Map: {task}")
+
+
+def probe_foreign_deletion(acc, stand: Stand) -> None:
+    """Стык удаления, сделанного ДРУГОЙ задачей после первого коммита задачи,
+    — не её: иначе шаг требовал мутаций там, где задача ничего не меняла
+    (16.11: ask-consent.py 293–294, owner_word.py — удалял 6bc44771)."""
+    set_lines(stand, "hr.base", "a = 1", "b = 1", "c = 1", "d = 1")
+    set_lines(stand, "hr.own", "a = 1", "b = 1", "c = 1", "d = 1", "e = 1")
+    set_lines(stand, "hr.other", "a = 1", "c = 1", "d = 1", "e = 1")
+    check("36 стык удаления другой задачей — не задаче", "4",
+          acc.task_changed_lines("hr.own", stand.root, MECHANISM))
+
+
+def probe_own_deletion_shifted(acc, stand: Stand) -> None:
+    """Стык удаления задачей остаётся её и после того, как чужая вставка выше
+    сдвинула его; удаление в работе — тоже её."""
+    set_lines(stand, "hr.base", "a = 1", "b = 1", "c = 1", "d = 1", "e = 1")
+    set_lines(stand, "hr.own", "a = 1", "b = 1", "d = 1", "e = 1")            # стык 2,3
+    set_lines(stand, "hr.other", "z = 1", "a = 1", "b = 1", "d = 1", "e = 1")  # стык 3,4
+    set_lines(stand, "hr.own", "z = 1", "a = 1", "b = 1", "d = 1", "n = 1", "e = 1")
+    set_lines(stand, "", "z = 1", "a = 1", "b = 1", "d = 1", "n = 1")          # в работе: стык 5,6
+    check("37 удаление задачей (сдвинутое чужой вставкой и в работе) — задаче", "3,4,5,6",
+          acc.task_changed_lines("hr.own", stand.root, MECHANISM))
+
+
+def probe_comment_lines(acc, stand: Stand) -> None:
+    """Комментарий и пустая строка поведения не несут — мутировать нечего
+    (16.11: pre-commit-gate.sh 748 — комментарий, 753 — пустая)."""
+    set_lines(stand, "hr.own", "x = 1", "# почему", "", "    # отступ", "y = 2")
+    check("38 комментарии и пустые строки — не в наборе", "5",
+          acc.task_changed_lines("hr.own", stand.root, MECHANISM))
+
+
 def probe_batch_law(stand: Stand, tmp: Path) -> None:
     """Закон пачек (слово владельца 14.11): два вызова ПОДРЯД по одному id в окне
     сбора — один заход в срез, бумага каждой задаче; очередь — в своём LOG_DIR."""
@@ -497,6 +559,11 @@ def main() -> int:
                 ("без git", lambda: probe_no_git(acc, cp, tmp / "nogit")),
                 ("команда", lambda: probe_command(cp, Stand(tmp / "cmd"), tmp)),
                 ("пачка", lambda: probe_batch(cp, Stand(tmp / "batch"), tmp)),
+                ("чужие строки", lambda: probe_foreign_lines(acc, Stand(tmp / "foreign"))),
+                ("удаление", lambda: probe_deleted_lines(acc, Stand(tmp / "deleted"))),
+                ("чужое удаление", lambda: probe_foreign_deletion(acc, Stand(tmp / "fdel"))),
+                ("своё удаление", lambda: probe_own_deletion_shifted(acc, Stand(tmp / "odel"))),
+                ("комментарии", lambda: probe_comment_lines(acc, Stand(tmp / "comments"))),
                 ("закон пачек", lambda: probe_batch_law(Stand(tmp / "law"), tmp)),
                 ("обрыв захода", lambda: probe_resume(cp, Stand(tmp / "resume"), tmp)),
                 ("пульт", lambda: probe_live(cp))):

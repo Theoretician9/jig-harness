@@ -8,8 +8,8 @@
 переиспользуются отсюда.
 
     выкат        "<sha HEAD> <realpath дерева>"
-    публикация   "<sha HEAD пакета> <адрес без учётки> refs/heads/<ветка> <вершина на удалённом>
-                  <вершина ветки сборки или -> <пакет> <сборка>"
+    публикация   "<sha HEAD пакета или среза поезда> <адрес без учётки> refs/heads/<ветка>
+                  <вершина на удалённом> <вершина ветки сборки или -> <пакет> <сборка>"
     перепись     "<адрес без учётки> refs/heads/<ветка> <вершина удалённого до>..<новый sha>
                   <sha256 списка «sha ref» удалённого до, 12 знаков>"
     спека        "<id задачи> <sha256 файла спеки>"
@@ -20,25 +20,35 @@
     python3 door_subjects.py грязь <дерево>
         причины, по которым дерево не равно коммиту (пусто — чисто); для deploy.sh
     python3 door_subjects.py сверить-публикацию <предмет замка 2> <пакет> <сборка> <удалённый> <ветка>
+                             [<срез> <журнал поезда>]
         0 — предмет тот же, коммит сборки стоит на вершине, одобренной владельцем
     python3 door_subjects.py сверить-перепись <предмет ворот> <копия> <пакет> <удалённый> <ветка>
         0 — удалённый и копия те же, что на кнопке: повторный force-push тем же «Да» не пройдёт
 """
 from __future__ import annotations
 
+import datetime as dt
 import hashlib
+import json
 import os
 import re
 import sys
 from pathlib import Path
+
+import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import push_subject  # noqa: E402
 from push_subject import HEX40, _git, _out  # noqa: E402
 
 SubjectError = push_subject.PushSubjectError
+# Журнал ходов поезда в LOG_DIR; пишет его publish.sh (TRAIN_JOURNAL там же).
+TRAIN_JOURNAL = "release-train.jsonl"
+TRAIN_CONFIG = Path(__file__).resolve().parents[2] / "harness" / "config" / "release-train.yaml"
 PUBLISH_FIELDS = ("sha пакета", "адрес", "ветка", "вершина удалённого", "вершина сборки", "пакет", "сборка")
 NO_TIP = "-"
+# Часы машины и записи журнала расходятся на секунды; запись дальше в будущем — подлог или сбой часов.
+FUTURE_SKEW = dt.timedelta(minutes=5)
 
 
 def _whitespace_free(path: str, what: str) -> str:
@@ -94,14 +104,68 @@ def publish_settings(harness_conf: dict) -> tuple[str, str, str]:
     return settings
 
 
-def publish_subject(package: str, build: str, remote: str, branch: str) -> str:
+def green_train_slice(journal: str, commit: str, hours: float) -> bool:
+    """Есть ли ход поезда с зелёными воротами на этом срезе пакета не старше hours часов.
+
+    Любой ход, а не последний: следующий --проверка --поезд не должен сжигать кнопку,
+    уже нажатую на срез, который ворота пропустили."""
+    try:
+        lines = Path(journal).read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return False
+    now = dt.datetime.now().astimezone()
+    oldest, newest = now - dt.timedelta(hours=hours), now + FUTURE_SKEW
+    for line in lines:
+        try:
+            record = json.loads(line)
+            when = dt.datetime.fromisoformat(str(record.get("ts")))
+            step = record["data"]
+        except (ValueError, AttributeError, KeyError, TypeError):
+            continue
+        # Строка — событие events.emit: время в корне, срез и вердикт ворот в data.
+        if (step.get("срез_пакета") == commit and step.get("ворота") == "зелёные"
+                and when.tzinfo is not None and oldest <= when <= newest):
+            return True
+    return False
+
+
+def released_package(pack: str, work: str, tip: str) -> str:
+    """Коммит пакета прошлого выпуска — из темы коммита сборки на вершине публичной ветки
+    («версия от …, пакет <sha>»): её пишет публикация, а не неохраняемый журнал поезда."""
+    done = _git(work, "log", "-1", "--format=%s", tip)
+    found = re.search(r"пакет ([0-9a-f]{7,40})$", done.stdout.strip()) if done.returncode == 0 else None
+    if not found:
+        raise SubjectError(f"прошлый выпуск не прочитан: у вершины {tip[:12]} в сборке нет темы «…, пакет <sha>»")
+    return _out(pack, "rev-parse", "--verify", f"{found[1]}^{{commit}}")
+
+
+def slice_sha(pack: str, commit: str, journal: str, released: str) -> str:
+    """Срез поезда: пакет ушёл вперёд, а одобряется и публикуется срез.
+
+    Годен HEAD пакета или срез зелёного хода поезда в сроке: иначе кнопкой можно было бы
+    одобрить любой старый коммит истории, а ход поезда записывает, что он резал и чем кончились ворота.
+    Срез старше прошлого выпуска — откат копий: он годен, только если потомок released."""
+    if not HEX40.fullmatch(commit):
+        raise SubjectError(f"срез пакета — не 40-значный sha: {commit[:48]}")
+    hours = float(yaml.safe_load(TRAIN_CONFIG.read_text(encoding="utf-8"))["согласие"]["срок_среза_ч"])
+    if commit != _out(pack, "rev-parse", "--verify", "HEAD") and not green_train_slice(journal, commit, hours):
+        raise SubjectError(f"{commit[:12]} — не HEAD пакета, и нет зелёного хода поезда на этот срез "
+                           f"за {hours:g} ч ({journal})")
+    if _git(pack, "merge-base", "--is-ancestor", commit, "HEAD").returncode != 0:
+        raise SubjectError(f"среза {commit[:12]} нет в истории пакета")
+    if _git(pack, "merge-base", "--is-ancestor", released, commit).returncode != 0:
+        raise SubjectError(f"срез {commit[:12]} не потомок прошлого выпуска {released[:12]} — откат копий")
+    return commit
+
+
+def publish_subject(package: str, build: str, remote: str, branch: str, commit: str = "HEAD",
+                    train_journal: str = "") -> str:
     pack = _whitespace_free(os.path.realpath(package), "пакет")
     work = _whitespace_free(os.path.realpath(build), "каталог сборки")
     if _git(pack, "check-ref-format", f"refs/heads/{branch}").returncode != 0:
         raise SubjectError(f"имя ветки негодное: {branch}")
     if remote.startswith("-") or _git(pack, "remote", "get-url", remote).returncode != 0:
         raise SubjectError(f"у пакета нет удалённого {remote}")
-    sha = _out(pack, "rev-parse", "--verify", "HEAD")
     # Пуш идёт из сборки, а адрес берётся у пакета: перенаправления опасны в обоих.
     repos = [pack] + ([work] if os.path.isdir(os.path.join(work, ".git")) else [])
     for repo in repos:
@@ -116,6 +180,8 @@ def publish_subject(package: str, build: str, remote: str, branch: str) -> str:
     if len(tips) != 1 or len(tips[0]) != 2 or tips[0][1] != ref or not HEX40.fullmatch(tips[0][0]):
         raise SubjectError(f"на удалённом {ref}: строк {len(lines)}, нужна одна "
                            "(первая публикация — не кнопкой)")
+    sha = _out(pack, "rev-parse", "--verify", "HEAD") if commit == "HEAD" else \
+        slice_sha(pack, commit, train_journal, released_package(pack, work, tips[0][0]))
     built = _git(work, "rev-parse", "--verify", "-q", ref) if len(repos) > 1 else None
     build_tip = built.stdout.strip() if built is not None and built.returncode == 0 else NO_TIP
     return " ".join([sha, push_subject.hide_userinfo(address), ref, tips[0][0], build_tip, pack, work])
@@ -198,7 +264,8 @@ def parse_publish_subject(subject: str) -> dict:
             "build_tip": parts[4], "package": parts[5], "build": parts[6]}
 
 
-def verify_publish(locked: str, package: str, build: str, remote: str, branch: str) -> None:
+def verify_publish(locked: str, package: str, build: str, remote: str, branch: str,
+                   commit: str = "HEAD", train_journal: str = "") -> None:
     """Прямо перед пушем: предмет тот же, что открыл замок 2, а в сборке нет чужих коммитов.
 
     Вершина сборки к этому часу уже сдвинута своим же коммитом версии, поэтому она
@@ -206,7 +273,7 @@ def verify_publish(locked: str, package: str, build: str, remote: str, branch: s
     (или HEAD и есть она — повтор упавшей отправки).
     """
     was, now = parse_publish_subject(locked), parse_publish_subject(
-        publish_subject(package, build, remote, branch))
+        publish_subject(package, build, remote, branch, commit, train_journal))
     for key in was.keys() - {"build_tip"}:
         if was[key] != now[key]:
             raise SubjectError(f"после согласия изменилось: {key} ({was[key][:40]} → {now[key][:40]})")
@@ -247,7 +314,7 @@ def main(argv: list[str]) -> int:
     try:
         if len(argv) == 3 and argv[1] == "грязь":
             print("\n".join(tree_dirt(argv[2])))
-        elif len(argv) == 7 and argv[1] == "сверить-публикацию":
+        elif len(argv) in (7, 9) and argv[1] == "сверить-публикацию":
             verify_publish(*argv[2:])
         elif len(argv) == 7 and argv[1] == "сверить-перепись":
             verify_rewrite(*argv[2:])

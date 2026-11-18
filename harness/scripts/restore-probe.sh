@@ -535,7 +535,8 @@ PostgreSQL init process complete; ready for start up."; then
     # секунды, и проба доходит до «НЕ ПРОВЕДЕНА».
     dvor_zhivoj=$(mktemp -d)
     mkdir -p "$dvor_zhivoj/kopii/2026-11-02_0000"
-    printf 'CREATE TABLE t ();\n' > "$dvor_zhivoj/kopii/2026-11-02_0000/db-selftest.dump"
+    # Шапка pg_dump обязательна: дамп без неё проба не берёт (newest_pg_dump).
+    printf -- '--\n-- PostgreSQL database dump\n--\n\nCREATE TABLE t ();\n' > "$dvor_zhivoj/kopii/2026-11-02_0000/db-selftest.dump"
     printf '%s\n' "BACKUP_DIR=\"$dvor_zhivoj/kopii\"" "LOG_DIR=\"$dvor_zhivoj\"" 'BACKUP_DBS=""' \
         'DROPPABLE_DB_PREFIX="proba_"' 'PROBE_DB_CONTAINER=""' 'PROBE_DB_USER=""' \
         'PROBE_DB_IMAGE="harness-restore-selftest.invalid/none:0"' 'PROBE_DB_IMAGE_TEMPLATE=""' \
@@ -572,7 +573,7 @@ STUB
     printf '%s\n' 'BACKUP_DBS="cf_core_db=docker exec -i -u postgres cf_postgres pg_dump cf_core_db"' \
         'PROBE_DB_IMAGE_TEMPLATE=""' >> "$dvor_zhivoj/harness.conf"
     sed -i '/^PROBE_DB_IMAGE=/d' "$dvor_zhivoj/harness.conf"
-    printf 'CREATE TABLE t ();\n' > "$dvor_zhivoj/kopii/2026-11-02_0000/db-cf_core_db.dump"
+    printf -- '--\n-- PostgreSQL database dump\n--\n\nCREATE TABLE t ();\n' > "$dvor_zhivoj/kopii/2026-11-02_0000/db-cf_core_db.dump"
     rm -f "$dvor_zhivoj/kopii/2026-11-02_0000/db-selftest.dump"
     stub_run() { # аргументы пробы → её stdout; журнал docker — в $dvor_stub/log
         : > "$dvor_stub/log"; : > "$dvor_trevogi/door.log"; rm -f "$dvor_stub"/log.*
@@ -607,7 +608,7 @@ STUB
     # Явная подмена образа сильнее источника.
     : > "$dvor_stub/log"
     printf '%s\n' 'PROBE_DB_IMAGE_TEMPLATE="my/pg:{major}"' >> "$dvor_zhivoj/harness.conf"
-    printf -- '-- Dumped by pg_dump version 17.2\nCREATE TABLE t ();\n' > "$dvor_zhivoj/kopii/2026-11-02_0000/db-cf_core_db.dump"
+    printf -- '--\n-- PostgreSQL database dump\n--\n\n-- Dumped by pg_dump version 17.2\nCREATE TABLE t ();\n' > "$dvor_zhivoj/kopii/2026-11-02_0000/db-cf_core_db.dump"
     stub_run >/dev/null
     if grep '^run ' "$dvor_stub/log" | grep -q ' my/pg:17'; then
         echo "  ок    PROBE_DB_IMAGE_TEMPLATE остаётся явной подменой образа"

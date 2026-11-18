@@ -251,9 +251,11 @@ import json, os, sys
 куда = sys.argv[sys.argv.index("--куда") + 1]
 os.makedirs(куда, exist_ok=True)
 open(os.path.join(куда, "README.md"), "w").write("сборка\n")
+open(os.path.join(куда, "ЧТО-НОВОГО.md"), "w").write("## 2026-11-17 — Выпуск 0.1.0: проба\n")
 print(json.dumps({"пакет": "proba"}))
 EOF
 for judge in check-public-clean.py check-release-notes.py; do printf 'print("ок")\n' > "$d/stubs/$judge"; done
+printf 'print("{\\"следующая\\": \\"0.1.0\\"}")\n' > "$d/stubs/version.py"
 OUT=$( ( . "$T/lib.sh"
          PROJECT_DIR="$d/proj" SCRIPTS_REAL="$d/stubs" PACKAGE_DIR="$d/pkg" PUBLIC_BUILD_DIR="$d/build" \
          PUBLIC_REMOTE=jig PUBLIC_BRANCH=master PUBLIC_PASPORT="$d/pasport.conf" KONF_DVERI_KOREN="$d" \

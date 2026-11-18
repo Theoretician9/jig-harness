@@ -299,9 +299,9 @@ class Stand:
             out.append(json.dumps(row, ensure_ascii=False))
         path.write_text("\n".join(out) + "\n", encoding="utf-8")
 
-    def press(self, answer: str, subject: str, from_id: str = OWNER) -> None:
+    def press(self, answer: str, subject: str, from_id: str = OWNER, hours_ago: float = 0) -> None:
         """Нажатие так, как его пишет диспетчер: на последнюю просьбу этого предмета.
-        Просьбы нет — пишется и она (как если бы ask-consent её записал)."""
+        Просьбы нет — пишется и она (как если бы ask-consent её записал) минутой раньше нажатия."""
         nonce = None
         for line in (self.log / "consent-requests.jsonl").read_text(encoding="utf-8").splitlines():
             if line.strip():
@@ -311,13 +311,13 @@ class Stand:
         if nonce is None:
             nonce = f"press{time.time_ns()}"
             with open(self.log / "consent-requests.jsonl", "a", encoding="utf-8") as fh:
-                fh.write(json.dumps({"v": 1, "ts": now_iso(), "src": "scripts/ask-consent.py",
+                fh.write(json.dumps({"v": 1, "ts": now_iso(hours_ago + 1 / 60), "src": "scripts/ask-consent.py",
                                      "event": "consent.request", "outcome": "ok",
                                      "data": {"nonce": nonce, "вид": KIND, "цель": subject,
                                               "почему": "проба"}}, ensure_ascii=False) + "\n")
         event = {"да": "consent.yes", "нет": "consent.no"}[answer]
         with open(self.log / "consent-buttons.jsonl", "a", encoding="utf-8") as fh:
-            fh.write(json.dumps({"v": 1, "ts": now_iso(), "src": "проба", "event": event,
+            fh.write(json.dumps({"v": 1, "ts": now_iso(hours_ago), "src": "проба", "event": event,
                                  "outcome": "ok",
                                  "data": {"nonce": nonce, "вид": KIND, "цель": subject,
                                           "message_id": 4100, "from_id": int(from_id)}},
@@ -453,6 +453,35 @@ def case_wrong_yes(stand: Stand) -> None:
           rc == WAITING and stand.instance.read_bytes() == before, f"rc={rc}")
 
 
+def case_button_day(stand: Stand) -> None:
+    """Срок кнопки слоя человека — сутки (owner_word.СРОК_ВИДА_МИН), а не общие 15 мин стенда."""
+    before = stand.instance.read_bytes()
+    stand.press("да", "роль=агент вчерашний", hours_ago=25)
+    rc, _ = stand.self_set("роль", "агент вчерашний")
+    check("«Да» 25 ч назад: старше суток — не записано (код 3)",
+          rc == WAITING and stand.instance.read_bytes() == before, f"rc={rc}")
+    stand.press("да", "роль=агент вечерний", hours_ago=20)
+    rc, out = stand.self_set("роль", "агент вечерний")
+    check("«Да» 20 ч назад: в пределах суток — записано (код 0)",
+          rc == WRITTEN and load(stand.instance).get("роль") == "агент вечерний",
+          f"rc={rc} роль={load(stand.instance).get('роль')!r} {out.strip()[-200:]!r}")
+
+
+def case_spent_only_after_press(stand: Stand) -> None:
+    """«Да» гасит запись этого предмета НЕ РАНЬШЕ нажатия; прежняя запись того же значения — нет."""
+    field, value = "человек", "владелец снова"
+    with open(stand.log / "self-set.jsonl", "a", encoding="utf-8") as fh:
+        fh.write(json.dumps({"v": 1, "ts": now_iso(2), "src": "scripts/self-set.py", "event": "self.set",
+                             "outcome": "ok", "data": {"время": now_iso(2), "поле": field, "значение": value,
+                                                       "источник": "контекст", "состояние": "да"}},
+                            ensure_ascii=False) + "\n")
+    stand.press("да", f"{field}={value}")
+    rc, out = stand.self_set(field, value)
+    check("запись «да» того же значения 2 ч ДО нажатия не гасит новое «Да»: записано (код 0)",
+          rc == WRITTEN and load(stand.instance).get(field) == value,
+          f"rc={rc} {field}={load(stand.instance).get(field)!r} {out.strip()[-200:]!r}")
+
+
 def case_bypass(stand: Stand) -> None:
     """Сверка при старте смены: молчит после записи дверью, называет поле правки мимо."""
     rc, out = stand.session_state()
@@ -543,6 +572,8 @@ def main() -> int:
     case_no_flow(main_stand)
     case_wrong_yes(main_stand)
     case_bypass(main_stand)
+    case_button_day(Stand("day"))
+    case_spent_only_after_press(Stand("spent"))
     case_gaps()
     case_cards_rebuild()
     live_after = snapshot(LIVE_TRACES)

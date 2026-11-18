@@ -580,6 +580,17 @@ YELLOW_CODE=77
         journal yellow "$name"
         return 0
     fi
+    # Карантин копии (gates-quarantine.py): известная неглавная красная после обновления
+    # не должна вставать поперёк каждого коммита на срок записи.
+    local quarantined
+    if quarantined=$(python3 "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/gates-quarantine.py" \
+            --гейт "$name" --карантин "${PROJECT_DIR:-$PWD}/harness/config/gates-quarantine.yaml" \
+            --карта "${PROJECT_DIR:-$PWD}/dev-map.yaml" 2>/dev/null); then
+        printf '%s\n' "$quarantined"
+        echo "[pre-commit] под карантином $name: коммит не остановлен"
+        journal yellow "$name"
+        return 0
+    fi
     fail "$name"
 }
 

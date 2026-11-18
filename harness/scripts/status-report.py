@@ -827,6 +827,16 @@ def assemble(report: Report, ceiling: int) -> str:
     return report.text()
 
 
+def account_line() -> str:
+    """Строка «аккаунт: …» из account-switch.py --сейчас; профили не заведены или вызов не удался — строки нет."""
+    try:
+        done = subprocess.run([sys.executable, str(HERE / "account-switch.py"), "--сейчас"],
+                              capture_output=True, text=True, timeout=60)
+    except (subprocess.TimeoutExpired, OSError):
+        return ""
+    return done.stdout.strip() if done.returncode == 0 else ""
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--журнал-вызовов", dest="journal")
@@ -896,8 +906,10 @@ def main() -> int:
     umbrellas_done = {root for t in done if (root := family_root(t.key, cards)) != t.key}
     finished = lambda n: task_finished(n, cards, project, umbrellas_done)
     continued = lambda n: bool(n.key) and any(m.key == n.key and m.ts > n.ts for m in launches.values())
-    print(assemble(Report(sections, lost_items(lost, titles, labels, finished, continued), upcoming, fallback),
-                   ceiling))
+    account = account_line()
+    room = ceiling - (len(account) + 1 if account else 0)
+    text = assemble(Report(sections, lost_items(lost, titles, labels, finished, continued), upcoming, fallback), room)
+    print(text + ("\n" + account if account else ""))
     write_atomic(Path(log_dir) / PENDING_NAME, json.dumps(sections[0].hidden_keys(), ensure_ascii=False))
     return 0
 

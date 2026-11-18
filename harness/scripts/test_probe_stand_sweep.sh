@@ -16,7 +16,8 @@
 #      пробы их убирает;
 #   4. стенд живого хозяина (параллельный прогон) следующий прогон не трогает.
 #
-#   bash scripts/test_probe_stand_sweep.sh [--случай пауза|лок|голос|метки|след]
+#   bash scripts/test_probe_stand_sweep.sh [--случай пауза|лок|голос|метки|след|ворота]
+# «ворота» — общая уборка в начале scripts/gates.sh: мёртвый хозяин, живой, без owner.
 # Метки и след уборку берут из scripts/lib/stand_sweep.sh: их пути судят и её.
 # Код возврата: 0 — зелёная, 1 — красная. Последняя строка — итог с числом путей.
 # Пробы берутся от места самой пробы (../ от scripts/): мутации идут «из-копии».
@@ -37,7 +38,7 @@ SUBJECTS=(
 ONLY=""
 if [ "${1:-}" = "--случай" ]; then
     ONLY="${2:-}"
-    case "$ONLY" in пауза|лок|голос|метки|след) ;; *) echo "ПРОБА: неизвестный случай «$ONLY» (пауза|лок|голос|метки|след)"; exit 1 ;; esac
+    case "$ONLY" in пауза|лок|голос|метки|след|ворота) ;; *) echo "ПРОБА: неизвестный случай «$ONLY» (пауза|лок|голос|метки|след|ворота)"; exit 1 ;; esac
 elif [ -n "${1:-}" ]; then
     echo "ПРОБА: неизвестный ключ «$1»"; exit 1
 fi
@@ -162,12 +163,38 @@ judge() {  # $1 = имя, $2 = файл пробы, $3 = префикс, $4 = б
     PATHS_JUDGED=$((PATHS_JUDGED + 4))
 }
 
+# Ворота подметают стенды всех проб разом: сирота пробы, которая сама больше не
+# идёт, иначе живёт до её следующего прогона. Префикс — свой (дверь
+# GATES_STAND_PREFIX): чужие стенды машины проба не трогает.
+judge_gates() {
+    local prefix="proba-gates-sweep-$$-" live dead bare decoy_live decoy_dead decoy_bare gone code
+    echo "── ворота: scripts/gates.sh"
+    live=$(mktemp -d "/tmp/${prefix}XXXXXX"); OWN_DIRS+=("$live/")
+    echo $$ > "$live/owner"
+    dead=$(mktemp -d "/tmp/${prefix}XXXXXX"); OWN_DIRS+=("$dead/")
+    ( : ) & gone=$!; wait "$gone"
+    echo "$gone" > "$dead/owner"
+    bare=$(mktemp -d "/tmp/${prefix}XXXXXX"); OWN_DIRS+=("$bare/")
+    PROBA_STAND="$live/" setsid sleep 600 & decoy_live=$!; CHILDREN+=("$decoy_live"); disown "$decoy_live"
+    PROBA_STAND="$dead/" setsid sleep 600 & decoy_dead=$!; CHILDREN+=("$decoy_dead"); disown "$decoy_dead"
+    PROBA_STAND="$bare/" setsid sleep 600 & decoy_bare=$!; CHILDREN+=("$decoy_bare"); disown "$decoy_bare"
+    GATES_STAND_PREFIX="/tmp/$prefix" bash "$KOREN/scripts/gates.sh" --selftest > "$W/gates.out" 2>&1 < /dev/null
+    code=$?
+    case_check "ворота: код самотеста ворот" 0 "$code"
+    [ "$code" = 0 ] || tail -5 "$W/gates.out" | sed 's/^/    /'
+    case_check "ворота: процесс стенда мёртвого хозяина убит" нет "$(yes_no running "$decoy_dead")"
+    case_check "ворота: процесс стенда живого хозяина цел" да "$(yes_no running "$decoy_live")"
+    case_check "ворота: процесс каталога без owner цел" да "$(yes_no running "$decoy_bare")"
+    PATHS_JUDGED=$((PATHS_JUDGED + 3))
+}
+
 PATHS_JUDGED=0
 for s in "${SUBJECTS[@]}"; do
     IFS='|' read -r name probe prefix quick <<< "$s"
     [ -z "$ONLY" ] || [ "$ONLY" = "$name" ] || continue
     judge "$name" "$probe" "$prefix" "$quick"
 done
+[ -z "$ONLY" ] || [ "$ONLY" = ворота ] && judge_gates
 
 echo "судимых путей: $PATHS_JUDGED"
 [ "$PATHS_JUDGED" -gt 0 ] || { echo "ПРОБА КРАСНАЯ: не судилось ни одного пути"; exit 1; }

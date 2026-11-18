@@ -19,6 +19,9 @@ export LC_ALL=C.UTF-8
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OBERTKA="$HERE/claude-demon.sh"
+# Обёртка берёт носитель и судью из PROJECT_DIR (окружение старше паспорта):
+# проба судит своё дерево, а не дерево паспорта.
+export PROJECT_DIR="$(dirname "$HERE")"
 source "$HERE/lib/selftest_cases.sh"
 
 STAND="$(mktemp -d)"
@@ -45,6 +48,23 @@ export PATH="$STAND/bin:$PATH"
 export LOG_DIR="$STAND/log" HEARTBEAT_DIR="$STAND/heartbeat"
 export TG_SEND="$STAND/bin/tg_send.sh" TG_VYHOD="$STAND/сказано.txt"
 : > "$TG_VYHOD"
+
+# Аккаунты — свои. При отказе по лимиту обёртка зовёт дверь автоперехода
+# account-switch.py --авто, если в каталоге аккаунтов лежит profiles.json; без
+# строки ниже каталог — боевой ($STATE_DIR/account паспорта), и 18.11.2026 19:49
+# прогон ворот записал в боевой state.json ложный лимит и начал переход.
+# Дверь — HARNESS_ACCOUNT_DIR (её читают и обёртка, и accounts.py); STATE_DIR —
+# чтобы и прочее под корнем состояния было своим.
+export HARNESS_ACCOUNT_DIR="$STAND/account" STATE_DIR="$STAND/state"
+mkdir -p "$HARNESS_ACCOUNT_DIR" "$STATE_DIR"
+
+# Сторож стенда: каталог аккаунтов судится тем же разбором конфига, что у
+# обёртки. Вне стенда — дальше не играть: любой случай лимита дошёл бы до боевой двери.
+echo "── стенд: каталог аккаунтов обёртки — свой ──"
+AKK_DVOR="$(bash -c 'source "$1/lib/config.sh"; konf_zagruzit; printf %s "${HARNESS_ACCOUNT_DIR:-${STATE_DIR:-}/account}"' _ "$HERE")"
+AKK_SVOJ="$(case "$AKK_DVOR" in "$STAND"/*) echo да ;; *) echo нет ;; esac)"
+case_check "каталог аккаунтов обёртки лежит в стенде" да "$AKK_SVOJ"
+[ "$AKK_SVOJ" = да ] || { echo "СТЕНД: обёртка дошла бы до боевых аккаунтов — дальше не играю" >&2; exit 1; }
 
 # Модель обёртка зовёт через носитель claude-run.sh --класс демон
 # (§4.4). Носитель настоящий; его сборщик и писатель
@@ -82,6 +102,9 @@ case_check "в сообщении названа дата сброса" "да" "
 # 13.09.2026 показал обрезку по скобке: «resets Sep 16, 6pm (Asia/Qostanay».
 case_check "пояс из скобок не потерян" "да" "$(grep -q 'Asia/Qostanay)' "$TG_VYHOD" && echo да || echo нет)"
 case_check "в сообщении назван демон" "да" "$(grep -q 'проба-демон' "$TG_VYHOD" && echo да || echo нет)"
+# В стенде profiles.json нет: дверь, званная здесь, — дверь чужого каталога аккаунтов.
+case_check "лимит на стенде: дверь автоперехода не звана" 0 \
+     "$(grep -c 'дверь автоперехода ответила' "$LOG_DIR/claude-demon.log")"
 
 echo "── тот же лимит второй раз: владельцу НЕ повторяем ──"
 bash "$OBERTKA" проба-демон -p "задание" >/dev/null 2>&1

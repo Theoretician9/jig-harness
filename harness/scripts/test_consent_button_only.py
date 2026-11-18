@@ -1056,6 +1056,8 @@ def probe_journal_append(yard: Yard) -> None:
              f"python3 -c \"open('{buttons}', 'a').write('x')\""),
             (2, "python3 -c open(os.environ[…] + '/consent-buttons.jsonl', 'a')",
              "python3 -c \"import os; open(os.environ['LOG_DIR'] + '/consent-buttons.jsonl', 'a').write('x')\""),
+            (2, "python3 -c open(… + '/consent-butto' + 'ns.jsonl', 'a') — имя склеено",
+             "python3 -c \"import os; open(os.environ['LOG_DIR'] + '/consent-butto' + 'ns.jsonl', 'a').write('x')\""),
             (0, "cat журнала кнопок", f"cat {buttons}"),
             (0, "grep по журналу кнопок", f"grep consent.yes {buttons}"),
             (0, "tail журнала кнопок", f"tail -n 5 {buttons}")):

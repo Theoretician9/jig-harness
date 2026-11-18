@@ -17,6 +17,7 @@
 Код возврата: 0 — чисто; 1 — находки; 2 — явно названный файл не прочитан.
 """
 import argparse
+import os
 import re
 import sys
 from pathlib import Path
@@ -28,22 +29,30 @@ import config  # noqa: E402
 
 CODE_SUFFIXES = {".sh", ".py"}
 SKIP_DIRS = {".git", "__pycache__", "node_modules", ".tasks"}
+# Деревья помощников — копии чужих веток, а не код этого корня: 122 дерева — 2 ГБ кода.
+SKIP_PATHS = {Path(".claude/worktrees")}
 COMMENTED_KEY = re.compile(r"^\s*#\s*([A-Z][A-Z0-9_]*)=", re.MULTILINE)
+NAME = re.compile(r"[A-Z0-9_]+")
 
 
-def code_text(root: Path) -> str:
-    """Весь код корня без строк-комментариев: комментарий ключ упоминает, но не читает."""
-    chunks = []
-    for path in root.rglob("*"):
-        if path.suffix not in CODE_SUFFIXES or SKIP_DIRS & set(path.relative_to(root).parts):
-            continue
-        lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
-        chunks.extend(line for line in lines if not line.lstrip().startswith("#"))
-    return "\n".join(chunks)
+def code_files(root: Path):
+    for top, dirs, files in os.walk(root):
+        here = Path(top).relative_to(root)
+        dirs[:] = [d for d in dirs if d not in SKIP_DIRS and here / d not in SKIP_PATHS]
+        yield from (Path(top) / f for f in files if Path(f).suffix in CODE_SUFFIXES)
 
 
-def is_read(key: str, code: str) -> bool:
-    return re.search(rf"(?<![A-Z0-9_]){key}(?![A-Z0-9_])", code) is not None
+def code_names(root: Path) -> set[str]:
+    """Имена из строк кода корня, кроме комментариев: комментарий ключ упоминает, но не читает.
+
+    По строке, без склейки: память не растёт с объёмом кода."""
+    names = set()
+    for path in code_files(root):
+        with open(path, encoding="utf-8", errors="ignore") as handle:
+            for line in handle:
+                if not line.lstrip().startswith("#"):
+                    names.update(NAME.findall(line))
+    return names
 
 
 def main() -> int:
@@ -65,10 +74,10 @@ def main() -> int:
 
     live_path = args.live or Path(config.путь_harness_conf())
     live = set(config.из_файла(str(live_path))) if live_path.is_file() else set()
-    code = code_text(args.code_root) if live else ""
+    code = code_names(args.code_root) if live else set()
 
     found = [f"{key}: нет в образце — живой конфиг его объявил и код читает"
-             for key in sorted(live - active - described) if is_read(key, code)]
+             for key in sorted(live - active - described) if key in code]
     found += [f"{key}: нет в образце — «ключи:» доустановки его доносит, чистая установка не получит"
               for key in sorted(set(jobs.get("ключи") or {}) - active)]
     found += [f"{key}: снят («снять_ключи:»), а образец его раздаёт"

@@ -44,6 +44,7 @@
 Запуск:
     python3 scripts/acceptance.py              # сухой прогон: только отчёт
     python3 scripts/acceptance.py --применить  # + записать исходы в карту
+    python3 scripts/acceptance.py --задача <id>[,<id>] [--применить]  # приёмка названных карточек под локом карты
     python3 scripts/acceptance.py --selftest
     python3 scripts/acceptance.py --мутации-задачи <id>  # шаг «мутации»: бумага .tasks/<id>/мутации.log
     python3 scripts/acceptance.py --мутации-задачи <id1>,<id2>  # пачка: один заход в срез
@@ -545,15 +546,96 @@ def task_changed_lines(ид: str, корень: Path, файл: str) -> str | No
     diff_lines = _git_lines(корень, "diff", "-U0", f"{commits[0]}^", "--", файл)
     if not diff_lines:
         return None
-    lines: list[int] = []
-    for line in diff_lines:
-        hunk = re.match(r"@@ -\S+ \+(\d+)(?:,(\d+))? @@", line)
-        if not hunk:
-            continue
-        start, count = int(hunk.group(1)), int(hunk.group(2) or 1)
-        # Чистое удаление (+N,0): поведение изменилось на стыке строк N и N+1.
-        lines += range(start, start + count) if count else [n for n in (start, start + 1) if n > 0]
-    return ",".join(map(str, lines)) or None
+    # Разница от первого коммита задачи до дерева несёт и правки ДРУГИХ задач,
+    # слитые позже в тот же файл: шаг судил задаче чужие строки (16.11:
+    # задача по замеру — 35 из 41 строки реестра журналов). Строка остаётся
+    # задаче, если blame называет её коммит или правку в работе.
+    чьи = _blame_commits(корень, файл)
+    своё = set(commits) | {UNCOMMITTED}
+    lines = {n for _, _, start, count in map(_hunk, diff_lines) if count
+             for n in range(start, start + count) if чьи.get(n, UNCOMMITTED) in своё}
+    lines |= _own_deletion_seams(корень, файл, commits[0], своё)
+    lines -= _silent_lines(корень, файл)
+    return ",".join(map(str, sorted(lines))) or None
+
+
+HUNK = re.compile(r"@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
+
+
+def _hunk(line: str) -> tuple[int, int, int, int]:
+    """(старое начало, старых строк, новое начало, новых строк); не стык — нули."""
+    found = HUNK.match(line)
+    if not found:
+        return 0, 0, 0, 0
+    old_start, old_count, new_start, new_count = found.groups()
+    return int(old_start), int(old_count or 1), int(new_start), int(new_count or 1)
+
+
+def _own_deletion_seams(корень: Path, файл: str, base: str, своё: set) -> set[int]:
+    """Строки стыков чистых удалений, сделанных задачей (стык N — строки N и N+1).
+    blame удаления не видит, а разница от базы не знает, ЧЕЙ коммит удалял:
+    стык чужого удаления уходил задаче (16.11: owner_word.py 37–38 — удалял
+    6bc44771). Поэтому идём по коммитам по порядку, сдвигая стыки задачи
+    правками после них; правка в работе — последний шаг, она своя."""
+    history = _git_lines(корень, "log", "-p", "-U0", "--reverse", "--format=COMMIT %H",
+                         f"{base}^..HEAD", "--", файл) or []
+    work = _git_lines(корень, "diff", "-U0", "HEAD", "--", файл) or []
+    steps: list[tuple[str, list]] = []
+    for line in history:
+        if line.startswith("COMMIT "):
+            steps.append((line.split()[1], []))
+        elif steps and line.startswith("@@"):
+            steps[-1][1].append(_hunk(line))
+    steps.append((UNCOMMITTED, [_hunk(line) for line in work if line.startswith("@@")]))
+    seams: set[int] = set()
+    for sha, hunks in steps:
+        seams = {moved for seam in seams if (moved := _shift_seam(seam, hunks)) is not None}
+        if sha in своё:
+            seams |= {new_start for _, old_count, new_start, new_count in hunks
+                      if old_count and not new_count}
+    return {n for seam in seams for n in (seam, seam + 1) if n > 0}
+
+
+def _shift_seam(seam: int, hunks: list) -> int | None:
+    """Где стык после строки seam после правки; None — правка заменила его соседей."""
+    shift = 0
+    for old_start, old_count, _, new_count in hunks:
+        # Вставка (old_count 0) идёт ПОСЛЕ строки old_start.
+        last = old_start + old_count - 1 if old_count else old_start
+        if last <= seam:
+            shift += new_count - old_count
+        elif old_start <= seam:
+            return None
+    return seam + shift
+
+
+SILENT_SUFFIXES = (".sh", ".py", ".yaml", ".yml")
+
+
+def _silent_lines(корень: Path, файл: str) -> set[int]:
+    """Пустые строки и комментарии: поведения не несут, мутировать в них нечего
+    (16.11: pre-commit-gate.sh 748 — комментарий, 753 — пустая)."""
+    if not файл.endswith(SILENT_SUFFIXES):
+        return set()
+    try:
+        text = (корень / файл).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return set()
+    return {n for n, line in enumerate(text.splitlines(), 1)
+            if not line.strip() or line.lstrip().startswith("#")}
+
+
+UNCOMMITTED = "0" * 40
+
+
+def _blame_commits(корень: Path, файл: str) -> dict[int, str]:
+    """Номер строки рабочего дерева -> коммит, что её последним менял (нули — в работе)."""
+    чьи: dict[int, str] = {}
+    for line in _git_lines(корень, "blame", "--line-porcelain", "--", файл) or []:
+        head = re.match(r"([0-9a-f]{40}) \d+ (\d+)", line)
+        if head:
+            чьи[int(head.group(2))] = head.group(1)
+    return чьи
 
 
 class QueueBusy(Exception):
@@ -1093,11 +1175,11 @@ def _судить(задача: dict, корень: Path) -> dict:
             "почему": "вывод содержит " + " и ".join(f"«{ж}»" for ж in ждём)}
 
 
-def разбор(карта: dict, корень: Path) -> list[dict]:
+def разбор(карта: dict, корень: Path, только: set | None = None) -> list[dict]:
     активное = активное_направление()
     return [судить(з, корень)
             for з in карточки(карта, направление=активное or None)
-            if з.get("status") == "test"]
+            if з.get("status") == "test" and (только is None or з.get("id") in только)]
 
 
 def свод(вердикты: list[dict]) -> dict:
@@ -2292,9 +2374,22 @@ def main() -> int:
         порция = next((int(а) for а in sys.argv[sys.argv.index("--долг") + 1:]
                        if а.isdigit()), 0)
         return _печать_долга(порция)
+    только = None
+    if "--задача" in sys.argv:
+        после = sys.argv[sys.argv.index("--задача") + 1:]
+        названные = [и for и in (после[0].split(",") if после else []) if и]
+        if not названные:
+            print("--задача требует id карточки: --задача <id>[,<id>]", file=sys.stderr)
+            return 2
+        только = set(названные)
     import yaml
     карта = yaml.safe_load(КАРТА.read_text(encoding="utf-8"))
-    вердикты = разбор(карта, КОРЕНЬ)
+    вердикты = разбор(карта, КОРЕНЬ, только)
+    if только is not None:
+        нет = sorted(только - {в["id"] for в in вердикты})
+        if нет:
+            print(f"--задача: нет среди карточек в статусе test: {', '.join(нет)}", file=sys.stderr)
+            return 2
     итог = свод(вердикты)
     print(json.dumps({"задач в test": len(вердикты), "итог": итог,
                       "очередь владельца": len(очередь_владельца(вердикты)),
@@ -2311,13 +2406,25 @@ def main() -> int:
     # неотслеживаемый файл — иначе сторож чужих правок у строителя каждую ночь
     # винит агента (находка G-13 ревью 27.09.2026). Пустая очередь ПЕРЕЗАПИСЫВАЕТ
     # файл: иначе рядом лежал бы вчерашний список как сегодняшний.
-    if "--применить" in sys.argv:
+    if "--применить" in sys.argv and только is None:
         ждут = очередь_владельца(вердикты)
         СПИСОК_ВЛАДЕЛЬЦУ.parent.mkdir(parents=True, exist_ok=True)
         СПИСОК_ВЛАДЕЛЬЦУ.write_text(
             документ_очереди(ждут, карточки(карта)), encoding="utf-8")
     if "--применить" in sys.argv:
-        закрыто, вернулось = применить(вердикты, КАРТА)
+        if только is None:
+            закрыто, вернулось = применить(вердикты, КАРТА)
+        else:
+            # Лок — только в режиме одной карточки: acceptance-watch держит его
+            # на fd 9 при целом прогоне, и второй flock там повис бы.
+            try:
+                with разбор_карточки.map_lock(
+                        разбор_карточки.lock_path(),
+                        float(os.environ.get("HARNESS_MAP_LOCK_WAIT") or 30)):
+                    закрыто, вернулось = применить(вердикты, КАРТА)
+            except разбор_карточки.LockBusy as занят:
+                print(f"--задача: лок карты занят ({занят}), исходы не записаны", file=sys.stderr)
+                return 2
         print(f"записано в карту: принято {закрыто}, вернулось в работу {вернулось}")
     return 1 if итог.get("провал") else 0
 

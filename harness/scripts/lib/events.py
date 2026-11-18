@@ -39,7 +39,10 @@ HASH_VALUE = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 HASH_RANGE = re.compile(r"[0-9a-f]{40}\.\.[0-9a-f]{40}")
 # Отпечаток ssh-ключа — хэш ОТКРЫТОГО ключа, предмет кнопки «ключ-сети»: секретом он не бывает.
 SSH_FINGERPRINT = re.compile(r"SHA256:[A-Za-z0-9+/]{43}")
-DIGEST_KEYS = frozenset({"sha256", "head", "commit", "ino_from", "sha", "checks_file_sha"})
+# Срезы поезда и прошлый выпуск — коммиты проекта и пакета: по ним дверь согласия и выбор ворот
+# находят ход, маска их стёрла бы.
+DIGEST_KEYS = frozenset({"sha256", "head", "commit", "ino_from", "sha", "checks_file_sha",
+                         "срез_проекта", "срез_пакета", "прошлый_sha_проекта"})
 # Предмет согласия (sha выката, пакета, спеки) — строка кода, а не речь: хэш в нём не секрет.
 SUBJECT_KEY = "цель"
 

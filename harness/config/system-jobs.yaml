@@ -247,6 +247,8 @@
   resource-report: 60
   backup: 1440
   devmap-selfheal: 1440
+  # 1440: сведение автопамяти раз в сутки (30 4 * * *), метку ставит events.run по успеху.
+  claude-mem-fix: 1440
   heartbeat-watch: 1440
   check-login-expiry: 30
   build-board: 5

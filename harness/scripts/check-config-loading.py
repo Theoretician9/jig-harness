@@ -46,7 +46,7 @@ import sys
 
 
 sys.path.insert(0, os.path.join(КОРЕНЬ, "scripts", "lib"))
-from config import из_файла, путь_harness_conf, путь_install_conf  # noqa: E402 — один парсер паспорта
+from config import katalog_paketa  # noqa: E402 — один искатель пакета: срез поезда, STARTER_DIR, конвенция
 
 
 # ── питон: свой разбор конфига вместо общего загрузчика ────────────────────
@@ -108,10 +108,6 @@ def находки_питона(текст):
     return итог
 
 
-def _agent_user() -> str:
-    """Имя пользователя-агента из паспорта: вшитое — след чужой установки."""
-    return из_файла(путь_install_conf()).get("AGENT_USER") or "agent"
-
 def находки_в(текст):
     """Строки, где конфиг харнеса читается голым source.
 
@@ -152,22 +148,9 @@ def корни():
 
 
 def найти_пакет():
-    """Каталог пакета из STARTER_DIR (данные), либо None — пакета нет."""
-    путь = путь_harness_conf()
-    try:
-        for строка in io.open(путь, encoding='utf-8').read().splitlines():
-            m = re.match(r'\s*STARTER_DIR\s*=\s*"?([^"#\s]*)"?', строка)
-            if m and m.group(1):
-                каталог = os.path.join(m.group(1), 'STARTER-PACKAGE', 'harness')
-                return каталог if os.path.isdir(каталог) else None
-    except OSError:
-        pass
-    # STARTER_DIR пуст на этой установке — ищем по домам, как sverit-s-paketom.
-    for дом in (os.path.join('/home', _agent_user()), os.path.expanduser('~')):
-        каталог = os.path.join(дом, 'starter', 'STARTER-PACKAGE', 'harness')
-        if os.path.isdir(каталог):
-            return каталог
-    return None
+    """Каталог harness/ пакета по общему искателю (срез поезда, STARTER_DIR, конвенция), либо None."""
+    каталог = os.path.join(str(katalog_paketa()), 'harness')
+    return каталог if os.path.isdir(каталог) else None
 
 
 def файлы_репозитория():

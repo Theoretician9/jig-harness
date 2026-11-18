@@ -768,6 +768,10 @@ def case_g2_writer_target(tmp: Path) -> None:
             ("scripts/attnv.sh", "#!/bin/bash\nJ=\"$LOG_DIR/attn.jsonl\"\necho '{}' >> \"$J\"\n"),
         "emit(journal=\"attn\")":
             ("scripts/attne.py", "import events\nevents.emit(\"scripts/good.py\", \"a.x\", \"ok\", journal=\"attn\")\n"),
+        # events.run пишет run.start/run.end в свой journal (evolution-net.py).
+        "events.run(journal=\"attn\")":
+            ("scripts/attnr.py", "import events\nevents.run(\"scripts/good.py\", main, journal=\"attn\",\n"
+                                 "           name=\"attn\")\n"),
         "harness_event attn":
             ("scripts/attnh.sh", "#!/bin/bash\nharness_event attn scripts/good.py a.x ok\n"),
         "python heredoc open(путь, \"a\"), путь из sys.argv = \"$LOG_DIR/attn.jsonl\" (memory-revision.sh:262)":

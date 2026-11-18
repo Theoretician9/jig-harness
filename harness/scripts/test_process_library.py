@@ -247,6 +247,9 @@ print("── 8. порождения службы tg-dispatcher.sh ──")
 def spawned_scripts(text: str) -> tuple:
     """Скрипты, которые служба запускает `setsid nohup`: (пути от корня, нераспознанные)."""
     text = text.replace("\\\n", " ")
+    # Тело `bash -c '…'` бывает многострочным; одинарной кавычки внутри него нет, и
+    # схлопывание оставляет доводы (где стоит скрипт) на строке с `setsid nohup`.
+    text = re.sub(r"(bash -c )'[^']*'", r"\1''", text)
     assigned = dict(re.findall(r"^\s*([A-Z_]+)=\"?([^\"\s]+)\"?\s*$", text, re.M))
     found, unknown = [], []
     for line in text.splitlines():
