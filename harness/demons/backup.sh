@@ -12,6 +12,8 @@
 #   1. $PROJECT_DIR как git bundle (вся история одним файлом) — если это репо;
 #   2. память/ + docs/handover/ + STATE.md + dev-map.yaml — tar поверх bundle:
 #      bundle несёт только закоммиченное, а память меняется чаще коммитов;
+#   2б. следы живой проверки ($LIVE_CHECK_TRACE_ROOT, пусто — $LOG_DIR/живая-проверка):
+#      они вне репозитория, bundle их не несёт;
 #   3. crontab пользователя агента (расписание демонов — 01-SPEC §9);
 #   4. /etc/harness (паспорт установки + пороги механики);
 #   5. базы продукта — по списку BACKUP_DBS из harness.conf; пустой список —
@@ -552,6 +554,25 @@ if [ "${#TAR_LIST[@]}" -gt 0 ]; then
     fi
 else
     say "2. состояния ещё нет (ни памяти, ни handover) — нормально до первой сессии"
+fi
+
+# ── 2б. следы живой проверки (вне репозитория) ─────────────────────────────
+# Следы вынесены из гита за репозиторий, то есть из bundle выпали, а на них
+# ссылаются пути «след:» состояния живой проверки: без них её записи — ссылки
+# в пустоту. Корень — тот же, что у приборов (live_check_trace_root в config.py).
+TRACE_ROOT="${LIVE_CHECK_TRACE_ROOT:-$LOG_DIR/живая-проверка}"
+if [ -d "$TRACE_ROOT" ]; then
+    if tar -C "$(dirname "$TRACE_ROOT")" -czf "$DEST/live-check-traces.tar.gz" \
+            "$(basename "$TRACE_ROOT")" 2>/dev/null \
+       && tar -tzf "$DEST/live-check-traces.tar.gz" >/dev/null 2>&1; then
+        say "2б. следы живой проверки: $TRACE_ROOT → $(du -h "$DEST/live-check-traces.tar.gz" | cut -f1) (tar -tzf — OK)"
+    else
+        say "2б. tar следов живой проверки ($TRACE_ROOT) НЕ собрался или не листается"
+        rm -f "$DEST/live-check-traces.tar.gz"
+        FAILURES=$((FAILURES + 1))
+    fi
+else
+    say "2б. следов живой проверки нет ($TRACE_ROOT) — нормально до первой проверки"
 fi
 
 # ── 3. crontab агента ───────────────────────────────────────────────────────

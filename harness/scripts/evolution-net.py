@@ -5,6 +5,7 @@
     evolution-net.py --якорь --правки <каталог>    # собрать и подписать коммит, не отправляя
     evolution-net.py --якорь --первый --правки <каталог>   # то же на пустой истории: заверить дерево origin/main
     evolution-net.py --отправить <40-hex sha>      # единственная дверь push в общий репозиторий
+    evolution-net.py --находка <ГГГГ-ММ-ДД-суть.md>  # копия: подписанный коммит своей находки, не отправляя
     evolution-net.py --перечитать <sha>…           # заново судить отвергнутые, чья причина снята
 
 Общий репозиторий HarnessEvolution пишут чужие серверы, поэтому каждый коммит —
@@ -22,9 +23,14 @@
 смены: строка в .tasks/<id>/журнал.md, карточка снова в работе, толчок в панель
 служебной дверью scripts/lib/pane.sh; неотданный толчок ждёт следующего тика.
 
+Копия (EVOLUTION_ROLE=copy) открывает только --находка и --отправить: дверь
+берёт её коммит, лишь если он подписан ключом этой копии, меняет только
+находки/<эта копия>/<ГГГГ-ММ-ДД>-<суть>.md (A или M) и стоит на свежем origin/main.
+Всё прочее (письма, страница сервера) копия не шлёт: суд хозяина остаётся у хозяина.
+
 Коды: 0 прочитано/отправлено · 1 push отвергнут удалённым · 2 отказ двери, правок
 или конфига клона · 3 перепись истории · 4 нет клона, ключа, ключа конфига, якоря
-или состояния читателя, роль не host · 5 сеть недоступна (таймаут или потолок fetch).
+или состояния читателя, режим не для этой роли · 5 сеть недоступна (таймаут или потолок fetch).
 Спека и контракт — в задаче сети эволюции харнеса.
 """
 from __future__ import annotations
@@ -39,6 +45,7 @@ import os
 import re
 import resource
 import shlex
+import stat
 import subprocess
 import sys
 import tempfile
@@ -61,7 +68,8 @@ OK, PUSH_REJECTED, DOOR_REFUSED, HISTORY_REWRITTEN, NOT_READY, NO_NETWORK = 0, 1
 # потолка коммит X раздувает их своим именем файла.
 TEXT_MAX = 200
 DIR_FORM = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
-FILE_FORM = re.compile(r"^\d{4}-\d{2}-\d{2}-[a-z0-9-]{1,80}\.md$")
+# re.ASCII: без него \d пропускает цифры Unicode (٢٠٢٦-…) — у двери копии и у суда хозяина.
+FILE_FORM = re.compile(r"^\d{4}-\d{2}-\d{2}-[a-z0-9-]{1,80}\.md$", re.ASCII)
 MAIL_FORM = re.compile(r"^\d{4}-\d{2}-\d{2}-[A-Za-z0-9_-]{1,64}-[a-z0-9-]{1,80}\.md$")
 # Патч копии хозяину — каталог в ящике ЭТОЙ копии: `почта/<эта копия>/<дата>-<от>-<суть>/<путь>`.
 # Внутри каждый компонент без точки в начале (скрытое из обзора и `.git*` не проходят), глубина
@@ -163,9 +171,15 @@ def load_settings() -> Settings:
         starter=Path(starter), public_build=(conf.get("PUBLIC_BUILD_DIR") or "").strip())
 
 
-def require_host_ready(cfg: Settings) -> None:
-    if cfg.role != "host":
-        raise Refusal(NOT_READY, f"роль {cfg.role} — фаза 3: сеть для копий появится в обновлении харнеса")
+COPY_DOOR = "копия шлёт находку: --находка <файл> → sha, затем --отправить <sha>"
+ROLE_WORDS = {"host": "хозяина", "copy": "копии"}
+
+
+def require_ready(cfg: Settings, roles: tuple = ("host",)) -> None:
+    if cfg.role not in roles:
+        where = " и ".join(ROLE_WORDS.get(role, role) for role in roles)
+        tail = f"; {COPY_DOOR}" if cfg.role == "copy" else ""
+        raise Refusal(NOT_READY, f"роль {cfg.role}: этот режим только у {where}{tail}")
     if not (cfg.clone / ".git").exists():
         raise Refusal(NOT_READY, "нет клона общего репозитория (EVOLUTION_DIR)")
     if not cfg.key.is_file():
@@ -842,7 +856,7 @@ def rejudge_listed(cfg: Settings, state: dict, trust: str) -> None:
 
 
 def rejudge_command(cfg: Settings, shas: list) -> int:
-    require_host_ready(cfg)
+    require_ready(cfg)
     state = load_state(cfg)
     if "accepted" not in state:
         raise Refusal(NOT_READY, "нет состояния читателя: сначала evolution-net.py --читать")
@@ -1125,7 +1139,7 @@ def raise_alarm_once(cfg: Settings, state: dict) -> None:
 def read_tick(cfg: Settings) -> int:
     """Тик; занесённый на «Да» ключ даёт второй проход: якорь хозяина принимается и
     карточки на перечитанное заводятся сразу, а не следующим тиком."""
-    require_host_ready(cfg)
+    require_ready(cfg)
     code, entered = read_pass(cfg)
     if code == OK and entered:
         code, _ = read_pass(cfg)
@@ -1236,6 +1250,10 @@ def build_host_commit(cfg: Settings, base: dict, edits: dict, message: str) -> s
         listing = "".join(f"100644 {blob}\t{path}\0" for path, blob in entries.items()).encode()
         git(cfg.clone, "update-index", "-z", "--add", "--index-info", input=listing, index=index)
         tree = git_text(cfg.clone, "write-tree", index=index)
+    return signed_commit(cfg, tree, message)
+
+
+def signed_commit(cfg: Settings, tree: str, message: str) -> str:
     identity = (f"user.name={cfg.project_name}", f"user.email={cfg.project_name}@harness-evolution",
                 "gpg.format=ssh", f"user.signingkey={cfg.key}.pub")
     return git_text(cfg.clone, "commit-tree", "-S", tree, "-p", "refs/remotes/origin/main",
@@ -1255,15 +1273,28 @@ def read_edits(folder: Path) -> dict:
     return edits
 
 
-def without_own_name(data: bytes, project_name: str) -> bytes:
-    """Строки фронтматтера `от:`/`кому:`, чьё значение целиком — имя этого сервера, судье
+def network_names(base: dict, project_name: str) -> set:
+    """Имена копий сети: страницы серверы/<имя>.md принятой основы и имя этого
+    сервера (его страницы в основе может ещё не быть)."""
+    names = {path.removeprefix("серверы/").removesuffix(".md") for path in base
+             if path.startswith("серверы/") and path.endswith(".md") and path.count("/") == 1}
+    return {name for name in names | {project_name} if DIR_FORM.fullmatch(name)}
+
+
+def without_network_names(data: bytes, names: set) -> bytes:
+    """Строки фронтматтера `от:`/`кому:`, чьё значение целиком — имя копии сети, судье
     не подаются: формат записи требует имя сервера в этих полях, это не след установки.
     Любое другое значение (с добавкой, в других полях и в теле) остаётся."""
     parsed = split_entry(data)
     if not parsed:
         return data
-    own = re.compile(r"^(от|кому):[ \t]*" + re.escape(project_name) + r"[ \t]*\r?$")
-    front = [x for x in parsed[0] if not own.match(x.decode(errors="replace"))]
+    address = re.compile(r"^(?:от|кому):[ \t]*(\S+)[ \t]*\r?$")
+
+    def is_address(line: bytes) -> bool:
+        found = address.match(line.decode(errors="replace"))
+        return bool(found) and found.group(1) in names
+
+    front = [x for x in parsed[0] if not is_address(x)]
     return b"\n".join([b"---", *front, b"---", parsed[1]])
 
 
@@ -1271,7 +1302,7 @@ def changed_part(cfg: Settings, base: dict, path: str, data: bytes) -> bytes:
     """Что в правке новое: файл вне принятой основы — целиком, иначе только
     добавленные и изменённые строки против принятого блоба. Неизменённое тело
     чужой записи хозяин не пишет и под свою подпись не берёт."""
-    data = without_own_name(data, cfg.project_name)
+    data = without_network_names(data, network_names(base, cfg.project_name))
     if path not in base:
         return data
     old = blob_bytes(cfg.clone, base[path]).splitlines(keepends=True)
@@ -1374,7 +1405,7 @@ def anchor_message(edits: dict) -> str:
 
 
 def anchor_command(cfg: Settings, edits_dir: str, first: bool) -> int:
-    require_host_ready(cfg)
+    require_ready(cfg)
     problem = first_state_problem(cfg) if first else None
     if problem:
         raise Refusal(NOT_READY, problem)
@@ -1468,11 +1499,151 @@ def commit_refusal(cfg: Settings, sha: str) -> str | None:
     return None
 
 
+def own_public(cfg: Settings) -> str:
+    """«ssh-ed25519 <base64>» ключа этой установки — того, которым она подписывает."""
+    try:
+        fields = Path(f"{cfg.key}.pub").read_text(encoding="utf-8").split()
+    except OSError:
+        fields = []
+    if len(fields) < 2 or fields[0] != "ssh-ed25519":
+        raise Refusal(NOT_READY, f"нет открытого ключа ed25519 {cfg.key}.pub (EVOLUTION_KEY)")
+    return " ".join(fields[:2])
+
+
+APPEND_ONLY = ("правка своей находки — только дописка в конец версии из сети: хозяин мог записать "
+               "в неё статус и ответ; возьми её (git -C <EVOLUTION_DIR> show origin/main:<путь>), "
+               "допиши и собери заново, или дай находке новое имя")
+
+
+def finding_refusal(cfg: Settings, change: Change) -> str | None:
+    """Копия шлёт только свою находку: новую или дописку в конец своей, форма
+    блоба — общая. Дописка, а не любая правка: статус и ответ в находке пишет
+    хозяин, и копия с отставшим файлом стёрла бы их из сети."""
+    parts = change.path.split("/")
+    mine = (len(parts) == 3 and parts[0] == "находки" and parts[1] == cfg.project_name
+            and DIR_FORM.fullmatch(cfg.project_name) and FILE_FORM.fullmatch(parts[2]))
+    if not mine or change.status not in ("A", "M"):
+        return (f"путь {visible(change.path)} ({change.status}): копия шлёт только "
+                f"находки/{cfg.project_name}/<ГГГГ-ММ-ДД>-<суть>.md, новую или дописку своей")
+    problem = form_refusal(cfg.clone, change, False, cfg.max_entry)
+    if not problem and change.status == "M" and not appends_only(blob_bytes(cfg.clone, change.old_blob),
+                                                                  blob_bytes(cfg.clone, change.new_blob)):
+        problem = APPEND_ONLY
+    return problem
+
+
+def appends_only(old: bytes, new: bytes) -> bool:
+    return len(new) > len(old) and new.startswith(old)
+
+
+def network_knows(cfg: Settings) -> bool:
+    """Знает ли сеть эту копию: страница серверы/<имя>.md и строка её ключа в
+    списке подписантов на origin/main. Без них хозяин отвергнет коммит по U и
+    владельца о ключе не спросит (вопрос — только копии с принятой страницей)."""
+    tree = tree_blobs(cfg.clone, "refs/remotes/origin/main")
+    listed = tree.get(SIGNERS_PATH)
+    lines = blob_bytes(cfg.clone, listed).decode(errors="replace").splitlines() if listed else []
+    key = own_public(cfg)
+    has_key = any(SIGNER_LINE.match(line) and line.split()[0] == cfg.project_name and line.endswith(key)
+                  for line in lines)
+    return has_key and f"серверы/{cfg.project_name}.md" in tree
+
+
+UNKNOWN_COPY = ("внимание: хозяин ещё не знает эту копию (нет серверы/{name}.md или строки её ключа в "
+                "серверы/allowed_signers на origin/main): находка будет ждать, пока хозяин занесёт "
+                "страницу и ключ, — скажи владельцу")
+
+
+def trace_refusal(cfg: Settings, edits: dict) -> str | None:
+    """Судья следов установки — тот же, что у якоря хозяина: находку читают все
+    серверы, а след в истории общего репозитория убирается только переписью."""
+    problem = clean_refusal(cfg, edits, tree_blobs(cfg.clone, "refs/remotes/origin/main"))
+    return problem and f"{problem}; убери из находки пути, имена и адреса этой установки"
+
+
+def copy_commit_refusal(cfg: Settings, sha: str) -> str | None:
+    """Коммит копии для двери — УЖЕ суда хозяина: ровно один родитель = свежий
+    origin/main, подпись ключом ЭТОЙ установки (не любым ключом списка сети:
+    иначе агент копии шлёт от имени соседа) и только свои находки. Состояние
+    читателя копии не нужно: что войдёт в сеть, решает суд хозяина у себя."""
+    if git_run(cfg.clone, "cat-file", "-e", f"{sha}^{{commit}}").returncode:
+        return "такого коммита в клоне нет"
+    parents = git_text(cfg.clone, "rev-list", "--parents", "-n1", sha).split()[1:]
+    if parents != [git_text(cfg.clone, "rev-parse", "refs/remotes/origin/main")]:
+        return "родитель не равен свежему origin/main (собрать заново: --находка)"
+    with tempfile.TemporaryDirectory(prefix="evolution-net-") as tmp:
+        signers = Path(tmp) / "own-signers"
+        signers.write_text(f'{cfg.project_name} namespaces="git" {own_public(cfg)}\n', encoding="utf-8")
+        flag, who = signature(cfg.clone, sha, signers)
+    if (flag, who) != ("G", cfg.project_name):
+        return f"подпись {visible(flag)}: коммит не подписан ключом этой копии ({cfg.key}.pub)"
+    changes = raw_changes(cfg.clone, parents[0], sha)
+    if not changes or len(changes) > cfg.max_files:
+        return f"файлов {len(changes)}: нужно от 1 до {cfg.max_files}"
+    problem = next(filter(None, (finding_refusal(cfg, change) for change in changes)), None)
+    return problem or trace_refusal(cfg, {c.path: blob_bytes(cfg.clone, c.new_blob) for c in changes})
+
+
+def read_finding(path: Path, limit: int) -> bytes:
+    """Байты находки одним дескриптором: O_NOFOLLOW — не симлинк, fstat того же
+    дескриптора — обычный файл с одной ссылкой (жёсткая ссылка унесла бы в сеть
+    любой читаемый файл: ключ, секрет) и не больше потолка."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError as err:
+        raise Refusal(DOOR_REFUSED, f"отказ: находка не открывается как обычный файл ({err.strerror})")
+    with os.fdopen(fd, "rb") as handle:
+        info = os.fstat(handle.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            raise Refusal(DOOR_REFUSED, "отказ: находка — обычный файл с одной ссылкой (не каталог, "
+                                        "не устройство, не жёсткая ссылка)")
+        data = handle.read(limit + 1)      # по прочитанному, не по st_size: файл может расти
+    if len(data) > limit:
+        raise Refusal(DOOR_REFUSED, f"отказ: находка больше потолка {limit} байт")
+    return data
+
+
+def finding_command(cfg: Settings, file: str) -> int:
+    """Подписанный коммит копии: дерево свежего origin/main + один файл в
+    находки/<эта копия>/<имя файла>. Печатает sha; не отправляет."""
+    require_ready(cfg, ("copy",))
+    path = Path(file)
+    if not FILE_FORM.fullmatch(path.name):
+        raise Refusal(DOOR_REFUSED, f"отказ: имя находки — <ГГГГ-ММ-ДД>-<суть>.md, а не {visible(path.name)[:80]}")
+    if not DIR_FORM.fullmatch(cfg.project_name):
+        raise Refusal(NOT_READY, f"отказ: PROJECT_NAME {visible(cfg.project_name)[:80]} не годится в имя "
+                                 "каталога сети (латиница, цифры, _ и -)")
+    data = read_finding(path, cfg.max_entry)
+    own_public(cfg)
+    problem = clone_refusal(cfg)
+    if problem:
+        raise Refusal(DOOR_REFUSED, f"отказ: {problem}")
+    fetch(cfg)
+    target = f"находки/{cfg.project_name}/{path.name}"
+    sent = git_run(cfg.clone, "cat-file", "blob", f"refs/remotes/origin/main:{target}")
+    if sent.returncode == 0 and not appends_only(sent.stdout, data):
+        raise Refusal(DOOR_REFUSED, f"отказ: {APPEND_ONLY}")
+    problem = trace_refusal(cfg, {target: data})
+    if problem:
+        raise Refusal(DOOR_REFUSED, f"отказ: {problem}")
+    # Индекс — из самого origin/main, не из списка блобов: режимы чужих путей те же,
+    # и коммит меняет ровно один путь.
+    with tempfile.TemporaryDirectory(prefix="evolution-net-") as tmp:
+        index = Path(tmp) / "index"
+        git(cfg.clone, "read-tree", "refs/remotes/origin/main", index=index)
+        blob = git_text(cfg.clone, "hash-object", "-w", "--stdin", input=data)
+        entry = f"100644 {blob}\t{target}\0".encode()
+        git(cfg.clone, "update-index", "-z", "--add", "--index-info", input=entry, index=index)
+        tree = git_text(cfg.clone, "write-tree", index=index)
+    print(signed_commit(cfg, tree, f"Находка {cfg.project_name}: {path.name}"))
+    return OK
+
+
 def send_command(cfg: Settings, sha: str) -> int:
-    require_host_ready(cfg)
+    require_ready(cfg, ("host", "copy"))
     problem = clone_refusal(cfg) or fetch_problem(cfg)
     if not problem:
-        problem = commit_refusal(cfg, sha)
+        problem = commit_refusal(cfg, sha) if cfg.role == "host" else copy_commit_refusal(cfg, sha)
     if problem:
         raise Refusal(DOOR_REFUSED, f"отказ двери: {problem}")
     # по адресу, а не по имени `origin`: pushurl и прочие перенаправления по имени не действуют
@@ -1481,6 +1652,8 @@ def send_command(cfg: Settings, sha: str) -> int:
     if done.returncode:
         last = done.stderr.decode(errors="replace").strip().splitlines()[-1:] or ["?"]
         raise Refusal(PUSH_REJECTED, f"push отвергнут: {visible(last[0])[:200]}")
+    if cfg.role == "copy" and not network_knows(cfg):
+        print(UNKNOWN_COPY.format(name=cfg.project_name))
     print(f"evolution-net --отправить: main = {sha}")
     return OK
 
@@ -1503,6 +1676,7 @@ def main(argv: list[str]) -> int:
     mode.add_argument("--якорь", action="store_true", dest="anchor")
     mode.add_argument("--отправить", metavar="SHA", dest="send")
     mode.add_argument("--перечитать", metavar="SHA", nargs="+", dest="rejudge")
+    mode.add_argument("--находка", metavar="ФАЙЛ", dest="finding")
     parser.add_argument("--первый", action="store_true", dest="first",
                         help="с --якорь: первый якорь на пустой истории (нет файла якоря и состояния)")
     parser.add_argument("--правки", dest="edits", metavar="КАТАЛОГ")
@@ -1524,6 +1698,8 @@ def main(argv: list[str]) -> int:
             return anchor_command(cfg, args.edits, args.first)
         if args.rejudge:
             return rejudge_command(cfg, args.rejudge)
+        if args.finding:
+            return finding_command(cfg, args.finding)
         return send_command(cfg, args.send)
     except Refusal as refusal:
         print(refusal.text, file=sys.stderr)

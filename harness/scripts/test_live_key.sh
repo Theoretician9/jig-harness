@@ -69,6 +69,9 @@ make_stand() {
     echo 'роль исполнителя' > "$s/proj/harness/self/roles/worker.md"
     echo '1.0.0' > "$s/state/версия-харнеса"
     echo '2.1.299' > "$s/ver"
+    # Свой паспорт выключателя: обёртка фоновых читает ключ из файла, не из окружения.
+    echo 'BACKGROUND_PROCESSES=on' > "$s/harness.conf"
+    : > "$s/install.conf"
     printf '#!/usr/bin/env bash\n[ "${1:-}" = --version ] && { echo "$(cat %q) (Claude Code)"; exit 0; }\nexit 1\n' \
         "$s/ver" > "$s/bin/claude"
     chmod +x "$s/bin/claude"
@@ -97,6 +100,7 @@ in_stand() {
     local s="$1"; shift
     PROJECT_DIR="$s/proj" LOG_DIR="$s/log" HARNESS_SCRIPTS="$HERE" \
     CLAUDE_BIN="$s/bin/claude" HARNESS_VERSION_FILE="$s/state/версия-харнеса" \
+    HARNESS_CONF="$s/harness.conf" HARNESS_INSTALL_CONF="$s/install.conf" \
     SELF_ETALON_DIR="${ETALON:-$s/no-etalon}" \
     SELF_PROMPT_LIVE_SH="$s/probe.sh" SELF_PROMPT_LIVE_STATE="$s/log/self-prompt-live.state" \
     SAY_LOG="$s/say.log" FNS="$FNS" \
@@ -237,6 +241,18 @@ echo "── CLI нет: сторож не падает ──"
 S=$(make_stand nocli); rm -f "$S/bin/claude"
 r=$(pass "$S" 20)
 case_check "Н1: claude --version не отвечает — обход сторожа rc 0" "0" "${r%% *}"
+
+echo "── запуск пробы идёт обёрткой фоновых (выключатель BACKGROUND_PROCESSES) ──"
+S=$(make_stand wrapped)
+r=$(pass "$S")
+case_check "В1: выключатель on — проба запущена ровно раз" "0 1" "$r"
+case_check "В2: запуск записан обёрткой: process.start с id self-prompt-live в журнале стенда" "1" \
+    "$(grep -h '"process.start"' "$S/log"/process-runs*.jsonl 2>/dev/null | grep -c '"id": *"self-prompt-live"' || true)"
+S=$(make_stand switched-off); echo 'BACKGROUND_PROCESSES=off' > "$S/harness.conf"
+r=$(pass "$S" 20)
+case_check "В3: выключатель off — пробы нет, сторож не падает" "0 0" "$r"
+case_check "В4: погашенный запуск не тратит суточный потолок" "0" \
+    "$(grep -cE '^[0-9]{9,} ' "$S/log/self-prompt-live.runs" 2>/dev/null || echo 0)"
 
 echo
 if [ "$CASES_FAILED" -eq 0 ]; then

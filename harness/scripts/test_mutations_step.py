@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import re
 import shutil
@@ -334,6 +335,25 @@ def probe_batch(cp, stand: Stand, tmp: Path) -> None:
           (debts(cp, root, "hr.a"), debts(cp, root, "hr.b")))
 
 
+def probe_mechanism_list(acc, stand: Stand) -> None:
+    """Поле «механизм» списком: проба судит несколько файлов (test_limit_silence.sh
+    — четыре). Правка пробы — шаг всех её механизмов; правка одного из них — его."""
+    pair, first, second = "scripts/test_pair.py", "scripts/pa.py", "scripts/pb.py"
+    (stand.root / "harness" / "config" / "probe-mutations.yaml").write_text(
+        PROBES + f"  {pair}:\n    механизм: [{first}, {second}]\n"
+                 f"    доказательство: python3 {pair}\n    мутация:\n    - 's@a@b@'\n",
+        encoding="utf-8")
+    # Таблицу — прямым коммитом: commit() дописал бы в неё строку кода.
+    stand.git("add", "harness/config/probe-mutations.yaml")
+    stand.git("commit", "-q", "-m", "таблица: механизм списком")
+    stand.commit("hr.pair-proof", pair)
+    stand.commit("hr.pair-second", second)
+    check("39 механизм списком: правка пробы — шаг обоих механизмов, правка одного — его",
+          ([first, second], [second]),
+          (acc.механизмы_задачи("hr.pair-proof", stand.root),
+           acc.механизмы_задачи("hr.pair-second", stand.root)))
+
+
 def probe_foreign_lines(acc, stand: Stand) -> None:
     """Строки задачи — только её: правка другой задачи ПОСЛЕ первого коммита
     задачи в тот же файл в её набор не входит. Иначе шаг судил задаче чужие
@@ -447,6 +467,34 @@ def probe_batch_law(stand: Stand, tmp: Path) -> None:
     code, seen = acc._own_view(["hr.a"], 0, ["мутации задачи hr.b: дыр 0, бумага b"])
     check("27 закон пачек: заход без итога своей задачи — код 2 и слово, а не тихий 0",
           (2, True), (code, any("не дал итога" in line for line in seen)))
+
+
+def probe_queued_tree(stand: Stand, tmp: Path) -> None:
+    """Заявка очереди несёт `дерево` — корень acceptance.py заявителя: без него исполнитель
+    гонит заход в чужом каталоге, а заявку в ушедшее дерево помощника не отличить от живой.
+    Очередь отвечает сразу подставным итогом: исполнитель не нужен, читается сама заявка."""
+    scripts = stand.root / "scripts"
+    shutil.copy(ACCEPTANCE, scripts / "acceptance.py")
+    (scripts / "lib").symlink_to(ACCEPTANCE.resolve().parent / "lib")
+    logs = tmp / "queued-logs"
+    saved = dict(os.environ)
+    os.environ.update(LOG_DIR=str(logs), HARNESS_LOG_DIR=str(logs))
+    os.environ.pop("HARNESS_IN_CHECKS_SLICE", None)
+    try:
+        acc = load(scripts / "acceptance.py", "acceptance_queued_stand")
+        import batch_queue
+        real = batch_queue.await_result
+        batch_queue.await_result = lambda *args, **kwargs: {"код": 0, "строки": []}
+        try:
+            acc._queued_mutations(["hr.a"])
+        finally:
+            batch_queue.await_result = real
+    finally:
+        os.environ.clear()
+        os.environ.update(saved)
+    state = json.loads((logs / "очередь-мутаций" / "очередь.json").read_text(encoding="utf-8"))
+    check("34 заявка очереди несёт дерево — корень acceptance.py", [str(stand.root)],
+          [z.get("дерево") for z in state["заявки"]])
 
 
 # Подставной прибор с задержкой: механизм из STUB_SLOW спит STUB_SLEEP с; каждый
@@ -564,7 +612,9 @@ def main() -> int:
                 ("чужое удаление", lambda: probe_foreign_deletion(acc, Stand(tmp / "fdel"))),
                 ("своё удаление", lambda: probe_own_deletion_shifted(acc, Stand(tmp / "odel"))),
                 ("комментарии", lambda: probe_comment_lines(acc, Stand(tmp / "comments"))),
+                ("механизм списком", lambda: probe_mechanism_list(acc, Stand(tmp / "pair"))),
                 ("закон пачек", lambda: probe_batch_law(Stand(tmp / "law"), tmp)),
+                ("дерево заявки", lambda: probe_queued_tree(Stand(tmp / "queued"), tmp)),
                 ("обрыв захода", lambda: probe_resume(cp, Stand(tmp / "resume"), tmp)),
                 ("пульт", lambda: probe_live(cp))):
             try:

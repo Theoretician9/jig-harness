@@ -291,9 +291,16 @@ M_FRESH="$(( NOW - 20 )).300000000"
 M_OLD="$(( NOW - 9000 )).400000000"
 echo ok > "$C/inbox/обработано/$M_OK.txt"; jr delivery.ack ok "$M_OK" $(( NOW - 599 ))
 case_check "е) квитанция есть — зелено" 0 "$(check_rc)"
-echo x > "$C/inbox/$M_FRESH.txt"
+echo x > "$C/inbox/$M_FRESH.txt"; jr delivery.queued ok "$M_FRESH" $(( NOW - 20 ))
 case_check "е) без квитанции, но моложе 60 с — зелено" 0 "$(check_rc)"
-echo x > "$C/inbox/$M_LATE.txt"
+# Квитанцию сверка ждёт только на то, что диспетчер принял из канала (delivery.queued).
+# БОЛЬНОЙ (Content-Factory 18.11.2026): файл нажатия кнопки «Да» на спеку лёг во входящие
+# не из канала — квитанции на него нет и не нужно, а сторож прислал владельцу «АВАРИЯ».
+M_PRESS="$(( NOW - 72 )).500000000"
+echo 'Владелец нажал «Да»: спека' > "$C/inbox/$M_PRESS.txt"
+case_check "е) БОЛЬНОЙ: файл не из канала (нажатие кнопки) без квитанции — не нарушение" 0 "$(check_rc)"
+rm "$C/inbox/$M_PRESS.txt"
+echo x > "$C/inbox/$M_LATE.txt"; jr delivery.queued ok "$M_LATE" $(( NOW - 90 ))
 case_check "е) без квитанции 90 с — нарушение" 1 "$(check_rc)"
 case_check "е) нарушение называет сообщение" 1 "$(grep -c "^$M_LATE" "$C/out")"
 case_check "е) моложе 60 с нарушением не названо" 0 "$(grep -c "^$M_FRESH" "$C/out")"
@@ -304,7 +311,7 @@ case_check "е) квитанция с исходом error не считаетс
 jr delivery.ack ok "$M_LATE" $(( NOW - 70 ))
 rm "$C/inbox/$M_FRESH.txt"
 case_check "е) после удачной квитанции — зелено" 0 "$(check_rc)"
-echo x > "$C/inbox/обработано/$M_OLD.txt"
+echo x > "$C/inbox/обработано/$M_OLD.txt"; jr delivery.queued ok "$M_OLD" $(( NOW - 9000 ))
 case_check "е) сообщение до начала журнала не судится" 0 "$(check_rc)"
 echo x > "$C/inbox/not-a-stamp.txt"
 case_check "е) чужой файл в inbox не роняет сверку" 0 "$(check_rc)"

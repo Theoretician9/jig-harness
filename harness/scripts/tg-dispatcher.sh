@@ -1024,9 +1024,10 @@ handle_callback() {  # $1 = update
     cb=$(printf '%s' "$1" | jq -c '.callback_query')
     cb_id=$(printf '%s' "$cb" | jq -r '.id // empty')
     # Префикс a: — выбор аккаунта (свой судья и свой журнал), остальное — согласие.
+    # Канал и владелец — разные ключи: в группе chat.id группы ≠ from.id человека.
     case "$(printf '%s' "$cb" | jq -r '.data // empty')" in
-        a:*) verdict=$(printf '%s' "$cb" | python3 "$HERE/lib/account_buttons.py" judge "$LOG_DIR" "$TG_CHAT_ID" 2>>"$DISPATCH_LOG") ;;
-        *)   verdict=$(printf '%s' "$cb" | python3 "$HERE/lib/consent_buttons.py" judge "$LOG_DIR" "$TG_CHAT_ID" "${SECRETS_DIR:-}" 2>>"$DISPATCH_LOG") ;;
+        a:*) verdict=$(printf '%s' "$cb" | python3 "$HERE/lib/account_buttons.py" judge "$LOG_DIR" "$TG_CHAT_ID" "${TG_OWNER_ID:-}" 2>>"$DISPATCH_LOG") ;;
+        *)   verdict=$(printf '%s' "$cb" | python3 "$HERE/lib/consent_buttons.py" judge "$LOG_DIR" "$TG_CHAT_ID" "${SECRETS_DIR:-}" "${TG_OWNER_ID:-}" 2>>"$DISPATCH_LOG") ;;
     esac || verdict='{"answer":"Сбой, нажми ещё раз","log":"судья нажатий упал"}'
     printf '%s' "$verdict" | jq -e . >/dev/null 2>&1 || verdict='{"answer":"Сбой, нажми ещё раз","log":"судья нажатий ответил не JSON"}'
     say "кнопка: $(printf '%s' "$verdict" | jq -r '.log // "без пояснения"')"
@@ -1206,6 +1207,24 @@ while true; do
             fi
             persist_offset
             continue
+        fi
+
+        # ── канал-группа: слово владельца — по from.id, тем же судьёй, что нажатие ──
+        # В группе chat.id — сама группа, и без сверки from.id «да» любого
+        # участника легло бы в согласия и во входящие словом владельца. В личке
+        # chat.id и есть человек: судья там не зовётся — лишний python на каждое
+        # слово владельца.
+        if [ "${TG_CHAT_ID:0:1}" = "-" ]; then
+            OTKAZ=$(printf '%s' "$MSG" | python3 "$HERE/lib/consent_buttons.py" sender "$TG_CHAT_ID" "${TG_OWNER_ID:-}" 2>>"$DISPATCH_LOG") \
+                || OTKAZ='{"answer":"Сбой проверки отправителя — сообщение не принято, пришли ещё раз","log":"судья отправителя упал","tell":true}'
+            if [ "$OTKAZ" != "{}" ]; then
+                say "входящее в группе не засчитано: $(printf '%s' "$OTKAZ" | jq -r '.log') — ни в очередь, ни в согласия"
+                if printf '%s' "$OTKAZ" | jq -e '.tell' >/dev/null; then
+                    ack "$CHAT" "$(printf '%s' "$OTKAZ" | jq -r '.answer')"
+                fi
+                persist_offset
+                continue
+            fi
         fi
 
         # ── секрет из канала: значение — в хранилище, дальше идёт пометка ───

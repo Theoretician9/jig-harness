@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -741,13 +742,130 @@ def case_v_called_from_tree(tmp: Path) -> None:
     check("в2: master == вершина, дерево снято", (tip, False), (s.sha(), wt.exists()))
 
 
+# ─── Д: уборка деревьев помощников (спека тяжёлых прогонов §Д, ревью-3 п.10–11) ───
+# Стенд держит WORKTREE_IDLE_H=6 в своём harness.conf; время создания ветки — первая запись
+# reflog (GIT_COMMITTER_DATE при `worktree add`), простой — mtime индекса дерева
+# (.git/worktrees/<имя>/index). Очередь тяжёлых прогонов — $LOG_DIR/очередь-мутаций/очередь.json
+# стенда, не боевая.
+IDLE_H = 6
+HOUR = 3600
+TIDY_LINE = r"убрано \d+, оставлено \d+ \(грязных \d+, неслитых \d+, в очереди \d+\)"
+
+
+def aged_tree(s: Stand, name: str, created_h: float, index_h: float,
+              start: str = "master") -> tuple[str, Path]:
+    """Дерево помощника без коммитов (одна запись reflog), созданное created_h часов назад,
+    индекс которого не трогали index_h часов."""
+    branch, where = f"worktree-agent-{name}", s.proj / ".claude/worktrees" / f"agent-{name}"
+    created = int(time.time() - created_h * HOUR)
+    subprocess.run(["git", "-C", str(s.proj), "worktree", "add", "-q", "-b", branch, str(where), start],
+                   check=True, capture_output=True,
+                   env={**os.environ, **GIT_ENV, "GIT_COMMITTER_DATE": f"@{created} +0000"})
+    touch_index(s, name, index_h)
+    return branch, where
+
+
+def touch_index(s: Stand, name: str, index_h: float) -> None:
+    index = s.proj / ".git" / "worktrees" / f"agent-{name}" / "index"
+    when = time.time() - index_h * HOUR
+    os.utime(index, (when, when))
+
+
+def idle_stand(tmp: Path, name: str) -> Stand:
+    s = Stand(tmp / name)
+    with s.conf.open("a", encoding="utf-8") as fh:
+        fh.write(f'WORKTREE_IDLE_H="{IDLE_H}"\n')
+    return s
+
+
+def case_w_idle_trees(tmp: Path) -> None:
+    """Д(а)–(д), ревью-3 п.11: дерево без коммита снимается только при И (создано И индекс
+    старше WORKTREE_IDLE_H), чистое, слитое, с reflog."""
+    print("Д) уборка деревьев без коммита по возрасту")
+    s = idle_stand(tmp, "Д")
+    # (а) Поломка: helper_worked по-прежнему держит любую ветку с одной записью reflog —
+    # 15 брошенных деревьев в .claude/worktrees так и лежат.
+    b_a, w_a = aged_tree(s, "da", created_h=7, index_h=7)
+    # (б) Поломка: возраст не смотрится вовсе (снимается любое без коммита).
+    b_b, w_b = aged_tree(s, "db", created_h=5, index_h=7)
+    # (в) Поломка: «создано ИЛИ индекс» — помощник, который час назад трогал индекс, теряет дерево.
+    b_c, w_c = aged_tree(s, "dc", created_h=7, index_h=1)
+    # (г) Поломка: возраст без проверки грязи — неотслеженный файл помощника уходит с деревом (И-1).
+    b_d, w_d = aged_tree(s, "dd", created_h=7, index_h=7)
+    s.write(w_d, "черновик.txt", "данные\n")
+    touch_index(s, "dd", 7)
+    # (д) Поломка: «по возрасту без слитости» — ветка с коммитом не в master и одной записью reflog.
+    scratch = s.proj / ".claude/worktrees" / "mq-scratch"
+    git(s.proj, "worktree", "add", "-q", "--detach", str(scratch), "master")
+    foreign = s.change(scratch, "e.txt", "e-неслитое\n")
+    git(s.proj, "worktree", "remove", "--force", str(scratch))
+    b_e, w_e = aged_tree(s, "de", created_h=7, index_h=7, start=foreign)
+    # (ж) ревью-3 п.11. Поломка: нет reflog → «время создания 0» → снято как древнее.
+    b_g, w_g = aged_tree(s, "dg", created_h=7, index_h=7)
+    (s.proj / ".git" / "logs" / "refs" / "heads" / b_g).unlink()
+    code, _, out = s.queue("--убрать")
+    check("Д: --убрать код 0", 0, code)
+    check("Д(а): без коммита, без замка, чистое, создано и индекс 7 ч назад — снято (дерево и ветка)",
+          (False, False), (w_a.exists(), s.branch_exists(b_a)))
+    check("Д(б): создано 5 ч назад — оставлено", (True, True), (w_b.exists(), s.branch_exists(b_b)))
+    check("Д(в): создано 7 ч, индекс 1 ч — оставлено (условие «И», не «ИЛИ»)", (True, True),
+          (w_c.exists(), s.branch_exists(b_c)))
+    check("Д(г): грязное (неотслеженный файл) — оставлено вместе с файлом", (True, "данные\n"),
+          (w_d.exists(), s.read("черновик.txt", w_d) if w_d.exists() else None))
+    check("Д(д): неслитое с одной записью reflog — оставлено", (True, True),
+          (w_e.exists(), s.branch_exists(b_e)))
+    check("Д(ж): у ветки нет reflog (время создания неизвестно) — оставлено", (True, True),
+          (w_g.exists(), s.branch_exists(b_g)))
+    check("Д: --убрать печатает «убрано N, оставлено M (грязных K, неслитых U, в очереди Q)»",
+          True, bool(re.search(TIDY_LINE, out)))
+
+
+def queue_request(s: Stand, tree: Path, taken: int | None) -> None:
+    """Висящая заявка очереди тяжёлых прогонов стенда на дерево tree; taken — pid захода."""
+    place = s.logs / "очередь-мутаций"
+    place.mkdir(parents=True, exist_ok=True)
+    request = {"знак": f"проба-{taken}", "ids": ["hr.проба"], "команда": ["true"], "с": time.time(),
+               "заход": taken, "дерево": str(tree), "попыток": 0, "не_раньше": 0, "среда": {}}
+    (place / "очередь.json").write_text(json.dumps({"заявки": [request], "итоги": {}},
+                                                   ensure_ascii=False), encoding="utf-8")
+
+
+def case_x_queued_tree(tmp: Path) -> None:
+    """Д(е), ревью-3 п.10: дерево из поля «дерево» висящей заявки не снимается ни на пути
+    merge_branch → finish_tree, ни в cleanup; висящая — и ожидающая, и взятая в заход."""
+    print("Д(е) дерево с заявкой очереди тяжёлых прогонов")
+    for label, taken in (("ожидающая", None), ("взятая в заход", os.getpid())):
+        s = idle_stand(tmp, f"Де-{'взятая' if taken else 'ждёт'}")
+        # Путь слияния. Поломка: проверка заявки только в cleanup — finish_tree снимает
+        # дерево, в котором идёт (или вот-вот пойдёт) заход.
+        branch, wt = s.tree("qe")
+        s.change(wt, "a.txt", "a-qe\n")
+        queue_request(s, wt, taken)
+        code, data, _ = s.queue(branch, "--json")
+        check(f"Д(е) {label}: слияние прошло (код 0)", 0, code)
+        check(f"Д(е) {label}: merge_branch → finish_tree оставил дерево с заявкой", (True, True),
+              (wt.exists(), s.branch_exists(branch)))
+        check(f"Д(е) {label}: «оставлено» называет дерево", True,
+              wt.name in json.dumps(data.get("оставлено"), ensure_ascii=False))
+        # Путь уборки. Поломка: смотрится только `заход is None` (взятую снимают посреди захода)
+        # или место очереди зашито боевым путём (заявку стенда не видно).
+        branch2, wt2 = s.tree("qc")
+        s.change(wt2, "b.txt", "b-qc\n")
+        git(s.proj, "merge", "-q", "--ff-only", branch2)
+        queue_request(s, wt2, taken)
+        code, _, out = s.queue("--убрать")
+        check(f"Д(е) {label}: --убрать оставил слитое чистое дерево с заявкой", (0, True, True),
+              (code, wt2.exists(), s.branch_exists(branch2)))
+        check(f"Д(е) {label}: печать считает его «в очереди 1»", True, "в очереди 1" in out)
+
+
 CASES = (case_a_fast_forward, case_b_master_moved, case_c_conflict, case_d_red_gate,
          case_e_dirty_helper, case_f_dirty_main, case_g_locked, case_h_package,
          case_p_package_superset,
          case_i_two_queues, case_j_union, case_k_heal_hook, case_l_retries, case_m_cleanup,
          case_n_rollback, case_bad_call, case_q_new_sample_key, case_r_key_unwritable,
          case_s_package_carried, case_t_dirty_map, case_u_broken_map,
-         case_v_called_from_tree)
+         case_v_called_from_tree, case_w_idle_trees, case_x_queued_tree)
 
 
 def main() -> int:

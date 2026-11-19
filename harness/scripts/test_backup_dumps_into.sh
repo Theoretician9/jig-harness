@@ -288,6 +288,46 @@ for KEEP in 0 abc 05 -1; do
         "осталось: $(find "$S/backup/$PRE" -mindepth 1 -maxdepth 1 -type d | wc -l); ключ: $(est 'printf "%s" "$OUT" | grep -q BACKUP_PRE_DEPLOY_KEEP'); код $(kod)"
 done
 
+# ── (г) следы живой проверки — в ночной копии ─────────────────────────────
+# Следы перенесены из гита за репозиторий ($LOG_DIR/живая-проверка), то есть
+# из bundle выпали; на них ссылаются пути «след:» состояния живой проверки.
+# Список файлов — РАЗБОРОМ каталога стенда, пустой список — провал.
+traces_in_copy() { # $1 = корень следов, $2 = ночной каталог → «есть в копии: N из M»
+    local want got
+    want=$(cd "$1" 2>/dev/null && find . -type f | sed 's|^\./||' | sort)
+    got=$(tar -tzf "$2/live-check-traces.tar.gz" 2>/dev/null | grep -v '/$' | sed 's|^[^/]*/||' | sort)
+    printf 'есть в копии: %s из %s' \
+        "$(comm -12 <(printf '%s\n' "$want") <(printf '%s\n' "$got") | grep -c .)" \
+        "$(printf '%s\n' "$want" | grep -c .)"
+}
+failures_of() { printf '%s' "$OUT" | sed -n 's/.*отказов шагов: \([0-9]*\).*/\1/p'; }
+# 14. БОЛЬНОЙ: следы под корнем по умолчанию ($LOG_DIR/живая-проверка) в копию не шли.
+S=$(stand g14)
+mkdir -p "$S/log/живая-проверка/живая-проверка/живьём" "$S/log/живая-проверка/живая-проверка/живьём-больные"
+echo след > "$S/log/живая-проверка/живая-проверка/живьём/scripts-a.py.log"
+echo больной > "$S/log/живая-проверка/живая-проверка/живьём-больные/scripts-a.py.log"
+run_bs "$S"
+case_check "БОЛЬНОЙ (г): следы живой проверки под \$LOG_DIR/живая-проверка — в ночной копии, отказов 0" \
+    "есть в копии: 2 из 2; отказов шагов: 0" \
+    "$(traces_in_copy "$S/log/живая-проверка" "$(night_dir "$S")"); отказов шагов: $(failures_of)"
+[ "$RC" = 0 ] || show_out
+# 15. Корень следов задан ключом LIVE_CHECK_TRACE_ROOT — копируется он, а не LOG_DIR.
+S=$(stand g15)
+mkdir -p "$S/sledy/x/живьём" "$S/log/живая-проверка/не-тот"
+echo след > "$S/sledy/x/живьём/b.log"
+echo чужое > "$S/log/живая-проверка/не-тот/c.log"
+printf 'LIVE_CHECK_TRACE_ROOT="%s"\n' "$S/sledy" >> "$S/harness.conf"
+run_bs "$S"
+case_check "(г): корень следов из LIVE_CHECK_TRACE_ROOT — в ночной копии он, а не \$LOG_DIR/живая-проверка" \
+    "есть в копии: 1 из 1; не-тот: нет" \
+    "$(traces_in_copy "$S/sledy" "$(night_dir "$S")"); не-тот: $(est 'tar -tzf "$(night_dir "$S")/live-check-traces.tar.gz" 2>/dev/null | grep -q не-тот')"
+# 16. Следов ещё нет (свежая установка) — не отказ, но строка в журнале.
+S=$(stand g16)
+run_bs "$S"
+case_check "(г): следов нет — отказов 0, журнал называет это словами" \
+    "отказов шагов: 0; названо: да" \
+    "отказов шагов: $(failures_of); названо: $(est 'printf "%s" "$OUT" | grep -q "следов живой проверки нет"')"
+
 if [ "$CASES_FAILED" = 0 ]; then
     echo "ПРОБА: ЗЕЛЁНАЯ ($CASES_PATHS путей)"; exit 0
 fi

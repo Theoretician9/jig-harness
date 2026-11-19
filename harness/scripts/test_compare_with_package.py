@@ -13,6 +13,10 @@
   (в) двойник A в пакете закоммичен, но отличается от файла коммита → rc 1;
   (г) в коммите нет файлов харнеса → гейт неприменим, rc 0.
   (д) process-library.json расходится только полем «замер» → rc 0, иным → rc 1.
+  (е) копия (EVOLUTION_ROLE не host): агенты, settings.json и mechanisms.yaml
+      раскладки разошлись с пакетом → rc 0 и строка-причина, без «cp … в пакет»;
+      хозяин с тем же расхождением → rc 1, как прежде.
+Стенды (а)–(д) — хозяин: правило «правка только в проекте умрёт» — его.
 Дверь пробы: COMPARE_WITH_PACKAGE_GATE — путь копии гейта (мутации).
 
 Прогон: python3 scripts/test_compare_with_package.py
@@ -67,12 +71,12 @@ def stand(base: Path, name: str) -> tuple[Path, Path, Path]:
         git(root, "add", "-A")
         git(root, "commit", "-qm", "начальный")
     conf = base / f"{name}-harness.conf"
-    write(conf, f'STARTER_DIR="{pkg}"\n')
+    write(conf, f'STARTER_DIR="{pkg}"\nEVOLUTION_ROLE="host"\n')
     return prj, pkg, conf
 
 
 def run_gate(prj: Path, conf: Path, staged: list[str]) -> tuple[int, str]:
-    env = {k: v for k, v in os.environ.items() if k != "GIT_INDEX_FILE"}
+    env = {k: v for k, v in os.environ.items() if k not in ("GIT_INDEX_FILE", "EVOLUTION_ROLE")}
     env["HARNESS_CONF"] = str(conf)
     r = subprocess.run([sys.executable, str(GATE)], input="\n".join(staged) + "\n",
                        capture_output=True, text=True, cwd=prj, env=env, timeout=60)
@@ -173,6 +177,35 @@ def main() -> int:
             git(prj, "add", lib)
             rc, out = run_gate(prj, conf, [lib])
             check(title, rc == rc_want, out)
+
+        # (е) Раскладка у копии: агенты собраны с instance.yaml, settings.json
+        # сведён, в mechanisms.yaml своя запись (копия bkb, 0.14.2, 19.11.2026).
+        # Правку файлов харнеса у копии держит harness_files_guard; второй сторож
+        # с советом «cp в пакет» гнал бы данные копии в пакет строителя.
+        diverged = {".claude/agents/harness-worker.md": "harness/agents/harness-worker.md",
+                    ".claude/settings.json": "harness/hooks/project-settings.json",
+                    "harness/config/mechanisms.yaml": "harness/config/mechanisms.yaml"}
+        for case, role, rc_want, title in (
+                ("e1", 'EVOLUTION_ROLE="copy"\n', 0, "(е1) копия (EVOLUTION_ROLE=copy)"),
+                ("e2", "", 0, "(е2) копия (ключа EVOLUTION_ROLE нет)"),
+                ("e3", 'EVOLUTION_ROLE="host"\n', 1, "(е3) хозяин")):
+            prj, pkg, conf = stand(base, case)
+            write(conf, f'STARTER_DIR="{pkg}"\n{role}')
+            for inside in diverged.values():
+                write(pkg / inside, f"пакет: {inside}\n")
+            git(pkg, "add", "-A")
+            git(pkg, "commit", "-qm", "файлы раскладки")
+            for rel in diverged:
+                write(prj / rel, f"раскладка копии: {rel}\n")
+            git(prj, "add", *diverged)
+            rc, out = run_gate(prj, conf, list(diverged))
+            check(f"{title}: раскладка разошлась с пакетом — rc {rc_want}", rc == rc_want, out)
+            if rc_want == 0:
+                check(f"{title}: …строка-причина «не хозяин»", "не хозяин" in out, out)
+                check(f"{title}: …без совета «cp в пакет»", "cp " not in out, out)
+            else:
+                check(f"{title}: …назван путь и совет «cp»",
+                      "harness/config/mechanisms.yaml" in out and "cp " in out, out)
 
         # Здоровый: двойник закоммичен и совпадает, пакет чист.
         prj, pkg, conf = stand(base, "ok")

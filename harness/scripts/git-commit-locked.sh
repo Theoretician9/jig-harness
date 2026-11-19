@@ -5,7 +5,7 @@
 # commit-msg и ПЕРЕЧИТЫВАЕТ файл. При личном индексе (GIT_INDEX_FILE) и при
 # `-- <пути>` index.lock у каждого коммитера свой, и сосед переписывает файл в чужом
 # окне: сообщение уходит не тому коммиту (гонка общего файла сообщения, 11.2026).
-# Здесь коммиты идут по одному, а после коммита видно, то ли сообщение легло в
+# Здесь коммиты одного дерева идут по одному, а после коммита видно, то ли сообщение легло в
 # историю, что подали.
 #
 # Вызов (из каталога репозитория или его подкаталога):
@@ -134,7 +134,11 @@ else
 fi
 [ -n "$msg_file" ] || [ "${#msg_texts[@]}" -gt 0 ] || refuse "нет -F и -m" "сообщение — только -F или -m"
 
-lock_dir=$(git rev-parse --path-format=absolute --git-common-dir) || exit $?
+# Замок — на дерево (<git-dir>): COMMIT_EDITMSG, индекс и HEAD у каждого worktree свои,
+# и коммиты разных деревьев в свои ветки друг другу не мешают. Замок на все деревья
+# ставил 14 помощников в одну очередь за минутами pre-commit (19.11). У основного
+# дерева git-dir = common-dir: его коммиты и слияния очереди по-прежнему по одному.
+lock_dir=$(git rev-parse --path-format=absolute --git-dir) || exit $?
 lock="$lock_dir/harness-commit.lock"
 
 # Повторный вход: замок держит родитель, ребёнок ждал бы до предела. Сравнение по
@@ -156,7 +160,7 @@ fi
 printf '%s %s %s\n' "$$" "$(date '+%F %T')" "$PWD" > "$lock.who"
 head_now=$(git rev-parse -q --verify HEAD || true)
 if [ -n "$base" ] && [ "$head_now" != "$base" ] && { [ "$paths" = 0 ] || [ "$include" = 1 ]; }; then
-    lost=$(comm -12 <(git diff --no-renames --name-only "$base" "$head_now" | sort) <(git diff --cached --no-renames --name-only "$head_now" | sort))
+    lost=$(comm -12 <(git -c core.quotepath=false diff --no-renames --name-only "$base" "$head_now" | sort) <(git -c core.quotepath=false diff --cached --no-renames --name-only "$head_now" | sort))
     if [ -n "$lost" ]; then
         printf 'git-commit-locked: отказ: индекс собран на %s, HEAD ушёл на %s; коммит откатил бы: %s — пересобери индекс от HEAD\n' "$base" "$head_now" "$(echo $lost)" >&2
         exit 5

@@ -5,8 +5,9 @@
 # Две беды этого шага пришли с соседней установки (отчёт 18.10.2026):
 #   * 3.6 — модель переписала статус СУЩЕСТВУЮЩЕЙ карточки (`test → wip`
 #     через 7 минут после выката), и демон это закоммитил. Правило: демон
-#     только дописывает; статус, который модель сменила, — отказ коммита и
-#     строка в журнал с именем карточки.
+#     только дописывает; статус, который модель сменила, возвращается к
+#     прежнему строкой, остальная правка едет в коммит, журнал называет
+#     карточку. Удалённая карточка и нечитаемая карта — отказ целиком.
 #   * c0c2ae9 — задача, перенесённая приёмкой в архив без коммита, в коммите
 #     демона выглядела пропавшей: демон коммитил одну карту, гейт потери задач
 #     отказывал. Правило: грязный архив карты уходит тем же коммитом.
@@ -108,8 +109,11 @@ new_stand() {
     printf 'заметки\n' > "$R/notes.txt"
     # Подставная модель: кладёт карту, написанную случаем, на место настоящей.
     # Карты случая нет — модель ничего не правит (второй проход VG-01).
+    # mid-run.sh случая — то, что делает с репозиторием сосед, пока модель думает.
     cat > "$R/scripts/claude-demon.sh" <<'SH'
 #!/usr/bin/env bash
+printf '%s\n' "$@" > "$PROJECT_DIR/../prompt.txt"
+[ -f "$PROJECT_DIR/../mid-run.sh" ] && bash "$PROJECT_DIR/../mid-run.sh"
 [ -f "$STAND_MODEL_MAP" ] || exit 0
 cp "$STAND_MODEL_MAP" "$PROJECT_DIR/dev-map.yaml"
 SH
@@ -158,29 +162,92 @@ in_head_map() {  # $1 = стенд, $2 = id → 1, если карточка в 
 }
 
 # ── 3.6, БОЛЬНОЙ СЛУЧАЙ: модель сменила статус существующей карточки ────────
+# 17.11 и 19.11 отказ ЦЕЛИКОМ из-за одной строки статуса стоил всей ночной
+# правки (33 и 87 пропусков) и тревоги «демон мёртв». Сторож отвергает строку,
+# а не правку: статус возвращён, пропуски закоммичены.
 new_stand
 before=$(head_of "$T")
 map_text wip wip 1 1 0 > "$T/model-map.yaml"          # hr.a: test → wip, плюс hr.n
 out=$(run_daemon "$T")
 after=$(head_of "$T")
-verdict "$([ "$before" = "$after" ] && echo 1 || echo 0)" \
-    "БОЛЬНОЙ 3.6: модель сменила статус hr.a test→wip — коммита нет" \
-    "коммит есть: $(git -C "$T/repo" log -1 --format=%s), hr.a в HEAD = $(status_in_head "$T" hr.a)"
+verdict "$([ "$before" != "$after" ] && [ "$(status_in_head "$T" hr.a)" = test ] && echo 1 || echo 0)" \
+    "БОЛЬНОЙ 3.6: модель сменила статус hr.a test→wip — в HEAD hr.a прежний test" \
+    "HEAD сдвинут: $([ "$before" != "$after" ] && echo да || echo нет), hr.a в HEAD = $(status_in_head "$T" hr.a)"
+verdict "$([ "$(in_head_map "$T" hr.n)" = 1 ] && [ "$(cat "$T/rc")" = 0 ] && echo 1 || echo 0)" \
+    "БОЛЬНОЙ 19.11: чужая строка статуса не топит правку — hr.n закоммичена, код 0" \
+    "hr.n в HEAD: $(in_head_map "$T" hr.n), rc=$(cat "$T/rc"); вывод: $(printf '%s' "$out" | tail -2 | tr '\n' ' ')"
 verdict "$(printf '%s' "$out" | grep -q 'hr\.a' && printf '%s' "$out" | grep -qi 'статус' && echo 1 || echo 0)" \
-    "БОЛЬНОЙ 3.6: отказ назван в журнале — имя карточки и слово «статус»" \
+    "БОЛЬНОЙ 3.6: возврат назван в журнале — имя карточки и слово «статус»" \
     "вывод: $(printf '%s' "$out" | tail -3 | tr '\n' ' ')"
-verdict "$([ ! -s "$T/log/devmap/audit.cursor" ] && echo 1 || echo 0)" \
-    "БОЛЬНОЙ 3.6: водораздел не сдвинут — пропуск всплывёт в следующий прогон" \
-    "audit.cursor записан"
+rejected=$(find "$T/log/devmap" -maxdepth 1 -name 'rejected-*.yaml' -print -quit)
+verdict "$([ -n "$rejected" ] && cmp -s "$T/model-map.yaml" "$rejected" && echo 1 || echo 0)" \
+    "3.6: правка модели как была, со сменой статуса, сохранена в rejected-*.yaml" "отвергнутая: ${rejected:-нет}"
+verdict "$([ "$(cat "$T/log/devmap/audit.cursor" 2>/dev/null)" = "$before" ] && echo 1 || echo 0)" \
+    "3.6: пропуски заведены — водораздел сдвинут на HEAD сверки" \
+    "audit.cursor: $(cat "$T/log/devmap/audit.cursor" 2>/dev/null || echo нет)"
 
 # ── 3.6: обмен статусами — счёт статусов тот же, карточки другие ────────────
 new_stand
 before=$(head_of "$T")
 map_text wip test 1 0 0 > "$T/model-map.yaml"         # hr.a test→wip, hr.b wip→test
 run_daemon "$T" >/dev/null
-verdict "$([ "$before" = "$(head_of "$T")" ] && echo 1 || echo 0)" \
-    "БОЛЬНОЙ 3.6: обмен статусами hr.a↔hr.b (число test/wip то же) — коммита нет" \
-    "коммит есть: hr.a=$(status_in_head "$T" hr.a), hr.b=$(status_in_head "$T" hr.b)"
+verdict "$([ "$before" = "$(head_of "$T")" ] && [ -z "$(git -C "$T/repo" status --porcelain -- dev-map.yaml)" ] && [ "$(cat "$T/rc")" = 0 ] && echo 1 || echo 0)" \
+    "БОЛЬНОЙ 3.6: обмен статусами hr.a↔hr.b (число test/wip то же) — оба возвращены, коммитить нечего, код 0" \
+    "hr.a=$(status_in_head "$T" hr.a), hr.b=$(status_in_head "$T" hr.b), дерево: $(git -C "$T/repo" status --porcelain -- dev-map.yaml), rc=$(cat "$T/rc")"
+
+# ── БОЛЬНОЙ СЛУЧАЙ 19.11.2026: статус сменил КОММИТ, влитый во время прогона ──
+# Модель думала 6 минут; в это время очередь слияний влила ветку, где три
+# карточки ушли wip→test, — дерево карты сменилось под моделью. Сторож сравнил
+# снимок «до» с картой «после» и записал чужой коммит на модель: отказ всей
+# правки с 87 пропусками, код 1. Смена, которую принёс HEAD, — не модели.
+merge_mid_run() {
+    cat > "$T/mid-run.sh" <<'SH'
+cd "$PROJECT_DIR"
+sed -i 's/^        status: wip$/        status: test/' dev-map.yaml
+git add dev-map.yaml
+git -c user.name=t -c user.email=t@t commit -q -m 'слито: hr.b в test
+
+Dev-Map: hr.b'
+SH
+}
+new_stand
+merge_mid_run
+map_text test test 1 1 0 > "$T/model-map.yaml"        # модель дописала hr.n к влитой карте
+before=$(head_of "$T")
+out=$(run_daemon "$T")
+verdict "$([ "$(git -C "$T/repo" rev-list --count "$before..HEAD")" = 2 ] && [ "$(in_head_map "$T" hr.n)" = 1 ] \
+            && [ "$(status_in_head "$T" hr.b)" = test ] && [ "$(cat "$T/rc")" = 0 ] && echo 1 || echo 0)" \
+    "БОЛЬНОЙ 19.11: смену hr.b wip→test принёс влитый коммит — правка модели закоммичена, код 0" \
+    "коммитов после: $(git -C "$T/repo" rev-list --count "$before..HEAD"), hr.n в HEAD: $(in_head_map "$T" hr.n), hr.b=$(status_in_head "$T" hr.b), rc=$(cat "$T/rc"); вывод: $(printf '%s' "$out" | tail -2 | tr '\n' ' ')"
+verdict "$(printf '%s' "$out" | grep -q 'hr\.b(' && echo 0 || echo 1)" \
+    "БОЛЬНОЙ 19.11: смена из влитого коммита не названа сменой модели" \
+    "вывод: $(printf '%s' "$out" | tail -2 | tr '\n' ' ')"
+# Сосед: влитый коммит не прикрывает модель — её собственные смены возвращаются:
+# hr.a к статусу до прогона, hr.b (влито test, модель поверх — done) к статусу
+# HEAD, а не к снимку «до»: возврат не откатывает влитый коммит.
+new_stand
+merge_mid_run
+map_text wip done 1 1 0 > "$T/model-map.yaml"         # влито hr.b test; модель: hr.a test→wip, hr.b →done
+run_daemon "$T" >/dev/null
+verdict "$([ "$(status_in_head "$T" hr.a)" = test ] && [ "$(status_in_head "$T" hr.b)" = test ] && [ "$(in_head_map "$T" hr.n)" = 1 ] && echo 1 || echo 0)" \
+    "19.11, сосед: влитый коммит не прикрывает смену самой модели — hr.a возвращён, hr.b к влитому test" \
+    "hr.a=$(status_in_head "$T" hr.a), hr.b=$(status_in_head "$T" hr.b), hr.n в HEAD: $(in_head_map "$T" hr.n)"
+
+# ── статус, который строкой не вернуть (карточка в одну строку), — отказ целиком
+new_stand
+printf '      - { id: hr.f, status: wip, title: "Строчная" }\n' >> "$T/repo/dev-map.yaml"
+git -C "$T/repo" add -A
+git -C "$T/repo" -c user.name=t -c user.email=t@t commit -q -m 'карта: строчная карточка
+
+Dev-Map: hr.f'
+git -C "$T/repo" -c user.name=t -c user.email=t@t commit -q --allow-empty -m 'работа после строчной'
+cp "$T/repo/dev-map.yaml" "$T/snapshot-before.yaml"
+{ map_text test wip 1 1 0; printf '      - { id: hr.f, status: test, title: "Строчная" }\n'; } > "$T/model-map.yaml"
+before=$(head_of "$T")
+run_daemon "$T" >/dev/null
+verdict "$([ "$before" = "$(head_of "$T")" ] && cmp -s "$T/snapshot-before.yaml" "$T/repo/dev-map.yaml" && [ "$(cat "$T/rc")" = 1 ] && echo 1 || echo 0)" \
+    "статус строчной карточки не вернуть строкой — отказ целиком, карта = снимок, код 1" \
+    "HEAD сдвинут: $([ "$before" != "$(head_of "$T")" ] && echo да || echo нет), rc=$(cat "$T/rc")"
 
 # ── 3.6, сосед: дописать — законно ──────────────────────────────────────────
 new_stand
@@ -257,31 +324,32 @@ verdict "$([ "$files" = "dev-map.yaml " ] && echo 1 || echo 0)" \
 # «вместе с чужой правкой». Правило: на отказе дерево карты возвращается к
 # снимку, который демон застал перед вызовом модели, — с ЧУЖОЙ правкой этого
 # снимка (И-1: приёмка сменила hr.b wip→test до прогона, и это не теряется).
+# Отказ целиком остался для удалённой карточки: её строкой не вернуть.
 new_stand
-map_text test test 1 0 0 > "$T/repo/dev-map.yaml"     # чужая правка до прогона: hr.b wip→test
+map_text done wip 1 0 0 > "$T/repo/dev-map.yaml"      # чужая правка до прогона: hr.a test→done
 cp "$T/repo/dev-map.yaml" "$T/snapshot-before.yaml"
-map_text wip test 1 1 0 > "$T/model-map.yaml"         # модель: hr.a test→wip, плюс hr.n
+map_text done wip 0 1 0 > "$T/model-map.yaml"         # модель: выкинула hr.b, плюс hr.n
 before=$(head_of "$T")
 out1=$(run_daemon "$T")
 verdict "$([ "$before" = "$(head_of "$T")" ] && echo 1 || echo 0)" \
-    "VG-01, проход 1: смена статуса моделью — коммита нет" \
-    "коммит есть: hr.a в HEAD = $(status_in_head "$T" hr.a)"
+    "VG-01, проход 1: удаление карточки моделью — коммита нет" \
+    "коммит есть: hr.b в HEAD = $(in_head_map "$T" hr.b)"
 verdict "$(cmp -s "$T/snapshot-before.yaml" "$T/repo/dev-map.yaml" && echo 1 || echo 0)" \
-    "БОЛЬНОЙ VG-01, проход 1: дерево карты после отказа = снимок «до» (с чужой правкой hr.b)" \
-    "в дереве hr.a=$(python3 -c 'import sys,yaml;print([t["status"] for l in yaml.safe_load(open(sys.argv[1]))["lines"] for t in l["tasks"] if t["id"]=="hr.a"])' "$T/repo/dev-map.yaml"), hr.n в дереве: $(grep -c -- '- id: hr.n$' "$T/repo/dev-map.yaml")"
+    "БОЛЬНОЙ VG-01, проход 1: дерево карты после отказа = снимок «до» (с чужой правкой hr.a)" \
+    "hr.b в дереве: $(grep -c -- '- id: hr.b$' "$T/repo/dev-map.yaml"), hr.n в дереве: $(grep -c -- '- id: hr.n$' "$T/repo/dev-map.yaml")"
 rm -f "$T/model-map.yaml"                             # проход 2: модель ничего не правит
 out2=$(run_daemon "$T")
-verdict "$([ "$(status_in_head "$T" hr.a)" = test ] && echo 1 || echo 0)" \
-    "БОЛЬНОЙ VG-01, проход 2: отвергнутая смена hr.a test→wip в HEAD не уехала" \
-    "hr.a в HEAD = $(status_in_head "$T" hr.a); коммит: $(git -C "$T/repo" log -1 --format=%s); вывод: $(printf '%s' "$out2" | tail -2 | tr '\n' ' ')"
+verdict "$([ "$(in_head_map "$T" hr.b)" = 1 ] && echo 1 || echo 0)" \
+    "БОЛЬНОЙ VG-01, проход 2: отвергнутое удаление hr.b в HEAD не уехало" \
+    "hr.b в HEAD: $(in_head_map "$T" hr.b); коммит: $(git -C "$T/repo" log -1 --format=%s); вывод: $(printf '%s' "$out2" | tail -2 | tr '\n' ' ')"
 verdict "$([ "$(in_head_map "$T" hr.n)" = 0 ] && echo 1 || echo 0)" \
     "БОЛЬНОЙ VG-01, проход 2: карточка hr.n из отвергнутой правки в HEAD не уехала" \
     "hr.n в HEAD: $(in_head_map "$T" hr.n)"
 # Сосед: «держать отказ» не значит «больше не коммитить никогда» — чужая
-# правка hr.b, честно грязная до прогона, уезжает вторым проходом.
-verdict "$([ "$before" != "$(head_of "$T")" ] && [ "$(status_in_head "$T" hr.b)" = test ] && echo 1 || echo 0)" \
-    "VG-01, проход 2, сосед: чужая правка hr.b wip→test закоммичена, карта не заперта" \
-    "HEAD сдвинут: $([ "$before" != "$(head_of "$T")" ] && echo да || echo нет), hr.b в HEAD = $(status_in_head "$T" hr.b), rc=$(cat "$T/rc")"
+# правка hr.a, честно грязная до прогона, уезжает вторым проходом.
+verdict "$([ "$before" != "$(head_of "$T")" ] && [ "$(status_in_head "$T" hr.a)" = done ] && echo 1 || echo 0)" \
+    "VG-01, проход 2, сосед: чужая правка hr.a test→done закоммичена, карта не заперта" \
+    "HEAD сдвинут: $([ "$before" != "$(head_of "$T")" ] && echo да || echo нет), hr.a в HEAD = $(status_in_head "$T" hr.a), rc=$(cat "$T/rc")"
 
 # ── БОЛЬНОЙ СЛУЧАЙ 14.11.2026: гейт отверг ЧУЖУЮ правку, ехавшую в коммите ────
 # В дереве лежали незакоммиченные переводы карточек в test (смена ждала мутаций),
@@ -339,10 +407,10 @@ verdict "$(printf '%s' "$sha_list_before" | grep -q "${sha:0:10}" && [ -z "$(pri
 
 # ── метка жизни: отказ — тоже прогон ─────────────────────────────────────────
 new_stand
-map_text wip wip 1 1 0 > "$T/model-map.yaml"
+map_text test wip 0 1 0 > "$T/model-map.yaml"
 run_daemon "$T" >/dev/null
 verdict "$([ -e "$T/hb/devmap-selfheal" ] && echo 1 || echo 0)" \
-    "БОЛЬНОЙ: отказ по смене статуса ставит метку жизни" "метки нет, rc=$(cat "$T/rc")"
+    "БОЛЬНОЙ: отказ по удалению карточки ставит метку жизни" "метки нет, rc=$(cat "$T/rc")"
 
 new_stand
 cat > "$T/repo/scripts/claude-demon.sh" <<'SH'
@@ -399,14 +467,39 @@ plan_stand
 before=$(head_of "$T")
 map_text test wip 1 0 1 > "$T/model-map.yaml"          # пункт без SHA
 run_daemon "$T" >/dev/null
-verdict "$([ "$before" = "$(head_of "$T")" ] && echo 1 || echo 0)" \
-    "БОЛЬНОЙ: plan→test без привязанного SHA — коммита нет" "hr.a в HEAD = $(status_in_head "$T" hr.a)"
+verdict "$([ "$before" != "$(head_of "$T")" ] && [ "$(status_in_head "$T" hr.a)" = plan ] && echo 1 || echo 0)" \
+    "БОЛЬНОЙ: plan→test без привязанного SHA — статус возвращён в plan, пункт закоммичен" "hr.a в HEAD = $(status_in_head "$T" hr.a)"
 plan_stand
 before=$(head_of "$T")
 map_text done wip 1 0 1 | sed "s/Дописано демоном/коммит ${PLAN_SHA:0:10}/" > "$T/model-map.yaml"
 run_daemon "$T" >/dev/null
-verdict "$([ "$before" = "$(head_of "$T")" ] && echo 1 || echo 0)" \
-    "сосед: plan→done даже с SHA отвергается (разрешён только plan→test)" "hr.a в HEAD = $(status_in_head "$T" hr.a)"
+verdict "$([ "$before" != "$(head_of "$T")" ] && [ "$(status_in_head "$T" hr.a)" = plan ] && echo 1 || echo 0)" \
+    "сосед: plan→done даже с SHA не проходит — статус возвращён в plan (разрешены только plan→test и plan→wip)" "hr.a в HEAD = $(status_in_head "$T" hr.a)"
+# БОЛЬНОЙ СЛУЧАЙ 17.11.2026: модель перевела две карточки plan→wip, назвав в их
+# пунктах SHA коммитов из выборки (работа начата, но не проверена), — демон
+# отверг всю правку с 33 пропусками и вышел с кодом 1, сторож меток назвал его
+# падающим. Начатая коммитом работа в «plan» — та же ложь дашборду, что и
+# сделанная, поэтому plan→wip с SHA законен так же, как plan→test.
+plan_stand
+before=$(head_of "$T")
+map_text wip wip 1 0 1 | sed "s/Дописано демоном/коммит ${PLAN_SHA:0:10}/" > "$T/model-map.yaml"
+run_daemon "$T" >/dev/null
+verdict "$([ "$before" != "$(head_of "$T")" ] && [ "$(status_in_head "$T" hr.a)" = wip ] && [ "$(cat "$T/rc")" = 0 ] && echo 1 || echo 0)" \
+    "БОЛЬНОЙ 17.11: plan→wip с привязанным SHA коммита из выборки — коммит есть, код 0" \
+    "hr.a в HEAD = $(status_in_head "$T" hr.a), rc=$(cat "$T/rc")"
+plan_stand
+before=$(head_of "$T")
+map_text wip wip 1 0 1 > "$T/model-map.yaml"           # пункт без SHA
+run_daemon "$T" >/dev/null
+verdict "$([ "$before" != "$(head_of "$T")" ] && [ "$(status_in_head "$T" hr.a)" = plan ] && echo 1 || echo 0)" \
+    "сосед: plan→wip без привязанного SHA — статус возвращён в plan" "hr.a в HEAD = $(status_in_head "$T" hr.a)"
+# Промт и сторож — одно правило: промт 17.11 звал «сменой её статуса» без
+# границы, а сторож пропускал одну смену. Модель шла за промтом и теряла всю
+# правку. Промт обязан назвать ту же границу, что держит сторож.
+verdict "$(grep -q 'Статус меняй только у карточки в plan: на wip или test' "$T/prompt.txt" 2>/dev/null \
+            && ! grep -q 'сменой её статуса, если работа его меняет' "$T/prompt.txt" && echo 1 || echo 0)" \
+    "БОЛЬНОЙ 17.11: промт называет ту же границу смены статуса, что держит сторож" \
+    "промт: $(grep -n 'статус' "$T/prompt.txt" 2>/dev/null | head -3 | tr '\n' ' ')"
 
 # ── модель оставила нечитаемый YAML: откат к снимку, а не падение ─────────────
 new_stand

@@ -328,6 +328,15 @@ if [ "${1:-}" = "--devmap-only" ]; then
     exit $?
 fi
 
+# Прогон гейтов — в общий пул тяжёлых прогонов (scripts/heavy-slot.sh). Сверка одной
+# карты выше идёт мимо: её зовут демоны, и она дешевле очереди. Ждём не дольше
+# HEAVY_SLOT_COMMIT_WAIT_S: хук идёт под замком коммита своего дерева и под index.lock.
+# Стенд пробы, куда скопирован один хук без обёртки, идёт как прежде.
+HEAVY_SLOT="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/heavy-slot.sh"
+[ -n "${HEAVY_SLOT_HELD:-}" ] || [ ! -f "$HEAVY_SLOT" ] \
+    || exec bash "$HEAVY_SLOT" --не-дольше "${HEAVY_SLOT_COMMIT_WAIT_S:-120}" \
+        -- bash "$(readlink -f "${BASH_SOURCE[0]}")" "$@"
+
 # ── Самотест статусного гейта И-4 (Б-3): больной и здоровый случай ──────────
 if [ "${1:-}" = "--selftest-devmap" ]; then
     T=$(mktemp -d)
@@ -530,12 +539,15 @@ fi
 # ручная склейка JSON ломается на первой кавычке (улика session-warden).
 # secs — стена хука (SECONDS его оболочки); tree — дерево индекса, который он судил
 # (с учётом GIT_INDEX_FILE): очередь слияния по нему узнаёт уже проверенное дерево.
+# base — полный HEAD, против которого судили: пара (tree, base = master) у очереди —
+# тот же предмет, что у неё самой (в дереве очереди HEAD = master).
 journal() {  # вердикт, имя-гейта
     mkdir -p "$LOG_DIR" 2>/dev/null || true
     jq -cn --arg ts "$(date -Is)" --arg sha "$HEAD_SHA" --arg v "$1" --arg g "${2:-}" \
         --arg n "$(printf '%s' "$CHANGED" | grep -c . || true)" \
         --argjson secs "$SECONDS" --arg tree "$(git write-tree 2>/dev/null || true)" \
-        '{ts:$ts, gate:"pre-commit", head:$sha, staged:($n|tonumber), verdict:$v, failed:$g, secs:$secs, tree:$tree}' \
+        --arg base "$(git rev-parse HEAD 2>/dev/null || true)" \
+        '{ts:$ts, gate:"pre-commit", head:$sha, staged:($n|tonumber), verdict:$v, failed:$g, secs:$secs, tree:$tree, base:$base}' \
         >> "$GATES_LOG" 2>/dev/null || echo "[pre-commit] журнал $GATES_LOG недоступен (гейт не затронут)"
 }
 
@@ -616,6 +628,34 @@ if [ "${1:-}" = "--selftest-yellow" ]; then
     # (живой случай 12.09.2026: гейт пайплайна пожелтел — коммит не прошёл).
     гейт "проба-жёлтая-прямо" bash -c 'echo "прямая находка"; exit 77' >/dev/null 2>&1
     echo "САМОТЕСТ ПРОЙДЕН: 4 пути (жёлтый показан и пропущен, прямой вызов пережит, красный валит)"
+    exit 0
+fi
+
+# Самотест поля base: очередь слияния пропускает ворота только по строке, где base =
+# текущий master (спека тяжёлых прогонов, раздел В). Ловит две поломки:
+# base не пишется вовсе и base = `rev-parse master` вместо HEAD — поэтому HEAD стенда
+# стоит на коммите ветки, не на master (ревью-3 спеки, п. 12). Свой репозиторий и свой
+# журнал: боевой gates.jsonl не трогается.
+if [ "${1:-}" = "--selftest-base" ]; then
+    T=$(mktemp -d)
+    trap 'rm -rf "$T"' EXIT
+    GATES_LOG="$T/gates.jsonl"
+    CHANGED=""
+    cd "$T"
+    git init -q -b master repo && cd repo
+    git -c user.name=проба -c user.email=proba@stend commit -q --allow-empty -m "master"
+    git checkout -q -b vetka
+    git -c user.name=проба -c user.email=proba@stend commit -q --allow-empty -m "ветка"
+    HEAD_SHA=$(git rev-parse --short HEAD)
+    WANT=$(git rev-parse HEAD)
+    MASTER_SHA=$(git rev-parse master)
+    [ "$WANT" != "$MASTER_SHA" ] \
+        || { echo "САМОТЕСТ ПРОВАЛЕН: стенд — HEAD совпал с master"; exit 1; }
+    journal pass ""
+    GOT=$(tail -1 "$GATES_LOG" 2>/dev/null | jq -r '.base // ""' 2>/dev/null || true)
+    [ "$GOT" = "$WANT" ] \
+        || { echo "САМОТЕСТ ПРОВАЛЕН: base в строке журнала «$GOT», а HEAD — $WANT (master — $MASTER_SHA)"; exit 1; }
+    echo "САМОТЕСТ ПРОЙДЕН: base в строке журнала = полный HEAD ветки, не master"
     exit 0
 fi
 

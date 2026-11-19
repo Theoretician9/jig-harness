@@ -448,6 +448,142 @@ else
     sluchaj "БОЛЬНОЙ СЛУЧАЙ: запись «проба#суффикс» из копии, карта проекта в копии — мутация поймана" 1 "код $RC, вывод: $(printf '%s' "$OUT" | tr '\n' '|' | cut -c1-300)"
 fi
 
+# ── БОЛЬНОЙ СЛУЧАЙ 17.11.2026: «чистая копия уже красная» держалась в кэше ──
+# Красная чистая копия говорит о ПРОБЕ и её окружении, а не о механизме:
+# соседи и пакет вне ключа кэша, и после починки пробы старая «дыра» неделю
+# жила строкой кэша (четыре ложные дыры). Здесь
+# проба красна, пока рядом с ней нет файла-соседа; сосед появился — следующий
+# прогон обязан позвать пробу заново и увидеть зелёную чистую копию.
+YARD=$(kesh_dvor '[ -f "$(dirname "$0")/sosed" ] || exit 1; grep -q "^PRIZNAK=1" "$1"')
+kesh_progon "$YARD" 7
+PERVYJ_RC=$RC
+if ! grep -q 'чистая копия уже красная' "$YARD/mutations-cache.tsv" 2>/dev/null; then
+    sluchaj "кэш: дыра «чистая копия уже красная» в кэш не записана" 0 ""
+else
+    sluchaj "кэш: дыра «чистая копия уже красная» в кэш не записана" 1 "строка: $(grep 'чистая копия' "$YARD/mutations-cache.tsv" | head -1)"
+fi
+touch "$YARD/sosed"
+kesh_progon "$YARD" 7
+if [ "$PERVYJ_RC" = 1 ]; then
+    kesh_sluchaj "БОЛЬНОЙ СЛУЧАЙ: «чистая копия уже красная» не кэшируется — после починки соседа прогнана заново" 2 0 0
+else
+    sluchaj "БОЛЬНОЙ СЛУЧАЙ: «чистая копия уже красная» не кэшируется — после починки соседа прогнана заново" 1 \
+        "первый прогон без соседа не красный (код $PERVYJ_RC) — условие не создано"
+fi
+# Строки «чистая копия уже красная», которые кэш уже держит (записаны прежним
+# прибором), тоже не берутся: иначе ложные дыры доживают свой срок.
+kesh_progon "$YARD" 7
+awk -F'\t' -v OFS='\t' '{ $4 = "чистая копия уже красная — проверка ничего не доказывает"; print }' \
+    "$YARD/mutations-cache.tsv" > "$YARD/kesh.tmp" && mv "$YARD/kesh.tmp" "$YARD/mutations-cache.tsv"
+kesh_progon "$YARD" 7
+kesh_sluchaj "кэш: прежняя строка «чистая копия уже красная» не берётся — прогнана заново" 2 0 0
+
+# ── БОЛЬНОЙ СЛУЧАЙ 02.11.2026: следы мутантов в боевом LOG_DIR ───────────
+# Проба под мутацией пишет в журналы (метки, события). Прибор наследовал ей
+# свой LOG_DIR — боевой /var/log/harness, — и следы испорченного кода ложились
+# в боевые журналы. Каждый зов пробы получает СВОЙ пустой каталог журналов:
+# не боевой и не общий с чистым прогоном той же мутации.
+YARD=$(kesh_dvor 'printf "%s\n" "${LOG_DIR:-}" >> "$(dirname "$0")/logdirs.txt"; if [ -n "${LOG_DIR:-}" ] && [ -d "$LOG_DIR" ]; then [ -e "$LOG_DIR/sled" ] && exit 3; : > "$LOG_DIR/sled"; fi; grep -q "^PRIZNAK=1" "$1"')
+kesh_progon "$YARD" 0
+LOGDIRS=$(cat "$YARD/logdirs.txt" 2>/dev/null)
+DIR_A=$(printf '%s\n' "$LOGDIRS" | sed -n 1p); DIR_B=$(printf '%s\n' "$LOGDIRS" | sed -n 2p)
+if [ "$RC" = 0 ] && printf '%s' "$OUT" | grep -q "покраснели как надо 1, дыр 0" \
+   && [ ! -e "$YARD/sled" ] && [ -n "$DIR_A" ] && [ -n "$DIR_B" ] \
+   && [ "$DIR_A" != "$YARD" ] && [ "$DIR_B" != "$YARD" ] && [ "$DIR_A" != "$DIR_B" ]; then
+    sluchaj "БОЛЬНОЙ СЛУЧАЙ: проба под мутацией пишет в свой LOG_DIR, а не в журнал прибора" 0 ""
+else
+    sluchaj "БОЛЬНОЙ СЛУЧАЙ: проба под мутацией пишет в свой LOG_DIR, а не в журнал прибора" 1 \
+        "код $RC, след в журнале прибора: $([ -e "$YARD/sled" ] && echo есть || echo нет), LOG_DIR зовов «$DIR_A» «$DIR_B» (прибора $YARD), вывод: $(printf '%s' "$OUT" | tr '\n' '|' | cut -c1-200)"
+fi
+
+# ── Механизм списком: проба судит несколько файлов ────────────────────────
+# test_limit_silence.sh судит четыре файла (tg_send.sh, limit_mark.py,
+# limit-watch.sh, lib/pane.sh), а поле «механизм» держало один — мутации
+# остальных трёх поставить было некуда (17.10.2026). Выражение применяется к
+# тому файлу списка, где его текст «до» найден.
+SPISOK=$(mktemp -d "${TMPDIR:-/tmp}/мутации-список-XXXXXX")
+printf 'PRIZNAK=1\n' > "$SPISOK/m1.sh"
+printf 'VTOROJ=1\n' > "$SPISOK/m2.sh"
+printf '#!/usr/bin/env bash\ngrep -q "^PRIZNAK=1" "$1" && grep -q "^VTOROJ=1" "$2"\n' > "$SPISOK/proba.sh"
+printf 'инварианты: []\n' > "$SPISOK/invariants.yaml"
+spisok_tablica() { # $1 = третье выражение (сверх двух верных)
+    cat > "$SPISOK/probe-mutations.yaml" <<YAML
+пробы:
+  $SPISOK/proba.sh:
+    механизм: [$SPISOK/m1.sh, $SPISOK/m2.sh]
+    доказательство: bash $SPISOK/proba.sh $SPISOK/m1.sh $SPISOK/m2.sh
+    подмена: '-'
+    мутация: ['s/^PRIZNAK=1/PRIZNAK=0/', 's/^VTOROJ=1/VTOROJ=0/'$1]
+    мутация_случай: ['первый файл', 'второй файл'$2]
+YAML
+}
+spisok_progon() { # доводы прибора
+    env -u MECH_FILTER LOG_DIR="$SPISOK" MUT_CACHE_DAYS=0 \
+        HARNESS_INVARIANTS="$SPISOK/invariants.yaml" HARNESS_PROBE_MUTATIONS="$SPISOK/probe-mutations.yaml" \
+        timeout 120 bash "$TOOL" "$@" > "$SPISOK/vyvod.txt" 2>&1
+    RC=$?; OUT=$(cat "$SPISOK/vyvod.txt")
+}
+spisok_tablica "" ""
+spisok_progon
+if [ "$RC" = 0 ] && printf '%s' "$OUT" | grep -q "покраснели как надо 2, дыр 0"; then
+    sluchaj "механизм списком: мутация каждого файла поставлена в свой файл и поймана" 0 ""
+else
+    sluchaj "механизм списком: мутация каждого файла поставлена в свой файл и поймана" 1 "код $RC, вывод: $(printf '%s' "$OUT" | tr '\n' '|' | cut -c1-300)"
+fi
+spisok_progon --механизм "$SPISOK/m2.sh"
+if [ "$RC" = 0 ] && printf '%s' "$OUT" | grep -q "покраснели как надо 1, дыр 0" \
+   && printf '%s' "$OUT" | grep -q "поймана: .*второй файл"; then
+    sluchaj "механизм списком: --механизм второго файла гоняет только его мутацию" 0 ""
+else
+    sluchaj "механизм списком: --механизм второго файла гоняет только его мутацию" 1 "код $RC, вывод: $(printf '%s' "$OUT" | tr '\n' '|' | cut -c1-300)"
+fi
+cp "$SPISOK/probe-mutations.yaml" "$SPISOK/chistaja.yaml"
+cat >> "$SPISOK/probe-mutations.yaml" <<YAML
+  $SPISOK/chuzhaja.sh:
+    механизм: $SPISOK/chuzhoj.sh
+    доказательство: bash $SPISOK/chuzhaja.sh
+    мутация: ['s/^A=1/A=0/', 's/^B=1/B=0/']
+    мутация_случай: ['одна на две — данные не парны']
+YAML
+spisok_progon --механизм "$SPISOK/m2.sh"
+if [ "$RC" = 0 ] && printf '%s' "$OUT" | grep -q "покраснели как надо 1, дыр 0" \
+   && ! printf '%s' "$OUT" | grep -q "не парны\|выпало"; then
+    sluchaj "отбор: непарная ЧУЖАЯ запись не судится и не роняет выбранный прогон" 0 ""
+else
+    sluchaj "отбор: непарная ЧУЖАЯ запись не судится и не роняет выбранный прогон" 1 "код $RC, вывод: $(printf '%s' "$OUT" | tr '\n' '|' | cut -c1-300)"
+fi
+cp "$SPISOK/chistaja.yaml" "$SPISOK/probe-mutations.yaml"
+spisok_progon --сверить-тексты
+if [ "$RC" = 0 ] && printf '%s' "$OUT" | grep -q "мутаций 2, не встало: 0"; then
+    sluchaj "механизм списком: сверка текстов находит текст во втором файле" 0 ""
+else
+    sluchaj "механизм списком: сверка текстов находит текст во втором файле" 1 "код $RC, вывод: $(printf '%s' "$OUT" | tr '\n' '|' | cut -c1-300)"
+fi
+spisok_tablica ", 's/^NETU=1/NETU=0/'" ", 'ни в одном'"
+spisok_progon --сверить-тексты
+if [ "$RC" = 1 ] && printf '%s' "$OUT" | grep -q "ни в одном: текст мутации НЕ НАЙДЕН"; then
+    sluchaj "механизм списком: текст, которого нет ни в одном файле, назван" 0 ""
+else
+    sluchaj "механизм списком: текст, которого нет ни в одном файле, назван" 1 "код $RC, вывод: $(printf '%s' "$OUT" | tr '\n' '|' | cut -c1-300)"
+fi
+printf 'PRIZNAK=1\n' >> "$SPISOK/m2.sh"
+spisok_tablica "" ""
+spisok_progon --сверить-тексты
+if [ "$RC" = 1 ] && printf '%s' "$OUT" | grep -q "первый файл: текст встречается 2 раза"; then
+    sluchaj "механизм списком: текст в двух файлах списка назван неоднозначным" 0 ""
+else
+    sluchaj "механизм списком: текст в двух файлах списка назван неоднозначным" 1 "код $RC, вывод: $(printf '%s' "$OUT" | tr '\n' '|' | cut -c1-300)"
+fi
+printf 'VTOROJ=1\n' > "$SPISOK/m2.sh"
+printf 'TRETIJ=1\n' > "$SPISOK/m3.sh"
+sed -i "s#механизм: \[\(.*\)\]#механизм: [\1, $SPISOK/m3.sh]#" "$SPISOK/probe-mutations.yaml"
+spisok_progon --механизм "$SPISOK/m3.sh"
+if [ "$RC" = 2 ] && printf '%s' "$OUT" | grep -q "записей для механизма нет"; then
+    sluchaj "механизм списком: файл списка без своих мутаций — отбор пуст, код 2" 0 ""
+else
+    sluchaj "механизм списком: файл списка без своих мутаций — отбор пуст, код 2" 1 "код $RC, вывод: $(printf '%s' "$OUT" | tr '\n' '|' | cut -c1-300)"
+fi
+
 AFTER=$(md5sum "$LIVE_INV" "$LIVE_PROBES" 2>/dev/null)
 if [ "$BEFORE" = "$AFTER" ]; then
     sluchaj "боевые носители не тронуты" 0 ""

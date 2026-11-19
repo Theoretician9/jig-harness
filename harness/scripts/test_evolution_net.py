@@ -20,7 +20,7 @@ HARNESS_DEVMAP / DEVMAP_ARCHIVE / EVOLUTION_STATE. Боевой клон и бо
 проба не печатает — только счётчики, коды и булевы ответы.
 
     python3 scripts/test_evolution_net.py                    # все секции
-    python3 scripts/test_evolution_net.py --section judge     # keys|root|judge|read|forge|write|door|boot|state|threat|status|answer|sign|patch|key|addition
+    python3 scripts/test_evolution_net.py --section judge     # keys|root|judge|read|forge|write|door|boot|state|threat|status|answer|sign|patch|key|addition|copy
 
 Дверь мутаций: HARNESS_EVOLUTION_NET — путь evolution-net.py под пробой.
 Последняя строка: `evolution-net --пробы: случаев N, падений F`.
@@ -446,7 +446,7 @@ def section_keys(base: Path, keys: Keys) -> None:
         ("K1b нет строки EVOLUTION_REMOTE_URL", st.write_conf(drop=("EVOLUTION_REMOTE_URL",)), "EVOLUTION_REMOTE_URL"),
         ("K2 нет EVOLUTION_DIR", st.write_conf(drop=("EVOLUTION_DIR",)), "EVOLUTION_DIR"),
         ("K3 нет EVOLUTION_KEY", st.write_conf(drop=("EVOLUTION_KEY",)), "EVOLUTION_KEY"),
-        ("K4 роль copy — фаза 3 (Н-5)", st.write_conf(EVOLUTION_ROLE="copy"), "фаза 3"),
+        ("K4 роль copy: --читать только у хозяина", st.write_conf(EVOLUTION_ROLE="copy"), "только у хозяина"),
         ("K5 нет EVOLUTION_STATE_SUBDIR", st.write_conf(drop=("EVOLUTION_STATE_SUBDIR",)), "EVOLUTION_STATE_SUBDIR"),
     ]:
         before = sha1(st.map)
@@ -2250,8 +2250,31 @@ def sign_own_name_guards(base: Path, keys: Keys) -> None:
               (r.rc, r.clean, printed_sha(r), r.says("check-public-clean")))
 
 
+def sign_peer_name(base: Path, keys: Keys) -> None:
+    """Письмо хозяина копии сети: «кому: <имя из серверы/>» — формат записи, не след
+    установки, даже если имя стоит в PUBLIC_FORBIDDEN_WORDS (живой случай: почта/sample-26/)."""
+    peer = next(p.split("/")[1][:-3] for p in base_tree(keys) if p.startswith("серверы/") and p.endswith(".md"))
+    stranger = f"Copy{secrets.token_hex(3)}"
+    st = Stand(base / "peer", keys, PUBLIC_FORBIDDEN_WORDS=f"{peer} {stranger}")
+    st.tick()
+    mail = f"почта/{peer}/2026-11-19-{NAME}-peer.md"
+    r = anchor_own(st, {mail: entry(NAME, "вопрос", to=peer)})
+    # N3 — краснеет, если с суда снимается только «кому: <своё имя>»: письмо копии сети,
+    # чьё имя — запретное слово, хозяин не может подписать
+    check("N3 «кому: <копия из серверы/>», имя — запретное слово → --якорь 0, sha",
+          (0, True, True), (r.rc, r.clean, bool(printed_sha(r))))
+    for name, data in (
+            ("N3b имя копии в теле", entry(NAME, "вопрос", to=peer, body=f"Сервер {peer} упал.")),
+            ("N3c «кому: <имя не из серверы/>»", entry(NAME, "вопрос", to=stranger))):
+        r = anchor_own(st, {mail: data})
+        # N3b–N3c — сторожа: краснеют, если послабление шире списка копий сети —
+        # имя снято и в теле, или снято любое значение «кому:»
+        check(f"{name} → код 2, sha нет, отказал судья чистоты", (2, True, "", True),
+              (r.rc, r.clean, printed_sha(r), r.says("check-public-clean")))
+
+
 def section_sign(base: Path, keys: Keys) -> None:
-    for probe in (sign_own_name, sign_own_name_guards):
+    for probe in (sign_own_name, sign_own_name_guards, sign_peer_name):
         try:
             probe(base, keys)
         except Exception as error:  # одна упавшая проба не глушит остальные
@@ -2624,12 +2647,285 @@ def section_read_all(base: Path, keys: Keys) -> None:
     section_read_edges(base, keys)
 
 
+# ── copy: копия шлёт свою находку строителю (дефект 0.14.2: круг был замкнут) ──
+#
+# Копия не пишет файлы харнеса (сторож у копии) и не толкает руками (сторож
+# сети): дверь --отправить — её единственный путь к строителю. Дверь копии УЖЕ
+# двери хозяина: коммит подписан ключом этой копии, трогает только
+# находки/<своё имя>/<ГГГГ-ММ-ДД>-<суть>.md (A или M), родитель — свежий origin/main.
+
+COPY_NAME = "HarnessX"
+
+
+def copy_stand(base: Path, keys: Keys, name: str) -> tuple:
+    """Стенд с установкой-копией HarnessX (ключ x) и конфигом хозяина рядом:
+    хозяин на том же удалённом судит то, что копия отправила."""
+    st = Stand(base / name, keys)
+    install = st.root / "install.conf"
+    install.write_text(install.read_text(encoding="utf-8").replace(
+        f'PROJECT_NAME="{NAME}"', f'PROJECT_NAME="{COPY_NAME}"'), encoding="utf-8")
+    return st, st.write_conf(EVOLUTION_ROLE="copy", EVOLUTION_KEY=str(keys.x))
+
+
+def copy_signed(st: Stand, keys: Keys, sha: str) -> list:
+    signers = st.root / "x-signers"
+    signers.write_text(f'{COPY_NAME} namespaces="git" {keys.pub(keys.x)}\n', encoding="utf-8")
+    show = subprocess.run(["git", "-C", str(st.clone), "-c", f"gpg.ssh.allowedSignersFile={signers}",
+                           "log", "-1", "--format=%G?%x00%GS%x00%P", sha], env=GIT_ENV,
+                          capture_output=True, text=True)
+    return show.stdout.strip().split("\0") if show.returncode == 0 and sha else ["нет коммита", "", ""]
+
+
+def changed_paths(repo: Path, sha: str) -> list:
+    out = subprocess.run(["git", "-C", str(repo), "-c", "core.quotepath=false", "diff-tree", "-r", "-z", "--no-renames",
+                          "--name-status", f"{sha}~1", sha], env=GIT_ENV, capture_output=True).stdout
+    parts = out.decode().split("\0")
+    return [f"{s} {p}" for s, p in zip(parts[0::2], parts[1::2]) if s]
+
+
+def copy_send(base: Path, keys: Keys) -> None:
+    st, conf = copy_stand(base, keys, "copy-send")
+    find = base / "my-find" / "2026-11-19-copy-find.md"
+    find.parent.mkdir(parents=True)
+    find.write_bytes(entry(COPY_NAME, "косяк"))
+    before = st.remote_main()
+    r = st.run("--находка", str(find), conf=conf)
+    sha = printed_sha(r)
+    path = f"находки/{COPY_NAME}/2026-11-19-copy-find.md"
+    # CS1 — краснеет, если у копии нет шага «собрать коммит находки» (агент копии сам
+    # не соберёт подписанный коммит на свежем origin/main) или он сразу толкает
+    check("CS1 --находка → код 0, sha, remote main прежний", (0, True, True, before),
+          (r.rc, r.clean, bool(sha), st.remote_main()))
+    check("CS1 коммит подписан ключом копии, родитель = origin/main", ["G", COPY_NAME, before],
+          copy_signed(st, keys, sha))
+    check("CS1 коммит трогает только свою находку", [f"A {path}"], changed_paths(st.clone, sha) if sha else [])
+    check("CS1 тело находки в вывод не идёт", False, "Факты стенда" in r.out + r.err)
+    r = st.run("--отправить", sha, conf=conf)
+    # CS2 — краснеет, пока дверь отказывает копии (роль copy — «фаза 3»)
+    check("CS2 копия --отправить свою находку → код 0, remote main = sha", (0, sha), (r.rc, st.remote_main()))
+    check("CS2 последняя строка «evolution-net --отправить: main = <sha>»",
+          f"evolution-net --отправить: main = {sha}", r.last)
+    r = st.tick()
+    # CS3 — краснеет, если дверь копии пропускает то, что суд хозяина отвергнет
+    check("CS3 хозяин принял находку копии", (0, True, False),
+          (r.rc, r.summary.get("принято", 0) >= 1, sha in st.rejected()))
+    check("CS2c известной копии предупреждения «не знает» нет", False, r.says("не знает"))
+    # хозяин закрывает находку правкой её файла: статус и ответ (спека §3.1 п.6)
+    git(st.writer, "fetch", "-q", st.url, "main")      # коммиты копии ушли из клона, не из писателя
+    st.tip = st.remote_main()
+    answered = entry(COPY_NAME, "косяк", status="сделано", answer='"починено"')
+    st.add({path: answered}, keys.host)
+    find.write_bytes(entry(COPY_NAME, "косяк") + "\nДописано копией.\n".encode())
+    r = st.run("--находка", str(find), conf=conf)
+    # CS4 — краснеет, если отставший локальный файл копии кладётся поверх версии сети
+    # целиком: ответ хозяина стёрт, а у хозяина это выглядит как дописка
+    check("CS4 --находка поверх отставшего файла → код 2, sha нет, «дописка»", (2, True, "", True),
+          (r.rc, r.clean, printed_sha(r), r.says("дописка")))
+    find.write_bytes(answered + "\nДописано копией.\n".encode())
+    r = st.run("--находка", str(find), conf=conf)
+    edit = printed_sha(r)
+    check("CS4b --находка дописка поверх версии сети → правка M", [f"M {path}"],
+          changed_paths(st.clone, edit) if edit else [])
+    r = st.run("--отправить", edit, conf=conf)
+    check("CS4b дописка отправлена, ответ хозяина цел", (0, edit, True),
+          (r.rc, st.remote_main(), "починено" in git(st.remote, "show", f"main:{path}")))
+
+
+def copy_traces(base: Path, keys: Keys) -> None:
+    """Б1 ревью: находку судит тот же судья следов установки, что якорь хозяина."""
+    st, conf = copy_stand(base, keys, "copy-trace")
+    tip = st.remote_main()
+    for name, body in (("путь проекта", f"Упало в {st.project}/scripts/x.py."),
+                       ("имя установки", f"Сервер {COPY_NAME} упал.")):
+        find = base / f"trace-{secrets.token_hex(3)}" / "2026-11-19-trace.md"
+        find.parent.mkdir(parents=True)
+        find.write_bytes(entry(COPY_NAME, body=body))
+        r = st.run("--находка", str(find), conf=conf)
+        # CS13 — краснеет, если --находка не зовёт судью следов: след установки уходит
+        # в историю общего репозитория, убрать его можно только переписью
+        check(f"CS13 --находка: {name} в теле → код 2, sha нет, отказал судья", (2, True, "", True),
+              (r.rc, r.clean, printed_sha(r), r.says("check-public-clean")))
+    sha = st.build(st.clone, [tip], {f"находки/{COPY_NAME}/2026-11-19-hand.md":
+                                     entry(COPY_NAME, body=f"Упало в {st.project}.")}, keys.x)
+    r = st.run("--отправить", sha, conf=conf)
+    # CS13b — краснеет, если судья следов стоит только в --находка: коммит, собранный
+    # руками, проходит дверь
+    check("CS13b --отправить ручного коммита со следом → код 2, main прежний", (2, True, tip, True),
+          (r.rc, r.clean, st.remote_main(), r.says("check-public-clean")))
+
+
+def copy_file_form(base: Path, keys: Keys) -> None:
+    """В2 ревью: форма файла --находка и коммита копии."""
+    st, conf = copy_stand(base, keys, "copy-form")
+    tip = st.remote_main()
+    folder = base / "form"
+    folder.mkdir()
+
+    def finding_refused(name: str, path: Path, word: str, code: int = 2, run_conf: Path | None = None) -> None:
+        r = st.run("--находка", str(path), conf=run_conf or conf)
+        check(name, (code, True, "", tip, True), (r.rc, r.clean, printed_sha(r), st.remote_main(), r.says(word)))
+
+    real = folder / "2026-11-19-real.md"
+    real.write_bytes(entry(COPY_NAME))
+    link = folder / "2026-11-19-link.md"
+    link.symlink_to(real)
+    finding_refused("CS14 --находка симлинк → код 2", link, "обычный файл")
+    hard_dir = folder / "hard"
+    hard_dir.mkdir()
+    secret = folder / "secret-like"                     # своя пара: real должен остаться с одной ссылкой
+    secret.write_bytes(entry(COPY_NAME))
+    os.link(secret, hard_dir / "2026-11-19-hard.md")
+    finding_refused("CS14b --находка жёсткая ссылка → код 2", hard_dir / "2026-11-19-hard.md", "одной ссылкой")
+    big = folder / "2026-11-19-big.md"
+    big.write_bytes(entry(COPY_NAME, body="x" * 20000))
+    finding_refused("CS15 --находка больше потолка → код 2", big, "потолка")
+    for name, file in (("CS16 имя с переводом строки в конце", "2026-11-19-nl.md\n"),
+                       ("CS16b имя с цифрами Unicode", "٢٠٢٦-١١-١٩-x.md")):
+        (folder / file).write_bytes(entry(COPY_NAME))
+        finding_refused(f"{name} → код 2", folder / file, "имя находки")
+    no_pub = folder / "key-without-pub"
+    no_pub.write_bytes(keys.x.read_bytes())
+    no_pub.chmod(0o600)
+    finding_refused("CS17 нет EVOLUTION_KEY.pub → код 4 до fetch", real, ".pub", code=4,
+                    run_conf=st.write_conf(EVOLUTION_ROLE="copy", EVOLUTION_KEY=str(no_pub)))
+    hook = st.clone / ".git" / "hooks" / "post-checkout"
+    hook.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    # CS18 — краснеет, если --находка не зовёт проверку клона двери (pushurl ловит
+    # и fetch, крючок — только она)
+    finding_refused("CS18 --находка: крючок в клоне → код 2", real, "крючок")
+    hook.unlink()
+    git(st.clone, "config", "remote.origin.pushurl", f"file://{st.root / 'elsewhere.git'}")
+    sha = st.build(st.clone, [tip], {f"находки/{COPY_NAME}/2026-11-19-x.md": entry(COPY_NAME)}, keys.x)
+    r = st.run("--отправить", sha, conf=conf)
+    # CS18b — краснеет, если у копии снята проверка клона (крючки, pushurl, адрес)
+    check("CS18b --отправить: pushurl в конфиге клона → код 2", (2, True, tip, True),
+          (r.rc, r.clean, st.remote_main(), r.says("pushurl")))
+    git(st.clone, "config", "--unset", "remote.origin.pushurl")
+
+    def door_refused(name: str, changes: dict, word: str, run_conf: Path | None = None) -> None:
+        commit = st.build(st.clone, [tip], changes, keys.x)
+        r = st.run("--отправить", commit, conf=run_conf or conf)
+        check(name, (2, True, tip, True), (r.rc, r.clean, st.remote_main(), r.says(word)))
+
+    door_refused("CS19 пустой коммит → код 2", {}, "файлов 0")
+    door_refused("CS19b файлов больше потолка → код 2",
+                 {f"находки/{COPY_NAME}/2026-11-19-many-{i}.md": entry(COPY_NAME) for i in range(3)},
+                 "файлов 3", run_conf=st.write_conf(EVOLUTION_ROLE="copy", EVOLUTION_KEY=str(keys.x),
+                                                     EVOLUTION_MAX_FILES_PER_COMMIT="2"))
+    door_refused("CS19c блоб больше потолка → код 2",
+                 {f"находки/{COPY_NAME}/2026-11-19-big.md": entry(COPY_NAME, body="x" * 20000)}, "потолка")
+    door_refused("CS19d путь с переводом строки в конце → код 2",
+                 {f"находки/{COPY_NAME}/2026-11-19-nl.md\n": entry(COPY_NAME)}, f"находки/{COPY_NAME}/")
+    door_refused("CS19e путь с цифрами Unicode → код 2",
+                 {f"находки/{COPY_NAME}/٢٠٢٦-١١-١٩-x.md": entry(COPY_NAME)}, f"находки/{COPY_NAME}/")
+    own = f"находки/{COPY_NAME}/2026-11-12-own.md"
+    door_refused("CS19f правка своей находки не дописка → код 2", {own: entry(COPY_NAME, body="Переписано.")},
+                 "дописка")
+
+
+def copy_bad_name(base: Path, keys: Keys) -> None:
+    """PROJECT_NAME не по форме имени каталога сети: ни --находка, ни дверь."""
+    st, conf = copy_stand(base, keys, "copy-bad-name")
+    install = st.root / "install.conf"
+    install.write_text(install.read_text(encoding="utf-8").replace(
+        f'PROJECT_NAME="{COPY_NAME}"', 'PROJECT_NAME="Bad.Name"'), encoding="utf-8")
+    tip = st.remote_main()
+    find = base / "2026-11-19-bad-name.md"
+    find.write_bytes(entry("Bad.Name"))
+    r = st.run("--находка", str(find), conf=conf)
+    check("CS20 --находка у PROJECT_NAME «Bad.Name» → код 4, sha нет", (4, True, ""), (r.rc, r.clean, printed_sha(r)))
+    sha = st.build(st.clone, [tip], {"находки/Bad.Name/2026-11-19-x.md": entry("Bad.Name")}, keys.x)
+    r = st.run("--отправить", sha, conf=conf)
+    # CS20b — краснеет, если дверь копии не сверяет PROJECT_NAME с формой каталога сети
+    # (держит правило пути, а не судья следов, который отказал бы позже по имени)
+    check("CS20b --отправить находки/Bad.Name/ → код 2 по правилу пути", (2, True, tip, True),
+          (r.rc, r.clean, st.remote_main(), r.says("копия шлёт только")))
+
+
+def copy_unknown(base: Path, keys: Keys) -> None:
+    """В3 ревью: копия, которой сеть ещё не знает, слышит это от двери."""
+    st = Stand(base / "copy-unknown", keys)
+    install = st.root / "install.conf"
+    install.write_text(install.read_text(encoding="utf-8").replace(
+        f'PROJECT_NAME="{NAME}"', 'PROJECT_NAME="HarnessQ"'), encoding="utf-8")
+    conf = st.write_conf(EVOLUTION_ROLE="copy", EVOLUTION_KEY=str(keys.y))
+    find = base / "2026-11-19-fresh.md"
+    find.write_bytes(entry("HarnessQ"))
+    sha = printed_sha(st.run("--находка", str(find), conf=conf))
+    r = st.run("--отправить", sha or "0" * 40, conf=conf)
+    # CS21 — краснеет, если новая копия получает «код 0» молча: хозяин отвергнет
+    # коммит по U и владельца не спросит, а копия думает, что отправила
+    check("CS21 копия без страницы и ключа в сети → код 0 и «хозяин ещё не знает»", (0, sha, True),
+          (r.rc, st.remote_main(), r.says("хозяин ещё не знает")))
+
+
+def copy_refusals(base: Path, keys: Keys) -> None:
+    st, conf = copy_stand(base, keys, "copy-refuse")
+    tip = st.remote_main()
+    own = f"находки/{COPY_NAME}/2026-11-19-own-new.md"
+
+    def refused(name: str, changes: dict, key, word: str, parent: str | None = None) -> None:
+        sha = st.build(st.clone, [parent or tip], changes, key)
+        r = st.run("--отправить", sha, conf=conf)
+        # отказ — решение двери (код 2, не падение), push не начинался, причина названа
+        check(name, (2, True, tip, True), (r.rc, r.clean, st.remote_main(), r.says(word)))
+
+    # CS5 — краснеет, если с двери копии снята сверка «каталог = своё имя»
+    refused("CS5 x в находки/HarnessY/ → отказ", {"находки/HarnessY/2026-11-19-x.md": entry(COPY_NAME)},
+            keys.x, f"находки/{COPY_NAME}/")
+    # CS6 — краснеет, если дверь копии судит только судом хозяина: свою страницу и
+    # письмо суд копии разрешает, а дверь — только находки
+    refused("CS6 x правит серверы/HarnessX.md → отказ", {"серверы/HarnessX.md": b"# HarnessX\n"},
+            keys.x, f"находки/{COPY_NAME}/")
+    refused("CS6b x пишет письмо почта/HarnessY/ → отказ",
+            {"почта/HarnessY/2026-11-19-HarnessX-hi.md": entry(COPY_NAME, "вопрос", to="HarnessY")},
+            keys.x, f"находки/{COPY_NAME}/")
+    refused("CS6c своя находка + README → отказ целиком", {own: entry(COPY_NAME), "README.md": b"# x\n"},
+            keys.x, f"находки/{COPY_NAME}/")
+    refused("CS6d удаление своей находки → отказ", {f"находки/{COPY_NAME}/2026-11-12-own.md": None},
+            keys.x, f"находки/{COPY_NAME}/")
+    refused("CS6e имя без даты → отказ", {f"находки/{COPY_NAME}/bad.md": entry(COPY_NAME)},
+            keys.x, f"находки/{COPY_NAME}/")
+    refused("CS6f режим 100755 → отказ", {own: ("100755", entry(COPY_NAME))}, keys.x, "режим")
+    # CS7 — краснеет, если снят суд подписи в двери копии
+    refused("CS7 неподписанный коммит своей находки → отказ", {own: entry(COPY_NAME)}, None, "ключом этой копии")
+    # CS8 — краснеет, если подпись судится списком сети, а не ключом этой копии
+    refused("CS8 подписан ключом HarnessY из списка → отказ", {own: entry(COPY_NAME)}, keys.w, "ключом этой копии")
+    st.add({"находки/HarnessY/2026-11-19-moved.md": entry("HarnessY")}, keys.w)
+    tip = st.remote_main()
+    # CS9 — краснеет, если снята сверка родителя со свежим origin/main
+    refused("CS9 родитель — старый main → отказ", {own: entry(COPY_NAME)}, keys.x, "родитель", parent=st.anchor)
+    bad = base / "bad-name.md"
+    bad.write_bytes(entry(COPY_NAME))
+    r = st.run("--находка", str(bad), conf=conf)
+    check("CS10 --находка с именем не <ГГГГ-ММ-ДД>-<суть>.md → код 2, sha нет", (2, True, ""),
+          (r.rc, r.clean, printed_sha(r)))
+    good = base / "2026-11-19-host-tries.md"
+    good.write_bytes(entry(NAME))
+    r = st.run("--находка", str(good))
+    check("CS11 --находка у хозяина → код 4 (у хозяина дверь --якорь)", (4, True, "", True, False),
+          (r.rc, r.clean, printed_sha(r), r.says("только у копии"), r.says("--находка <файл> → sha")))
+    for mode in (("--читать",), ("--перечитать", "0" * 40)):
+        r = st.run(*mode, conf=conf)
+        check(f"CS12 копия {mode[0]} → код 4, только у хозяина", (4, True, True),
+              (r.rc, r.clean, r.says("только у хозяина")))
+
+
+def section_copy(base: Path, keys: Keys) -> None:
+    copy_send(base, keys)
+    copy_refusals(base, keys)
+    copy_traces(base, keys)
+    copy_file_form(base, keys)
+    copy_bad_name(base, keys)
+    copy_unknown(base, keys)
+
+
 SECTIONS = {"keys": section_keys, "root": section_root, "judge": section_judge,
             "read": section_read_all, "forge": section_forge, "write": section_write,
             "door": section_door, "boot": section_boot, "state": section_state, "threat": section_threat,
             "status": section_status, "patch": section_patch,
             "answer": section_answer, "sign": section_sign, "key": section_key,
-            "addition": section_addition}
+            "addition": section_addition, "copy": section_copy}
 
 
 def main(argv: list[str]) -> int:

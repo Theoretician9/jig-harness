@@ -9,8 +9,8 @@
   строка журнала `docs/ИЗМЕНЕНИЯ-ПАКЕТА.md` за сегодня по-прежнему обязательна (иначе 1).
   Ключ 0, основное дерево или связанное дерево вне `.claude/worktrees/` (снимки
   gates-snapshot.sh) — сверка как раньше.
-Стенд: свой git-проект и git-пакет, harness.conf с STARTER_DIR и ключом (HARNESS_CONF),
-свой install.conf (HARNESS_INSTALL_CONF). Механизм — рядом или HARNESS_COMPARE_PACKAGE
+Стенд: свой git-проект и git-пакет, harness.conf с STARTER_DIR, EVOLUTION_ROLE="host" и
+ключом (HARNESS_CONF), свой install.conf (HARNESS_INSTALL_CONF). Механизм — рядом или HARNESS_COMPARE_PACKAGE
 (дверь для мутаций копии).
 
 Прогон: python3 scripts/test_compare_package_deferred.py
@@ -67,7 +67,9 @@ class Stand:
             git(root, "add", "-A")
             git(root, "commit", "-qm", "начальный")
         self.conf = base / "harness.conf"
-        self.conf.write_text(f'STARTER_DIR="{self.pkg}"\n'
+        # Сверка судится только у хозяина харнеса: без роли стенд — копия, и гейт
+        # отвечает 0 «не хозяин» на всё, что эта проба различает.
+        self.conf.write_text(f'STARTER_DIR="{self.pkg}"\nEVOLUTION_ROLE="host"\n'
                              + (f'HELPER_WORKTREE="{key}"\n' if key is not None else ""),
                              encoding="utf-8")
         self.install = base / "install.conf"
@@ -90,7 +92,8 @@ class Stand:
     def run(self, cwd: Path) -> tuple[int, str]:
         env = {**os.environ, "HARNESS_CONF": str(self.conf),
                "HARNESS_INSTALL_CONF": str(self.install), "PYTHONDONTWRITEBYTECODE": "1"}
-        for name in ("HARNESS_STARTER", "STARTER_DIR", "PROJECT_DIR", "GIT_DIR", "GIT_INDEX_FILE"):
+        for name in ("HARNESS_STARTER", "STARTER_DIR", "PROJECT_DIR", "GIT_DIR", "GIT_INDEX_FILE",
+                     "EVOLUTION_ROLE"):
             env.pop(name, None)
         proc = subprocess.run([sys.executable, str(COMPARE)], input=HARNESS_FILE + "\n",
                               capture_output=True, text=True, cwd=cwd, env=env, timeout=60)
@@ -145,6 +148,8 @@ def case_outside(tmp: Path) -> None:
     s = Stand(tmp / "t-outside", "1")
     s.diverge(s.proj)
     code, out = s.run(s.proj)
+    check("стенд — хозяин харнеса: гейт судит, а не отвечает «не хозяин»", False,
+          "не хозяин" in out)
     check("основное дерево — код 1, не отложена", (1, False), (code, DEFERRED in out))
     snap = s.tree(tmp / "t-snapshot" / "20261113-000000-abc", "snap")
     s.diverge(snap)

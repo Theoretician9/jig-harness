@@ -131,12 +131,13 @@ def признаки_коммита(staged=None, пути=None):
         staged = _индекс()
         if staged is None:
             return None            # git не ответил — цену считать не из чего
-    строк = sum(запись["добавлено"] for запись in staged)
+    # «доля» — у записи коммита пачки (признаки_задачи); в индексе её нет.
+    строк = sum(запись["добавлено"] * запись.get("доля", 1) for запись in staged)
     имена = [запись["путь"] for запись in staged]
     шаблон = пути.get("MIGRATIONS_GLOB", "")
     return {
-        "строк": строк,
-        "файлов": len(имена),
+        "строк": round(строк),
+        "файлов": round(sum(запись.get("доля", 1) for запись in staged)),
         "миграция": bool(шаблон) and any(fnmatch.fnmatch(и, шаблон) for и in имена),
         "код_продукта": _под_путями_любой(имена, пути.get("PROD_PATHS", "")),
         "сторож_или_гейт": _под_путями_любой(имена, пути.get("GUARD_PATHS", "")),
@@ -246,17 +247,21 @@ def признаки_задачи(id_задачи, корень=None):
     # невидимой ровно там, где судить было нечем.
     try:
         ответ = subprocess.run(
-            общее + ["log", "--format=%H", f"--grep=^Dev-Map: {id_задачи}$", "--extended-regexp"],
+            общее + ["log", "--format=%H%x1f%B%x1e", f"--grep=^Dev-Map: {id_задачи}$",
+                     "--extended-regexp"],
             capture_output=True, text=True, timeout=60)
     except (OSError, subprocess.SubprocessError):
         return None
     if ответ.returncode != 0:
         return None
-    шапки = ответ.stdout.split()
-    if not шапки:
+    коммиты = [к.strip().split("\x1f", 1) for к in ответ.stdout.split("\x1e") if к.strip()]
+    if not коммиты:
         return {"коммитов": 0}          # коммитов нет — это ФАКТ, а не отказ
     записи = []
-    for sha in шапки:
+    for sha, тело in коммиты:
+        # Коммит пачки несёт несколько трейлеров: его объём — общий, и каждой
+        # карточке достаётся доля, иначе мелкая карточка пачки выходит крупной.
+        доля = 1 / max(1, len(re.findall(r"^Dev-Map: \S+\s*$", тело, re.MULTILINE)))
         try:
             показ = subprocess.run(общее + ["show", "--numstat", "--format=", "-r", sha],
                                    capture_output=True, text=True, errors="replace",
@@ -272,9 +277,9 @@ def признаки_задачи(id_задачи, корень=None):
                 continue
             записи.append({"путь": части[2],
                            "добавлено": int(части[0]) if части[0].isdigit() else 0,
-                           "новый": False})
+                           "новый": False, "доля": доля})
     признаки = признаки_коммита(staged=записи)
-    признаки["коммитов"] = len(шапки)
+    признаки["коммитов"] = len(коммиты)
     return признаки
 
 
@@ -509,6 +514,30 @@ def самотест():
     else:
         ok = False
         print("  ПЛОХО подсказка выдумала глубину задаче, которой нет")
+
+    # БОЛЬНОЙ СЛУЧАЙ 19.11.2026: коммит пачки с тремя трейлерами Dev-Map
+    # засчитывал весь свой объём КАЖДОЙ карточке — «мелкая» получала цену 7
+    # и долг пайплайна. Поломка, что оставит зелёным: доля не по числу
+    # трейлеров (ловит hr.b), доля и у одиночного коммита (ловит hr.a).
+    with tempfile.TemporaryDirectory() as каталог:
+        тихо = {"capture_output": True, "text": True, "timeout": 30}
+        гит = ["git", "-C", каталог, "-c", "user.name=proba", "-c", "user.email=p@p"]
+        subprocess.run(гит + ["init", "-q"], **тихо)
+        for номер in range(15):
+            (Path(каталог) / f"f{номер}.txt").write_text("x\n" * 20, encoding="utf-8")
+        subprocess.run(гит + ["add", "-A"], **тихо)
+        subprocess.run(гит + ["commit", "-q", "-m", "пачка\n\nDev-Map: hr.a\nDev-Map: hr.b\n"
+                              "Dev-Map: hr.c"], **тихо)
+        (Path(каталог) / "свой.txt").write_text("x\n" * 50, encoding="utf-8")
+        subprocess.run(гит + ["add", "-A"], **тихо)
+        subprocess.run(гит + ["commit", "-q", "-m", "своё\n\nDev-Map: hr.a"], **тихо)
+        доли = {id_: признаки_задачи(id_, корень=каталог) or {} for id_ in ("hr.a", "hr.b")}
+    вышло = {id_: (п.get("строк"), п.get("файлов")) for id_, п in доли.items()}
+    if вышло == {"hr.a": (150, 6), "hr.b": (100, 5)}:
+        print("  ок    БОЛЬНОЙ СЛУЧАЙ: объём коммита пачки делится между карточками трейлеров")
+    else:
+        ok = False
+        print(f"  ПЛОХО объём коммита пачки: {вышло}, ждали hr.a (150, 6), hr.b (100, 5)")
 
     # БОЛЬНОЙ СЛУЧАЙ 14.09.2026: git молчит — индекс выглядел пустым, цена
     # выходила 0, и любая работа звалась «мелкой»: спека не требуется.

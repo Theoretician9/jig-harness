@@ -18,7 +18,7 @@ owner_word.ЗАПРОС_КНОПКИ — обёрткой ask-consent с тем 
 отдельным процессом). Диспетчер носителя не получает, его срок кнопки — машинный (machine_ttl).
 
     python3 scripts/test_consent_buttons.py [--случай <имя>]...
-Случаи: запрос да чужой повтор срок битый дверь носитель охрана; виды-1 … виды-11 —
+Случаи: запрос да чужой группа группа-текст повтор срок битый дверь носитель охрана; виды-1 … виды-11 —
 пробы 1-11 задачи hr.consent-buttons-for-every-yes (виды согласия «удаление» и «пуш»,
 .tasks/hr.consent-buttons-for-every-yes/spec.md §7).
 Код возврата: 0 — «падений 0», 1 — красная (или отказ фикстуры: строка «ФИКСТУРА»).
@@ -54,6 +54,8 @@ from test_consent_push import GIT_ENV, REAL_GIT, GitBench, button, git  # noqa: 
 
 OWNER = 777000
 STRANGER = 555000
+# Канал-группа: chat.id группы отрицательный, from.id нажавшего — личный id человека.
+GROUP = -1001234567
 TTL_MIN = 15
 WAIT_S = 20
 PREFIX = "/tmp/proba-consent-buttons-"
@@ -92,7 +94,7 @@ sys.argv = [ask, *sys.argv[1:]]
 runpy.run_path(ask, run_name="__main__")
 """
 KIND_CASES = tuple(f"виды-{n}" for n in range(1, 12))
-CASE_NAMES = ("запрос", "да", "чужой", "повтор", "срок", "битый", "дверь", "носитель", "охрана",
+CASE_NAMES = ("запрос", "да", "чужой", "группа", "группа-текст", "повтор", "срок", "битый", "дверь", "носитель", "охрана",
               *KIND_CASES)
 
 cases = Cases()
@@ -342,9 +344,11 @@ def fixture_fail(why: str, stand: "Stand | None" = None) -> None:
 class Stand:
     """Диспетчер на своём LOG_DIR и своём Bot API."""
 
-    def __init__(self, yard: Yard) -> None:
+    def __init__(self, yard: Yard, name: str = "disp", chat_id: int = OWNER,
+                 owner_id: int | None = None) -> None:
         self.yard = yard
-        s = self.dir = yard.root / "disp"
+        self.chat_id = chat_id
+        s = self.dir = yard.root / name
         self.log = s / "log"
         self.secrets = s / "secrets"
         self.backups = s / "backups"
@@ -383,8 +387,9 @@ class Stand:
         print(f"  СТЕНД: Bot API на своём порту {self.port}, метка сверена")
         (s / "install.conf").write_text(
             f'PROJECT_DIR="{s}/project"\nPROJECT_NAME="стенд"\nLOG_DIR="{self.log}"\n'
-            f'TG_CHAT_ID="{OWNER}"\nTG_TOKEN_FILE="{s}/token"\nAGENT_USER="{os.environ.get("USER", "agent")}"\n'
-            f'PANEL_STATE_DIR="{s}/panel"\nSECRETS_DIR="{self.secrets}"\nBACKUP_DIR="{self.backups}"\n',
+            f'TG_CHAT_ID="{chat_id}"\nTG_TOKEN_FILE="{s}/token"\nAGENT_USER="{os.environ.get("USER", "agent")}"\n'
+            f'PANEL_STATE_DIR="{s}/panel"\nSECRETS_DIR="{self.secrets}"\nBACKUP_DIR="{self.backups}"\n'
+            + (f'TG_OWNER_ID="{owner_id}"\n' if owner_id is not None else ''),
             encoding="utf-8")
         (s / "harness.conf").write_text(
             f'TMUX_SESSION="proba-consent-{os.getpid()}"\nSERVICE_LOCKS_SUBDIR="services"\n'
@@ -489,20 +494,34 @@ class Stand:
         filtered = self.text("filtered").split()
         return offset > update_id or str(update_id) in filtered
 
-    def press(self, data: str | None, message_id, from_id: int = OWNER, chat_id: int = OWNER,
+    def press(self, data: str | None, message_id, from_id: int = OWNER, chat_id: int | None = None,
               with_message: bool = True) -> str:
-        """Нажатие владельца (или чужое); ждёт, пока диспетчер его обработал."""
+        """Нажатие владельца (или чужое) в канале стенда; ждёт, пока диспетчер его обработал."""
+        chat_id = self.chat_id if chat_id is None else chat_id
         callback = {"id": f"cb-{self.next_update + 1}", "chat_instance": "1",
                     "from": {"id": from_id, "is_bot": False, "first_name": "Проба"}}
         if data is not None:
             callback["data"] = data
         if with_message:
             callback["message"] = {"message_id": message_id, "date": int(time.time()),
-                                   "chat": {"id": chat_id, "type": "private"}, "text": "запрос"}
+                                   "chat": {"id": chat_id, "type": "private" if chat_id > 0 else "supergroup"},
+                                   "text": "запрос"}
         update_id = self.push({"callback_query": callback})
         if not wait_for(lambda: self.processed(update_id)):
             print(f"    (нажатие {callback['id']} не обработано за {WAIT_S} с)")
         return callback["id"]
+
+    def say_in(self, text: str, from_id: int = OWNER, chat_id: int | None = None, **extra) -> int:
+        """Сообщение в канал стенда так, как его шлёт Telegram: с from; ждёт обработки."""
+        chat_id = self.chat_id if chat_id is None else chat_id
+        message = {"message_id": self.next_update + 1, "date": int(time.time()),
+                   "chat": {"id": chat_id, "type": "private" if chat_id > 0 else "supergroup"},
+                   "from": {"id": from_id, "is_bot": False, "first_name": "Проба"}, **extra}
+        if text:
+            message["text"] = text
+        update_id = self.push({"message": message})
+        wait_for(lambda: self.processed(update_id))
+        return update_id
 
     def say_owner(self, text: str) -> int:
         update_id = self.push({"message": {"message_id": self.next_update + 1, "date": int(time.time()),
@@ -685,6 +704,101 @@ def probe_stranger(st: Stand) -> None:
     st.press(yes_data(nonce), mid) if nonce else None
     check("3в) контроль: нажатие владельца по тому же запросу записано", [YES],
           [r.get("event") for r in st.records(nonce)])
+
+
+# ── 3г. канал-группа: chat.id группы, from.id владельца ─────────────────────
+def judge_cli(log: Path, chat_id: int, owner_id: str, callback: dict) -> dict:
+    """Судья так, как его зовёт диспетчер: каталог, канал, каталог секретов, id владельца."""
+    done = subprocess.run(["python3", str(LIB / "consent_buttons.py"), "judge", str(log), str(chat_id), "",
+                           owner_id], input=json.dumps(callback), capture_output=True, text=True, timeout=30)
+    try:
+        verdict = json.loads(done.stdout)
+    except ValueError:
+        verdict = {"ошибка": (done.stdout + done.stderr)[-300:]}
+    return verdict if isinstance(verdict, dict) else {}
+
+
+def probe_group(yard: Yard) -> None:
+    """Улика bkb 19.11: в группе chat.id — id группы, from.id — личный id владельца;
+    судья сверял оба с одним TG_CHAT_ID, и «Да» владельца в группе не проходило никогда."""
+    print("— 3г. канал-группа: chat.id сверяется с TG_CHAT_ID, from.id — с TG_OWNER_ID")
+    st = Stand(yard, "group", chat_id=GROUP, owner_id=OWNER)
+    target = st.secret(f"g-{secrets.token_hex(3)}.txt")
+    nonce, mid = st.ask_sent(target)
+    check("г) условие: запрос с кнопками ушёл в группу", (True, str(GROUP)),
+          (mid is not None, sent_form(st, nonce).get("chat_id")))
+    cb = st.press(yes_data(nonce), mid, from_id=STRANGER) if nonce else None
+    check("г1) чужой в группе: записи нет, ответ вызван", ([], 1), (st.records(nonce), st.answers(cb)))
+    cb = st.press(yes_data(nonce), mid, chat_id=OWNER) if nonce else None
+    check("г2) владелец из лички, когда канал — группа: записи нет, ответ вызван", ([], 1),
+          (st.records(nonce), st.answers(cb)))
+    cb = st.press(yes_data(nonce), mid) if nonce else None
+    rec = st.records(nonce)
+    check("г3) владелец нажал в группе: решение «да» записано", [YES], [r.get("event") for r in rec])
+    check("г3) from_id записи — личный id владельца", OWNER, data_of(rec[0]).get("from_id") if rec else None)
+    check("г3) ответ владельцу — «Принято»", 1, sum(
+        1 for r in st.calls("answerCallbackQuery")
+        if cb and r["form"].get("callback_query_id") == cb and r["form"].get("text") == "Принято"))
+    # Дверь судит то же «Да» по паспорту группы: from_id сверяется с TG_OWNER_ID, не с TG_CHAT_ID.
+    done = carrier_run(st.carrier, [str(DELETE), str(target)], st.env)
+    check("г4) дверь удаления засчитала «Да» из группы: код 0, файла нет", (0, False),
+          (done.returncode, target.exists()))
+    if done.returncode:
+        print(f"    дверь: {(done.stdout + done.stderr)[-300:]}")
+    # Группа без TG_OWNER_ID: id владельца неизвестен — отказ называет ключ, а не «чужой запрос».
+    bare = yard.root / "group-nokey"
+    bare.mkdir()
+    press = {"id": "cb-g5", "from": {"id": OWNER}, "data": f"c:{'A' * 22}:y",
+             "message": {"message_id": 5, "chat": {"id": GROUP, "type": "supergroup"}}}
+    verdict = judge_cli(bare, GROUP, "", press)
+    check("г5) группа без TG_OWNER_ID: отказ называет ключ в ответе и в журнале", (True, True),
+          ("TG_OWNER_ID" in str(verdict.get("answer")), "TG_OWNER_ID" in str(verdict.get("log"))))
+    print(f"    вердикт г5: {verdict}")
+
+
+# ── 3д. текст «да» в группе: слово владельца — по from.id, как у кнопки ────
+def owner_word_counts(st: Stand) -> tuple[int, int, int]:
+    """Носители слова владельца: согласия, машинный журнал входящих, файлы очереди."""
+    return (line_count(st.log / "confirmations.jsonl"), line_count(st.log / "inbox.jsonl"),
+            len(list((st.log / "inbox").glob("*.txt"))))
+
+
+def probe_group_text(yard: Yard) -> None:
+    """Находка S-1 бумаги безопасности кнопки «Да» в группе: диспетчер сверял только chat.id,
+    и текст «да» любого участника ложился в согласия и во входящие — словом владельца."""
+    print("— 3д. текст в группе: chat.id — с TG_CHAT_ID, from.id — с TG_OWNER_ID, как у кнопки")
+    st = Stand(yard, "group-text", chat_id=GROUP, owner_id=OWNER)
+    before = owner_word_counts(st)
+    st.say_in("да", from_id=STRANGER)
+    check("д1) чужой текст «да» в группе: ни согласия, ни входящего, ни файла очереди", before,
+          owner_word_counts(st))
+    check("д1) диспетчер назвал чужой from.id в журнале", True,
+          f"from.id={STRANGER}" in st.text("log/tg-dispatcher.log"))
+    st.say_in("", from_id=STRANGER, caption="да", photo=[{"file_id": "proba-photo", "file_size": 10}])
+    check("д2) чужая подпись «да» под фото в группе: ни согласия, ни входящего, ни файла очереди", before,
+          owner_word_counts(st))
+    st.say_in("да")
+    check("д3) текст «да» владельца в группе: согласие и входящее записаны", (before[0] + 1, before[1] + 1),
+          owner_word_counts(st)[:2])
+    # Личка как была: владелец пишет из своего чата, с from и без него (форма стендов-соседей).
+    pm = Stand(yard, "private-text")
+    before = owner_word_counts(pm)
+    pm.say_in("да")
+    pm.say_owner("подтверждаю")
+    check("д4) личка: «да» и «подтверждаю» владельца записаны оба", (before[0] + 2, before[1] + 2),
+          owner_word_counts(pm)[:2])
+    # Группа без TG_OWNER_ID: владельца не узнать — отказ называет ключ, слово не засчитано.
+    bare = Stand(yard, "group-text-nokey", chat_id=GROUP)
+    before = owner_word_counts(bare)
+    bare.say_in("да")
+    check("д5) группа без TG_OWNER_ID: «да» не засчитано", before, owner_word_counts(bare))
+    told = [r["form"].get("text", "") for r in bare.calls("sendMessage")
+            if r["form"].get("chat_id") == str(GROUP)]
+    check("д5) группа без TG_OWNER_ID: ответ в группу называет ключ", True,
+          any("TG_OWNER_ID" in t for t in told))
+    if not cases.ok:
+        for one in (st, bare):
+            one.show()
 
 
 # ── 4. повтор и прежнее сообщение ───────────────────────────────────────────
@@ -1473,7 +1587,9 @@ def main() -> int:
     yard = Yard()
     stand = None
     for name, needs_stand, run in (("запрос", True, probe_request), ("да", True, probe_yes),
-                                   ("чужой", True, probe_stranger), ("повтор", True, probe_repeat),
+                                   ("чужой", True, probe_stranger), ("группа", False, probe_group),
+                                   ("группа-текст", False, probe_group_text),
+                                   ("повтор", True, probe_repeat),
                                    ("срок", True, probe_ttl), ("битый", True, probe_broken),
                                    ("дверь", False, probe_door), ("носитель", False, probe_carrier),
                                    ("охрана", False, probe_guard),

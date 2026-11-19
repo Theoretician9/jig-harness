@@ -31,7 +31,10 @@ agent_skill_guard.py, не состоится — его решение спра
 
 Нет задачи (ни метки с id из карты, ни `wip`: демон, помощник-управляющий) —
 запуски считаются по СЕССИИ под потолком уровня «без-задачи»: иначе при пустой карте потолка нет вовсе
-(замер 29.10: все 20 запусков легли skipped). Потолок или уровень не
+(замер 29.10: все 20 запусков легли skipped). Потолок со значением «режим_скорости» берёт
+число у выбранного режима скорости (speed-modes.yaml → режимы.<SPEED_MODE>.задач, тем же
+судьёй speed_mode.py, что пишет «N задач одновременно») и считает только ЖИВЫХ помощников —
+без строки agent.finish: режим говорит «одновременно», а не «за смену». Потолок или уровень не
 определены — пропуск со следом в журнале (fail-open, как у model_guard.py):
 запрет вслепую остановил бы смену.
 
@@ -115,6 +118,7 @@ MAX_DEPTH = 2
 LEAD_TYPE = "harness-lead"
 LEAD_LEVEL = "управляющий"
 LIVE_WINDOW_S = 180
+SPEED_CEILING = "режим_скорости"
 
 
 def pipeline_path() -> Path:
@@ -144,12 +148,35 @@ def door_path() -> Path:
     return Path(events.log_dir()) / DOOR_NAME
 
 
+def speed_mode_tasks() -> int | None:
+    """Задач одновременно у выбранного режима скорости; None — судья или его данные не читаются."""
+    path = ROOT / "harness" / "demons" / "speed_mode.py"
+    try:
+        spec = importlib.util.spec_from_file_location("speed_mode", path)
+        judge = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(judge)
+    except (OSError, ImportError, RuntimeError):
+        return None
+    try:
+        data = judge.load_data()
+        return int(data["режимы"][judge.resolve_mode(data)[0]]["задач"])
+    except (judge.DataError, KeyError, TypeError, ValueError):
+        return None
+
+
 def ceilings() -> dict:
+    """Потолки по уровням; «режим_скорости» заменён числом режима и пометкой «одновременно»,
+    а без данных режима уровень не определён (пропуск со следом)."""
     try:
         data = yaml.safe_load(pipeline_path().read_text(encoding="utf-8")) or {}
     except (OSError, yaml.YAMLError):
         return {}
-    return data.get("помощники") or {}
+    found = dict(data.get("помощники") or {})
+    for level, ceiling in found.items():
+        if isinstance(ceiling, dict) and ceiling.get("всего") == SPEED_CEILING:
+            tasks = speed_mode_tasks()
+            found[level] = None if tasks is None else {**ceiling, "всего": tasks, "одновременно": True}
+    return found
 
 
 def current_task() -> str | None:
@@ -310,6 +337,11 @@ def over_ceiling(task: str, session: str, level: str, ceiling: dict,
                  is_review: bool) -> str:
     """Причина отказа словами или пустая строка, если запуск в пределах."""
     done = launches(task, session)
+    counted = "запусков"
+    if ceiling.get("одновременно"):
+        finished = finished_calls()
+        done = [r for r in done if (r.get("data") or {}).get("вызов") not in finished]
+        counted = "по режиму скорости живых"
     total = int(ceiling.get("всего") or 0)
     review = int(ceiling.get("ревью") or 0)
     reviews_done = sum(1 for r in done if (r.get("data") or {}).get("ревью"))
@@ -318,7 +350,7 @@ def over_ceiling(task: str, session: str, level: str, ceiling: dict,
                 f"потолка: ревьюеров уже {reviews_done} из {review}")
     if total and len(done) >= total:
         return (f"помощник №{len(done) + 1} задаче {task} (уровень «{level}») сверх "
-                f"потолка: запусков уже {len(done)} из {total}")
+                f"потолка: {counted} уже {len(done)} из {total}")
     return ""
 
 

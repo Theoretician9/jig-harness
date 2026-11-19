@@ -108,7 +108,7 @@ def exact(length: int, tag: str) -> str:
 class Stand:
     """Свой проект на случай: карта, спека, тон, паспорт, журналы, заглушки канала."""
 
-    def __init__(self, spec_text: str):
+    def __init__(self, spec_text: str, card_extra: str = ""):
         self.root = Path(tempfile.mkdtemp(prefix="human-stand-"))
         self.logs = self.root / "logs"
         self.logs.mkdir()
@@ -142,7 +142,7 @@ class Stand:
             f"  - id: {TASK}\n"
             "    status: plan\n"
             "    title: Проба блока для человека\n"
-            f"    spec: {SPEC_REL}\n", encoding="utf-8")
+            f"    spec: {SPEC_REL}\n" + card_extra, encoding="utf-8")
         self.install_conf = self.root / "install.conf"
         self.install_conf.write_text(
             f'PROJECT_DIR="{self.root}"\nLOG_DIR="{self.logs}"\n', encoding="utf-8")
@@ -158,6 +158,12 @@ class Stand:
     def send(self) -> subprocess.CompletedProcess:
         return subprocess.run(
             [sys.executable, str(self.root / "scripts" / "spec_approval.py"), "--отправить", TASK],
+            capture_output=True, text=True, errors="replace", env=self.env, timeout=120,
+            cwd=str(self.root))
+
+    def run_flag(self, flag: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [sys.executable, str(self.root / "scripts" / "spec_approval.py"), flag],
             capture_output=True, text=True, errors="replace", env=self.env, timeout=120,
             cwd=str(self.root))
 
@@ -363,6 +369,88 @@ def attachment_checks() -> None:
     attachment("тело ровно в потолок", lambda limit: BODY_CEILING)
 
 
+STANDARDS_SINCE = "2026-11-19"
+NEW_DEV = ("    заведено: \"2026-11-19\"\n"
+           "    глубина: { уровень: обычная, характер: разработка }\n")
+STANDARDS_NONE = "\n## Стандарты\n\nСтандартов нет: задача не задевает протоколов и форматов.\n"
+
+
+def standards_unit_checks() -> None:
+    print("— 5. раздел «## Стандарты» у задачи-разработки (дверь по дате карточки)")
+    stand = Stand(spec_with("x"))
+    try:
+        module = load(stand.root / "scripts" / "spec_approval.py", "standards_subject")
+    finally:
+        stand.drop()
+    check("СТАНДАРТЫ_С == 2026-11-19 (день правила)",
+          getattr(module, "СТАНДАРТЫ_С", None) == STANDARDS_SINCE,
+          f"есть {getattr(module, 'СТАНДАРТЫ_С', 'НЕТ КОНСТАНТЫ')!r}")
+    judge = getattr(module, "беда_стандартов", None)
+    if not callable(judge):
+        check("функция беда_стандартов есть", False, "НЕТ ФУНКЦИИ")
+        return
+    dev = {"заведено": "2026-11-19", "глубина": {"характер": "разработка"}}
+    bare = spec_with("суть")
+    cases = [
+        ("БОЛЬНОЙ СЛУЧАЙ: новая разработка без раздела — беда", bare, dev, True),
+        ("новая разработка с «стандартов нет» — можно", bare + STANDARDS_NONE, dev, False),
+        ("новая разработка с номером RFC — можно",
+         bare + "\n## Стандарты\n\n- RFC 9110: сервер ДОЛЖЕН …\n", dev, False),
+        ("пустой раздел «Стандарты» — беда", bare + "\n## Стандарты\n\n  \n", dev, True),
+        ("чужой заголовок «## Стандарты кода» — раздела нет",
+         bare + "\n## Стандарты кода\n\nтекст\n", dev, True),
+        ("починка — правило не судит", bare, {**dev, "глубина": {"характер": "починка"}}, False),
+        ("дверь по дате: карточка 18.11 — старая, не судится",
+         bare, {**dev, "заведено": "2026-11-18"}, False),
+        ("дверь по дате: карточка без «заведено» — старая, не судится",
+         bare, {"глубина": {"характер": "разработка"}}, False),
+        ("дверь по дате: карточка 01.12 — судится", bare, {**dev, "заведено": "2026-12-01"}, True),
+    ]
+    for name, text, card, red in cases:
+        got = judge(text, card)
+        check(name, bool(got) == red and (not got or "Стандарты" in got), f"вышло {got!r}")
+
+
+def standards_send_checks() -> None:
+    print("— 6. отправка новой разработки без «Стандартов» — отказ; с ними — уходит")
+    stand = Stand(spec_with(exact(300, "станд")), NEW_DEV)
+    try:
+        done = stand.send()
+        out = (done.stdout or "") + (done.stderr or "")
+        check("БОЛЬНОЙ СЛУЧАЙ: без «Стандартов» — код 1, tg_send не зван, причина названа",
+              done.returncode == 1 and not stand.calls(stand.tg_calls) and "Стандарты" in out,
+              f"код {done.returncode}: {out.strip()[-300:]!r}")
+        stand.spec.write_text(spec_with(exact(300, "станд")) + STANDARDS_NONE, encoding="utf-8")
+        done = stand.send()
+        check("с разделом «Стандарты» — код 0 и «отправлена»",
+              done.returncode == 0 and len(stand.sent_records()) == 1,
+              f"код {done.returncode}: {(done.stdout or '')[-300:]!r}")
+    finally:
+        stand.drop()
+
+    print("— 7. --стандарты: прогон по всем спекам карты")
+    stand = Stand(spec_with("суть"), NEW_DEV)
+    try:
+        done = stand.run_flag("--стандарты")
+        out = (done.stdout or "") + (done.stderr or "")
+        check("новая разработка без раздела — код 1 и id задачи в выводе",
+              done.returncode == 1 and TASK in out, f"код {done.returncode}: {out.strip()[-300:]!r}")
+        stand.spec.write_text(spec_with("суть") + STANDARDS_NONE, encoding="utf-8")
+        done = stand.run_flag("--стандарты")
+        check("с разделом — код 0", done.returncode == 0,
+              f"код {done.returncode}: {(done.stdout or '')[-300:]!r}")
+    finally:
+        stand.drop()
+    stand = Stand(spec_with("суть"), "    заведено: \"2026-11-02\"\n"
+                  "    глубина: { уровень: обычная, характер: разработка }\n")
+    try:
+        done = stand.run_flag("--стандарты")
+        check("старая разработка без раздела — дверь по дате, код 0",
+              done.returncode == 0, f"код {done.returncode}: {(done.stdout or '')[-300:]!r}")
+    finally:
+        stand.drop()
+
+
 def main() -> int:
     print(f"проба блока «Для человека»; предмет {SUBJECT}")
     if not SUBJECT.is_file() or not CHANNEL_GUARD.is_file():
@@ -373,6 +461,8 @@ def main() -> int:
     text_send_checks()
     text_refused_checks()
     attachment_checks()
+    standards_unit_checks()
+    standards_send_checks()
     bad = sum(1 for _, ok in RESULTS if not ok)
     if not RESULTS:
         print("ИТОГО: путей 0, неудач 1 (пустой список проверок)")

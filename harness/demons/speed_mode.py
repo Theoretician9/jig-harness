@@ -3,13 +3,14 @@
 
 Владелец выбирает режим (slow/medium/fast/ultra), судья каждые 2 минуты считает
 ЭФФЕКТИВНЫЙ: выбранный, ограниченный действующими блокерами (пауза, лимит, выкат,
-ротация, мощность, авария, мало задач, файлы, расход лимита подписки). Сторож и
-launch-plan читают итог, а не пересчитывают: судья один.
+ротация, мощность, авария, мало задач, файлы, расход лимита подписки). Блокер с
+«действует: нет» в данных считается и пишется («не_действуют»), но потолок не режет.
+Сторож и launch-plan читают итог, а не пересчитывают: судья один.
 
     speed_mode.py --замер                       один проход: замер, решение, запись состояния
     speed_mode.py --показать [--коротко]        печать из состояния, без пересчёта
     speed_mode.py --журнал [--за Nч]            лента событий (только чтение, состояние не нужно)
-    speed_mode.py --сторожу --последний-пинок N [--последнее-лишнее M]
+    speed_mode.py --сторожу --последний-пинок N [--предложено "id …"] [--последнее-лишнее M]
                                                 одна строка для сторожа (только чтение)
     speed_mode.py --выбран <панель|бот|чат|руки> mode.selected, выбор_ts, полный проход
     общий флаг   --на <ISO 8601 с поясом>       подменные часы (пробы)
@@ -327,13 +328,14 @@ def gather(now: float, data: dict, want_ready: bool = True) -> dict:
     waiting = {i for i in status if partial and approval.отправлена(i, records)
                and not approval.одобрена(i, records)}
     launched = set(launches["tasks"])
-    wip = {i for i, st in status.items() if st == "wip"}
-    work = sorted(launched | (wip - waiting))
+    # В работе — то, что ведёт живой помощник: статус wip без помощника — брошенная карточка,
+    # и счёт по статусам при 3 живых велел смене при ультра не брать новых.
+    work = sorted(launched)
     idle_waiting = waiting - launched
     snap = {"in_work": work, "launched": launches["tasks"], "phantoms": launches["phantoms"],
             "no_label": sum(1 for i in work if i.startswith("без-метки:")),
             "waiting_count": sum(1 for i in idle_waiting if status.get(i) not in OPEN_STATUSES_OFF),
-            "wip": wip, "take": [], "broken": [], "deps": 0, "spec_limit": False}
+            "take": [], "broken": [], "deps": 0, "spec_limit": False}
     if not want_ready:
         return snap
     ready, snap["broken"], snap["deps"] = run_work_queue()
@@ -538,14 +540,19 @@ def limit_points(now: float, window: str, settings: dict, percent_now: float, re
 
 def window_speed(points: list, now: float, percent: float, window: str, settings: dict):
     """(%/ч на задачу, консервативна ли): Σ Δp / Σ n·Δt по интервалам с n ≥ 1
-    (точки уже без разрывов)."""
+    (точки уже без разрывов).
+
+    Строка состояния отдаёт ЦЕЛЫЙ процент, и рост на пункт бывает ростом на сотую: шаг округления
+    вычитается из роста. Иначе пункт сразу после разрыва (смена аккаунта, новое окно), делённый на
+    час работы и умноженный на неделю до сброса, режет ultra при 1 % лимита (bkb, Content-Factory 18.11)."""
     series = points + [(now, 0, percent, None)]
     rise = hours = 0.0
     for (t1, n1, p1, _), (t2, _, p2, _) in zip(series, series[1:]):
         if n1 >= 1:
             rise += p2 - p1
             hours += n1 * (t2 - t1) / 3600
-    speed = rise / hours if hours else 0.0
+    step = 1 if all(float(p).is_integer() for _, _, p, _ in series) else 0
+    speed = max(rise - step, 0) / hours if hours else 0.0
     if hours < settings["мин_задача_часов"][window]:
         return max(speed, settings["скорость_без_данных_pct_ч_на_задачу"][window]), True
     return speed, False
@@ -559,7 +566,7 @@ def window_ceiling(percent: float, speed: float, hours_left: float, tasks: int,
     return tasks if burn <= 0 else max(1, math.floor(min(tasks, (threshold - percent) / burn)))
 
 
-def limit_pass(prev: dict, now: float, data: dict, tasks: int, work_count: int) -> dict:
+def limit_pass(prev: dict, now: float, data: dict, tasks: int) -> dict:
     """Блокер «лимит по расходу»: потолок окон, итог = худшее окно; «отказ» — не действует."""
     settings = data["лимит_подписки"]
     read = read_limit_file(data, now)
@@ -586,11 +593,11 @@ def limit_pass(prev: dict, now: float, data: dict, tasks: int, work_count: int) 
             or (was_reset is not None and reset is not None and reset > was_reset + RESET_SHIFT_S)
             or (isinstance(was.get("процент"), (int, float))
                 and was["процент"] - percent >= settings["сброс_падение_pct"]))
-        down = window_ceiling(percent, speed, hours_left, tasks, settings["порог_прогноза_pct"],
-                              settings["стоп_pct"])
+        # Порог у окна свой: упор в 5 часов — пауза до сброса, упор в неделю — потеря недели.
+        threshold = settings["порог_прогноза_pct"][window]
+        down = window_ceiling(percent, speed, hours_left, tasks, threshold, settings["стоп_pct"])
         up = window_ceiling(percent, speed, hours_left, tasks,
-                            settings["порог_прогноза_pct"] - settings["запас_подъёма_pct"],
-                            settings["стоп_pct"])
+                            threshold - settings["запас_подъёма_pct"], settings["стоп_pct"])
         old = was.get("потолок")
         changed_at = parse_ts(was.get("сменён_ts"))
         may_rise = changed_at is None or now - changed_at >= settings["подъём_не_чаще_мин"] * 60
@@ -598,9 +605,11 @@ def limit_pass(prev: dict, now: float, data: dict, tasks: int, work_count: int) 
             ceiling = down
         else:
             ceiling = up if up > old and may_rise else old
-        # Скорость по догадке, а не по замеру: начатое не урезаем; стоп сильнее этой границы.
+        # Скорость по догадке, а не по замеру, ниже выбранного не режет: скорость режут пауза
+        # и 429 (владелец 11.11 и 19.11), а догадка с потолком «в работе» держала одну задачу
+        # часами, пока копились данные (bkb 14.11). Стоп сильнее этой границы.
         if conservative and percent < settings["стоп_pct"]:
-            ceiling = max(ceiling, min(tasks, max(work_count, 1)))
+            ceiling = tasks
         ceilings.append(ceiling)
         burn_now = ceiling if ceiling else tasks
         result[window] = {"процент": percent, "сброс": None if reset is None else to_iso(reset),
@@ -609,12 +618,11 @@ def limit_pass(prev: dict, now: float, data: dict, tasks: int, work_count: int) 
                           else to_iso(now),
                           "прогноз": round(percent + speed * burn_now * hours_left, 1),
                           "прогноз_выбранный": round(percent + speed * tasks * hours_left, 1),
-                          "снижение_при": round(settings["порог_прогноза_pct"]
-                                                - speed * tasks * hours_left, 1)}
+                          "порог": threshold,
+                          "снижение_при": round(threshold - speed * tasks * hours_left, 1)}
     if ceilings:
         result["потолок"] = min(ceilings)
         result["точность"] = "оценка" if inexact else "точно"
-        result["порог"] = settings["порог_прогноза_pct"]
     return result
 
 
@@ -695,6 +703,14 @@ def short_reason(name: str, rec: dict) -> str:
     return f"{name}: {rec['причина']}"
 
 
+def acts(blocker_cfg: dict) -> bool:
+    """Выключатель данными «действует: нет»: признак считается и пишется, потолок не режет.
+
+    Правило владельца 11.11 «включай режим средний и не снижай»: снижают только пауза и 429.
+    """
+    return blocker_cfg.get("действует", "да") != "нет"
+
+
 def decide(prev: dict | None, now: float, data: dict, snap: dict, meas: dict, fact: dict,
            mode: str) -> dict:
     prev = prev or {}
@@ -703,7 +719,9 @@ def decide(prev: dict | None, now: float, data: dict, snap: dict, meas: dict, fa
     work = snap["in_work"]
     work_count = len(work)
     cfg = data["блокеры"]
-    before = prev.get("блокеры") or {}
+    acting = {name for name, body in cfg.items() if acts(body)}
+    # Выключенный блокер хранит гистерезис рядом: включат снова — продолжит, а не начнёт с нуля.
+    before = {**(prev.get("не_действуют") or {}), **(prev.get("блокеры") or {})}
     cand_before = prev.get("кандидаты") or {}
     block, cand, ceilings = {}, {}, {}
 
@@ -721,9 +739,8 @@ def decide(prev: dict | None, now: float, data: dict, snap: dict, meas: dict, fa
     if fact["ротация"]:
         immediate("ротация", work_count, "ротация смены, новых задач нет")
 
-    limit = limit_pass(prev, now, data, tasks, work_count)
-    limit_acts = cfg["лимит_расход"].get("действует", "да") != "нет"  # выключатель данными: считает, но потолок не режет
-    if limit_acts and limit["потолок"] is not None and limit["потолок"] < tasks:
+    limit = limit_pass(prev, now, data, tasks)
+    if limit["потолок"] is not None and limit["потолок"] < tasks:
         immediate("лимит_расход", limit["потолок"], "расход лимита подписки")
 
     few = work_count + len(snap["take"])
@@ -750,12 +767,14 @@ def decide(prev: dict | None, now: float, data: dict, snap: dict, meas: dict, fa
     acc_on, acc_why = accident_sign(meas["raw"], acc_cfg)
     acc, acc_cand, acc_started, acc_ended = track(
         before.get("авария"), cand_before.get("авария"), acc_on, acc_cfg, now, {"замер": meas["state"]})
+    # Выключенная авария не режет и через лестницу мощности.
+    steers = "авария" in acting
     old_power = before.get("мощность") or {}
     lad = {"потолок": old_power.get("потолок"), "шаг_ts": old_power.get("шаг_ts")}
     raised_at = prev.get("поднят_ts")
-    if acc_started:
+    if acc_started and steers:
         lad = {"потолок": 1, "шаг_ts": to_iso(now)}
-    if acc_ended:
+    if acc_ended and steers:
         lad["шаг_ts"] = to_iso(now)
         raised_at = to_iso(now)
     if acc:
@@ -770,7 +789,7 @@ def decide(prev: dict | None, now: float, data: dict, snap: dict, meas: dict, fa
     pow_on, pow_why = power_sign(meas["raw"], pow_cfg)
     sign = sign_record((old_power or cand_before.get("мощность") or {}).get("признак"), pow_on, now)
     quiet = sign_record(old_power.get("тихо"), power_quiet(meas["raw"], pow_cfg), now)
-    if acc:
+    if acc and steers:
         # Пока авария действует, лестница стоит: подъёмы за её спиной не «отрабатываются».
         lad, rose = {"потолок": 1, "шаг_ts": to_iso(now)}, False
     else:
@@ -785,11 +804,12 @@ def decide(prev: dict | None, now: float, data: dict, snap: dict, meas: dict, fa
     elif pow_on:
         cand["мощность"] = {"с": sign["с"], "признак": sign, "замер": meas["state"], "причина": pow_why}
 
-    eff = max(0, min([tasks] + list(ceilings.values())))
+    muted = {name: block.pop(name) for name in list(block) if name not in acting}
+    eff = max(0, min([tasks] + [ceiling for name, ceiling in ceilings.items() if name in acting]))
     binding = min(block.items(), key=lambda item: item[1]["потолок"], default=None)
     reason = short_reason(*binding) if binding and binding[1]["потолок"] < tasks else "блокеров нет"
-    return {"tasks": tasks, "eff": eff, "block": block, "cand": cand, "limit": limit, "reason": reason,
-            "raised_at": raised_at}
+    return {"tasks": tasks, "eff": eff, "block": block, "muted": muted, "cand": cand, "limit": limit,
+            "reason": reason, "raised_at": raised_at}
 
 
 def fill_quota(eff: int, work_count: int, take: list, raw: dict, data: dict) -> tuple[int, str]:
@@ -801,6 +821,8 @@ def fill_quota(eff: int, work_count: int, take: list, raw: dict, data: dict) -> 
         return 0, "готовых задач нет"
     pow_cfg = data["блокеры"]["мощность"]
     busy = "занятость неизвестна" if raw["busy"] is None else f"занято {num(raw['busy'], 0)} %"
+    if not acts(pow_cfg):
+        return min(short, len(take)), f"{busy}, мощность не действует — добираю весь недобор"
     if power_sign(raw, pow_cfg)[0]:
         return 0, f"не добираю — кандидат мощности, {busy}"
     if power_quiet(raw, pow_cfg):
@@ -855,7 +877,7 @@ def limit_text(eff: int, tasks: int, limit: dict, now: float) -> str:
     ahead = "до конца окна" if reset is None else f"к обновлению ({clock_phrase(reset, now)})"
     return (f"Скорость: работаю по {tasks_dative(eff)} вместо {tasks} — {used}. Если работать "
             f"без перерыва {ahead}, по {tasks_dative(tasks)} было бы {round(cell['прогноз_выбранный'])} %, "
-            f"выше порога {round(limit['порог'])} %; по {tasks_dative(eff)} — {round(cell['прогноз'])} %. "
+            f"выше порога {round(cell['порог'])} %; по {tasks_dative(eff)} — {round(cell['прогноз'])} %. "
             f"После обновления верну {tasks} сам.")
 
 
@@ -892,6 +914,9 @@ def plan_message(prev: dict, now: float, data: dict, mode: str, verdict: dict, w
         return {**told, "эфф": eff, "режим": mode, "блокер": binding, "смен": 0}, None, "нет"
     if eff == told["эфф"]:
         return {**told, "смен": 0}, None, "нет"
+    if binding is None and told["блокер"] is not None and not acts(data["блокеры"].get(told["блокер"], {})):
+        # Сказанный блокер выключили данными: возврат скорости — не новость, владелец о нём не просил.
+        return {**told, "эфф": eff, "блокер": None, "смен": 0}, None, "нет"
     if binding is not None and data["блокеры"][binding]["говорить"] != "да":
         return told, None, "нет"
     if binding == LIMIT_BLOCKER and told["блокер"] == LIMIT_BLOCKER:
@@ -981,7 +1006,7 @@ def blocker_events(prev: dict, verdict: dict, meas: dict, now: float) -> None:
 def task_events(prev: dict, snap: dict, now: float) -> None:
     old = set(prev.get("в_работе") or [])
     for task in sorted(set(snap["in_work"]) - old):
-        origin = "без-метки" if task.startswith("без-") else ("метка" if task in snap["launched"] else "wip")
+        origin = "без-метки" if task.startswith("без-") else "метка"
         record("task.taken", "ok", {"id": task, "откуда": origin,
                                   "вызовы": snap["launched"].get(task, [])}, now)
     for task in sorted(old - set(snap["in_work"])):
@@ -1019,7 +1044,7 @@ def judge_pass(now: float, who: str | None, data: dict, path: Path) -> int:
         "ждут_владельца": snap["waiting_count"], "к_взятию": snap["take"],
         "фантомов": snap["phantoms"], "без_метки": snap["no_label"],
         "зависимостей": snap["deps"], "битые": snap["broken"],
-        "блокеры": verdict["block"], "кандидаты": verdict["cand"],
+        "блокеры": verdict["block"], "не_действуют": verdict["muted"], "кандидаты": verdict["cand"],
         "поднят_ts": verdict["raised_at"],
         "выбор_ts": to_iso(now) if chose else (prev or {}).get("выбор_ts"),
         "добор": quota, "добор_почему": quota_why, "лимит": verdict["limit"],
@@ -1055,6 +1080,7 @@ def judge_pass(now: float, who: str | None, data: dict, path: Path) -> int:
                 "готовых": len(snap["take"]), "без_метки": snap["no_label"],
                 "фантомов": snap["phantoms"], "ждут_владельца": snap["waiting_count"],
                 "блокеры": {name: rec.get("замер") or rec["причина"] for name, rec in verdict["block"].items()},
+                "не_действуют": {name: rec["причина"] for name, rec in verdict["muted"].items()},
                 "замер": meas["state"], "добор": quota, "причина": verdict["reason"]}
         if state["лимит"]["точность"] != "отказ":
             body["лимит"] = point
@@ -1164,7 +1190,8 @@ def wait_minutes(name: str, rec: dict, data: dict, st: dict) -> int:
     return max(0, math.ceil(data["блокеры"][name]["держится_мин"] - held / 60))
 
 
-def warden_line(st: dict, last_kick: float, now: float, data: dict, last_over: float = 0.0) -> str:
+def warden_line(st: dict, last_kick: float, now: float, data: dict, last_over: float = 0.0,
+                offered: frozenset = frozenset()) -> str:
     block = st["блокеры"]
     for name in ("пауза", "лимит", "выкат", "ротация"):
         if name in block:
@@ -1196,7 +1223,8 @@ def warden_line(st: dict, last_kick: float, now: float, data: dict, last_over: f
             return f"молчу\tпризнак {label} держится: {block[name]['причина']}"
     if st["добор"] < 1:
         return f"молчу\t{st['добор_почему']}"
-    return f"недобор\t{st['добор']}\t{' '.join(st['к_взятию'][:st['добор']])}"
+    take = sorted(st["к_взятию"], key=lambda task: task in offered)
+    return f"недобор\t{st['добор']}\t{' '.join(take[:st['добор']])}"
 
 
 # ───────────────────────── лента событий ─────────────────────────
@@ -1313,8 +1341,9 @@ def main(argv: list) -> int:
                     last_over = float(over)
                 except ValueError:
                     last_over = 0.0
+                offered = frozenset((pop_value(args, "--предложено") or "").split())
                 print(warden_line(st, last_kick if math.isfinite(last_kick) else 0.0, now, data,
-                                  last_over if math.isfinite(last_over) else 0.0))
+                                  last_over if math.isfinite(last_over) else 0.0, offered))
             return 0
     except DataError as exc:
         print(f"ошибка данных: {exc}", file=sys.stderr)

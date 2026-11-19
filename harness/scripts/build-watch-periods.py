@@ -27,6 +27,7 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
 from config import switched_off_marks, из_файла, корень_дерева, путь_harness_conf  # noqa: E402
+import process_library  # noqa: E402
 
 КОРЕНЬ = корень_дерева(__file__)
 РЕЕСТР = "harness/config/mechanisms.yaml"
@@ -77,8 +78,12 @@ def сроки_реестра(источник: Path) -> tuple[dict, list]:
         данные = yaml.safe_load(источник.read_text(encoding="utf-8")) or {}
     except OSError as беда:
         raise SystemExit(f"реестр не прочитан: {источник} — {беда}")
+    return сроки_паспортов(данные.get("механизмы") or [])
+
+
+def сроки_паспортов(паспорта: list) -> tuple[dict, list]:
     сроки, безнадзорные = {}, []
-    for запись in данные.get("механизмы") or []:
+    for запись in паспорта:
         повод = запись.get("повод")
         if not isinstance(повод, dict):
             continue
@@ -161,7 +166,12 @@ def without(registry: dict, names: set) -> dict:
 
 
 def главная() -> int:
-    реестр, безнадзорные = сроки_реестра(путь_реестра())
+    реестр_пакета, безнадзорные = сроки_реестра(путь_реестра())
+    # Свои механизмы копии: паспорт в слое установки, срок — в её harness.conf.
+    # Образец пакета о них не знает, поэтому с ним сверяется только реестр пакета.
+    свои, свои_безнадзорные = сроки_паспортов(process_library.local_mechanisms())
+    реестр = {**реестр_пакета, **свои}
+    безнадзорные += свои_безнадзорные
     конфиг = сроки_конфига(путь_конфига())
     off = switched_off(путь_конфига())
     active = without(реестр, off)
@@ -192,7 +202,7 @@ def главная() -> int:
     if образец.exists() and not свой_стенд:
         в_образце = сроки_конфига(образец)
         беды += [f"ОБРАЗЕЦ ПАКЕТА: {б}"
-                 for б in расхождения(without(реестр, switched_off(образец)), в_образце)]
+                 for б in расхождения(without(реестр_пакета, switched_off(образец)), в_образце)]
 
     if беды:
         print("сроки присмотра: РАЗОШЛИСЬ")
@@ -200,6 +210,9 @@ def главная() -> int:
         # ищет её по маркеру («в реестре есть, в конфиге нет:»), а не по месту.
         for строка in беды:
             print(f"  {строка}")
+        if any(с.startswith("в конфиге есть, в реестре нет:") for с in беды):
+            print(f"  свой механизм копии — запиши паспорт с повод.метки в "
+                  f"{process_library.local_mechanisms_place()}")
         print(f"\nимён в реестре {len(active)}, в конфиге {len(конфиг)}")
         return 1
     print(f"сроки присмотра: сошлось — имён {len(active)}")

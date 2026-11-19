@@ -207,6 +207,10 @@ class Stand:
             "HARNESS_ACTIVE_LINE": "harness", "HARNESS_PANEL_STATE": str(self.base / "panel"),
             "HARNESS_DOSKA": str(self.board), "HEARTBEAT_DIR": str(self.base / "heartbeat"),
             "STATE_DIR": str(self.base / "state"),
+            # The probe is the stand root: release gates run from a session, so
+            # a real `claude` sits above every probe; only ancestry below the
+            # probe is the call's own.
+            "ALERT_STAND_ROOT": str(os.getpid()),
         })
         env.update(self.settings)
         env.update(extra)
@@ -575,8 +579,7 @@ def section_session(tmp: Path) -> None:
     would turn the control red. Reasons: .tasks/hr.watchers-report-must-create-
     model-task/p-r2-notes.md."""
     print("── зов из сессии: --resolve и обход env -u (R1-01) ──")
-    check("проба сама не под сессией (иначе случаи ниже судят форму: claude-предок есть у всех)",
-          [], ancestors_named("claude"))
+    print(f"  (предков claude над пробой: {len(ancestors_named('claude'))} — их скрывает дверь стенда)")
     st = Stand(tmp / "session")
     bash = shutil.which("bash") or "/bin/bash"
     launchers = st.base / "launchers"
@@ -625,6 +628,41 @@ def section_session(tmp: Path) -> None:
     rc, out, _ = under("claude", "--is-green", "ses:x")
     check("--is-green из сессии читает (код 1, «КРАСНОЕ»): чтение не запрещено", (1, True),
           (rc, out.startswith("КРАСНОЕ ses:x")))
+
+    print("── дверь стенда ALERT_STAND_ROOT: выше корня родословная не судится ──")
+    def under_root(*args: str, env: dict | None = None, root: str = "$$") -> tuple[int, str, str]:
+        """`claude` is the GRANDPARENT, the shell between declares itself root."""
+        root_here = f'ALERT_STAND_ROOT={root} "$@"; rc=$?; exit $rc'
+        done = subprocess.run([str(launchers / "claude"), "-c", script_fork, "claude",
+                               str(launchers / "watcher-sh"), "-c", root_here, "watcher-sh",
+                               sys.executable, str(writer), *args],
+                              env=env or st.env(), capture_output=True, text=True, timeout=60,
+                              cwd=str(st.base))
+        return done.returncode, done.stdout, done.stderr
+
+    script_fork = 'env -u CLAUDE_CODE_SESSION_ID "$@"; rc=$?; exit $rc'
+    writer = WRITER
+    rc, out, err = under_root("--key", "ses:root", "--title", "Беда под корнем стенда", "--text", "t")
+    check("дверь: claude выше корня стенда — --key код 0, карточка заведена", (0, 1),
+          (rc, len(st.by_source("ses:root"))))
+    # The writer's own tree is the live one: a copy of the writer whose map lies
+    # in its own tree must refuse even with the door, and leave that map alone.
+    tree = st.base / "own-tree"
+    (tree / "scripts").mkdir(parents=True)
+    writer = tree / "scripts" / "alert-task.py"
+    shutil.copy2(WRITER, writer)
+    own_map = tree / "dev-map.yaml"
+    shutil.copy2(st.map, own_map)
+    own_before = sha1(own_map)
+    rc, _, _ = under_root("--key", "ses:own", "--title", "Беда в боевую карту", "--text", "t",
+                          env=st.env(HARNESS_DEVMAP=str(own_map),
+                                     HARNESS_CARDS_LIB=str(CARDS_DIR)))
+    check("дверь: карта собственного дерева писателя дверь не открывает — код 6", 6, rc)
+    check("дверь: карта собственного дерева не тронута", own_before, sha1(own_map))
+    writer = WRITER
+    rc, _, _ = under_root("--key", "ses:noroot", "--title", "t", "--text", "t",
+                          root="x")
+    check("дверь: кривой корень (не число) не открывает — код 6", 6, rc)
 
     rc, _, _ = under("watcher-sh", "--resolve", "ses:x")
     check("контроль: тот же запуск под другим именем — --resolve код 0", 0, rc)

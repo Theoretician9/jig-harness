@@ -238,8 +238,8 @@ advance() { echo "$HEAD_AT_AUDIT" > "$CURSOR"; }
 # Статусы карточек, как они в дереве сейчас: «id статус» по строке. Агент
 # дописывает карту, но статус существующей карточки решает приёмка и владелец,
 # и сверка «до/после» держит это, пока у агента есть Write.
-statusy_kart() {
-    python3 - "$DEVMAP" <<'PY'
+statusy_kart() {  # $1 — карта, по умолчанию живая
+    python3 - "${1:-$DEVMAP}" <<'PY'
 import sys, yaml
 def обход(узел):
     if isinstance(узел, dict):
@@ -253,19 +253,32 @@ def обход(узел):
 обход(yaml.safe_load(open(sys.argv[1], encoding="utf-8")))
 PY
 }
+# Статусы карты из коммита: пустой вывод, если карты в нём нет.
+head_statuses() {  # $1 — коммит
+    statusy_kart <(git -C "$PROJECT_DIR" show "$1:dev-map.yaml" 2>/dev/null)
+}
 
 # Карточки, чей статус после прогона другой, чем до, и карточки, которых не
 # стало: снимок «до» взят под общим локом карты, а в архив карточку переносит
 # приёмка под тем же локом, так что пропавшую убрала модель. Новая — не смена.
 #
-# Единственная законная смена: plan -> test у карточки, в которой модель назвала
+# Законная смена одна: plan -> wip или test у карточки, в которой модель назвала
 # SHA коммита из выборки (аргумент $2 — файл SHA). Работа по плановой карточке
-# уже сделана коммитом, и держать её в «plan» значит врать дашборду; без
-# привязанного коммита это самовольная смена статуса.
+# начата или сделана коммитом, и держать её в «plan» значит врать дашборду; без
+# привязанного коммита это самовольная смена статуса. Ту же границу называет
+# промт: расходясь, они стоили 17.11.2026 отказа всей правки (plan -> wip).
+#
+# Смена, которую принёс коммит, влитый в HEAD за время прогона, — не модели:
+# модель думает минутами, очередь слияний за это время пишет в то же дерево.
+# 19.11.2026 влитая ветка перевела три карточки wip -> test, и сторож записал
+# это на модель. Признак: статус в HEAD сменился с HEAD сверки ($HEAD_AT_AUDIT),
+# и карта «после» несёт именно его. Для такой карточки «было» в вердикте —
+# статус HEAD: возврат не должен откатить влитый коммит.
 # Нечитаемая модельная карта — маркер MAP_UNREADABLE вместо падения: вызывающий
 # откатывает к снимку, а не обрывает скрипт под set -e.
 смененные_статусы() {  # $1 — снимок «до», $2 — файл с SHA выборки
-    python3 - "$1" <(statusy_kart) "$2" "$DEVMAP" <<'PY'
+    python3 - "$1" <(statusy_kart) "$2" "$DEVMAP" \
+        <(head_statuses "$HEAD_AT_AUDIT") <(head_statuses HEAD) <<'PY'
 import json, re, sys, yaml
 def читать(путь):
     return dict(строка.split(" ", 1) for строка in open(путь, encoding="utf-8").read().splitlines() if строка)
@@ -286,12 +299,42 @@ except yaml.YAMLError:
     sys.exit(0)
 до, после = читать(sys.argv[1]), читать(sys.argv[2])
 shas = open(sys.argv[3], encoding="utf-8").read().split()
+head_then, head_now = читать(sys.argv[5]), читать(sys.argv[6])
+def came_by_commit(id):
+    return head_then.get(id) != head_now.get(id) and после.get(id) == head_now.get(id)
 def is_legit(id):
-    return (до[id], после.get(id)) == ("plan", "test") and any(
+    return came_by_commit(id) or до[id] == "plan" and после.get(id) in ("wip", "test") and any(
         re.search("(?<![0-9a-f])" + sha[:8], card_texts.get(id, "")) for sha in shas)
-print(" ".join(f"{id}({до[id]}->{после.get(id, 'удалена')})" for id in до if до[id] != после.get(id) and not is_legit(id)))
+def base(id):
+    return head_now[id] if head_then.get(id) != head_now.get(id) and id in head_now else до[id]
+print(" ".join(f"{id}({base(id)}->{после.get(id, 'удалена')})" for id in до if до[id] != после.get(id) and not is_legit(id)))
 PY
 }
+
+# Возврат статусов строкой: первая «status:» после «- id: X». Правка текста,
+# а не yaml.dump: тот стёр бы комментарии карты. Чего строкой не найти
+# (карточка в одну строку, удалённая), остаётся как было — повторная сверка
+# это увидит и откажет целиком.
+revert_statuses() {  # $1 — вердикт сторожа «id(было->стало) …»
+    python3 - "$DEVMAP" "$1" <<'PY'
+import re, sys
+path, verdict = sys.argv[1], sys.argv[2]
+wanted = dict(re.findall(r"(\S+?)\((\S+?)->\S+?\)", verdict))
+lines = open(path, encoding="utf-8").read().split("\n")
+card = None
+for i, line in enumerate(lines):
+    card_line = re.match(r"\s*- id: (\S+)\s*$", line)
+    if card_line:
+        card = card_line.group(1)
+        continue
+    status_line = re.match(r"(\s*)status: \S+", line)
+    if status_line and card in wanted:
+        lines[i] = status_line.group(1) + "status: " + wanted.pop(card) + line[status_line.end():]
+open(path, "w", encoding="utf-8").write("\n".join(lines))
+PY
+}
+
+sample_shas() { printf '%s\n' "$ITEMS" | grep -oP 'коммит \K[0-9a-f]{10}'; }
 
 # Встроенная сверка: коммиты после водораздела (или за $DAYS дней) без
 # трейлера `Dev-Map:` и не трогающие ТОЛЬКО сам манифест.
@@ -392,9 +435,13 @@ $ITEMS
    с summary и done_at (дата из строки выше или сегодняшняя), не меняя чужие поля.
 2а. Причина «работа без следа в карте» означает: ссылка на задачу есть, но за тот день
    её запись не менялась — значит на дашборде дня нет. Лечится ровно пунктом чек-листа
-   у названной задачи с датой из причины (или сменой её статуса, если работа его меняет).
+   у названной задачи с датой из причины.
    Даже если задача стоит «ждёт теста» или «готово» — пункт всё равно нужен: иначе
    дневной работе негде оказаться.
+2б. Статус меняй только у карточки в plan: на wip или test, и только если в её новом
+   пункте назван SHA коммита из списка выше. Любой другой статус существующей
+   карточки не трогай: демон вернёт его к прежнему, а удалённую карточку не
+   простит — отвергнет всю правку вместе с пропусками.
 3. Если это самостоятельная работа — заведи новую задачу в подходящем направлении:
    id, title, summary, status (done только если протестировано владельцем, иначе test),
    volume (loc по диффу, complexity и tokens_k — оценка), when с датами.
@@ -493,12 +540,20 @@ ARCHIVE=docs/dev-map-archive.yaml
 if [ -n "$(git -C "$PROJECT_DIR" status --porcelain -- "$ARCHIVE")" ]; then
     COMMIT_PATHS+=("$ARCHIVE")
 fi
+# Сторож отвергает строку, а не правку: недопустимый статус возвращается к
+# прежнему, пропуски едут в коммит. Отказ целиком из-за одной строки стоил
+# 17.11 и 19.11.2026 всей ночной правки и тревоги «демон мёртв». Целиком —
+# только то, что строкой не вернуть: пропавшая карточка и нечитаемая карта.
 if [ -n "$(git -C "$PROJECT_DIR" status --porcelain -- dev-map.yaml)" ]; then
-    CHANGED=$(смененные_статусы "$STATUSES_BEFORE" <(printf '%s\n' "$ITEMS" | grep -oP 'коммит \K[0-9a-f]{10}')) \
-        || CHANGED=MAP_UNREADABLE
-    if [ -n "$CHANGED" ]; then
+    CHANGED=$(смененные_статусы "$STATUSES_BEFORE" <(sample_shas)) || CHANGED=MAP_UNREADABLE
+    REVERTED=$CHANGED
+    if [ -n "$REVERTED" ]; then
         REJECTED="$LOG_DIR/devmap/rejected-$(date +%Y%m%d-%H%M%S).yaml"
         cp -p "$DEVMAP" "$REJECTED"
+        revert_statuses "$REVERTED"
+        CHANGED=$(смененные_статусы "$STATUSES_BEFORE" <(sample_shas)) || CHANGED=MAP_UNREADABLE
+    fi
+    if [ -n "$CHANGED" ]; then
         cp -p "$MAP_BEFORE" "$DEVMAP"
         if [ "$CHANGED" = MAP_UNREADABLE ]; then
             say "карта после модели не читается — возвращена к снимку до модели, отвергнутая лежит в $REJECTED, водораздел на месте"
@@ -508,6 +563,9 @@ if [ -n "$(git -C "$PROJECT_DIR" status --porcelain -- dev-map.yaml)" ]; then
         alive
         exit 1
     fi
+    [ -z "$REVERTED" ] || say "статус сменила модель — возвращён к прежнему: $REVERTED; правка модели как была лежит в $REJECTED"
+fi
+if [ -n "$(git -C "$PROJECT_DIR" status --porcelain -- dev-map.yaml)" ]; then
     # add — часть коммита: занятый чужим git index.lock даёт код 128, и под
     # set -e демон вышел бы без метки жизни и без строки в журнал.
     if git -C "$PROJECT_DIR" add -- "${COMMIT_PATHS[@]}" \

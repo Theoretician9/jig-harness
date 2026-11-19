@@ -286,7 +286,7 @@ if [ -n "$project_dir" ] && cd "$project_dir" 2>/dev/null; then
     fi
 
     dirty=$(git status --porcelain 2>/dev/null | grep -v '^??' | wc -l)
-    [ "${dirty:-0}" -gt 0 ] && { echo "⚠ незакоммичено файлов: $dirty"; git status --short 2>/dev/null | grep -v '^??' | head -5 | sed 's/^/    /'; }
+    [ "${dirty:-0}" -gt 0 ] && { echo "⚠ незакоммичено файлов: $dirty"; git -c core.quotepath=false status --short 2>/dev/null | grep -v '^??' | head -5 | sed 's/^/    /'; }
 
     # Свежесть документа передачи меряется КОММИТАМИ, а не mtime файла: передача
     # всегда пишется за минуту ДО коммита и входит в него же, поэтому сравнение

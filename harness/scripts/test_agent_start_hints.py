@@ -41,7 +41,9 @@ claude-run.sh --класс оркестратор) или сам claude-run.sh.
     «start-agent.sh --команда» — только когда её не посчитать);
   * `start-agent.sh --команда` печатает ту же komanda_agenta(AGENT_START_CMD) стенда.
 
-Дверь мутаций: START_HINTS_ROOT — корень пакета под пробой.
+Двери мутаций: START_HINTS_ROOT — корень пакета под пробой; START_HINTS_INSTALLER —
+файл USTANOVIT.sh под пробой (прибор мутаций подставляет в дверь путь одного файла,
+а не каталог пакета; остальные источники читаются из корня пакета).
 Прогон: python3 scripts/test_agent_start_hints.py   Код: 0 — все случаи прошли.
 """
 import os
@@ -116,7 +118,7 @@ def installer_env(root: Path, variant: str) -> dict:
 
 def installer_variants(pkg: Path, root: Path) -> dict:
     """{вариант канала: строки вывода осталось_руками}."""
-    source = (pkg / "USTANOVIT.sh").read_text(encoding="utf-8")
+    source = Path(os.environ.get("START_HINTS_INSTALLER") or pkg / "USTANOVIT.sh").read_text(encoding="utf-8")
     body = "\n".join(extract(source, f) for f in ("заголовок", "скажи", "осталось_руками"))
     if "осталось_руками()" not in body:
         return {}

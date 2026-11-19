@@ -22,6 +22,9 @@
 #     Строки хакатона и выборки после полной её не заслоняют; битая строка и
 #     строка-не-объект — не итог (и без трассы Python в выводе); более поздняя
 #     красная полная строка того же sha — ворота идут. Строка без «код» — не итог;
+#   * Ж (спека тяжёлых прогонов): вместо «sha = HEAD» — последняя полная строка, чей sha —
+#     предок HEAD, если между ними и в рабочем дереве только добавленные строки в классе
+#     DAEMON_OWNED_PATHS под память/ (судья service-only-diff.py, раздел 6);
 #   * иначе — полный прогон gates.sh как сейчас: другой sha, master ушёл после ворот,
 #     дерево грязное сейчас, итог «чисто»: false, красный итог, режим хакатон или
 #     выборка, строка без sha (старый формат), файла нет; красные ворота — отказ 1;
@@ -264,6 +267,100 @@ OUT=$( ( . "$T/lib.sh"
 case_check "сухой прогон сборки: код 0" "да" "$(printf '%s' "$OUT" | grep -q 'rc=0' && echo да || echo "нет: ${OUT:0:200}")"
 case_check "сборка: check-secrets.sh по каталогу сборки — 1 раз" "1" "$(calls "$d" "^secrets $d/build\$")"
 case_check "сборка: check-secrets.sh по PROJECT_DIR — 0 раз" "0" "$(calls "$d" "^secrets $d/proj\$")"
+
+echo "── 6. Ж: зелёный итог на A годен через служебные коммиты (спека тяжёлых прогонов, Ж) ──"
+# Контракт Ж: берётся ПОСЛЕДНЯЯ полная строка, чей sha — предок HEAD, и судья
+# `service-only-diff.py <sha> HEAD --под память/` даёт 0 (только класс DAEMON_OWNED_PATHS
+# и только добавленные строки); дерево сейчас чисто, кроме добавлений в класс (судья в
+# режиме рабочего дерева). Судья — настоящий scripts/service-only-diff.py, скопированный
+# в каталог скриптов двора; класс — harness.conf двора (дверь HARNESS_CONF). Пока судьи
+# нет, «взят» красный, «не взят» зелёный — как и у механизма без Ж.
+ZH_KEY='DAEMON_OWNED_PATHS="память/.tasks-triaged память/.orders-processed память/.details-triaged память/.указания-разобрано docs/приёмка/"'
+dvor_zh() {  # $1 = двор → двор с памятью, кодом, карантином и зелёным итогом на A
+    local d="$1"
+    dvor "$d"
+    mkdir -p "$d/proj/память" "$d/proj/scripts" "$d/proj/harness/config" "$d/proj/docs/приёмка"
+    printf 'отметка 0\n' > "$d/proj/память/.tasks-triaged"
+    printf 'указание владельца\n' > "$d/proj/память/ORDERS.md"
+    printf 'print(1)\n' > "$d/proj/scripts/x.py"
+    printf 'карантин: []\n' > "$d/proj/harness/config/gates-quarantine.yaml"
+    printf 'очередь\n' > "$d/proj/docs/приёмка/очередь.md"
+    g -C "$d/proj" add -A; g -C "$d/proj" commit -qm "A"
+    printf '%s\n' "$ZH_KEY" > "$d/harness.conf"
+    [ -f "$HERE/service-only-diff.py" ] && cp "$HERE/service-only-diff.py" "$d/stubs/"
+    row "$d" "$(full_row обычный 0 0 0 0)"
+}
+zh_commit() {  # $1 = двор, $2 = сообщение → коммит всего, что на диске
+    g -C "$1/proj" add -A; g -C "$1/proj" commit -qm "$2"
+}
+zh_lock1() {  # как lock1, но с классом двора и судьёй в каталоге скриптов двора
+    local d="$1"
+    ( . "$T/lib.sh"; PROJECT_DIR="$d/proj" SCRIPTS_REAL="$d/stubs" HARNESS_CONF="$d/harness.conf" \
+      CHECK_ONLY=0 zamok_vorot "$d/log" "$d/stubs" 2>&1 ); echo "rc=$?"
+}
+zh_taken() {  # $1 = имя, $2 = двор → итог A взят: gates.sh не шёл, код 0, «замок 1»
+    local OUT; OUT=$(zh_lock1 "$2")
+    case_check "Ж $1: итог взят — gates.sh не запущен" "0" "$(full_runs "$2")"
+    case_check "Ж $1: код 0 и «замок 1»" "да" \
+        "$(printf '%s' "$OUT" | grep -q 'rc=0' && printf '%s' "$OUT" | grep -q 'замок 1' && echo да || echo нет)"
+}
+zh_not_taken() {  # $1 = имя, $2 = двор → итог A не взят: полный прогон один раз
+    local OUT; OUT=$(zh_lock1 "$2")
+    case_check "Ж $1: итог не взят — gates.sh запущен один раз" "1" "$(full_runs "$2")"
+}
+d="$T/zh-a"; dvor_zh "$d"
+printf 'отметка 1\n' >> "$d/proj/память/.tasks-triaged"; zh_commit "$d" "отметка"
+zh_taken "(а) после A — коммит добавленной строки .tasks-triaged" "$d"
+d="$T/zh-a2"; dvor_zh "$d"
+printf 'отметка 1\n' >> "$d/proj/память/.tasks-triaged"; zh_commit "$d" "отметка 1"
+printf 'отметка 2\n' >> "$d/proj/память/.tasks-triaged"; zh_commit "$d" "отметка 2"
+zh_taken "(а') после A — два служебных коммита" "$d"
+d="$T/zh-a3"; dvor_zh "$d"
+printf 'отметка 1\n' >> "$d/proj/память/.tasks-triaged"
+zh_taken "(а'') HEAD = A, отметка дописана и не закоммичена (ревью ЕЖ п. 3, publish.sh:171)" "$d"
+d="$T/zh-b"; dvor_zh "$d"
+printf 'print(2)\n' >> "$d/proj/scripts/x.py"; zh_commit "$d" "код"
+zh_not_taken "(б) правка scripts/x.py" "$d"
+d="$T/zh-v"; dvor_zh "$d"
+printf '# правка\n' >> "$d/proj/harness/config/gates-quarantine.yaml"; zh_commit "$d" "карантин"
+zh_not_taken "(в) правка harness/config/gates-quarantine.yaml" "$d"
+d="$T/zh-g"; dvor_zh "$d"
+printf 'отметка 1\n' >> "$d/proj/память/.tasks-triaged"; zh_commit "$d" "отметка"
+sed -i '1d' "$d/proj/память/.tasks-triaged"; zh_commit "$d" "удалена строка"
+zh_not_taken "(г) удалена строка .tasks-triaged" "$d"
+d="$T/zh-d"; dvor_zh "$d"
+printf 'указание 2\n' >> "$d/proj/память/ORDERS.md"; zh_commit "$d" "владелец"
+zh_not_taken "(д) правка память/ORDERS.md" "$d"
+d="$T/zh-e"; dvor_zh "$d"
+printf 'print(2)\n' >> "$d/proj/scripts/x.py"; zh_commit "$d" "код"
+printf 'отметка 1\n' >> "$d/proj/память/.tasks-triaged"; zh_commit "$d" "отметка"
+zh_not_taken "(е) код, затем служебный — судится вся разница от A, не последний коммит (ревью ЕЖ п. 4)" "$d"
+d="$T/zh-zh"; dvor_zh "$d"
+g -C "$d/proj" mv память/.tasks-triaged память/.details-triaged; zh_commit "$d" "mv"
+zh_not_taken "(ж) git mv .tasks-triaged в другое имя класса (ревью ЕЖ п. 5)" "$d"
+d="$T/zh-z"; dvor_zh "$d"
+g -C "$d/proj" rm -q память/.tasks-triaged; zh_commit "$d" "rm"
+zh_not_taken "(з) удалён файл класса" "$d"
+d="$T/zh-i"; dvor_zh "$d"
+printf 'строка\n' >> "$d/proj/docs/приёмка/очередь.md"; zh_commit "$d" "приёмка"
+zh_not_taken "(и) docs/приёмка/ в ключе, но не под память/ — его читают проверки" "$d"
+d="$T/zh-k"; dvor_zh "$d"
+row "$d" "$(full_row обычный 2 2 0 2)"
+printf 'отметка 1\n' >> "$d/proj/память/.tasks-triaged"; zh_commit "$d" "отметка"
+zh_not_taken "(к) после зелёной на A — красная полная на A, затем служебный коммит" "$d"
+d="$T/zh-l"; dvor_zh "$d"
+printf 'отметка 1\n' >> "$d/proj/память/.tasks-triaged"; zh_commit "$d" "отметка"
+printf 'лишний\n' > "$d/proj/scripts/new.py"
+zh_not_taken "(л) служебный коммит, но неотслеженный файл вне класса сейчас" "$d"
+# Строка с sha не из истории HEAD (ворота в дереве помощника) — не «последняя полная»:
+# судья смотрел бы её разницу, а не разницу от A, и годный итог A пропадал бы.
+d="$T/zh-m"; dvor_zh "$d"
+g -C "$d/proj" checkout -q -b помощник
+printf 'print(3)\n' >> "$d/proj/scripts/x.py"; zh_commit "$d" "код помощника"
+row "$d" "$(full_row обычный 0 0 0 0)"
+g -C "$d/proj" checkout -q master
+printf 'отметка 1\n' >> "$d/proj/память/.tasks-triaged"; zh_commit "$d" "отметка"
+zh_taken "(м) после A — зелёная полная на sha чужой ветки, затем служебный коммит" "$d"
 
 [ "$CASES_PATHS" -gt 0 ] || { echo "FAIL: ни одного случая"; exit 1; }
 echo "SELFTEST: $([ "$CASES_FAILED" = 0 ] && echo зелёный || echo КРАСНЫЙ) ($CASES_PATHS проверок, неудач $CASES_FAILED)"

@@ -8,7 +8,9 @@
      `# KEY=` (описан, умолчание держит код);
   2. каждый ключ «ключи:» доустановки стоит в образце НЕзакомментированным:
      чистая установка обязана получить то же, что обновлённая;
-  3. ключ из «снять_ключи:» в образце не стоит.
+  3. ключ из «снять_ключи:» в образце не стоит;
+  4. ни живой конфиг, ни образец не ставят ключ дважды: загрузчик берёт
+     последнее, и правка владельца в первой строке молча не работает.
 
 Почему только ключи живого конфига, а не все имена из кода: синтаксический
 поиск даёт сотни имён вне образца (локальные переменные, двери проб).
@@ -18,6 +20,7 @@
 """
 import argparse
 import os
+from collections import Counter
 import re
 import sys
 from pathlib import Path
@@ -33,6 +36,14 @@ SKIP_DIRS = {".git", "__pycache__", "node_modules", ".tasks"}
 SKIP_PATHS = {Path(".claude/worktrees")}
 COMMENTED_KEY = re.compile(r"^\s*#\s*([A-Z][A-Z0-9_]*)=", re.MULTILINE)
 NAME = re.compile(r"[A-Z0-9_]+")
+# Та же строка присваивания, что у загрузчика (config.из_текста): судим то, что он прочтёт.
+ASSIGNED = re.compile(r"\s*([A-Z][A-Z0-9_]*)\s*=")
+
+
+def repeated(text: str) -> dict[str, int]:
+    """Ключ → сколько раз присвоен, только поставленные больше одного раза."""
+    counts = Counter(m.group(1) for line in text.splitlines() if (m := ASSIGNED.match(line)))
+    return {key: n for key, n in sorted(counts.items()) if n > 1}
 
 
 def code_files(root: Path):
@@ -73,7 +84,8 @@ def main() -> int:
     jobs = yaml.safe_load(args.jobs.read_text(encoding="utf-8")) or {}
 
     live_path = args.live or Path(config.путь_harness_conf())
-    live = set(config.из_файла(str(live_path))) if live_path.is_file() else set()
+    live_text = live_path.read_text(encoding="utf-8", errors="replace") if live_path.is_file() else ""
+    live = set(config.из_текста(live_text))
     code = code_names(args.code_root) if live else set()
 
     found = [f"{key}: нет в образце — живой конфиг его объявил и код читает"
@@ -82,6 +94,9 @@ def main() -> int:
               for key in sorted(set(jobs.get("ключи") or {}) - active)]
     found += [f"{key}: снят («снять_ключи:»), а образец его раздаёт"
               for key in sorted(set(jobs.get("снять_ключи") or []) & active)]
+    found += [f"{key}: стоит дважды и больше ({n}) в {where} — загрузчик берёт последнее"
+              for where, text in ((live_path, live_text), (args.sample, sample))
+              for key, n in repeated(text).items()]
     if not found:
         # Число судимого в приговоре отличает «проверено» от «ничего не судили».
         print(f"чисто: ключей живого конфига {len(live)}, "

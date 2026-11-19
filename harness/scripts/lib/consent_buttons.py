@@ -13,7 +13,11 @@ consent-buttons.jsonl пишет только этот модуль и толь�
   unsent  <log> <secrets_dir>   → строки JSON {nonce, target, text, reply_markup} для отправки;
                                   target = "<вид>:<цель>" (без вида, с «/» в начале — удаление)
   sent    <log> <nonce> <target> → ответ sendMessage на stdin; пишет «отправлено» только при ok:true
-  judge   <log> <owner_id> [<secrets_dir>] → callback_query на stdin; пишет «да»/«нет», если нажатие прошло
+  judge   <log> <chat_id> [<secrets_dir> [<owner_id>]] → callback_query на stdin; пишет «да»/«нет»,
+                                  если нажатие прошло: chat.id = канал (TG_CHAT_ID), from.id = владелец
+                                  (TG_OWNER_ID; пусто — равен каналу, как в личке)
+  sender  <chat_id> [<owner_id>] → .message на stdin; {} — пишет владелец, иначе {answer, log, tell}:
+                                  тот же судья, что у нажатия, для текста в канале-группе
 """
 from __future__ import annotations
 
@@ -392,17 +396,35 @@ def kick_text(verdict: dict, secrets_dir: str) -> str:
     return " ".join(parts)
 
 
-def judge(log: Path, owner_id: str, callback: dict, secrets_dir: str = "") -> dict:
+NO_OWNER_KEY = "Не знаю твой id: впиши TG_OWNER_ID в install.conf"
+
+
+def sender_refusal(chat_id: str, owner_id: str, sender, chat) -> tuple[str, str] | None:
+    """(ответ, причина), если жмёт или пишет не владелец в своём канале; None — владелец.
+
+    Один судья нажатия и текста. Канал и человек — разные числа: в группе chat.id — id группы,
+    from.id — личный id владельца; owner_id пуст — равен каналу, как в личке."""
+    owner_id = owner_id or chat_id
+    if owner_id.startswith("-"):
+        # Отрицательный id — группа, человеком он не бывает: без ключа отказ называет ключ.
+        return NO_OWNER_KEY, f"канал — группа {chat_id}, а TG_OWNER_ID в паспорте нет; from.id={sender}"
+    if str(sender) != owner_id:
+        return "Это не твой запрос", f"чужой from.id={sender}"
+    if str(chat) != chat_id:
+        return "Это не твой запрос", f"чужой chat.id={chat}"
+    return None
+
+
+def judge(log: Path, chat_id: str, callback: dict, secrets_dir: str = "", owner_id: str = "") -> dict:
     """Вердикт для диспетчера: {answer, log, edit, kick}. Записывает решение.
 
     kick — пинок смене, только на нажатие владельца (записанное и отвергнутое)."""
     sender = (callback.get("from") or {}).get("id")
     message = callback.get("message") or {}
     chat = (message.get("chat") or {}).get("id")
-    if str(sender) != owner_id:
-        verdict = reject("Это не твой запрос", f"чужой from.id={sender}")
-    elif str(chat) != owner_id:
-        verdict = reject("Это не твой запрос", f"чужой chat.id={chat}")
+    refusal = sender_refusal(chat_id, owner_id, sender, chat)
+    if refusal:
+        verdict = reject(*refusal)
     else:
         verdict = decide(log, callback, sender, message)
         verdict["kick"] = kick_text(verdict, secrets_dir)
@@ -442,7 +464,25 @@ def decide(log: Path, callback: dict, sender, message: dict) -> dict:
             "nonce": nonce, "sent": sent, "decision": event}
 
 
+def sender_verdict(chat_id: str, owner_id: str, message: dict) -> dict:
+    """Текст в канале: {} — слово владельца; отказ говорится в канал (tell), только когда
+    владельца не узнать без ключа — чужим участникам группы бот не отвечает."""
+    refusal = sender_refusal(chat_id, owner_id, (message.get("from") or {}).get("id"),
+                             (message.get("chat") or {}).get("id"))
+    if refusal is None:
+        return {}
+    return {"answer": refusal[0], "log": refusal[1], "tell": refusal[0] == NO_OWNER_KEY}
+
+
 def main(argv: list[str]) -> int:
+    if argv[1] == "sender":
+        try:
+            message = json.loads(sys.stdin.read())
+        except ValueError:
+            message = {}
+        print(json.dumps(sender_verdict(argv[2], argv[3] if len(argv) > 3 else "",
+                                        message if isinstance(message, dict) else {}), ensure_ascii=False))
+        return 0
     command, log = argv[1], Path(argv[2])
     if command == "unsent":
         for row in unsent(log, argv[3]):
@@ -458,7 +498,7 @@ def main(argv: list[str]) -> int:
         except ValueError:
             callback = {}
         print(json.dumps(judge(log, argv[3], callback if isinstance(callback, dict) else {},
-                               argv[4] if len(argv) > 4 else ""),
+                               argv[4] if len(argv) > 4 else "", argv[5] if len(argv) > 5 else ""),
                          ensure_ascii=False))
     return 0
 

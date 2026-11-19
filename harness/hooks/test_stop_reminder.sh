@@ -37,6 +37,9 @@ door_copy() {  # $1 — каталог копии: hooks/stop_reminder.sh, lib/,
     mkdir -p "$1/hooks"
     cp -r "$SRC_SCRIPTS/lib" "$1/lib"
     cp "$SRC_SCRIPTS/deploy_guard.py" "$1/"
+    # Единый судья класса путей (ревью ЕЖ п. 6) лежит рядом, как в раскладке; пока его
+    # нет, копировать нечего — случаи судьи ниже красные.
+    [ -f "$SRC_SCRIPTS/service-only-diff.py" ] && cp "$SRC_SCRIPTS/service-only-diff.py" "$1/"
     cp "$HOOK_SRC" "$1/hooks/stop_reminder.sh"
 }
 DOOR_COPY=$(mktemp -d)
@@ -79,10 +82,12 @@ new_stand() {
 touch_file() { printf 'правка\n' >> "$T/repo/$1"; }
 
 # Прогон хука: печатает stderr, код — в $T/rc.
+# Направление закреплено за линией карты стенда (h): хук зовёт work-queue.py, а тот
+# под чужим HARNESS_ACTIVE_LINE («продукт») искал бы задачи вне стенда и молчал.
 run_hook() {
     local rc=0 out
     out=$(cd "$T" && printf '{}' | env -u HANDOVER_MAX_AGE_MIN -u DEVMAP_TRACE_FRESH_MIN \
-            HARNESS_DOOR_STAND_HOME="$T" \
+            HARNESS_ACTIVE_LINE=h HARNESS_DOOR_STAND_HOME="$T" \
             HARNESS_INSTALL_CONF="$T/install.conf" HARNESS_CONF="$T/harness.conf" \
             PROJECT_DIR="$T/repo" LOG_DIR="$T/log" \
             timeout 60 bash "${STAND_HOOK:-$HOOK}" 2>&1 >/dev/null) || rc=$?
@@ -152,6 +157,61 @@ touch_file "память/.tasks-triaged"
 out=$(run_hook)
 verdict "$(printf '%s' "$out" | grep -q "$DIRTY_WORDS: 1\$" && echo 1 || echo 0)" \
     "ключа DAEMON_OWNED_PATHS нет — файл считается, список не вшит в код" \
+    "хук сказал: ${out:-ничего}"
+
+# ── Е.1: служебные отметки разбора — в классе ключа настоящего harness.conf ──
+# Спека тяжёлых прогонов, раздел Е.1: отметки разбора пишут механизмы, коммитит
+# демон памяти пачкой. Ловит поломку «ключ в harness.conf не дополнен»: тогда демон
+# коммитил бы их как правку владельца, а stop-хук звал бы их работой смены. Ключ
+# берётся из НАСТОЯЩЕГО конфига проекта (в пакете — harness/config рядом с hooks/).
+REAL_CONF="$HERE/../../harness/config/harness.conf"
+[ -f "$REAL_CONF" ] || REAL_CONF="$HERE/../config/harness.conf"
+REAL_KEY=$(grep -m1 '^DAEMON_OWNED_PATHS=' "$REAL_CONF" 2>/dev/null || true)
+for mark in .orders-processed .details-triaged .указания-разобрано; do
+    new_stand "$REAL_KEY"
+    printf 'отметка\n' > "$T/repo/память/$mark"
+    git -C "$T/repo" add -- "память/$mark"
+    git -C "$T/repo" commit -q -m "отметка $mark"
+    touch_file "память/$mark"
+    out=$(run_hook)
+    verdict "$(printf '%s' "$out" | grep -q "$DIRTY_WORDS" && echo 0 || echo 1)" \
+        "Е.1: память/$mark в DAEMON_OWNED_PATHS настоящего harness.conf — не «работа без коммита»" \
+        "ключ: ${REAL_KEY:-нет}; хук сказал: $(printf '%s' "$out" | grep "$DIRTY_WORDS")"
+done
+
+# ── Е/Ж: класс путей судит ОДИН судья — service-only-diff.py --путь (ревью ЕЖ п. 6) ──
+# Поломка: хук держит свой разбор ключа (встроенный python), а memory-commit.sh и
+# Ж — свои; правило класса расходится молча. Стенд: копия хука с подставным судьёй,
+# который отвечает НАОБОРОТ ключу (scripts/work.sh — в классе, .tasks-triaged — нет)
+# и пишет каждый вызов. Хук со своим разбором ключа красит оба случая; хук, который
+# зовёт судью, — нет. Правильность самого судьи судит scripts/test_service_only_diff.py.
+JUDGE_DOOR=$(mktemp -d)
+STANDS+=("$JUDGE_DOOR")
+door_copy "$JUDGE_DOOR"
+cat > "$JUDGE_DOOR/service-only-diff.py" <<'PY'
+import os, sys
+args = sys.argv[1:]
+with open(os.path.join(os.environ["LOG_DIR"], "judge-calls.txt"), "a", encoding="utf-8") as fh:
+    fh.write(" ".join(args) + "\n")
+path = args[args.index("--путь") + 1] if "--путь" in args else ""
+sys.exit(0 if path == "scripts/work.sh" else 1)
+PY
+new_stand "$KEY"
+STAND_HOOK="$JUDGE_DOOR/hooks/stop_reminder.sh"
+touch_file "scripts/work.sh"
+out=$(run_hook)
+verdict "$(printf '%s' "$out" | grep -q "$DIRTY_WORDS" && echo 0 || echo 1)" \
+    "судья: scripts/work.sh, который судья назвал классом, — не «работа без коммита»" \
+    "хук сказал: $(printf '%s' "$out" | grep "$DIRTY_WORDS")"
+verdict "$(grep -qF -- '--путь scripts/work.sh' "$T/log/judge-calls.txt" 2>/dev/null && echo 1 || echo 0)" \
+    "судья: хук спросил судью «--путь scripts/work.sh»" \
+    "вызовы судьи: $(tr '\n' ';' < "$T/log/judge-calls.txt" 2>/dev/null || echo нет)"
+new_stand "$KEY"
+STAND_HOOK="$JUDGE_DOOR/hooks/stop_reminder.sh"
+touch_file "память/.tasks-triaged"
+out=$(run_hook)
+verdict "$(printf '%s' "$out" | grep -q "$DIRTY_WORDS: 1\$" && echo 1 || echo 0)" \
+    "судья: память/.tasks-triaged, который судья назвал не классом, — «изменённых без коммита: 1»" \
     "хук сказал: ${out:-ничего}"
 
 # ══ «СЛЕДУЮЩАЯ РАБОТА» не называет сделанную задачу (п.6 отчёта чужого сервера 25.10) ══

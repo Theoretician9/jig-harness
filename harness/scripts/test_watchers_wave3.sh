@@ -888,8 +888,10 @@ SENDERS_OUT="$(judge senders "$SENDERS_DATA" "$ROOT/scripts/check-owner-senders.
     "$DEMONS/acceptance-watch.sh" "$DEMONS/check-builder.sh" "$DEMONS/extensions-watch.sh" \
     "$DEMONS/memory-revision.sh" "$DEMONS/product-health.sh" "$DEMONS/sentinel.sh" \
     "$DEMONS/session-warden.sh" 2>&1)"
-case_check "owner-senders: ключи семи сторожей — девять записей, все card" "записей 9, не card: -" \
-    "$(sed -n 1p <<< "$SENDERS_OUT")"
+# Девять — записи волны 3; сторожа с тех пор поднимают и новые ключи (скорость,
+# ранний выход). Судится нижняя граница и вид каждой записи, а не точный счёт.
+case_check "owner-senders: ключи семи сторожей — не меньше девяти записей, все card" "да, не card: -" \
+    "$(sed -n 1p <<< "$SENDERS_OUT" | awk '{n = $2 + 0; sub(/^записей [0-9]+, /, ""); print (n >= 9 ? "да" : "записей " n) ", " $0}')"
 case_check "owner-senders: долга не осталось, debt_max 0" "долг 0, потолок 0" \
     "$(sed -n 2p <<< "$SENDERS_OUT")"
 fi

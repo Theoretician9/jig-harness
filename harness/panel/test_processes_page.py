@@ -75,7 +75,10 @@ DISPATCHER = find_up("scripts/process-dispatcher.py")
 STATE_MODULE = find_up("scripts/lib/process_state.py")
 DEMON_SCRIPT = find_up("scripts/claude-demon.sh")
 SOURCE_MECHANISMS = find_up("config/mechanisms.yaml") or find_up("harness/config/mechanisms.yaml")
-PLAYWRIGHT_PYTHON = os.environ.get("PANEL_PLAYWRIGHT_PYTHON") or "/home/user/.local/share/playwright-venv/bin/python"
+# От дома хозяина копии: сборка переписывает имя нашего пользователя, и вшитый путь
+# у любой копии указывал бы в чужой дом. Браузеры playwright ищет тоже под HOME.
+PLAYWRIGHT_PYTHON = (os.environ.get("PANEL_PLAYWRIGHT_PYTHON")
+                     or str(Path.home() / ".local/share/playwright-venv/bin/python"))
 # 20 видимых строк таблицы расходов (спека hr.zapuskov §4.2) — карточки на телефоне: прежние 3 500 недостижимы.
 # Наибольший замер стенда на живых данных — 6 306 px; порог 6 400 + 10 % запаса = 7 040, решение
 # управляющего по §5 п.8. Выше — снова лента, а не рост числа процессов.

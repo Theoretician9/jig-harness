@@ -50,6 +50,13 @@ for key, path in CONF.items():
 TOOL = str(PKG / "harness" / "scripts" / "tool.py")
 REGISTRY = str(PKG / "harness" / "config" / "probe-mutations.yaml")
 DOOR_WORDS = ["очередь слияния", "merge-queue.py", "в своём дереве"]
+# Скрипты «из scratchpad»: вне дерева помощника, их текст хук читает сам.
+AD_HOC = STAND / "scratch" / "patch_tool.py"
+AD_HOC_PKG = STAND / "scratch" / "fix_registry.py"
+AD_HOC.parent.mkdir()
+AD_HOC.write_text("import sys, pathlib\np = pathlib.Path(sys.argv[1]); p.write_text('y')\n", encoding="utf-8")
+AD_HOC_PKG.write_text(f"from pathlib import Path\nPath('{REGISTRY}').write_text('y')\n", encoding="utf-8")
+(PKG / "harness" / "razlozhit-harnes.sh").write_text("#!/bin/bash\n", encoding="utf-8")
 
 checked = failed = 0
 
@@ -111,6 +118,41 @@ denied("Bash tee", bash(f"printf y | tee {REGISTRY} >/dev/null"))
 denied("Bash cd в пакет и mv", bash(f"cd {PKG}/harness && mv scripts/tool.py scripts/t2.py"))
 denied("Bash python write_text", bash(
     f"python3 -c \"import pathlib; pathlib.Path('{TOOL}').write_text('y')\""))
+
+print("ключ 1, дерево помощника: python и patch с путём пакета в тексте — отказ (19.11: 4 помощника)")
+PY_DOOR = ["очередь слияния", "merge-queue"]
+denied("python heredoc: write_text по списку путей", bash(
+    f"python3 - <<'PY'\nfrom pathlib import Path\nfor f in ['harness/config/x.yaml', '{REGISTRY}']:\n"
+    f"    p = Path(f); p.write_text(p.read_text() + 'y')\nPY"), PY_DOOR)
+denied("python heredoc: каталог пакета и open(..., 'w')", bash(
+    f"python3 - <<'EOF'\nP = '{PKG}/harness/config'\nopen(P + '/probe-mutations.yaml', 'w').write('y')\nEOF"),
+    PY_DOOR)
+denied("python -c shutil.copyfile в пакет", bash(
+    f"python3 -c \"import shutil; shutil.copyfile('scripts/tool.py', '{TOOL}')\""), PY_DOOR)
+denied("python в cd пакета: скрипт из scratchpad, запись в нём", bash(
+    f"cd {PKG} && python3 {AD_HOC} harness/scripts/tool.py"), PY_DOOR)
+denied("python: скрипт из scratchpad пишет пакет, путь только в скрипте", bash(f"python3 {AD_HOC_PKG}"), PY_DOOR)
+denied("patch файла пакета через переменную", bash(f"P={PKG} && patch $P/harness/scripts/tool.py t.diff"),
+       PY_DOOR)
+denied("patch -R по пути пакета", bash(f"patch -R {TOOL} t.diff"), PY_DOOR)
+denied("cd пакета && patch -p1 < diff", bash(f"cd {PKG} && patch -p1 --no-backup-if-mismatch < /tmp/x.diff"),
+       PY_DOOR)
+denied("patch -d пакета", bash(f"patch -d {PKG} -p1 < /tmp/x.diff"), PY_DOOR)
+denied("cd пакета && git apply", bash(f"cd {PKG} && git apply /tmp/x.patch"), PY_DOOR)
+
+print("ключ 1, дерево помощника: python и patch, которые пакет не пишут, — проходят")
+passed("python -c читает yaml пакета", bash(
+    f"python3 -c \"import yaml; yaml.safe_load(open('{REGISTRY}')); print('ok')\""))
+passed("python heredoc читает пакет, пишет своё дерево без пути пакета", bash(
+    f"python3 - <<'PY'\nprint(open('{TOOL}').read())\nPY\npython3 -c \"open('x.txt', 'w').write('y')\""))
+passed("cmp с пакетом; python пишет своё дерево (звенья судятся порознь)", bash(
+    f"cmp scripts/tool.py {TOOL}; python3 -c \"open('scripts/tool.py', 'w').write('y')\""))
+passed("patch --dry-run на пакет", bash(f"patch --dry-run {TOOL} t.diff"))
+passed("git apply --check в пакете", bash(f"cd {PKG} && git apply --check /tmp/x.patch"))
+passed("python пишет файл пакета без пары (раскладчик)", bash(
+    f"python3 -c \"open('{PKG}/harness/razlozhit-harnes.sh', 'a').write('#')\""))
+passed("python скрипт проекта с путём пакета доводом", bash(
+    f"python3 scripts/compare-with-package.py --starter {PKG}"))
 
 print("ключ 1, дерево помощника: пакет без пары, своё дерево, чтение — проходят")
 for rel in ("harness/razlozhit-harnes.sh", "harness/self/roles/worker.md", "CLAUDE.md",

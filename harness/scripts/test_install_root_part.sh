@@ -152,7 +152,7 @@ plib, lib, U = sys.argv[1], sys.argv[2], sys.argv[3]
 sys.path.insert(0, lib)
 spec = importlib.util.spec_from_file_location("process_library_under_test", plib)
 m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
-conf = {"CHECKS_CPU_QUOTA": "200%", "CHECKS_MEMORY_HIGH": "2G", "CHECKS_MEMORY_MAX": "3G"}
+conf = {"CHECKS_CPU_WEIGHT": "idle", "CHECKS_CPU_QUOTA": "200%", "CHECKS_MEMORY_HIGH": "2G", "CHECKS_MEMORY_MAX": "3G"}
 units = m.checks_units(f"{U}/proj", f"{U}/logs", "agent", conf=conf)
 library = m.load().get("процессы") or {}
 services = {n: s for n, s in units.items() if n.endswith(".service")}

@@ -481,5 +481,233 @@ case_check "Z2 подпись называет отметки разбора с�
 case_check "Z2 сверка состава: оба файла в коммите" \
     "0" "$(grep -c . "$STAND/zhurnal/memory-commit.вывод.назвал-не-внёс" 2>/dev/null || true)"
 
+# ══ Е: служебные отметки — пачкой, не под замком очереди слияния ════════════
+# Спека тяжёлых прогонов, раздел Е, и ревью ЕЖ п. 1, 2, 7. Каждый случай —
+# свой проект, свой LOG_DIR и свой файл замка $LOG_DIR/merge-queue.lock (боевой замок
+# не трогается). Класс служебных путей — ДАННЫЕ: ключ DAEMON_OWNED_PATHS стенда.
+# Время прошлых коммитов задаётся датой коммита, а не ожиданием.
+SERVICE_CLASS="память/.tasks-triaged память/.orders-processed память/.details-triaged память/.указания-разобрано docs/приёмка/"
+
+e_stand() {  # $1 — имя случая; ставит EP (проект), EL (журналы), ELOCK (замок очереди)
+    local d="$STAND/e/$1"
+    EP="$d/proekt"; EL="$d/zhurnal"; ELOCK="$EL/merge-queue.lock"
+    mkdir -p "$EP/scripts/lib" "$EP/память" "$EL"
+    cp "$HERE/board.py" "$HERE/pause.py" "$EP/scripts/"
+    cp "$HERE/lib/config.py" "$EP/scripts/lib/"
+    # Единый судья класса путей (ревью ЕЖ п. 6): демон зовёт его из проекта.
+    cp "$HERE/service-only-diff.py" "$EP/scripts/" 2>/dev/null \
+        || echo "  (судьи класса scripts/service-only-diff.py нет — механизма нет)"
+    printf 'PROJECT_DIR="%s"\nLOG_DIR="%s"\nHEARTBEAT_DIR="%s/heartbeat"\n' "$EP" "$EL" "$EL" \
+        > "$d/install.conf"
+    printf 'MEMORY_COMMIT_FAILS_MAX=3\nMEMORY_COMMIT_LOCK_MAX=5\nDAEMON_OWNED_PATHS="%s"\nMEMORY_SERVICE_COMMIT_MIN=60\nMEMORY_OWNER_WAIT_MIN=30\n' \
+        "$SERVICE_CLASS" > "$d/harness.conf"
+    printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$1" >> "$LOG_DIR/kanal.txt"\n' > "$EP/scripts/tg_send.sh"
+    chmod +x "$EP/scripts/tg_send.sh"
+    git -C "$EP" init -q -b master
+    git -C "$EP" config user.email "proba@stend"
+    git -C "$EP" config user.name "проба"
+    printf 'начало\n' > "$EP/README.md"
+    printf 'указание 0\n' > "$EP/память/ORDERS.md"
+    printf 'отметка 0\n' > "$EP/память/.tasks-triaged"
+    git -C "$EP" add -A
+    e_commit_at 180 "начало"
+}
+
+e_commit_at() {  # $1 — сколько минут назад, $2 — сообщение; коммитит индекс
+    local when
+    when="$(date -d "-$1 minutes" -R)"
+    GIT_AUTHOR_DATE="$when" GIT_COMMITTER_DATE="$when" \
+        git -C "$EP" commit -q --allow-empty -m "$2"
+}
+
+e_progon() {  # $1 — файл вывода демона
+    local d; d="$(dirname "$EP")"
+    env LOG_DIR="$EL" PROJECT_DIR="$EP" HEARTBEAT_DIR="$EL/heartbeat" \
+        HARNESS_DOSKA="$d/доска.json" MEMORY_SUBDIR="память" \
+        HARNESS_PANEL_STATE="$d/panel-state" \
+        HARNESS_INSTALL_CONF="$d/install.conf" HARNESS_CONF="$d/harness.conf" \
+        bash "$DEMON" > "${1:-/dev/null}" 2>&1
+}
+
+e_head() { git -C "$EP" rev-parse HEAD; }
+e_in_head() {  # $1 — путь; да, если он в составе последнего коммита
+    git -C "$EP" -c core.quotepath=false show --name-only --format= HEAD | grep -qxF "$1" \
+        && echo да || echo нет
+}
+e_puls() { [ -f "$EL/heartbeat/memory-commit" ] && echo да || echo нет; }
+
+E_HOLDER=""
+e_hold_lock() {  # держит flock на ELOCK, пока не снят e_free_lock; ждёт, что замок взят
+    flock -x "$ELOCK" sleep 300 &
+    E_HOLDER=$!
+    local i
+    for i in $(seq 1 50); do
+        flock -n "$ELOCK" true 2>/dev/null || return 0
+        sleep 0.1
+    done
+    echo "  ПРОБА СЛОМАНА: замок стенда не взят за 5 с"
+}
+e_free_lock() {
+    [ -n "$E_HOLDER" ] || return 0
+    pkill -P "$E_HOLDER" 2>/dev/null; kill "$E_HOLDER" 2>/dev/null; wait "$E_HOLDER" 2>/dev/null
+    E_HOLDER=""
+}
+
+echo "── Е(а) замок очереди занят, изменены только отметки → коммита нет, пульс стоит (Е(е)) ──"
+# Поломка: демон не смотрит на замок и сдвигает master посреди слияния (17.11: повтор
+# ворот и два отказа кодом 6). Пульс (Е(е)): отложенный обход — состоявшийся обход;
+# без метки сторож пульса назвал бы живого демона мёртвым.
+e_stand a
+printf 'отметка 1\n' >> "$EP/память/.tasks-triaged"
+DO=$(e_head)
+e_hold_lock
+e_progon "$EL/a.out"
+e_free_lock
+case_check "Е(а) под занятым замком коммита нет" "$DO" "$(e_head)"
+case_check "Е(а) правка отметки цела на диске" "да" \
+    "$(grep -q 'отметка 1' "$EP/память/.tasks-triaged" && echo да || echo нет)"
+case_check "Е(е) отложил — метка пульса стоит" "да" "$(e_puls)"
+case_check "Е(а) причина отложенного коммита названа в журнале (замок)" "да" \
+    "$(grep -q 'замок\|merge-queue' "$EL/a.out" && echo да || echo нет)"
+
+echo "── Е(б) замок занят, изменены указания владельца → коммита нет ──"
+# Поломка: «правка владельца — сразу» понята как «мимо замка»: ORDERS.md так же
+# сдвигает master под слиянием, как и отметка.
+e_stand b
+printf 'указание 1\n' >> "$EP/память/ORDERS.md"
+DO=$(e_head)
+e_hold_lock
+e_progon "$EL/b.out"
+e_free_lock
+case_check "Е(б) ORDERS.md под занятым замком не закоммичен" "$DO" "$(e_head)"
+case_check "Е(б) метка пульса стоит" "да" "$(e_puls)"
+
+echo "── Е(в) файл замка есть, но не занят + ORDERS.md → коммит ──"
+# Поломка «проверять существование файла замка»: файл после очереди остаётся всегда,
+# и такой демон не коммитил бы никогда — а (а) с такой ломкой осталась бы зелёной.
+e_stand v
+: > "$ELOCK"
+printf 'указание 1\n' >> "$EP/память/ORDERS.md"
+DO=$(e_head)
+e_progon "$EL/v.out"
+case_check "Е(в) свободный замок: коммит есть" "да" "$([ "$(e_head)" != "$DO" ] && echo да || echo нет)"
+case_check "Е(в) ORDERS.md в коммите" "да" "$(e_in_head память/ORDERS.md)"
+
+echo "── Е(г) только отметки: коммит класса 10 мин назад → нет, 61 мин → есть ──"
+# Поломка: служебные отметки коммитятся каждым обходом (17.11 — 19 коммитов
+# .tasks-triaged в 11 разных часах), порог MEMORY_SERVICE_COMMIT_MIN не судится.
+e_stand g10
+printf 'отметка 1\n' >> "$EP/память/.tasks-triaged"
+git -C "$EP" add -- память/.tasks-triaged
+e_commit_at 10 "отметки 10 мин назад"
+printf 'отметка 2\n' >> "$EP/память/.tasks-triaged"
+DO=$(e_head)
+rm -f "$EL/heartbeat/memory-commit"
+e_progon "$EL/g10.out"
+case_check "Е(г) класс закоммичен 10 мин назад — нового коммита нет" "$DO" "$(e_head)"
+case_check "Е(е) отложил по сроку — метка пульса стоит" "да" "$(e_puls)"
+e_stand g61
+printf 'отметка 1\n' >> "$EP/память/.tasks-triaged"
+git -C "$EP" add -- память/.tasks-triaged
+e_commit_at 61 "отметки 61 мин назад"
+printf 'отметка 2\n' >> "$EP/память/.tasks-triaged"
+e_progon "$EL/g61.out"
+case_check "Е(г) класс закоммичен 61 мин назад — коммит отметок есть" "да" \
+    "$(e_in_head память/.tasks-triaged)"
+
+echo "── Е(г') чужой коммит минуту назад, коммит класса 61 мин назад → коммит ──"
+# Поломка (ревью ЕЖ п. 7): `git log -1 --format=%ct` без путей класса — это время HEAD;
+# любой чужой коммит откладывал бы отметки бесконечно.
+e_stand g1
+printf 'отметка 1\n' >> "$EP/память/.tasks-triaged"
+git -C "$EP" add -- память/.tasks-triaged
+e_commit_at 61 "отметки 61 мин назад"
+printf 'чужое\n' >> "$EP/README.md"
+git -C "$EP" add -- README.md
+e_commit_at 1 "чужой коммит минуту назад"
+printf 'отметка 2\n' >> "$EP/память/.tasks-triaged"
+e_progon "$EL/g1.out"
+case_check "Е(г') время берётся по путям класса — отметки закоммичены" "да" \
+    "$(e_in_head память/.tasks-triaged)"
+# Класс — все пути ключа, а не один изменённый файл: другая отметка класса закоммичена
+# 10 мин назад — срок пачки не вышел. Ловит ломку «время по изменённому файлу».
+e_stand g2
+printf 'разобрано 1\n' > "$EP/память/.orders-processed"
+git -C "$EP" add -- память/.orders-processed
+e_commit_at 10 "другая отметка класса 10 мин назад"
+printf 'отметка 1\n' >> "$EP/память/.tasks-triaged"
+DO=$(e_head)
+e_progon "$EL/g2.out"
+case_check "Е(г') класс — все пути ключа: другая отметка 10 мин назад держит срок" "$DO" "$(e_head)"
+
+echo "── Е(д) ORDERS.md + отметка → один коммит с обоими ──"
+# Поломка: правка владельца коммитится одна, а отметки ждут своего часа отдельным
+# коммитом — лишний сдвиг master.
+e_stand d
+printf 'отметка 1\n' >> "$EP/память/.tasks-triaged"
+git -C "$EP" add -- память/.tasks-triaged
+e_commit_at 5 "отметки 5 мин назад"
+printf 'указание 1\n' >> "$EP/память/ORDERS.md"
+printf 'отметка 2\n' >> "$EP/память/.tasks-triaged"
+DO=$(e_head)
+e_progon "$EL/d.out"
+case_check "Е(д) ровно один новый коммит" "1" "$(git -C "$EP" rev-list --count "$DO..HEAD")"
+case_check "Е(д) ORDERS.md в коммите" "да" "$(e_in_head память/ORDERS.md)"
+case_check "Е(д) отметка едет с ним" "да" "$(e_in_head память/.tasks-triaged)"
+
+echo "── Е(ж) демон ДЕРЖИТ замок очереди до конца git commit ──"
+# Поломка «проверил и отпустил» (ревью ЕЖ п. 1): демон видит замок свободным, а за
+# ~70 с его pre-commit очередь берёт замок и сдвигает master посреди слияния. Хук
+# стенда спит; пока он спит, flock -n пробы обязан получить отказ.
+e_stand zh
+printf '#!/usr/bin/env bash\n: > "%s/hook-started"\nsleep 4\n' "$EL" > "$EP/.git/hooks/pre-commit"
+chmod +x "$EP/.git/hooks/pre-commit"
+printf 'указание 1\n' >> "$EP/память/ORDERS.md"
+e_progon "$EL/zh.out" &
+E_DEMON=$!
+for _ in $(seq 1 100); do [ -f "$EL/hook-started" ] && break; sleep 0.1; done
+case_check "Е(ж) стенд: хук коммита запущен" "да" "$([ -f "$EL/hook-started" ] && echo да || echo нет)"
+case_check "Е(ж) пока идёт pre-commit демона, замок очереди занят" "занят" \
+    "$(flock -n "$ELOCK" true 2>/dev/null && echo свободен || echo занят)"
+wait "$E_DEMON"
+case_check "Е(ж) коммит прошёл" "да" "$(e_in_head память/ORDERS.md)"
+case_check "Е(ж) после коммита замок отпущен" "свободен" \
+    "$(flock -n "$ELOCK" true 2>/dev/null && echo свободен || echo занят)"
+
+echo "── Е(з) потолок ожидания правки владельца MEMORY_OWNER_WAIT_MIN ──"
+# Поломка (ревью ЕЖ п. 2): под долгой публикацией (36–76 мин держит замок) правка
+# владельца ждёт без предела. Метка первого «отложил» — файл
+# $LOG_DIR/memory-commit.отложено (mtime = время первого отказа); старше 30 мин —
+# коммит владельца без оглядки на замок. Отметки одни потолка не получают.
+e_stand z
+printf 'указание 1\n' >> "$EP/память/ORDERS.md"
+DO=$(e_head)
+e_hold_lock
+e_progon "$EL/z1.out"
+case_check "Е(з) первый отказ: коммита нет" "$DO" "$(e_head)"
+case_check "Е(з) метка первого «отложил» поставлена" "да" \
+    "$([ -f "$EL/memory-commit.отложено" ] && echo да || echo нет)"
+touch -d '-29 minutes' "$EL/memory-commit.отложено" 2>/dev/null
+e_progon "$EL/z2.out"
+case_check "Е(з) ждёт 29 мин — ещё не коммитит" "$DO" "$(e_head)"
+touch -d '-31 minutes' "$EL/memory-commit.отложено" 2>/dev/null
+e_progon "$EL/z3.out"
+e_free_lock
+# Новый коммит обязателен: ORDERS.md есть и в начальном коммите стенда, и без него
+# e_in_head отвечал «да» на демоне, который так и не закоммитил.
+case_check "Е(з) ждёт 31 мин — ORDERS.md закоммичен под занятым замком" "да" \
+    "$([ "$(e_head)" != "$DO" ] && e_in_head память/ORDERS.md || echo нет)"
+case_check "Е(з) коммит владельца мимо замка записан в журнал" "да" \
+    "$(grep -q 'замок\|merge-queue' "$EL/z3.out" && echo да || echo нет)"
+e_stand z2
+printf 'отметка 1\n' >> "$EP/память/.tasks-triaged"
+DO=$(e_head)
+e_hold_lock
+e_progon "$EL/z4.out"
+touch -d '-31 minutes' "$EL/memory-commit.отложено" 2>/dev/null
+e_progon "$EL/z5.out"
+e_free_lock
+case_check "Е(з) потолок — только правке владельца: отметки под замком ждут" "$DO" "$(e_head)"
+
 printf '\nПАМЯТЬ-В-ГИТ: путей %d, неудач %d\n' "$CASES_PATHS" "$CASES_FAILED"
 [ "$CASES_FAILED" -eq 0 ]

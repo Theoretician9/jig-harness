@@ -106,28 +106,23 @@ if [ "${ahead:-0}" -gt 0 ]; then
 fi
 
 # Файлы, которые пишет демон, — не работа смены: список путей — данные
-# (DAEMON_OWNED_PATHS в harness.conf, «/» на конце — каталог целиком). Ключа
-# нет — список пуст, и считается всё.
-dirty=$(git status --porcelain -z 2>/dev/null \
-  | python3 -I -c '
-import sys
-владеет = sys.argv[1].split()
-записи = sys.stdin.buffer.read().decode("utf-8", "replace").split("\0")
-счёт, i = 0, 0
-while i < len(записи):
-    запись = записи[i]
-    i += 1
-    if len(запись) < 4:
-        continue
-    if запись[0] in "RC":
-        i += 1
-    путь = запись[3:]
-    if запись.startswith("??"):
-        continue
-    if any(путь.startswith(в) if в.endswith("/") else путь == в for в in владеет):
-        continue
-    счёт += 1
-print(счёт)' "${DAEMON_OWNED_PATHS:-}" 2>/dev/null || echo 0)
+# (DAEMON_OWNED_PATHS в harness.conf, «/» на конце — каталог целиком). Класс судит
+# ОДИН судья — service-only-diff.py --путь (его же спрашивает демон памяти): свой
+# разбор ключа здесь разошёлся бы с ним молча. Ключа нет — судья отвечает «не
+# класс», и считается всё.
+judge="$(dirname "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")")/service-only-diff.py"
+dirty=0
+skip_next=0
+while IFS= read -r -d '' entry; do
+  [ "$skip_next" = 1 ] && { skip_next=0; continue; }
+  [ "${#entry}" -ge 4 ] || continue
+  case "${entry:0:1}" in R|C) skip_next=1 ;; esac
+  [ "${entry:0:2}" = "??" ] && continue
+  # Места двери загрузчик не экспортирует: судье — паспорт этой двери, а не машины.
+  LOG_DIR="${LOG_DIR:-}" HARNESS_CONF="${HARNESS_CONF:-}" python3 -I "$judge" --путь "${entry:3}" >/dev/null 2>&1 \
+    && continue
+  dirty=$((dirty + 1))
+done < <(git status --porcelain -z 2>/dev/null)
 [ "${dirty:-0}" -gt 0 ] && msgs+=("изменённых файлов без коммита: $dirty")
 
 # Протухшая передача: вердикт даёт scripts/handover-check.sh — ЕДИНЫЙ источник

@@ -89,6 +89,9 @@ MIN = 60
 HOUR = 3600
 CPUS = 4
 BASE = int(time.time()) // MIN * MIN
+# Задача в работе — живой помощник, не статус карты (владелец 19.11). Стенд ведёт wip-карточку
+# живым помощником, чей транскрипт «пишется» до этого мига: случай двигает часы на часы, не на месяц.
+LIVE_UNTIL = BASE + 30 * 24 * HOUR
 # Пороги мощности по доле CPU за интервал замера: ключи harness.conf
 # стенда. Кража — по-прежнему «мощность.кража_выше_pct» данных (15).
 CPU_BUSY_MAX = 90
@@ -142,7 +145,7 @@ STAND_DATA = {
         "адаптер": "claude",
         "файл_claude": "",
         "устарел_мин": 15,
-        "порог_прогноза_pct": 95,
+        "порог_прогноза_pct": {"пять_часов": 95, "неделя": 95},
         "стоп_pct": 98,
         "окно_расхода_мин": {"пять_часов": 60, "неделя": 360},
         "мин_задача_часов": {"пять_часов": 0.5, "неделя": 3},
@@ -225,7 +228,7 @@ def number(value: str) -> float | None:
 class Stand:
     """Стенд одного случая; всё, что судья читает и пишет, лежит под self.root."""
 
-    def __init__(self, mode: str = "medium", cards=(), data_patch=None):
+    def __init__(self, mode: str = "medium", cards=(), data_patch=None, live_wip: bool = True):
         self.root = Path(tempfile.mkdtemp(prefix="speed-mode-probe-"))
         self.log = self.root / "log"
         self.panel = self.root / "panel"
@@ -255,6 +258,8 @@ class Stand:
                      "SWAP_MAX_PCT": "85", "AUTOMATION_LEVEL": "partial",
                      "HELPER_HUNG_MIN": "120", "ACTIVE_LINE": LINE}
         self.cards = [dict(c) for c in cards]
+        self.live_wip = live_wip
+        self.live: set = set()   # wip-карточки, которые ведёт живой помощник стенда
         self.load = 0.5
         self.steal_pct = 0.0
         self.affinity = CPUS  # ядер, доступных процессам судьи (cgroup cpuset); по умолчанию — все
@@ -290,6 +295,17 @@ class Stand:
         (self.root / "dev-map.yaml").write_text(yaml.safe_dump(
             {"lines": [{"id": LINE, "name": "стенд", "tasks": tasks}]},
             allow_unicode=True, sort_keys=False), encoding="utf-8")
+        if self.live_wip:
+            self.sync_live()
+
+    def sync_live(self) -> None:
+        """Каждую wip-карточку ведёт живой помощник; ушла из wip — его запуск кончился."""
+        wip = {c["id"] for c in self.cards if c.get("status") == "wip"}
+        for card in sorted(wip - self.live):
+            self.launch(f"live-{card}", LIVE_UNTIL, LIVE_UNTIL, part=card, quiet_s=0)
+        for card in sorted(self.live - wip):
+            self.finish(f"live-{card}", BASE)
+        self.live = wip
 
     def set_mode(self, mode: str) -> None:
         self.conf["SPEED_MODE"] = mode
@@ -550,6 +566,9 @@ def data_live():
           sorted(set(STAND_DATA["лимит_подписки"]) - set(data.get("лимит_подписки") or {})))
     check("по умолчанию — medium (решение владельца 11.3)", data.get("по_умолчанию") == "medium",
           data.get("по_умолчанию"))
+    acting = sorted(k for k, v in found.items() if (v or {}).get("действует", "да") != "нет")
+    check("режут только пауза, лимит (429), выкат, ротация (правило владельца 11.11)",
+          acting == sorted(["пауза", "лимит", "выкат", "ротация"]), acting)
 
 
 @case
@@ -1034,21 +1053,58 @@ def count_unlabeled_chain():
 
 @case
 def count_empty_journal():
-    """10.3.3: журнала запусков нет — в работе только wip карты."""
-    with Stand("ultra", [{"id": "hr.w", "status": "wip"}] + cards("p", 2)) as s:
+    """10.3.3: журнала запусков нет — в работе никого: статус wip без помощника не работа."""
+    with Stand("ultra", [{"id": "hr.w", "status": "wip"}] + cards("p", 2), live_wip=False) as s:
         got = s.call("in_work", BASE)
-        check("в работе только wip", got == ["hr.w"], got)
+        check("в работе пусто", got == [], got)
+
+
+@case
+def count_live_not_wip():
+    """Владелец 19.11: в работе — живые помощники; 15 wip при 3 живых — в работе 3, «лишнего» нет."""
+    with Stand("ultra", cards("w", 15, "wip") + cards("p", 2), live_wip=False) as s:
+        for i in (1, 2, 3):
+            s.launch(f"L{i}", BASE - 5 * MIN, BASE, part=f"w{i}")
+        got = s.call("in_work", BASE)
+        check("в работе 3 живых из 15 wip", got == ["w1", "w2", "w3"], got)
+        s.measure(BASE)
+        word = s.warden(0, BASE).split("\t")[0]
+        check("сторож: при ultra и 3 живых — не «лишнее»", word != "лишнее", word)
 
 
 @case
 def count_waiting_with_launch():
     """3.1: ждущая владельца с живым запуском — в работе; wip, ждущая без запуска, — нет."""
-    with Stand("ultra", [{"id": "hr.s", "status": "plan"}, {"id": "hr.t", "status": "wip"}]) as s:
+    with Stand("ultra", [{"id": "hr.s", "status": "plan"}, {"id": "hr.t", "status": "wip"}],
+               live_wip=False) as s:
         s.spec_sent("hr.s", BASE - HOUR)
         s.spec_sent("hr.t", BASE - HOUR)
         s.launch("S1", BASE - 5 * MIN, BASE, part="hr.s")
         got = s.call("in_work", BASE)
         check("в работе только hr.s", got == ["hr.s"], got)
+
+
+@case
+def warden_offered():
+    """--предложено: сторож предлагает сперва то, чего ещё не предлагал; всё предложено — снова по порядку."""
+    with Stand("medium", cards("w", 2, "wip") + cards("p", 5)) as s:
+        st = s.measure(BASE)
+        take = st.get("к_взятию") or []
+        check("предложено: стенд — к взятию 5, добор 1", len(take) == 5 and st.get("добор") == 1,
+              (take, st.get("добор")))
+
+        def offered(ids: list) -> list:
+            done = s.run("--сторожу", "--последний-пинок", "0", "--предложено", " ".join(ids), at=BASE)
+            parts = done.stdout.rstrip("\n").split("\t")
+            return parts[2].split() if done.returncode == 0 and parts[0] == "недобор" else [done.stdout]
+
+        check("предложено: без памяти — голова очереди", offered([]) == take[:1], (offered([]), take))
+        check("предложено: голова уже предлагалась — следующая", offered(take[:1]) == take[1:2],
+              (offered(take[:1]), take))
+        check("предложено: три первых предлагались — четвёртая", offered(take[:3]) == take[3:4],
+              (offered(take[:3]), take))
+        check("предложено: предлагалось всё — снова голова", offered(take) == take[:1],
+              (offered(take), take))
 
 
 # ═══════════════════════════ ждёт владельца и мало задач ══════════════════════
@@ -1062,7 +1118,7 @@ def waiting_map():
 @case
 def waiting_owner():
     """10.3.4: ждущие и зависимая не готовы; эффективный 2; журнал одобрений не тронут."""
-    with Stand("ultra", waiting_map()) as s:
+    with Stand("ultra", waiting_map(), live_wip=False) as s:
         s.spec_sent("W", BASE - HOUR)
         s.spec_sent("A", BASE - HOUR)
         approvals = s.log / "спеки-владельцу.jsonl"
@@ -1098,7 +1154,8 @@ def waiting_owner():
 @case
 def waiting_limit_reached():
     """10.3.4: ждущих ≥ максимума — plan без одобрения не готовы; причина «спеки ждут»."""
-    with Stand("ultra", waiting_map(), data_patch={"спек_ждут_владельца_максимум": 2}) as s:
+    with Stand("ultra", waiting_map(), data_patch={"спек_ждут_владельца_максимум": 2},
+               live_wip=False) as s:
         s.spec_sent("W", BASE - HOUR)
         s.spec_sent("A", BASE - HOUR)
         st = s.measure(BASE)
@@ -1515,7 +1572,8 @@ def limit_text_explains():
         chosen = window_field(st, "неделя", "прогноз_выбранный")
         want = round(60 + speed * tasks * 48, 1) if isinstance(tasks, int) else None
         check(f"неделя: прогноз при выбранных {tasks} — {want} %", chosen == want, chosen)
-        check("порог прогноза в состоянии лимита — 95", lim.get("порог") == 95, lim.get("порог"))
+        check("порог прогноза недели в состоянии лимита — 95",
+              window_field(st, "неделя", "порог") == 95, window_field(st, "неделя", "порог"))
         text = s.call("limit_text", eff, tasks, lim, now)
         at_ceiling = round(window_field(st, "неделя", "прогноз") or 0)
         check("в тексте: прогноз при выбранном режиме и что он выше порога 95 %",
@@ -1611,8 +1669,8 @@ def limit_reset_by_drop():
         at = BASE + 2 * MIN
         s.limits(at, five=(5, at + 5 * HOUR), week=(0, rw))
         st = s.measure(at)
-        # floor((95 − 5) / (8 · 5)) = 2, начатых 2: max(2, min(10, 2)) = 2.
-        check("сброс — эффективный 2 по догадке", st.get("эффективный") == 2, st.get("эффективный"))
+        # Скорость по догадке не режет ниже выбранного (владелец 11.11 и 19.11): 10.
+        check("сброс — эффективный 10 по догадке", st.get("эффективный") == 10, st.get("эффективный"))
 
 
 @case
@@ -1828,14 +1886,14 @@ def unexpected_error():
 
 @case
 def limit_stop_edges():
-    """4.5: p ≥ стоп при прошедшем сбросе — окно новое, потолок N; стоп ровно 98 — 0, 97,9 — 1."""
+    """4.5: p ≥ стоп при прошедшем сбросе — окно новое, потолок N; стоп ровно 98 — 0, 97,9 по догадке — N."""
     with limit_stand() as s:
         s.limits(BASE, five=(98.5, BASE - 10 * MIN), week=(10, BASE + 10 * HOUR))
         st = s.measure(BASE)
         check("98,5 % и сброс 10 мин назад — эффективный 10", st.get("эффективный") == 10,
               st.get("эффективный"))
-    # В работе 0: нижняя граница «мало данных» min(N, max(0, 1)) = 1 не маскирует 97,9 → 1.
-    for percent, want in ((98, 0), (97.9, 1)):
+    # Стоп ровно 98 — 0; на 97,9 при скорости по догадке потолок — выбранные 10 (догадка не режет).
+    for percent, want in ((98, 0), (97.9, 10)):
         with Stand("ultra", cards("p", 10)) as s:
             s.limits(BASE, five=(percent, BASE + HOUR), week=(10, BASE + 10 * HOUR))
             st = s.measure(BASE)
@@ -1845,14 +1903,14 @@ def limit_stop_edges():
 
 @case
 def limit_estimate_floor():
-    """4.5: мало данных — не ниже min(выбранный, max(в_работе, 1)); без resets_at — T = 168 ч, без границы."""
+    """4.5: мало данных — не ниже выбранного; без resets_at — T = 168 ч, по замеру режет."""
     with Stand("ultra", cards("w", 5, "wip") + cards("p", 10)) as s:
         s.limits(BASE, five=(0, BASE + HOUR), week=(0, BASE + 167 * HOUR))
         st = s.measure(BASE)
         check("точек нет — «оценка»", (st.get("лимит") or {}).get("точность") == "оценка",
               (st.get("лимит") or {}).get("точность"))
-        check("неделя 0 %, сброс через 167 ч, 5 в работе — эффективный 5, не 1",
-              st.get("эффективный") == 5, st.get("эффективный"))
+        check("неделя 0 %, сброс через 167 ч, 5 в работе — эффективный 10, не 1",
+              st.get("эффективный") == 10, st.get("эффективный"))
     with Stand("ultra", cards("w", 5, "wip") + cards("p", 10)) as s:
         now = BASE
         r5 = now + 3 * HOUR
@@ -2104,9 +2162,10 @@ def limit_speed_window():
         st = s.measure(now)
         want, _ = expected_speed(pts, now, 44, 60, "пять_часов")
         check("независимый счёт: 7 пунктов за 5/3 задача-часа = 4,2", abs(want - 4.2) < 1e-9, want)
+        # Проценты целые: судья вычитает шаг округления, 6 пунктов за 5/3 задача-часа = 3,6.
         got = window_field(st, "пять_часов", "скорость_на_задачу")
-        check("скорость 5 часов сходится с независимым счётом",
-              isinstance(got, (int, float)) and abs(got - want) < 1e-6, got)
+        check("скорость 5 часов сходится с независимым счётом минус пункт округления (3,6)",
+              isinstance(got, (int, float)) and abs(got - (want - 1 / (5 / 3))) < 1e-4, got)
 
 
 @case
@@ -2137,8 +2196,8 @@ def limit_inputs_misc():
         check("одно окно из двух — «оценка», эффективный 10",
               (st.get("лимит") or {}).get("точность") == "оценка" and st.get("эффективный") == 10,
               ((st.get("лимит") or {}).get("точность"), st.get("эффективный")))
-    # Догадка 8 %/ч и порог 95 при 75 %: потолок floor(20 / (8 · T)) = 1 и при T = 150 мин
-    # (сдвиг вперёд), и при T = 148 мин (сдвига нет); начатых 2: max(1, min(10, 2)) = 2.
+    # Догадка 8 %/ч при 75 % дала бы floor(20 / (8 · T)) = 1 и при T = 150 мин (сдвиг вперёд), и
+    # при T = 148 мин (сдвига нет); догадка не режет ниже выбранного — потолок 10.
     for shift in (2 * MIN, 0):
         s, r5, rw = drop_stand()
         with s:
@@ -2147,8 +2206,8 @@ def limit_inputs_misc():
             s.limits(at, five=(75, r5 + shift), week=(0, rw))
             st = s.measure(at)
             label = "сдвинут вперёд на 2 мин" if shift else "не сдвинут, падение 4"
-            check(f"resets_at {label} — разрыв, догадка, потолок 2",
-                  window_field(st, "пять_часов", "потолок") == 2,
+            check(f"resets_at {label} — разрыв, догадка, потолок 10",
+                  window_field(st, "пять_часов", "потолок") == 10,
                   window_field(st, "пять_часов", "потолок"))
 
 
@@ -2210,8 +2269,8 @@ def limit_window_gone_after_reset():
         at = BASE + 12 * MIN
         s.limits(at, week=(0, rw))
         st = s.measure(at)
-        # Сброса нет, T = полное окно 5 ч: floor(95 / (8 · 5)) = 2, начатых 2: max(2, 2) = 2.
-        check("окна нет — эффективный 2 по догадке", st.get("эффективный") == 2,
+        # Сброса нет, T = полное окно 5 ч: по догадке 8 %/ч было бы 2; догадка не режет — 10.
+        check("окна нет — эффективный 10 по догадке", st.get("эффективный") == 10,
               st.get("эффективный"))
         check("пять_часов в состоянии: 0 %, сброса нет",
               window_field(st, "пять_часов", "процент") == 0
@@ -2331,6 +2390,89 @@ def msg_quiet_blocker():
         check("mode.change: «нет» на входе и на снятии", s.said() == ["нет", "нет"], s.said())
 
 
+# ── выключатель блокера данными: «действует: нет» ─────────
+# Владелец 19.11: «Убери нахуй эту хуйню заебал он тормощить» про «работаю по 1 задаче вместо 10 —
+# сервер загружен». Правило 11.11 «включай режим средний и не снижай»: режут только пауза и 429.
+# Выключатель один для любого блокера: признак считается, потолок не режет, владельцу не пишет.
+MUTED = ("мощность", "авария", "мало_задач", "файлы", "лимит_расход")
+
+
+def muted_patch(names=MUTED) -> dict:
+    return {f"блокеры.{name}.действует": "нет" for name in names}
+
+
+@case
+def muted_blockers_keep_mode():
+    """19.11: занято 96 %, нагрузка 4,5/ядро, мало задач, заявки на файлы, лимит 99 % — ultra держит 10."""
+    with Stand("ultra", cards("w", 2, "wip") + cards("p", 1), data_patch=muted_patch()) as s:
+        s.busy_pct = 96
+        s.set_load(4.5)
+        warn_files(s, BASE)
+        effs = []
+        for minute in (0, 2, 4, 12, 14, 24, 40):
+            s.limits(BASE + minute * MIN, five=(99, BASE + HOUR), week=(10, BASE + 10 * HOUR))
+            st = s.measure(BASE + minute * MIN)
+            effs.append(st.get("эффективный"))
+        check("условие создано: занято ≈ 96", near(gauge(st, "занято_pct"), 96), gauge(st, "занято_pct"))
+        check("условие создано: признаки посчитаны (лимит 0, авария и мощность видны)",
+              (st.get("лимит") or {}).get("потолок") == 0
+              and {"мощность", "авария"} <= set(st.get("не_действуют") or {}),
+              ((st.get("лимит") or {}).get("потолок"), sorted(st.get("не_действуют") or {})))
+        check("ГЛАВНОЕ: ultra при 96 % — эффективный 10 на всех проходах", effs == [10] * 7, effs)
+        check("в действующих блокерах ни одного выключенного", not blockers(st) & set(MUTED),
+              blockers(st))
+        check("причина — «блокеров нет»", st.get("причина") == "блокеров нет", st.get("причина"))
+        check("ceiling_alive — потолок ultra 12, не аварийные 2",
+              s.call("ceiling_alive", BASE + 40 * MIN) == 12, s.call("ceiling_alive", BASE + 40 * MIN))
+        check("добор — весь недобор по готовым (1), не ноль из-за занятости", st.get("добор") == 1,
+              (st.get("добор"), st.get("добор_почему")))
+    with Stand("ultra", cards("w", 10, "wip") + cards("p", 2),
+               data_patch=muted_patch(("мощность", "авария", "мало_задач", "файлы"))) as s:
+        s.limits(BASE, five=(99, BASE + HOUR), week=(10, BASE + 10 * HOUR))
+        st = s.measure(BASE)
+        check("пауза и лимит не выключены: лимит 99 % — эффективный 0", st.get("эффективный") == 0,
+              (st.get("эффективный"), blockers(st)))
+        s.limits(BASE + 2 * MIN, five=(1, BASE + HOUR), week=(1, BASE + 10 * HOUR))
+        s.pause()
+        st = s.measure(BASE + 2 * MIN)
+        check("пауза режет при выключенных остальных", st.get("эффективный") == 0
+              and "пауза" in blockers(st), (st.get("эффективный"), blockers(st)))
+    with Stand("ultra", cards("w", 10, "wip") + cards("p", 2), data_patch=muted_patch(("авария",))) as s:
+        s.set_load(4.5)
+        effs = [s.measure(BASE + minute * MIN).get("эффективный") for minute in (0, 2, 4, 6)]
+        check("условие создано: авария видна, хоть и выключена", "авария" in (s.state().get("не_действуют") or {}),
+              sorted(s.state().get("не_действуют") or {}))
+        check("выключенная авария не режет и через лестницу мощности", effs == [10] * 4
+              and power_ceiling(s.state()) is None, (effs, power_ceiling(s.state())))
+        s.set_load(0.5)
+        s.measure(BASE + 8 * MIN)
+        st = s.measure(BASE + 28 * MIN)
+        check("условие создано: выключенная авария снята", not st.get("не_действуют"), st.get("не_действуют"))
+        check("её снятие — не «подъём»: поднят_ts пуст, пинок не ждёт", st.get("поднят_ts") is None,
+              st.get("поднят_ts"))
+
+
+@case
+def muted_blocker_releases_now():
+    """19.11: мощность срезала 10→5; выключили данными — следующий проход 10, без «отпускает_мин» и без вести."""
+    with MsgStand("ultra", cards("w", 10, "wip") + cards("p", 2)) as s:
+        s.busy_pct = 97
+        s.measure(BASE)
+        s.measure(BASE + 2 * MIN)
+        st = s.measure(BASE + 12 * MIN)
+        check("условие создано: мощность режет до 5, владельцу сказано", st.get("эффективный") == 5
+              and len(s.calls()) == 1, (st.get("эффективный"), s.calls()))
+        s.data["блокеры"]["мощность"]["действует"] = "нет"
+        s.write_all()
+        st = s.measure(BASE + 13 * MIN)
+        check("ГЛАВНОЕ: выключили — сразу 10", st.get("эффективный") == 10,
+              (st.get("эффективный"), blockers(st)))
+        later = [s.measure(BASE + minute * MIN).get("эффективный") for minute in (14, 50, 90)]
+        check("и дальше 10 при 97 %", later == [10, 10, 10], later)
+        check("ни одной вести о смене из-за выключенного", len(s.calls()) == 1, s.calls())
+        check("mode.change 5→10 — «сказано: нет»", s.said()[-1:] == ["нет"], s.said())
+
+
 def limit_pass_at(s: Stand, at: float, percent: float, reset: float) -> dict:
     s.limits(at, five=(percent, reset), week=(10, BASE + 10 * HOUR))
     return s.measure(at)
@@ -2351,6 +2493,10 @@ def msg_limit_once():
         check("оно с флагом --несмотря-на-лимит", OVER_LIMIT in first, first)
         check("в нём «стою» и время обновления", bool(first) and "стою" in first[-1]
               and "лимит обновится" in first[-1], first)
+        # Под лимитом режет только замер, не догадка: 2 задачи, 80,9 → 90 % за 29 мин — ~9,4 %/ч
+        # на задачу, до сброса 3,5 ч: потолок 1. Проценты дробные — шаг округления не вычитается.
+        s.seed_points([(t1 + k * 2 * MIN, 2, 80.25 + k * 0.65, r5, 10, BASE + 10 * HOUR)
+                       for k in range(1, 15)])
         st = limit_pass_at(s, t2, 90, r5)
         effs.append(st.get("эффективный"))
         check("условие создано: под лимитом эффективный сменился и держит его лимит",
@@ -2650,9 +2796,9 @@ def measured_ceiling(percent, speed, hours_left, tasks=3):
 
 
 def few_data_ceiling(percent, window, hours_left, in_work, tasks=3):
-    """Спека 4.5 при скорости по догадке: счёт, поднятый строкой «начатое не урезаем»."""
-    return max(measured_ceiling(percent, FEW_DATA_SPEED[window], hours_left, tasks),
-               min(tasks, max(in_work, 1)))
+    """Спека 4.5 при скорости по догадке: ниже выбранного не режет (владелец 11.11 и 19.11:
+    скорость режут только пауза и 429); стоп 98 — отдельно."""
+    return tasks
 
 
 def close_to(got, want) -> bool:
@@ -2852,8 +2998,9 @@ def limit_cut_regular_reset():
                            0, hours_left)
 
 
-# Живые числа: неделя 2 %, до сброса 157 ч, выбрано 3; 93 / (0,5 · 157) = 1,18.
-FEW_DATA_TABLE = {0: (1, 1), 1: (1, 1), 2: (2, 2), 3: (3, 3)}
+# Живые числа: неделя 2 %, до сброса 157 ч, выбрано 3; по догадке 93 / (0,5 · 157) = 1,18 —
+# но догадка не режет ниже выбранного: потолок 3 при любом числе начатых.
+FEW_DATA_TABLE = {0: (3, 3), 1: (3, 3), 2: (3, 3), 3: (3, 3)}
 
 
 def check_few_data_table(label, seed):
@@ -2874,7 +3021,7 @@ def check_few_data_table(label, seed):
 
 @case
 def limit_cut_few_data_table():
-    """H: контроль: живые числа без старых точек: потолок 1, поднимает только «начатое не урезаем»."""
+    """H: контроль: живые числа без старых точек: по догадке потолок — выбранные 3."""
     check_few_data_table("без точек", lambda s, now, new_reset: None)
 
 
@@ -2949,15 +3096,80 @@ def limit_cut_first_interval():
                        (new_reset - now) / HOUR)
 
 
+def whole_percent_stand(week_to: int):
+    """Находка bkb 18.11: смена аккаунта, ultra, в работе 8; строка состояния отдаёт целый процент.
+    После смены 80 мин точек: 5 часов 0 → 2, неделя 0 → week_to (рост за последние 30 мин)."""
+    now = BASE
+    r5, rw = now + round(3.8 * HOUR), now + round(166.3 * HOUR)
+    old = [(now - back * MIN, 8, 99, now + 20 * MIN, 93, now + 30 * HOUR)
+           for back in range(120, 81, -4)]
+    fresh = [(now - back * MIN, 8, 2 * (80 - back) // 80,  r5,
+              0 if back > 30 else week_to * (30 - back) // 28, rw)
+             for back in range(80, 1, -2)]
+    s = Stand("ultra", cards("w", 8, "wip") + cards("p", 10))
+    s.seed_points(old + fresh)
+    s.limits(now, five=(2, r5), week=(week_to, rw))
+    return s, now
+
+
+@case
+def limit_whole_percent_step():
+    """Находка bkb 18.11 и Content-Factory 18.11: рост на пункт целого процента — шум округления,
+    а не расход; при почти нетронутом лимите выбранный ultra не режется, настоящий рост режет."""
+    s, now = whole_percent_stand(1)
+    with s:
+        st = s.measure(now)
+        check("неделя 0 → 1: скорость недели 0 (пункт — шаг округления)",
+              window_field(st, "неделя", "скорость_на_задачу") == 0,
+              window_field(st, "неделя", "скорость_на_задачу"))
+        check("неделя 0 → 1, 5 часов 0 → 2: эффективный 10 из выбранных 10",
+              st.get("эффективный") == 10, (st.get("эффективный"), st.get("лимит")))
+    s, now = whole_percent_stand(9)
+    with s:
+        st = s.measure(now)
+        # 8 задач × 80 мин = 10,67 задача-часа; (9 − 1) / 10,67 = 0,75 %/ч — 94 / (0,75·166,3) < 1.
+        got = window_field(st, "неделя", "скорость_на_задачу")
+        check("контроль: неделя 0 → 9 — скорость (9 − 1) / 10,67 задача-часа",
+              close_to(got, 8 / (8 * 80 / 60)), got)
+        check("контроль: настоящий рост режет до 1", st.get("эффективный") == 1,
+              st.get("эффективный"))
+
+
+@case
+def limit_threshold_per_window():
+    """Находка Content-Factory 18.11, решение владельца 19.11: порог прогноза по окнам данными —
+    5 часов до 100 % (упор — пауза до сброса), неделя 95 %."""
+    live = (yaml.safe_load(LIVE_DATA.read_text(encoding="utf-8")) or {}).get("лимит_подписки") or {}
+    check("данные: порог_прогноза_pct — 5 часов 100, неделя 95",
+          live.get("порог_прогноза_pct") == {"пять_часов": 100, "неделя": 95},
+          live.get("порог_прогноза_pct"))
+    patch = {"лимит_подписки.порог_прогноза_pct": {"пять_часов": 100, "неделя": 95}}
+    with Stand("ultra", cards("w", 2, "wip") + cards("p", 10), data_patch=patch) as s:
+        now = BASE
+        r5, rw = now + HOUR, now + 100 * HOUR
+        # 5 часов: 7,8 %/ч на задачу (15,6 %/ч при 2 задачах), час до сброса, 20 %: прогноз при 10 —
+        # 98 %, floor(80 / 7,8) = 10; с порогом 95 было бы floor(75 / 7,8) = 9. Неделя ровная.
+        s.seed_points(linear_points(now, 2, 20, 15.6, r5, 10, 0.0, rw))
+        s.limits(now, five=(20, r5), week=(10, rw))
+        st = s.measure(now)
+        check("5 часов: скорость 7,8 %/ч на задачу", close_to(window_field(st, "пять_часов",
+              "скорость_на_задачу"), 7.8), (st.get("лимит") or {}).get("пять_часов"))
+        check("порог окна в состоянии: 5 часов 100, неделя 95",
+              (window_field(st, "пять_часов", "порог"), window_field(st, "неделя", "порог"))
+              == (100, 95), st.get("лимит"))
+        check("прогноз 5 часов 98 % не выше порога 100: эффективный 10",
+              st.get("эффективный") == 10, (st.get("эффективный"), st.get("лимит")))
+
+
 @case
 def limit_fresh_window():
     """4.5: новое окно поднимает потолок в тот же проход, падение меньше порога ждёт интервала."""
     at = BASE + 2 * MIN
-    # T = 58 мин: при 65 % floor(30 / 7,7) = 3; при 66 % floor(29 / 7,7) = 3, запас 26 / 7,7 тоже.
-    # T = 1 ч при сдвиге: floor(20 / 8) = 2. Без подъёма потолок остался бы прежней единицей.
+    # После разрыва скорость по догадке 8 %/ч: ниже выбранных 3 она не режет, будь окно новым
+    # (падение 10, сброс вперёд) или нет (падение 9) — без неё потолок остался бы прежней единицей.
     for label, percent, shift, want in (("падение 10", 65, 0, 3),
-                                        ("падение 9 — не новое окно", 66, 0, 1),
-                                        ("сброс вперёд на 2 мин", 75, 2 * MIN, 2)):
+                                        ("падение 9 — не новое окно", 66, 0, 3),
+                                        ("сброс вперёд на 2 мин", 75, 2 * MIN, 3)):
         s, r5, rw = fresh_window_stand()
         with s:
             st = s.measure(BASE)
@@ -2972,14 +3184,6 @@ def limit_fresh_window():
                   window_field(st, "пять_часов", "скорость_на_задачу"))
             check(f"{label}: потолок {want}", window_field(st, "пять_часов", "потолок") == want,
                   window_field(st, "пять_часов", "потолок"))
-            if want == 1:
-                later = BASE + 20 * MIN
-                s.limits(later, five=(percent, r5), week=(0, rw))
-                # T = 40 мин, запас: floor(26 / 5,3) = 4, зажато выбранными 3.
-                st = s.measure(later)
-                check(f"{label}: на 20-й минуте интервал вышел, потолок 3",
-                      window_field(st, "пять_часов", "потолок") == 3,
-                      window_field(st, "пять_часов", "потолок"))
 
 
 def main(argv: list[str]) -> int:

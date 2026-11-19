@@ -301,6 +301,8 @@ SAMPLES = [
     # events.run (формат v1): строки боевых журналов 16.11 и 13.11.
     ("log", 'claude-mem-fix.jsonl', {"v": 1, "ts": "2026-11-16T04:37:27+05:00", "src": "scripts/claude-mem-fix.py", "event": "run.start", "outcome": "ok", "task": "hr.sample", "task_from": "history", "session": "s-sample", "data": {"имя": "claude-mem-fix"}}, '2026-11-15T23:37:27+00:00'),
     ("log", 'evolution-net.jsonl', {"v": 1, "ts": "2026-11-13T19:50:45+05:00", "src": "scripts/evolution-net.py", "event": "run.start", "outcome": "ok", "task": "hr.sample", "task_from": "map", "session": "s-sample", "data": {"имя": "evolution-net-reader"}}, '2026-11-13T14:50:45+00:00'),
+    # scripts/heavy-slot.sh → harness_event (формат v1): строка боевого журнала 19.11, значения data — строки.
+    ("log", 'heavy-slots.jsonl', {"v": 1, "ts": "2026-11-19T11:12:41+05:00", "src": "scripts/heavy-slot.sh", "event": "heavy.slot-overflow", "outcome": "skipped", "task": "hr.sample", "task_from": "history", "session": "s-sample", "data": {"секунд": "120", "команда": "bash scripts/pre-commit-gate.sh ", "мест": "4"}}, '2026-11-19T06:12:41+00:00'),
 ]
 
 
@@ -510,7 +512,12 @@ def case_secrets(base: Path) -> None:
     st = Stand(base, "secret")
     key_path = f"{st.panel}/tok-{secrets.token_hex(4)}"
     # Отпечаток ssh-ключа — «SHA256:» и 43 знака base64, как его печатает ssh-keygen -l.
-    finger = "SHA256:" + base64.b64encode(hashlib.sha256(os.urandom(16)).digest()).decode().rstrip("=")
+    # «+» и «/» стоят на своём месте всегда: случайный base64 без них бывает каждый
+    # четвёртый раз, и форма отпечатка без этих знаков тогда не отличается от верной.
+    # Свои «+» и «/» случайного куска режут его на короткие куски — форма секрета
+    # считает такой кусок именем и не скрывает отпечаток вне «цели».
+    body = base64.b64encode(hashlib.sha256(os.urandom(16)).digest(), altchars=b"xy").decode().rstrip("=")
+    finger = "SHA256:" + body[:20] + "+/" + body[22:]
     keep_path = f"{st.secrets}/tg-token"
     rc, res, err = run_child(emit_body(src=SRC, event="probe.secret", outcome="ok", journal="sec",
                                        data={"note": f"ключ {secret} в речи", "sha256": sha, "other": sha,

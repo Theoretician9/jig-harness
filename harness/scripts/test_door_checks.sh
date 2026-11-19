@@ -148,6 +148,11 @@ if [ -s "\${DOCKER_FAIL:-}" ] && printf '%s\n' "\$*" | grep -qEf "\$DOCKER_FAIL"
 fi
 # Зависший вызов: exec сохраняет pid, timeout библиотеки убивает сам sleep;
 # имя процесса несёт метку пробы — уборка пробы снимает брошенное.
+# Подставной успех: службы стенда без их образов (случай 36 судит учётку, а не pg).
+if [ -s "\${DOCKER_OK:-}" ] && printf '%s\n' "\$*" | grep -qEf "\$DOCKER_OK"; then
+    echo "docker стенда: успех по шаблону"
+    exit 0
+fi
 if [ -s "\${DOCKER_HANG:-}" ] && printf '%s\n' "\$*" | grep -qEf "\$DOCKER_HANG"; then
     date +%s >> "\$DOCKER_HANG.t"
     exec -a "docker-hang-$ID" sleep 3600
@@ -188,7 +193,7 @@ CONF
     git clone -q "$S/remote.git" "$S/door"
     meminfo 20000 "$S/meminfo"
     MEM_WAIT=600; STAND_WAIT=60; EXEC_WAIT=""; RUN_LIMIT=300
-    ONLY=""; CHECK_UID="$(id -u):$(id -g)"; RUN_AS=""
+    ONLY=""; CHECK_UID="$(id -u):$(id -g)"; RUN_AS=""; STAND_PG=""
 }
 
 # suite <имя> <install> <timeout_s> <cmd>…: набор файла проверок на базе $BASE.
@@ -238,6 +243,7 @@ run_lib() {
           STACK_CHECKS_FILE="deploy/server-checks.yaml" STACK_CHECKS_ONLY="$ONLY" \
           STACK_CHECK_MIN_FREE_MB=4096 STACK_CHECK_UID="$CHECK_UID" STACK_RUN_AS="$RUN_AS" \
           STACK_STAND_IMAGES="$STAND_IMAGES" STACK_STAND_ENV_PREFIX=INTEGRATION_TEST_ \
+          STACK_STAND_PG="$STAND_PG" DOCKER_OK="$S/docker.ok" \
           DEPLOY_CHECK_RUN_ID="$RID" DEPLOY_CHECK_WORK_ROOT="$S/kopii" DEPLOY_CHECK_LOG_ROOT="$S/logi" \
           DEPLOY_CHECK_MEMINFO="$S/meminfo" DEPLOY_CHECK_MEM_WAIT_SEC="$MEM_WAIT" \
           DEPLOY_CHECK_STAND_WAIT_SEC="$STAND_WAIT" DEPLOY_CHECK_STAND_EXEC_SEC="$EXEC_WAIT" \
@@ -319,7 +325,7 @@ HAS_NET='ls /sys/class/net | grep -qvx lo'
 LIVE_BEFORE=$(stat -c %s "$LIVE_NOTES" 2>/dev/null || echo нет)
 echo "--- тестовый этап двери ($LIB; стенд $T; префикс $P)"
 
-NO_STAND_CASES=(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 34)
+NO_STAND_CASES=(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 34 35 36)
 if [ -n "$BASE_MISSING" ]; then
     for n in "${NO_STAND_CASES[@]}"; do skip_case "$n" "$BASE_MISSING"; done
 else
@@ -691,6 +697,41 @@ mangled_rows() { cat "$T"/c*/zhurnal/.events/lost.jsonl 2>/dev/null | grep -F '"
 case_check "sha не скрыт — sha 40 hex и свой, checks_file_sha 64 hex и свой, записок стендов есть, «<СКРЫТО>» 0, искажений 0" \
     "sha: да да; checks_file_sha: да да; записок: да; скрыто: 0; искажений: 0" \
     "sha: $(yes_no grep -qxE '[0-9a-f]{40}' <<<"$(note .data.sha)") $(yes_no test "$(note .data.sha)" = "$C01_SHA"); checks_file_sha: $(yes_no grep -qxE '[0-9a-f]{64}' <<<"$(note .data.checks_file_sha)") $(yes_no test "$(note .data.checks_file_sha)" = "$C01_CHECKS_SHA"); записок: $(yes_no test "$(all_notes | grep -c '"deploy.checks"')" -ge 1); скрыто: $(all_notes | grep -cF '<СКРЫТО>'); искажений: $(mangled_rows)"
+
+# ── 35. учётка стенда: незнакомое слово и значение не из букв ───────────────
+# Почему: STACK_STAND_PG — контракт с тестами копии (имя, база, пароль pg стенда).
+# Опечатка «usr=» иначе молча оставила бы умолчание, и тесты падали бы на входе в
+# базу уже после сборки; значение с «;» или пробелом — не имя учётки. Отказ до
+# docker, ключ и слово названы, значение (это может быть пароль) в выводе не звучит.
+echo "── 35. STACK_STAND_PG: незнакомое слово, значение с «;» → отказ до docker, ключ назван, значение не напечатано"
+for PGW in "user=cfu usr=cfx" "password=zz;yy"; do
+    new_stand "c35_${#PGW}"
+    branch_with "$(suite ok "$INSTALL_OK" 120 'true')"
+    STAND_PG="$PGW"
+    run_lib door_checks_run "$SHA" x; show
+    case_check "STACK_STAND_PG «$PGW» — код ≠0, ключ назван, значение не напечатано, вызовов docker 0" \
+        "код ≠0; ключ: да; значение скрыто: да; docker: 0" \
+        "код $(kod); ключ: $(has "$OUT" STACK_STAND_PG); значение скрыто: $(lacks "$OUT" "${PGW##*=}"); docker: $(jcount .)"
+done
+
+# ── 36. учётка стенда из ключа: pg с ней, pg_isready с ней, тесты видят её ───
+# Почему: тесты копии входят в pg стенда своей учёткой; вшитая app_user/app_test
+# роняла бы их на входе. Службы стенда подставные (их образов на сервере может не
+# быть): судится, с чем дверь их зовёт и что видит шаг. Сеть стенда и контейнер
+# набора — настоящие.
+echo "── 36. STACK_STAND_PG=user=cfu db=cfd password=cfp → run pg и pg_isready с ней, шаг видит PG_USER/PG_DB/PG_PASSWORD"
+new_stand c36
+branch_with "$(suite pgacc "$INSTALL_OK" 120 'env | grep ^INTEGRATION_TEST_PG_ | sort'; printf '    stand: pg-redis\n')"
+printf '^run (.* )?--name %s(-pg|-redis) \n^exec (.* )?%s-pg pg_isready\n' "$P$RID" "$P$RID" > "$S/docker.ok"
+STAND_PG="user=cfu db=cfd password=cfp"
+run_lib door_checks_run "$SHA" x; show
+LOG36="$S/logi/${SHA:0:8}-pgacc.log"
+PG36=$(jrun "$P$RID-pg")
+ISR36=$({ cat "$(DLOG)" 2>/dev/null || true; } | grep -E -- "^exec (.* )?$P$RID-pg pg_isready" | head -n 1)
+case_check "учётка из ключа — код 0, pg с ней, pg_isready с ней, шаг видит её окружением" \
+    "код 0; pg: да; pg_isready: да; шаг: да да да" \
+    "код $(kod); pg: $(has_words "$PG36" "-e POSTGRES_USER=cfu" "-e POSTGRES_PASSWORD=cfp" "-e POSTGRES_DB=cfd"); pg_isready: $(has_words "$ISR36" "-U cfu" "-d cfd"); шаг: $(yes_no grep -qsxF INTEGRATION_TEST_PG_USER=cfu "$LOG36") $(yes_no grep -qsxF INTEGRATION_TEST_PG_DB=cfd "$LOG36") $(yes_no grep -qsxF INTEGRATION_TEST_PG_PASSWORD=cfp "$LOG36")"
+for name in $(docker network ls --format '{{.Name}}' | grep -E "^$P$RID\$"); do docker network rm "$name" >/dev/null 2>&1; done
 
 fi
 

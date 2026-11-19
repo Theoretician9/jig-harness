@@ -233,6 +233,9 @@ def прогон(аргументы=(), ручки=None, предел: int = 120
     окружение = dict(os.environ)
     for ручка in РУЧКИ:
         окружение.pop(ручка, None)
+    if ручки:
+        # Двор не наследует паспорта своих механизмов живой машины из её слоя.
+        окружение["HARNESS_PROCESS_LIBRARY_LOCAL"] = "/nonexistent/process-library.local.json"
     окружение.update({к: str(v) for к, v in (ручки or {}).items()})
     итог = subprocess.run([sys.executable, str(СБОРЩИК), *аргументы],
                           cwd=str(КОРЕНЬ), env=окружение,
@@ -584,6 +587,35 @@ rc_sw, out_sw = switch_stand("http://127.0.0.1:1/health", period_in_conf=False)
 rc_sw, out_sw = switch_stand("", period_in_conf=True)
 красный_с_причиной("ключ пуст, а срок стоит — сторож меток звал бы его мёртвым",
                    rc_sw, out_sw, НЕТ_В_РЕЕСТРЕ, "probe-product")
+
+print("── свой механизм копии: паспорт в поле «механизмы» слоя установки ──")
+# Копия bkb 19.11.2026 (0.14.2): демон cf-exchange-watch — срок в её harness.conf,
+# паспорт был в mechanisms.yaml пакета, обновление его затёрло: «в конфиге есть,
+# в реестре нет». Паспорт своего механизма живёт в слое установки (PROCESS_LIBRARY_LOCAL).
+def own_stand(with_passport: bool):
+    stand = двор([паспорт("harness/demons/pakage.sh", "Демон пакета",
+                          повод("крон", "*/5 * * * *", метка("pakage", 5)))],
+                 {"pakage": 5, "own-watch": 10})
+    layer = stand["каталог"] / "process-library.local.json"
+    own = паспорт("harness/demons/own-watch.sh", "Свой сторож копии",
+                  повод("крон", "*/10 * * * *", метка("own-watch", 10)))
+    layer.write_text(json.dumps({"процессы": [], **({"механизмы": [own]} if with_passport else {})},
+                                ensure_ascii=False), encoding="utf-8")
+    try:
+        rc, out = прогон(("--проверить",), ручки={
+            РУЧКА_РЕЕСТР: stand[РУЧКА_РЕЕСТР], РУЧКА_КОНФИГ: stand[РУЧКА_КОНФИГ],
+            "HARNESS_PROCESS_LIBRARY_LOCAL": layer})
+        return rc, out, str(layer)
+    finally:
+        shutil.rmtree(stand["каталог"], ignore_errors=True)
+
+
+rc_own, out_own, layer_own = own_stand(with_passport=False)
+красный_с_причиной("паспорта своего демона нет — «в конфиге есть, в реестре нет» и названо место",
+                   rc_own, out_own, НЕТ_В_РЕЕСТРЕ, "own-watch", "«механизмы»", layer_own)
+rc_own, out_own, _ = own_stand(with_passport=True)
+сошлось("паспорт в поле «механизмы» слоя установки — сошлось, имён 2",
+        rc_own, out_own, СОШЛОСЬ, "имён 2")
 
 print("── боевые файлы не тронуты ──")
 # Слепок снят до первой пробы, сверяется после всех прогонов, включая живой

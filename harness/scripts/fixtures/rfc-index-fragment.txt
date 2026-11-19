@@ -1,0 +1,210 @@
+
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+                             RFC INDEX
+                           -------------
+
+(CREATED ON: 11/18/2026.)
+
+This file contains citations for all RFCs in numeric order.
+
+RFC citations appear in this format:
+
+  #### Title of RFC. Author 1, Author 2, Author 3. Issue date.
+       (Format: ASCII) (Obsoletes xxx) (Obsoleted by xxx) (Updates xxx)
+       (Updated by xxx) (Also FYI ####) (Status: ssssss) (DOI: ddd)
+
+or
+
+  #### Not Issued.
+
+For example:
+
+  9915 Dynamic Host Configuration Protocol for IPv6 (DHCPv6). T. Mrugalski,
+       B. Volz, M. Richardson, S. Jiang, T. Winters. January 2026. (Format:
+       HTML, TXT, PDF, XML) (Obsoletes RFC8415) (Also STD102) (Status:
+       INTERNET STANDARD) (DOI: 10.17487/RFC9915)
+
+Key to citations:
+
+#### is the RFC number.
+
+Following the RFC number are the title, the author(s), and the
+publication date of the RFC.  Each of these is terminated by a period.
+
+Following the number are the title (terminated with a period), the
+author, or list of authors (terminated with a period), and the date
+(terminated with a period).
+
+The format follows in parentheses. One or more of the following formats
+are listed:  text (TXT), PostScript (PS), Portable Document Format
+(PDF), HTML, XML.
+
+Obsoletes xxxx refers to other RFCs that this one replaces;
+Obsoleted by xxxx refers to RFCs that have replaced this one.
+Updates xxxx refers to other RFCs that this one merely updates (but
+does not replace); Updated by xxxx refers to RFCs that have updated
+(but not replaced) this one.  Generally, only immediately succeeding
+and/or preceding RFCs are indicated, not the entire history of each
+related earlier or later RFC in a related series.
+
+The (Also FYI ##) or (Also STD ##) or (Also BCP ##) phrase gives the
+equivalent FYI, STD, or BCP number if the RFC is also in those
+document sub-series.  The Status field gives the document's
+current status (see RFC 2026).  The (DOI ddd) field gives the
+Digital Object Identifier.
+
+RFCs may be obtained in a number of ways, using HTTP, FTP, or email.
+See the RFC Editor Web page http://www.rfc-editor.org
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+                                RFC INDEX
+                                ---------
+
+
+14 Not Issued.
+
+822 STANDARD FOR THE FORMAT OF ARPA INTERNET TEXT MESSAGES. D. Crocker.
+    August 1982. (Format: TXT, HTML) (Obsoletes RFC733) (Obsoleted by
+    RFC2822) (Updated by RFC1123, RFC1138, RFC1148, RFC1327, RFC2156)
+    (Also STD11) (Status: INTERNET STANDARD) (DOI: 10.17487/RFC822)
+
+2068 Hypertext Transfer Protocol -- HTTP/1.1. R. Fielding, J. Gettys, J.
+     Mogul, H. Frystyk, T. Berners-Lee. January 1997. (Format: TXT, HTML)
+     (Obsoleted by RFC2616) (Status: PROPOSED STANDARD) (DOI:
+     10.17487/RFC2068)
+
+2119 Key words for use in RFCs to Indicate Requirement Levels. S.
+     Bradner. March 1997. (Format: TXT, HTML) (Updated by RFC8174) (Also
+     BCP14) (Status: BEST CURRENT PRACTICE) (DOI: 10.17487/RFC2119)
+
+2616 Hypertext Transfer Protocol -- HTTP/1.1. R. Fielding, J. Gettys, J.
+     Mogul, H. Frystyk, L. Masinter, P. Leach, T. Berners-Lee. June 1999.
+     (Format: TXT, PS, PDF, HTML) (Obsoletes RFC2068) (Obsoleted by
+     RFC7230, RFC7231, RFC7232, RFC7233, RFC7234, RFC7235) (Updated by
+     RFC2817, RFC5785, RFC6266, RFC6585) (Status: DRAFT STANDARD) (DOI:
+     10.17487/RFC2616)
+
+2818 HTTP Over TLS. E. Rescorla. May 2000. (Format: TXT, HTML) (Obsoleted
+     by RFC9110) (Updated by RFC5785, RFC7230) (Status: INFORMATIONAL)
+     (DOI: 10.17487/RFC2818)
+
+2822 Internet Message Format. P. Resnick, Ed.. April 2001. (Format: TXT,
+     HTML) (Obsoletes RFC822) (Obsoleted by RFC5322) (Updated by RFC5335,
+     RFC5336) (Status: PROPOSED STANDARD) (DOI: 10.17487/RFC2822)
+
+2965 HTTP State Management Mechanism. D. Kristol, L. Montulli. October
+     2000. (Format: TXT, HTML) (Obsoletes RFC2109) (Obsoleted by RFC6265)
+     (Status: HISTORIC) (DOI: 10.17487/RFC2965)
+
+3339 Date and Time on the Internet: Timestamps. G. Klyne, C. Newman. July
+     2002. (Format: TXT, HTML) (Updated by RFC9557) (Status: PROPOSED
+     STANDARD) (DOI: 10.17487/RFC3339)
+
+3986 Uniform Resource Identifier (URI): Generic Syntax. T. Berners-Lee,
+     R. Fielding, L. Masinter. January 2005. (Format: TXT, HTML)
+     (Obsoletes RFC1808, RFC2396, RFC2732) (Updates RFC1738) (Updated by
+     RFC7320, RFC8820) (Also STD66) (Status: INTERNET STANDARD) (DOI:
+     10.17487/RFC3986)
+
+4180 Common Format and MIME Type for Comma-Separated Values (CSV) Files.
+     Y. Shafranovich. October 2005. (Format: TXT, HTML) (Updated by
+     RFC7111) (Status: INFORMATIONAL) (DOI: 10.17487/RFC4180)
+
+4627 The application/json Media Type for JavaScript Object Notation
+     (JSON). D. Crockford. July 2006. (Format: TXT, HTML) (Obsoleted by
+     RFC7159) (Status: INFORMATIONAL) (DOI: 10.17487/RFC4627)
+
+5322 Internet Message Format. P. Resnick, Ed.. October 2008. (Format:
+     TXT, HTML) (Obsoletes RFC2822) (Updates RFC4021) (Updated by
+     RFC6854) (Status: DRAFT STANDARD) (DOI: 10.17487/RFC5322)
+
+6265 HTTP State Management Mechanism. A. Barth. April 2011. (Format: TXT,
+     HTML) (Obsoletes RFC2965) (Status: PROPOSED STANDARD) (DOI:
+     10.17487/RFC6265)
+
+6749 The OAuth 2.0 Authorization Framework. D. Hardt, Ed.. October 2012.
+     (Format: TXT, HTML) (Obsoletes RFC5849) (Updated by RFC8252,
+     RFC8996, RFC9700) (Status: PROPOSED STANDARD) (DOI:
+     10.17487/RFC6749)
+
+7158 The JavaScript Object Notation (JSON) Data Interchange Format. T.
+     Bray, Ed.. March 2014. (Format: TXT, HTML) (Obsoleted by RFC7159)
+     (Status: PROPOSED STANDARD) (DOI: 10.17487/RFC7158)
+
+7159 The JavaScript Object Notation (JSON) Data Interchange Format. T.
+     Bray, Ed.. March 2014. (Format: TXT, HTML) (Obsoletes RFC4627,
+     RFC7158) (Obsoleted by RFC8259) (Status: PROPOSED STANDARD) (DOI:
+     10.17487/RFC7159)
+
+7230 Hypertext Transfer Protocol (HTTP/1.1): Message Syntax and Routing.
+     R. Fielding, Ed., J. Reschke, Ed.. June 2014. (Format: TXT, HTML)
+     (Obsoletes RFC2145, RFC2616) (Obsoleted by RFC9110, RFC9112)
+     (Updates RFC2817, RFC2818) (Updated by RFC8615) (Status: PROPOSED
+     STANDARD) (DOI: 10.17487/RFC7230)
+
+7231 Hypertext Transfer Protocol (HTTP/1.1): Semantics and Content. R.
+     Fielding, Ed., J. Reschke, Ed.. June 2014. (Format: TXT, HTML)
+     (Obsoletes RFC2616) (Obsoleted by RFC9110) (Updates RFC2817)
+     (Status: PROPOSED STANDARD) (DOI: 10.17487/RFC7231)
+
+7232 Hypertext Transfer Protocol (HTTP/1.1): Conditional Requests. R.
+     Fielding, Ed., J. Reschke, Ed.. June 2014. (Format: TXT, HTML)
+     (Obsoletes RFC2616) (Obsoleted by RFC9110) (Status: PROPOSED
+     STANDARD) (DOI: 10.17487/RFC7232)
+
+7233 Hypertext Transfer Protocol (HTTP/1.1): Range Requests. R. Fielding,
+     Ed., Y. Lafon, Ed., J. Reschke, Ed.. June 2014. (Format: TXT, HTML)
+     (Obsoletes RFC2616) (Obsoleted by RFC9110) (Status: PROPOSED
+     STANDARD) (DOI: 10.17487/RFC7233)
+
+7234 Hypertext Transfer Protocol (HTTP/1.1): Caching. R. Fielding, Ed.,
+     M. Nottingham, Ed., J. Reschke, Ed.. June 2014. (Format: TXT, HTML)
+     (Obsoletes RFC2616) (Obsoleted by RFC9111) (Status: PROPOSED
+     STANDARD) (DOI: 10.17487/RFC7234)
+
+7235 Hypertext Transfer Protocol (HTTP/1.1): Authentication. R. Fielding,
+     Ed., J. Reschke, Ed.. June 2014. (Format: TXT, HTML) (Obsoletes
+     RFC2616, RFC2617) (Obsoleted by RFC9110) (Status: PROPOSED STANDARD)
+     (DOI: 10.17487/RFC7235)
+
+7519 JSON Web Token (JWT). M. Jones, J. Bradley, N. Sakimura. May 2015.
+     (Format: TXT, HTML) (Updated by RFC7797, RFC8725) (Status: PROPOSED
+     STANDARD) (DOI: 10.17487/RFC7519)
+
+8174 Ambiguity of Uppercase vs Lowercase in RFC 2119 Key Words. B. Leiba.
+     May 2017. (Format: TXT, HTML) (Updates RFC2119) (Also BCP14)
+     (Status: BEST CURRENT PRACTICE) (DOI: 10.17487/RFC8174)
+
+8259 The JavaScript Object Notation (JSON) Data Interchange Format. T.
+     Bray, Ed.. December 2017. (Format: TXT, HTML) (Obsoletes RFC7159)
+     (Also STD90) (Status: INTERNET STANDARD) (DOI: 10.17487/RFC8259)
+
+8446 The Transport Layer Security (TLS) Protocol Version 1.3. E.
+     Rescorla. August 2018. (Format: TXT, HTML) (Obsoletes RFC5077,
+     RFC5246, RFC6961) (Obsoleted by RFC9846) (Updates RFC5705, RFC6066)
+     (Status: PROPOSED STANDARD) (DOI: 10.17487/RFC8446)
+
+9110 HTTP Semantics. R. Fielding, Ed., M. Nottingham, Ed., J. Reschke,
+     Ed.. June 2022. (Format: HTML, TXT, PDF, XML) (Obsoletes RFC2818,
+     RFC7230, RFC7231, RFC7232, RFC7233, RFC7235, RFC7538, RFC7615,
+     RFC7694) (Updates RFC3864) (Also STD97) (Status: INTERNET STANDARD)
+     (DOI: 10.17487/RFC9110)
+
+9111 HTTP Caching. R. Fielding, Ed., M. Nottingham, Ed., J. Reschke, Ed..
+     June 2022. (Format: HTML, TXT, PDF, XML) (Obsoletes RFC7234) (Also
+     STD98) (Status: INTERNET STANDARD) (DOI: 10.17487/RFC9111)
+
+9112 HTTP/1.1. R. Fielding, Ed., M. Nottingham, Ed., J. Reschke, Ed..
+     June 2022. (Format: HTML, TXT, PDF, XML) (Obsoletes RFC7230)
+     (Updated by RFC9931) (Also STD99) (Status: INTERNET STANDARD) (DOI:
+     10.17487/RFC9112)
+
+9846 The Transport Layer Security (TLS) Protocol Version 1.3. E.
+     Rescorla. July 2026. (Format: HTML, TXT, PDF, XML) (Obsoletes
+     RFC5077, RFC5246, RFC6961, RFC7627, RFC8422, RFC8446) (Updates
+     RFC5705, RFC6066) (Status: PROPOSED STANDARD) (DOI:
+     10.17487/RFC9846)
+

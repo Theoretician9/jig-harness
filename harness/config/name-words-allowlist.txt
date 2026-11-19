@@ -234,3 +234,4 @@ repro  # repro — общеупотребительное сокращение �
 statusline  # statusline — ИМЯ настройки statusLine самого Claude Code (скрипт строки состояния): scripts/statusline_limits.py и его проба названы по ней в spec.md hr.speed-modes Ч9; в словаре гейта слова нет (05.11.2026)
 dir  # dir — общеупотребительное сокращение английского directory: часть имени записи памяти stale-copy-dir-with-symlinks-mutates-production.md; в словаре гейта слова нет (05.11.2026)
 symlinks  # symlinks — английское «символические ссылки» (термин ОС): та же запись памяти; в словаре гейта слова нет (05.11.2026)
+runtime  # среда исполнения движка: runtime.json, runtime_check.py (видеофабрика Content-Factory, процедурность П0); в словаре гейта слова нет (19.11.2026)

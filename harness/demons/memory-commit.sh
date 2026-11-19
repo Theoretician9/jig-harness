@@ -30,7 +30,8 @@ set -euo pipefail
 CONF="${HARNESS_INSTALL_CONF:-$(konf_koren)/install.conf}"
 # Пороги — из общего загрузчика, а не числом в коде (находка ревью M-09).
 # Окружение СТАРШЕ файла: так проба задаёт свой порог, не трогая боевой.
-konf_zagruzit MEMORY_COMMIT_FAILS_MAX MEMORY_COMMIT_LOCK_MAX
+konf_zagruzit MEMORY_COMMIT_FAILS_MAX MEMORY_COMMIT_LOCK_MAX DAEMON_OWNED_PATHS \
+    MEMORY_SERVICE_COMMIT_MIN MEMORY_OWNER_WAIT_MIN
 # Значение конфига — до комментария: строка «PROJECT_DIR="…"   # каталог кода»
 # без этой обрезки приезжала в cd целиком (поймано первым же прогоном).
 znachenie() { grep -E "^$1=" "$CONF" 2>/dev/null | head -1 | cut -d= -f2- \
@@ -74,6 +75,9 @@ GATES_FILE="$FAILS_FILE.gates"   # имена гейтов серии — жив
 # Занятый индекс ведёт СВОЙ счёт: в счёт гейтов блокировка не идёт.
 LOCK_FILE="$LOG_DIR/memory-commit.индекс-занят"
 zabyt_neudachi() { rm -f "$FAILS_FILE" "$GATES_FILE" "$LOCK_FILE" || say "счёт неудач не снят: $FAILS_FILE"; }
+# Время первого «отложил» правки владельца (mtime): по нему судится потолок ожидания.
+DEFERRED_FILE="$LOG_DIR/memory-commit.отложено"
+pulse() { mkdir -p "$HEARTBEAT_DIR" && : > "$HEARTBEAT_DIR/memory-commit"; }
 
 # ── пауза владельца: демон, который ПИШЕТ, на паузе молчит ──────────────────
 # Ревью спеки остановки 21.09.2026 (CRITICAL 4): владелец нажал «стоп», а
@@ -115,6 +119,7 @@ CHANGED="$(git -c core.quotepath=false status --porcelain -uall -- "$MEMORY_SUBD
 if [ -z "$CHANGED" ]; then
     say "правок памяти нет"
     zabyt_neudachi        # не отказ гейта — счёт начинается заново (M-02)
+    rm -f "$DEFERRED_FILE"
     python3 "$PROJECT_DIR/scripts/board.py" --снять память-индекс-занят >/dev/null 2>&1 || true
     # Память закоммитила смена или файл вернули: беды нет, карточка не нужна.
     if [ -f "$PROJECT_DIR/scripts/alert-task.py" ]; then
@@ -128,6 +133,54 @@ fi
 COUNT="$(printf '%s\n' "$CHANGED" | grep -c . || true)"
 say "правок памяти: $COUNT"
 printf '%s\n' "$CHANGED" | sed 's/^/    /'
+
+# ── Когда коммитить: не под замком очереди и служебное — пачкой ────────────
+# Коммит сдвигает master. Под слиянием или публикацией (они держат замок очереди)
+# сдвиг даёт повтор ворот или отказ кодом 6 (17.11: 1 повтор и 2 отказа). Служебные
+# отметки разбора (класс DAEMON_OWNED_PATHS) пишут механизмы каждые минуты; по
+# коммиту на каждую — 19 из 23 коммитов демона за 17.11. Правка владельца — сразу,
+# отметки едут с ней. Класс судит тот же судья, что и stop-хук.
+JUDGE="$PROJECT_DIR/scripts/service-only-diff.py"
+OWNER_PATHS=0
+skip_next=0
+while IFS= read -r -d '' entry; do
+    [ "$skip_next" = 1 ] && { skip_next=0; continue; }
+    [ "${#entry}" -ge 4 ] || continue
+    case "${entry:0:1}" in R|C) skip_next=1 ;; esac
+    # Нет судьи — путь считается правкой владельца: коммит сразу, как до класса.
+    [ -f "$JUDGE" ] && python3 -I "$JUDGE" --путь "${entry:3}" >/dev/null 2>&1 && continue
+    OWNER_PATHS=$((OWNER_PATHS + 1))
+done < <(git -c core.quotepath=false status --porcelain -z -uall -- "$MEMORY_SUBDIR" 2>/dev/null || true)
+
+# Замок держим до конца git commit: «проверил и отпустил» оставил бы очереди окно
+# на время pre-commit (~70 с). Файл замка есть всегда — судит только flock.
+QUEUE_LOCK="$LOG_DIR/merge-queue.lock"
+exec 9>>"$QUEUE_LOCK"
+if ! flock -n 9; then
+    WAIT_MIN="${MEMORY_OWNER_WAIT_MIN:-30}"
+    if [ "$OWNER_PATHS" -gt 0 ] && [ -n "$(find "$DEFERRED_FILE" -mmin +"$WAIT_MIN" 2>/dev/null)" ]; then
+        say "замок очереди слияния ($QUEUE_LOCK) занят дольше $WAIT_MIN мин — коммичу правку владельца мимо замка"
+    else
+        [ "$OWNER_PATHS" -gt 0 ] && [ ! -f "$DEFERRED_FILE" ] && : > "$DEFERRED_FILE"
+        say "замок очереди слияния ($QUEUE_LOCK) занят — слияние или публикация; отложил коммит до следующего обхода"
+        pulse
+        exit 0
+    fi
+elif [ "$OWNER_PATHS" = 0 ]; then
+    # Срок пачки — по последнему коммиту ЛЮБОГО пути класса под памятью: время HEAD
+    # двигает любой чужой коммит, и отметки откладывались бы без конца.
+    CLASS_PATHS=()
+    for owned in ${DAEMON_OWNED_PATHS:-}; do
+        case "$owned" in "$MEMORY_SUBDIR"/*) CLASS_PATHS+=("$owned") ;; esac
+    done
+    LAST_CT="$(git log -1 --format=%ct -- "${CLASS_PATHS[@]}" 2>/dev/null || true)"
+    PERIOD_MIN="${MEMORY_SERVICE_COMMIT_MIN:-60}"
+    if [ -n "$LAST_CT" ] && [ $(( $(date +%s) - LAST_CT )) -lt $(( PERIOD_MIN * 60 )) ]; then
+        say "только служебные отметки, прошлый их коммит $(( ($(date +%s) - LAST_CT) / 60 )) мин назад — коммичу пачкой раз в $PERIOD_MIN мин"
+        pulse
+        exit 0
+    fi
+fi
 
 # НОВАЯ запись памяти в коммит сама не попадёт: `git commit --only <путь>`
 # берёт только ОТСЛЕЖИВАЕМЫЕ пути, а неотслеженный файл остаётся снаружи —
@@ -188,7 +241,9 @@ MSG="Сохранил в git файлы памяти: ${LJUDSKI:-записи}
 
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 
-if git commit -o "$MEMORY_SUBDIR" -m "$MSG" >"$VYVOD" 2>&1; then
+if git commit -o "$MEMORY_SUBDIR" -m "$MSG" >"$VYVOD" 2>&1 9>&-; then
+    flock -u 9
+    rm -f "$DEFERRED_FILE"
     say "закоммичено: $(git log --oneline -1)"
     # И-4 на своём же коммите: сообщение НАЗЫВАЕТ файлы, и они обязаны в нём
     # быть. Молчаливое расхождение и было бедой bf91834 — имя в истории,

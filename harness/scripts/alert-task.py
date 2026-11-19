@@ -71,12 +71,12 @@ class Paths:
         self.failures = self.log / "tg_failures.log"
 
 
-def claude_ancestors() -> list:
-    """Предки процесса с именем `claude`: окружение снимается одной командой
-    (`env -u`), а родословную процесс сменить не может. Отрыв через `setsid`
-    делает сироту — его ловит правило guard_bash по тексту команды."""
+def claude_ancestors(stop: int = 0) -> list:
+    """Предки процесса с именем `claude` ниже `stop`: окружение снимается одной
+    командой (`env -u`), а родословную процесс сменить не может. Отрыв через
+    `setsid` делает сироту — его ловит правило guard_bash по тексту команды."""
     found, pid = [], os.getppid()
-    while pid > 1:
+    while pid > 1 and pid != stop:
         try:
             status = Path(f"/proc/{pid}/status").read_text(encoding="utf-8")
         except OSError:
@@ -88,8 +88,21 @@ def claude_ancestors() -> list:
     return found
 
 
-def called_from_session() -> bool:
-    return bool(os.environ.get("CLAUDE_CODE_SESSION_ID")) or bool(claude_ancestors())
+def stand_root(paths: Paths) -> int:
+    """Дверь стенда пробы: ALERT_STAND_ROOT — PID пробы, выше него родословная не
+    судится. Ворота выпуска гонит оркестратор из сессии, и `claude` — предок
+    каждой пробы; без двери стенд получал 6 на каждый зов. Карта собственного
+    дерева писателя (боевая) дверь не открывает: стенд пишет только в свою."""
+    root = os.environ.get("ALERT_STAND_ROOT", "")
+    own_tree = HERE.parent.resolve()
+    if not root.isdigit() or paths.map.resolve().is_relative_to(own_tree):
+        return 0
+    return int(root)
+
+
+def called_from_session(paths: Paths) -> bool:
+    return (bool(os.environ.get("CLAUDE_CODE_SESSION_ID"))
+            or bool(claude_ancestors(stand_root(paths))))
 
 
 def refuse_session(paths: Paths, key: str, watcher: str | None) -> int:
@@ -415,7 +428,7 @@ def note_failure(paths: Paths, key: str, why: str) -> None:
 
 def command_raise(paths: Paths, args) -> int:
     key = args.key
-    if called_from_session():
+    if called_from_session(paths):
         return refuse_session(paths, key, args.watcher)
     intent = {"ts": now_stamp(), "key": key, "title": args.title,
               "text": args.text if args.text is not None else args.title,
@@ -451,7 +464,7 @@ def command_raise(paths: Paths, args) -> int:
 
 
 def command_resolve(paths: Paths, key: str) -> int:
-    if called_from_session():
+    if called_from_session(paths):
         return refuse_session(paths, key, None)
     queued = any(r.get("key") == key for r in queue_rows(paths))
     if cards.key_state(journal_lines(paths), key) == "открыта" or queued:

@@ -380,7 +380,7 @@ fi
 
 # Чужие файлы агент трогать не вправе. Сравнение идёт с ГИТОМ: он помнит, что
 # было, лучше любой нашей копии.
-CHUZHIE=$(cd "$PROJECT_DIR" && git status --porcelain -- . ':(exclude)dev-map.yaml' 2>/dev/null | head -5)
+CHUZHIE=$(cd "$PROJECT_DIR" && git -c core.quotepath=false status --porcelain -- . ':(exclude)dev-map.yaml' 2>/dev/null | head -5)
 if [ -n "$CHUZHIE" ]; then
     say "ВНИМАНИЕ: после агента изменены файлы кроме карты:"
     printf '%s\n' "$CHUZHIE" | sed 's/^/    /'

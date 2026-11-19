@@ -22,6 +22,9 @@
 #   * "чисто" — true, только если дерево чисто в НАЧАЛЕ и в КОНЦЕ прогона и HEAD
 #     конца тот же, что в начале: проверка, создавшая файл или сделавшая коммит
 #     посреди ворот, оставляет итог, который не описывает проверенное дерево.
+#     Исключение (спека тяжёлых прогонов, Ж): правки и коммиты, где только
+#     добавленные строки в классе DAEMON_OWNED_PATHS под память/, «чисто» не снимают
+#     ни в начале, ни в конце — судит service-only-diff.py (случаи Ж ниже).
 #
 # Стенд свой: копия отслеживаемых файлов scripts/ и harness/ в tmp-репозитории,
 # свой gates-hackathon.yaml с одной проверкой, свой LOG_DIR. Полные ворота не
@@ -50,13 +53,33 @@ else
 fi
 stand_git() { GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
               git -C "$TREE" -c user.name=proba -c user.email=p@p "$@"; }
-# Одна проверка; MOVE_DURING — сделать коммит посреди прогона (больной случай 4),
-# CLEAN_DURING — оставить неотслеживаемый файл посреди прогона, FAIL_DURING — красная.
+# Одна проверка (её тело — stand-during.sh в корне стенда); MOVE_DURING — коммит ПРАВКИ
+# КОДА посреди прогона (больной случай 4; пустой коммит Ж счёл бы служебным — разница
+# пуста), SERVICE_DURING — коммит добавленной строки служебной отметки посреди прогона,
+# SERVICE_DIRTY_DURING — та же строка, но без коммита, CLEAN_DURING — неотслеживаемый
+# файл посреди прогона, FAIL_DURING — красная.
 cat > "$TREE/harness/config/gates-hackathon.yaml" <<'EOF'
 checks:
   - name: стенд
-    cmd: 'if [ -n "${MOVE_DURING:-}" ]; then GIT_CONFIG_GLOBAL=/dev/null git -c user.name=p -c user.email=p@p commit -q --allow-empty -m "посреди ворот"; fi; if [ -n "${CLEAN_DURING:-}" ]; then echo посреди > during_gates.txt; fi; echo стенд; [ -z "${FAIL_DURING:-}" ]'
+    cmd: 'bash stand-during.sh'
 EOF
+cat > "$TREE/stand-during.sh" <<'EOF'
+sg() { GIT_CONFIG_GLOBAL=/dev/null git -c user.name=p -c user.email=p@p "$@"; }
+if [ -n "${MOVE_DURING:-}" ]; then
+    echo "правка $(date +%s%N)" >> scripts/moved_during.txt
+    sg add scripts/moved_during.txt; sg commit -q -m "код посреди ворот"
+fi
+if [ -n "${SERVICE_DURING:-}" ]; then
+    echo "отметка $(date +%s%N)" >> память/.tasks-triaged
+    sg add память/.tasks-triaged; sg commit -q -m "служебная отметка посреди ворот"
+fi
+[ -z "${SERVICE_DIRTY_DURING:-}" ] || echo "отметка $(date +%s%N)" >> память/.tasks-triaged
+[ -z "${CLEAN_DURING:-}" ] || echo посреди > during_gates.txt
+echo стенд
+[ -z "${FAIL_DURING:-}" ]
+EOF
+mkdir -p "$TREE/память"
+printf 'отметка 0\n' > "$TREE/память/.tasks-triaged"
 # Карантин стенда: одна запись на карточку, которой нет в карте, — беда карантина.
 # Основной путь при нуле красных выходит кодом 1 (новых 0, бед 1): то самое
 # «красных 0, новых 0, код > 0», которое замок публикации обязан видеть.
@@ -112,13 +135,13 @@ value = rows[-1].get(key, "нет-поля")
 print(value if isinstance(value, str) else json.dumps(value))
 PY
 }
-lines() { local n=0; [ -f "$LOGS/ворота-итог.jsonl" ] && n=$(grep -c . "$LOGS/ворота-итог.jsonl"); echo "${n:-0}"; }
+summary_lines() { local n=0; [ -f "$LOGS/ворота-итог.jsonl" ] && n=$(grep -c . "$LOGS/ворота-итог.jsonl"); echo "${n:-0}"; }
 EXTRA="$TREE/scripts/extra_file.txt"
 
 echo "── 1. --хакатон, чистое дерево ──"
 HEAD0=$(stand_git rev-parse HEAD)
-n0=$(lines); run_gates --хакатон
-case_check "строка итога дописана" "$((n0 + 1))" "$(lines)"
+n0=$(summary_lines); run_gates --хакатон
+case_check "строка итога дописана" "$((n0 + 1))" "$(summary_lines)"
 case_check "режим хакатон (поле осталось)" "хакатон" "$(last режим)"
 case_check "sha = полный HEAD стенда" "$HEAD0" "$(last sha)"
 case_check "чисто = true" "true" "$(last чисто)"
@@ -163,8 +186,8 @@ rm -f "$TREE/during_gates.txt"
 echo "── 5. основной путь (--только, ноль проверок), чистое дерево ──"
 HEAD5=$(stand_git rev-parse HEAD)
 case_check "стенд перед прогоном чист" "" "$(stand_git status --porcelain)"
-n5=$(lines); run_gates --только "нет-такой-проверки"
-case_check "строка итога основного пути дописана" "$((n5 + 1))" "$(lines)"
+n5=$(summary_lines); run_gates --только "нет-такой-проверки"
+case_check "строка итога основного пути дописана" "$((n5 + 1))" "$(summary_lines)"
 case_check "режим выборка" "выборка" "$(last режим)"
 case_check "sha = полный HEAD стенда" "$HEAD5" "$(last sha)"
 case_check "чисто = true (дерево было чистым в начале)" "true" "$(last чисто)"
@@ -179,6 +202,69 @@ printf 'лишний\n' > "$EXTRA"
 run_gates --только "нет-такой-проверки"
 case_check "чисто = false" "false" "$(last чисто)"
 rm -f "$EXTRA"
+
+echo "── 7. Ж: служебные отметки «чисто» не снимают (спека тяжёлых прогонов, Ж; ревью ЕЖ п. 3) ──"
+# Контракт Ж: старт и конец судит один судья — service-only-diff.py в режиме рабочего
+# дерева (`<sha начала> --под память/`): сдвиг HEAD и правки, где только добавленные
+# строки в классе DAEMON_OWNED_PATHS, «чисто» не снимают; правка кода, удалённая
+# строка отметки — снимают. Класс — harness.conf стенда (копия конфига машины с ключом
+# стенда), дверь HARNESS_CONF; судья — тот, что лежит в scripts/ судимого дерева.
+MACHINE_CONF=$(python3 -I -c 'import sys; sys.path.insert(0, sys.argv[1]); import config; print(config.путь_harness_conf())' "$TREE/scripts/lib" 2>/dev/null || true)
+{ grep -v '^DAEMON_OWNED_PATHS=' "$MACHINE_CONF" 2>/dev/null || true
+  echo 'DAEMON_OWNED_PATHS="память/.tasks-triaged память/.orders-processed память/.details-triaged память/.указания-разобрано docs/приёмка/"'
+} > "$STAND/harness.conf"
+restore_marks() {  # вернуть отметку к закоммиченному виду (без git checkout стенда)
+    stand_git show HEAD:память/.tasks-triaged > "$TREE/память/.tasks-triaged"
+    rm -f "$TREE/память/.details-triaged"
+}
+zh_run() { HARNESS_CONF="$STAND/harness.conf" run_gates "$@"; }
+# Основной путь (случаи 5–6) собрал производные документы docs/ (их нет на свежем стенде):
+# неотслеженные, они грязнят СТАРТ каждого следующего прогона, и «false» случаев Ж
+# говорил бы о них, а не о судимом. Кладём их в стенд коммитом.
+stand_git add -A -- docs 2>/dev/null
+stand_git diff --cached --quiet || stand_git commit -qm "производные документы стенда"
+
+case_check "стенд перед Ж чист" "" "$(stand_git status --porcelain)"
+HEAD7=$(stand_git rev-parse HEAD)
+SERVICE_DURING=1 zh_run --хакатон
+case_check "Ж1 стенд: HEAD сдвинулся за прогон" "да" "$([ "$HEAD7" != "$(stand_git rev-parse HEAD)" ] && echo да || echo нет)"
+case_check "Ж1 sha = HEAD начала" "$HEAD7" "$(last sha)"
+case_check "Ж1 служебный коммит посреди прогона → чисто = true" "true" "$(last чисто)"
+
+MOVE_DURING=1 zh_run --хакатон
+case_check "Ж2 коммит кода посреди прогона (с классом и судьёй) → чисто = false" "false" "$(last чисто)"
+
+case_check "стенд перед Ж3 чист" "" "$(stand_git status --porcelain)"
+SERVICE_DIRTY_DURING=1 zh_run --хакатон
+case_check "Ж3 отметка дописана посреди прогона без коммита → чисто = true" "true" "$(last чисто)"
+restore_marks
+
+printf 'отметка до старта\n' >> "$TREE/память/.tasks-triaged"
+zh_run --хакатон
+case_check "Ж4 отметка дописана ДО старта ворот → чисто = true" "true" "$(last чисто)"
+restore_marks
+
+sed -i '1d' "$TREE/память/.tasks-triaged"
+zh_run --хакатон
+case_check "Ж5 строка отметки удалена ДО старта ворот → чисто = false" "false" "$(last чисто)"
+restore_marks
+
+printf 'новая отметка\n' > "$TREE/память/.details-triaged"
+zh_run --хакатон
+case_check "Ж6 новый неотслеженный файл класса до старта → чисто = true" "true" "$(last чисто)"
+restore_marks
+
+printf 'отметка до старта\n' >> "$TREE/память/.tasks-triaged"
+printf 'лишний\n' > "$EXTRA"
+zh_run --хакатон
+case_check "Ж7 отметка плюс неотслеженный файл вне класса до старта → чисто = false" "false" "$(last чисто)"
+rm -f "$EXTRA"; restore_marks
+
+printf 'отметка до старта\n' >> "$TREE/память/.tasks-triaged"
+zh_run --только "нет-такой-проверки"
+case_check "Ж8 основной путь: отметка дописана до старта → чисто = true" "true" "$(last чисто)"
+restore_marks
+case_check "стенд после Ж чист" "" "$(stand_git status --porcelain)"
 
 [ "$CASES_PATHS" -gt 0 ] || { echo "FAIL: ни одного случая"; exit 1; }
 [ "$CASES_FAILED" -gt 0 ] && printf '%s\n' "$GATES_OUT" | tail -5 | sed 's/^/      последний прогон: /'

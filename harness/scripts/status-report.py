@@ -5,6 +5,9 @@
 запусков непонятно, нужны задачи, а под ними — кто делал и какие стадии. Форма:
 
     ✅ СДЕЛАНО
+    • выпуск vX опубликован в HH:MM    (шаги машины после среза, по строке на вид; см. ниже)
+    • слито веток: N
+    • письма копиям: N — <кому>
     1. <короткое название задачи>
        делали: <подпись> (<роль>), <подпись> (<роль> и <роль>)
        этапы: тест ✔ код ✔ проверка ✔ мутации ✔ коммит ✔
@@ -18,7 +21,8 @@
     ⚠ ПОТЕРЯН                 (только если есть потерянные запуски; иначе блока нет)
     • <описание>, с HH:MM      (не больше 3, остаток — «и ещё N»)
     ⏭ ДАЛЬШЕ
-    3. <название карточки очереди>     (нумерация сквозная)
+    3. <название карточки очереди>     (одна строка, нумерация сквозная; нет карточки — первая пачка
+                                        «пачка из N: <название>», нет и её — «очередь пуста»)
 
 Блок задачи с карточкой судит КАРТА, не запуски: test/done/принято — СДЕЛАНО (даже если запуск идёт),
 wip/plan — ДЕЛАЕТСЯ (даже если все запуски кончились). Задача без карточки («дело:…») — по запускам:
@@ -40,10 +44,11 @@ harness-lead — «вёл»; описание начинается со слов
 описании — «тесты»; investigate/survey/audit/measure/разбор/замер/исследов — «разведка»; harness-worker —
 «код»; иное — «помощник».
 
-    status-report.py [--журнал-вызовов F] [--карта F] [--очередь F] [--модели F]
+    status-report.py [--журнал-вызовов F] [--карта F] [--очередь F] [--пачки F] [--модели F]
                      [--сессия ID] [--с ISO-время]    (сессия по умолчанию пуста: весь журнал установки)
     status-report.py --отметить ISO-время   (пишет метку $LOG_DIR/status-report.last и выходит)
-Конфиг (harness.conf): STATUS_STRUCT_MAX_CHARS — потолок всего отчёта (нет ключа — 1400);
+Конфиг (harness.conf): STATUS_STRUCT_MAX_CHARS — потолок всего отчёта (нет ключа — 1400; мягкий потолок
+$PROJECT_DIR/память/TONE.md меньше — он: сторож пускает длиннее, а владелец читает до мягкого);
 сверх потолка задачи сворачиваются с конца блока в «ещё N задач»,
 STATUS_MODEL_LABELS — «модель=подпись;…»,
 STATUS_DONE_SINCE_LAST — «1»: СДЕЛАНО судится по концу работы позже метки прошлого доставленного
@@ -51,8 +56,13 @@ STATUS_DONE_SINCE_LAST — «1»: СДЕЛАНО судится по концу 
 STATUS_LOST_HOURS — часы тишины, после которых запуск без agent.finish потерян (нет ключа или мусор — 2).
 Потерянный: самая поздняя запись его жизни (свой launch, запись с data.вызов = его вызов или
 data.родитель = его вызов, launch и finish потомков любой глубины, запись его транскрипта) старше
-порога. Он не в ДЕЛАЕТСЯ, а в блоке «⚠ ПОТЕРЯН»; был после него запуск той же задачи — под его строкой
-«оборван, работу продолжили». Задача, где остались только потерянные запуски и законченные, — законченная.
+порога. Он не в ДЕЛАЕТСЯ, а в блоке «⚠ ПОТЕРЯН»; был после него запуск той же задачи — работу доделал
+другой, и это не потеря: в ⚠ его нет. Задача, где остались только потерянные запуски и законченные, — законченная.
+Шаги машины в СДЕЛАНО (после метки или окна): теги PUBLIC_BUILD_DIR (publish.sh ставит тег после отправки
+ветки), события «mq.слито» $LOG_DIR/merge-queue.jsonl, письма — файлы почта/<копия>/…, добавленные на
+refs/remotes/origin/main клона EVOLUTION_DIR коммитами автора PROJECT_NAME (паспорт установки).
+ДАЛЬШЕ: первая карточка `work-queue.py --порядок`, кроме «сейчас делаем», показанных выше и сданных
+(начатая тоже); нет — первая пачка `--пачки` с открытыми карточками. --очередь F без --пачки F — пачек нет.
 В СДЕЛАНО при STATUS_DONE_SINCE_LAST=1 и пустом блоке: живы помощники — «с HH:MM ничего не сдано, работа
 идёт», иначе — «с HH:MM нового нет; последний помощник кончил HH:MM».
 Этапы берутся из $PROJECT_DIR/.tasks/<id>/ (журнал.md, harness-code-review.md, мутации.log) и
@@ -89,16 +99,24 @@ NOBODY_NOTE = "сейчас никто не работает"
 GIT_TIMEOUT = 30
 QUEUE_EMPTY = "очередь пуста"
 QUEUE_UNAVAILABLE = "очередь недоступна"
-NEXT_MAX = 3
+# ДАЛЬШЕ — одна строка: владельцу нужен следующий шаг, а не список.
+NEXT_MAX = 1
+BATCH_LINE = "пачка из {count}: {title}"
 DEFAULT_LOST_HOURS = 2
 LOST_MAX = 3
 # Блок потерянных: по строке на запуск, остаток одной строкой.
 LOST_HEADER = "⚠ ПОТЕРЯН"
 LOST_LINE = "• {title}, {model}, с {clock}"
-# После оборванного в той же задаче был новый запуск: работа не брошена, её доделывает другой.
-# Своей строкой под пунктом: в строке пункта приписка съедала название задачи до «…».
-CONTINUED_NOTE = "   оборван, работу продолжили"
 LOST_UNNAMED = "работа без названия"
+# Шаги машины в СДЕЛАНО (отчёт 19.11: выпуск, слияния и письма копиям не видели карточки).
+STEP_RELEASE = "• выпуск {tags} опубликован в {clock}"
+STEP_MERGED = "• слито веток: {count}"
+STEP_LETTERS = "• письма копиям: {count} — {whom}"
+MERGED_EVENT = "mq.слито"
+MERGE_JOURNAL = "merge-queue.jsonl"
+MAIL_ROOT = "почта"
+TONE_FILE = "память/TONE.md"
+TONE_SOFT = re.compile(r"<!--\s*потолки:\s*мягкий=(\d{3,5})")
 LOST_MORE = "и ещё {count}"
 MARK_NAME = "status-report.last"
 # Что не влезло в потолок: сборка пишет PENDING, --отметить после доставки переводит его в CARRY.
@@ -352,6 +370,24 @@ def split_lost(launches: dict, rows: list, cut: Cut, lost_after: timedelta, proj
     return sorted(shown, key=lambda n: (n.ts, n.call)), gone
 
 
+def descends_from(launch: Launch, ancestor: str, launches: dict) -> bool:
+    """Запуск — потомок вызова ancestor по цепочке родителей; счётчик защищает от петли."""
+    step, hops = launch.parent, 0
+    while step and hops <= len(launches):
+        if step == ancestor:
+            return True
+        step = launches[step].parent if step in launches else ""
+        hops += 1
+    return False
+
+
+def continued_by_other(lost: Launch, launches: dict) -> bool:
+    """После оборванного задачу взял другой: позже запущен запуск той же задачи, не его потомок.
+    Свой ребёнок оборванного работу не продолжает: он часть той же брошенной работы."""
+    return bool(lost.key) and any(m.key == lost.key and m.ts > lost.ts and not descends_from(m, lost.call, launches)
+                                  for m in launches.values())
+
+
 def task_key(launch: Launch, launches: dict) -> str:
     """Метка «Часть:» ближайшего предка (или своя); без меток — самый верхний запуск цепочки с русским
     описанием; иначе пусто. Счётчик шагов защищает от петли в битом журнале."""
@@ -595,8 +631,9 @@ def tasks_word(count: int) -> str:
 class Section:
     """Блок отчёта: задачи (сколько показано — shown, остаток сворачивается), «прочее»."""
 
-    def __init__(self, header: str, entries: list, loose: int, empty: str) -> None:
+    def __init__(self, header: str, entries: list, loose: int, empty: str, steps: tuple = ()) -> None:
         self.header, self.entries, self.loose, self.empty = header, entries, loose, empty
+        self.steps = list(steps)   # строки шагов машины: идут первыми и не сворачиваются
         self.shown = len(entries)
         self.bare = 0   # сколько показанных с конца идут одним заголовком, без примечаний
 
@@ -615,7 +652,7 @@ class Section:
         return [e.key for e in self.entries[self.shown:]]
 
     def lines(self, first_number: int, width: int) -> list:
-        lines = [self.header]
+        lines = [self.header] + [clip(step, width) for step in self.steps]
         for number, entry in enumerate(self.entries[:self.shown], first_number):
             lines.append(clip(f"{number}. {entry.title}", width))
             # Примечания не режутся: строка «делали:» с полным списком ролей — смысл отчёта.
@@ -633,19 +670,19 @@ class LostItem(NamedTuple):
     title: str
     model: str
     ts: datetime
-    continued: bool
 
 
 def lost_items(lost: list, titles: dict, labels: dict, finished, continued) -> list:
     """По строке на задачу (самый ранний потерянный запуск); без задачи — по строке на запуск.
-    Сделанная задача строкой не показывается: finished(запуск) — судья «уже сделана»;
-    continued(запуск) — после него в задаче был новый запуск, строка говорит «работу продолжили»."""
+    Потеря — только брошенная работа: finished(запуск) — задача уже сделана; continued(запуск) —
+    после него в задаче был новый запуск, работу доделывает другой (отчёт 19.11: «оборван, работу
+    продолжили» в ⚠ владелец читал как тревогу, которой нет)."""
     firsts = {}
     for launch in lost:
-        if not finished(launch):
+        if not finished(launch) and not continued(launch):
             firsts.setdefault(launch.key or launch.call, launch)
-    return [LostItem(titles.get(n.key, LOST_UNNAMED), label_of(labels, n.model), n.ts,
-                     continued(n)) for n in firsts.values()]
+    return [LostItem(titles.get(n.key, LOST_UNNAMED), label_of(labels, n.model), n.ts)
+            for n in firsts.values()]
 
 
 def lost_lines(lost: list, shown: int, width: int) -> list:
@@ -659,41 +696,70 @@ def lost_lines(lost: list, shown: int, width: int) -> list:
         if len(line) > width:
             room = width - len(LOST_LINE.format(title="…", **fields))
             line = LOST_LINE.format(title=clip(item.title, max(room, 1) + 1), **fields)
-        lines += [line] + ([CONTINUED_NOTE] if item.continued else [])
+        lines.append(line)
     if len(lost) > shown:
         lines.append(LOST_MORE.format(count=len(lost) - shown))
     return lines
 
 
+def is_open(card_id: str, tasks: dict, taken: set) -> bool:
+    """Карточка ждёт работы: есть в карте, не показана выше (taken — семьи показанных) и не сдана."""
+    task = tasks.get(card_id)
+    return bool(task) and card_id not in taken and task.get("status") not in FINISHED_CARD_STATUSES
+
+
 def next_cards(queue_text: str, dev_map: dict, taken: set) -> list:
-    """Названия первых не начатых карточек очереди, кроме взятой сейчас («сейчас делаем: <id> — …»),
-    показанных выше (taken — их семьи) и уже сданных (test/done/принято)."""
+    """Название первой открытой карточки очереди, кроме взятой сейчас («сейчас делаем: <id> — …»).
+    Начатая (wip) тоже следующая: её никто не ведёт выше, а первые десять очереди обычно начаты."""
     tasks = card_index(dev_map)
     current = re.search(r"^сейчас делаем:\s*(\S+)\s+—", queue_text, re.MULTILINE)
     skip = current.group(1) if current else ""
-    titles = []
-    for match in re.finditer(r"^\s*\d+\.\s+(\S+)\s+·", queue_text, re.MULTILINE):
-        task = tasks.get(match.group(1))
-        if match.group(1) in taken or (task or {}).get("status") in FINISHED_CARD_STATUSES:
+    ids = re.findall(r"^\s*\d+\.\s+(\S+)\s+·", queue_text, re.MULTILINE)
+    return [clean_desc(short_title(tasks[cid])) for cid in ids
+            if cid != skip and is_open(cid, tasks, taken)][:NEXT_MAX]
+
+
+def next_batch(batches_text: str, dev_map: dict, taken: set) -> list:
+    """Первая пачка вывода `work-queue.py --пачки` с открытыми карточками — строкой «пачка из N: <первая>».
+    Одиночки пачкой не считаются."""
+    tasks = card_index(dev_map)
+    for line in batches_text.splitlines():
+        head, sep, ids = line.rpartition(": ")
+        if not sep or head.startswith(("пачек", "одиночки")):
             continue
-        if task and match.group(1) != skip and task.get("status") != "wip":
-            titles.append(clean_desc(short_title(task)))
-    return titles[:NEXT_MAX]
+        members = [cid for cid in (s.strip() for s in ids.split(",")) if is_open(cid, tasks, taken)]
+        if members:
+            title = clean_desc(short_title(tasks[members[0]]))
+            return [BATCH_LINE.format(count=len(members), title=title)]
+    return []
 
 
-def queue_text_of(args, map_path: Path) -> str | None:
-    """Вывод очереди; None — очередь недоступна (упал, завис, файл не читается)."""
-    if args.queue:
+def queue_text_of(given: str | None, map_path: Path, mode: str) -> str | None:
+    """Вывод `work-queue.py <карта> <mode>` или файла given; None — недоступен (упал, завис, не читается)."""
+    if given:
         try:
-            return Path(args.queue).read_text(encoding="utf-8", errors="replace")
+            return Path(given).read_text(encoding="utf-8", errors="replace")
         except OSError:
             return None
     try:
-        done = subprocess.run([sys.executable, str(HERE / "work-queue.py"), str(map_path), "--порядок"],
+        done = subprocess.run([sys.executable, str(HERE / "work-queue.py"), str(map_path), mode],
                               capture_output=True, text=True, timeout=60)
     except (subprocess.TimeoutExpired, OSError):
         return None
     return done.stdout if done.returncode == 0 else None
+
+
+def upcoming_lines(args, map_path: Path, dev_map: dict, taken: set) -> tuple:
+    """(строки ДАЛЬШЕ, запасная строка): карточка очереди; нет — первая пачка; нет и её — «очередь пуста».
+    Очередь из файла без файла пачек — пачек нет: стенд не зовёт настоящую очередь."""
+    queue_text = queue_text_of(args.queue, map_path, "--порядок")
+    if queue_text is None:
+        return [], QUEUE_UNAVAILABLE
+    found = next_cards(queue_text, dev_map, taken)
+    if not found and (args.batches or not args.queue):
+        batches = queue_text_of(args.batches, map_path, "--пачки")
+        found = next_batch(batches, dev_map, taken) if batches is not None else []
+    return found, QUEUE_EMPTY
 
 
 def parse_iso(text: str) -> datetime | None:
@@ -773,6 +839,62 @@ def human_subject(subject: str) -> str:
     return re.sub(r"\s+", " ", bare).strip(" :,-")
 
 
+def local_clock(moment: datetime) -> str:
+    return moment.astimezone().strftime("%H:%M")
+
+
+def release_steps(build_dir: str, since: datetime) -> list:
+    """Теги публичной сборки после среза: тег ставит publish.sh только после отправки ветки."""
+    refs = git_output(build_dir, "for-each-ref", "refs/tags", "--sort=creatordate",
+                      "--format=%(refname:short)%09%(creatordate:unix)")
+    fresh = [(name, datetime.fromtimestamp(int(stamp), timezone.utc))
+             for name, _, stamp in (line.partition("\t") for line in refs.splitlines()) if stamp.isdigit()]
+    fresh = [(name, moment) for name, moment in fresh if moment > since]
+    if not fresh:
+        return []
+    return [STEP_RELEASE.format(tags=", ".join(name for name, _ in fresh), clock=local_clock(fresh[-1][1]))]
+
+
+def merged_steps(log_dir: str, since: datetime) -> list:
+    """Слитые ветки после среза — события «mq.слито» журнала очереди слияния."""
+    count = sum(1 for row in read_rows(Path(log_dir) / MERGE_JOURNAL)
+                if row.get("event") == MERGED_EVENT and parse_time(row.get("ts")) > since)
+    return [STEP_MERGED.format(count=count)] if count else []
+
+
+def letter_steps(clone: str, own: str, since: datetime) -> list:
+    """Письма, ушедшие копиям после среза: файлы почта/<кому>/…, добавленные коммитами этой копии на main
+    общего репозитория (main клона обновляет читатель сети). Входящее и находки — не письма."""
+    if not own:
+        return []
+    log = git_output(clone, "-c", "core.quotepath=off", "log", "refs/remotes/origin/main",
+                     "--diff-filter=A", "--name-only", "--format=%x01%ct%x02%an")
+    whom = []
+    for record in log.split("\x01")[1:]:
+        head, _, names = record.partition("\n")
+        stamp, _, author = head.partition("\x02")
+        if author != own or not stamp.isdigit() or datetime.fromtimestamp(int(stamp), timezone.utc) <= since:
+            continue
+        for parts in (name.split("/") for name in names.splitlines()):
+            if len(parts) > 2 and parts[0] == MAIL_ROOT and parts[1] != own:
+                whom.append(parts[1])
+    names = ", ".join(dict.fromkeys(sorted(whom)))
+    return [STEP_LETTERS.format(count=len(whom), whom=names)] if whom else []
+
+
+def work_steps(conf: dict, log_dir: str, own: str, since: datetime) -> list:
+    """Сделанные шаги машины после среза — выпуск, слияния, письма; по строке на вид."""
+    clone = os.path.expanduser(str(conf.get("EVOLUTION_DIR") or "").strip())
+    return (release_steps(str(conf.get("PUBLIC_BUILD_DIR") or "").strip(), since)
+            + merged_steps(log_dir, since) + letter_steps(clone, own, since))
+
+
+def tone_ceiling(project: str) -> int | None:
+    """Мягкий потолок вести из машинной строки TONE.md («<!-- потолки: мягкий=N … -->»); нет — None."""
+    found = TONE_SOFT.search(read_text(Path(project) / TONE_FILE)) if project else None
+    return int(found.group(1)) if found else None
+
+
 def last_finish(rows: list) -> datetime | None:
     """Конец самой свежей работы в журнале, любой сессии и любого окна."""
     moments = [parse_time(r.get("ts")) for r in rows if r.get("event") == "agent.finish"]
@@ -842,6 +964,7 @@ def main() -> int:
     parser.add_argument("--журнал-вызовов", dest="journal")
     parser.add_argument("--карта", dest="map")
     parser.add_argument("--очередь", dest="queue")
+    parser.add_argument("--пачки", dest="batches")
     # Форма по задачам моделей из файла не берёт; ключ принят, чтобы прежние вызовы не падали.
     parser.add_argument("--модели", dest="models")
     parser.add_argument("--сессия", dest="session")
@@ -851,9 +974,11 @@ def main() -> int:
 
     conf = config.из_файла(config.путь_harness_conf())
     labels = parse_labels(conf.get("STATUS_MODEL_LABELS", ""))
-    ceiling = config.status_ceiling(conf)
     log_dir = os.environ.get("LOG_DIR") or config.log_dir()
-    project = os.environ.get("PROJECT_DIR") or config.конфиг().get("PROJECT_DIR", "")
+    passport = config.конфиг()
+    project = os.environ.get("PROJECT_DIR") or passport.get("PROJECT_DIR", "")
+    # Сторож канала пускает до STATUS_STRUCT_MAX_CHARS, а владелец читает до мягкого потолка TONE.md.
+    ceiling = min(filter(None, (config.status_ceiling(conf), tone_ceiling(project))))
     mark_path = Path(log_dir) / MARK_NAME
     if args.mark:
         if parse_iso(args.mark) is None:
@@ -889,23 +1014,22 @@ def main() -> int:
     carry = read_keys(Path(log_dir) / CARRY_NAME) if mark else set()
     shown = one_per_family(window_tasks(tasks, gone, carry, commits, cards), cards, commits)
     done, doing = split_tasks(shown, cards)
-    queue_text = queue_text_of(args, map_path)
     shown_roots = {family_root(t.key, cards) for t in shown}
     taken = {cid for cid in cards if family_root(cid, cards) in shown_roots}
-    upcoming = next_cards(queue_text, dev_map, taken) if queue_text is not None else []
+    upcoming, fallback = upcoming_lines(args, map_path, dev_map, taken)
     working = any(not n.done and n.call not in gone for n in launches.values())
     done_empty = idle_phrase(quiet_from, last_finish(rows), working) if since_last else NOTHING
     fresh_loose = [n for n in loose if n.fresh and n.call not in gone]
     commits_of = lambda t: family_commits(family_root(t.key, cards), cards, commits)
     sections = [
         Section(H_DONE, [done_entry(t, titles, labels, project, commits_of(t)) for t in done],
-                sum(n.done for n in fresh_loose), done_empty),
+                sum(n.done for n in fresh_loose), done_empty,
+                work_steps(conf, log_dir, passport.get("PROJECT_NAME", ""), quiet_from)),
         Section(H_DOING, [doing_entry(t, titles, labels, commits_of(t)) for t in doing], sum(not n.done for n in fresh_loose), NOTHING),
     ]
-    fallback = QUEUE_EMPTY if queue_text is not None else QUEUE_UNAVAILABLE
     umbrellas_done = {root for t in done if (root := family_root(t.key, cards)) != t.key}
     finished = lambda n: task_finished(n, cards, project, umbrellas_done)
-    continued = lambda n: bool(n.key) and any(m.key == n.key and m.ts > n.ts for m in launches.values())
+    continued = lambda n: continued_by_other(n, launches)
     account = account_line()
     room = ceiling - (len(account) + 1 if account else 0)
     text = assemble(Report(sections, lost_items(lost, titles, labels, finished, continued), upcoming, fallback), room)

@@ -13,7 +13,7 @@ CLI:
   process_library.py checks-ids            id таких записей, по одному в строке
   process_library.py checks-units <каталог> <проект> <журналы> <пользователь>
       пишет harness-checks.slice и пары harness-<id>.service/.timer; потолки —
-      из $HARNESS_CONF (CHECKS_CPU_QUOTA, CHECKS_MEMORY_HIGH, CHECKS_MEMORY_MAX)
+      из $HARNESS_CONF (CHECKS_CPU_WEIGHT, CHECKS_CPU_QUOTA, CHECKS_MEMORY_HIGH, CHECKS_MEMORY_MAX)
   process_library.py wrap-crontab [--вход <файл>] [--выход <файл>]
       переписывает СВОИ необёрнутые строки crontab в обёрнутые; без --вход
       читает и пишет живой crontab (копия до правки — в $LOG_DIR или /tmp).
@@ -23,7 +23,9 @@ CLI:
 Слой установки: записи, которые принадлежат машине, а не пакету (чужие
 контейнеры и т.п.), лежат в JSON того же вида по пути ключа PROCESS_LIBRARY_LOCAL
 из harness.conf. Файла нет — реестр как есть; есть — записи добавляются, а при
-том же id заменяют пакетные.
+том же id заменяют пакетные. Поле «механизмы» того же файла — паспорта своих
+механизмов копии (вид записи mechanisms.yaml): их читают судьи библиотеки
+процессов и сроков присмотра вместе с реестром пакета.
 
 Замер нагрузки (доля_нагрузки.замер) — данные машины: process-dispatcher --в-библиотеку
 пишет его в $LOG_DIR/process-library-measure.json, registry() накладывает поверх описания.
@@ -48,6 +50,7 @@ CHECKS_SIGN = "служба-проверок"
 CHECKS_SLICE = "harness-checks.slice"
 # Директива среза -> ключ harness.conf с её значением.
 _CHECKS_CEILINGS = {
+    "CPUWeight": "CHECKS_CPU_WEIGHT",
     "CPUQuota": "CHECKS_CPU_QUOTA",
     "MemoryHigh": "CHECKS_MEMORY_HIGH",
     "MemoryMax": "CHECKS_MEMORY_MAX",
@@ -111,6 +114,28 @@ def with_local_layer(library: dict) -> dict:
         return library
     слитые = [слой.pop(запись["id"], запись) for запись in library.get("процессы") or []]
     return {**library, "процессы": слитые + list(слой.values())}
+
+
+def local_mechanisms() -> list:
+    """Паспорта своих механизмов копии — поле «механизмы» слоя установки, вид записи тот
+    же, что в mechanisms.yaml. Паспорт в файле пакета затирает обновление (копия bkb,
+    19.11.2026), а слой раскладка не трогает. Файла нет — пусто; битый — строка в stderr."""
+    import json
+    путь = local_layer_path()
+    try:
+        паспорта = json.loads(путь.read_text(encoding="utf-8")).get("механизмы") or []
+    except FileNotFoundError:
+        return []
+    except (OSError, ValueError, AttributeError) as error:
+        print(f"process_library: слой установки {путь} не прочитан ({type(error).__name__}: {error}) — "
+              "своих механизмов нет", file=sys.stderr)
+        return []
+    return [п for п in паспорта if isinstance(п, dict)]
+
+
+def local_mechanisms_place() -> str:
+    """Где копия держит паспорт своего механизма — для текста отказа судей."""
+    return f"поле «механизмы» слоя установки {local_layer_path()} (ключ {LOCAL_LAYER_KEY})"
 
 
 MEASURE_NAME = "process-library-measure.json"

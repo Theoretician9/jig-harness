@@ -24,4 +24,5 @@
     маска: harness/self/instance.yaml
   - место: harness.conf установки (/etc/harness/harness.conf)
   - место: файл ключа PROCESS_LIBRARY_LOCAL (свои процессы машины)
+  - место: поле «механизмы» файла ключа PROCESS_LIBRARY_LOCAL (паспорта своих механизмов копии)
   - место: продукт, данные и журналы — всё вне описи .layout-manifest

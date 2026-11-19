@@ -66,8 +66,9 @@ def door(s, env: dict, *cmd: str):
 
 
 def acceptance(s, env: dict, ids: str):
-    return s.run([sys.executable, str(s.root / "scripts" / "acceptance.py"), "--мутации-задачи", ids],
-                 env, s.work)
+    # Заход мутаций зовёт дверь исполнитель очереди; прямой acceptance.py без читаемой
+    # истории в очередь и в дверь не идёт, поэтому судим дверь с командой acceptance.
+    return s.acceptance(env, ids)
 
 
 def probe_door(s) -> None:

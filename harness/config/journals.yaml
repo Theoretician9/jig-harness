@@ -11,7 +11,9 @@
 # Ключи конверта признаются только в строке с "v": 1 — у старой строки любое
 # поле принадлежит механизму.
 
-ignore_dirs: [demon-stream, проба-хука, .events]
+# стенд-хуков — песочница живой проверки перехватчиков (live-check-hook.py): её журналы
+# пишет стенд, а не боевой механизм, поэтому судятся они по имени каталога, не списком файлов.
+ignore_dirs: [demon-stream, проба-хука, стенд-хуков, .events]
 name_is_key_dirs: [PANEL_STATE_DIR]
 digest_keys: [sha256, head, commit, ino_from, sha, checks_file_sha]
 # Долг ворот G1 (scripts/check-event-writers.py): писатели — пары (файл, журнал из
@@ -19,7 +21,10 @@ digest_keys: [sha256, head, commit, ino_from, sha, checks_file_sha]
 # дозаписи в коде (у демона — без нарушений меток) краснит. Закрывается переводом
 # файла на emit / harness_run целиком (Ф3, Ф6), строка вычёркивается тем же коммитом.
 service_flags: [LATE_WATCH]
-disk_families: ["tokens-[0-9][0-9][0-9][0-9]-[0-9][0-9].jsonl"]
+# update-gates-timing/ — тот же журнал gates-timing в своём каталоге: update.py
+# зовёт ворота постановки с GATES_TIMING_DIR, чтобы красные откаченной версии не
+# стали основой. Писатель тот же (harness_event gates-timing), своего ключа нет.
+disk_families: ["tokens-[0-9][0-9][0-9][0-9]-[0-9][0-9].jsonl", "update-gates-timing/gates-timing.jsonl"]
 legacy_writers:
   - {file: harness/demons/evolution-collector.sh, card: hr.harness-detailed-logging, journals: [evo-summary]}
   - {file: harness/demons/memory-revision.sh, card: hr.harness-detailed-logging, journals: ["предложения"]}
@@ -532,6 +537,12 @@ journals:
   checks-slice:
     file: checks-slice.jsonl
     writers: [scripts/run-in-checks-slice.sh]
+    time_field: ts
+    time_kind: tz
+    event_from: "field:event"
+  heavy-slots:
+    file: heavy-slots.jsonl
+    writers: [scripts/heavy-slot.sh]
     time_field: ts
     time_kind: tz
     event_from: "field:event"

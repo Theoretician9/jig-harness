@@ -482,6 +482,24 @@ def case_spent_only_after_press(stand: Stand) -> None:
           f"rc={rc} {field}={load(stand.instance).get(field)!r} {out.strip()[-200:]!r}")
 
 
+def case_other_value_not_spent(stand: Stand) -> None:
+    """«Да» гасит только запись ЭТОГО «поле=значение»: запись другого значения после
+    нажатия его не гасит. Свой стенд: лишняя запись «да» сбила бы сверку старта смены."""
+    field, value = "цель", "Вести склад без ручного учёта"
+    stand.self_set(field, value)
+    stand.press("да", f"{field}={value}")
+    with open(stand.log / "self-set.jsonl", "a", encoding="utf-8") as fh:
+        fh.write(json.dumps({"v": 1, "ts": now_iso(0), "src": "scripts/self-set.py", "event": "self.set",
+                             "outcome": "ok", "data": {"время": now_iso(0), "поле": field,
+                                                       "значение": "другое значение цели",
+                                                       "источник": "контекст", "состояние": "да"}},
+                            ensure_ascii=False) + "\n")
+    rc, out = stand.self_set(field, value)
+    check("запись «да» другого значения после нажатия не гасит «Да»: записано (код 0)",
+          rc == WRITTEN and load(stand.instance).get(field) == value,
+          f"rc={rc} {field}={load(stand.instance).get(field)!r} {out.strip()[-200:]!r}")
+
+
 def case_bypass(stand: Stand) -> None:
     """Сверка при старте смены: молчит после записи дверью, называет поле правки мимо."""
     rc, out = stand.session_state()
@@ -574,6 +592,7 @@ def main() -> int:
     case_bypass(main_stand)
     case_button_day(Stand("day"))
     case_spent_only_after_press(Stand("spent"))
+    case_other_value_not_spent(Stand("other-value"))
     case_gaps()
     case_cards_rebuild()
     live_after = snapshot(LIVE_TRACES)

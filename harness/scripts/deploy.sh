@@ -54,7 +54,7 @@ konf_dveri_puti "${BASH_SOURCE[0]}"
 # .git/hooks симлинком, и dirname дал бы .git/hooks, где библиотеки нет.
 # Поймано первым же коммитом после правки, 12.09.2026.
 konf_zagruzit_dveri PROJECT_DIR LOG_DIR TMUX_SESSION SECRETS_DIR AGENT_START_CMD DOCKER_SWEEP_ENABLED BACKUP_DIR BACKUP_DBS DB_ADMIN_USER DEVMAP_AUDIT_DAYS HARNESS_LOG_DIR PRODUCT_DIR PRODUCT_REPO STACK_BUILD_CMD STACK_BUILD_NOCACHE_CMD STACK_CRON_SRC STACK_DB_DUMP_CMD STACK_DB_RESTORE_HINT STACK_HEALTH_CMD STACK_HEALTH_URL STACK_IMAGES STACK_MANIFESTS STACK_MIGRATE_CMD STACK_PROXY_RELOAD_CMD STACK_RELEASE_CMD STACK_UP_CMD PRODUCT_PATH
-konf_zagruzit_dveri STACK_REMOTE STACK_BRANCH DEPLOY_HEALTH_WAIT_SEC PROJECT_NAME STACK_RUN_AS STACK_STEP_TIMEOUTS STACK_CHECKS_FILE STACK_CHECKS_ONLY STACK_CHECK_MIN_FREE_MB STACK_CHECK_UID STACK_STAND_IMAGES STACK_STAND_ENV_PREFIX STACK_SMOKE_CMD STACK_FRONTEND_CMD STACK_ROLLBACK_CMD STACK_SCAN_CMD STACK_SCAN_POLICY
+konf_zagruzit_dveri STACK_REMOTE STACK_BRANCH DEPLOY_HEALTH_WAIT_SEC PROJECT_NAME STACK_RUN_AS STACK_STEP_TIMEOUTS STACK_CHECKS_FILE STACK_CHECKS_ONLY STACK_CHECK_MIN_FREE_MB STACK_CHECK_UID STACK_STAND_IMAGES STACK_STAND_ENV_PREFIX STACK_STAND_PG STACK_SMOKE_CMD STACK_FRONTEND_CMD STACK_ROLLBACK_CMD STACK_SCAN_CMD STACK_SCAN_POLICY
 # harness.conf несёт секцию STACK_*; без него продукт заведомо не задан.
 # HARNESS_ROOT нужен одному месту — предупреждению --план (Г7); предметом выката харнес не служит.
 : "${PROJECT_DIR:?в install.conf пуст PROJECT_DIR}" "${LOG_DIR:?пуст LOG_DIR}"; HARNESS_ROOT=$(readlink -f -- "$PROJECT_DIR")
@@ -175,6 +175,9 @@ TREE_NOTE="чисто"
 # Стоит ДО перезапуска под sg: плану docker не нужен, и ключ плана не
 # проходит через чужую оболочку, где мог бы исказиться.
 if [ "$WANT_PLAN" = 1 ]; then
+    # План — сухая проверка копии: ключ, на котором выкат откажет до сборки (шаг потолка не
+    # из списка, STACK_RUN_AS = root, учётка стенда), называется здесь, а не после сборки.
+    door_preflight || { say "план не составлен: выкат отказал бы по ключам выше — поправь $HARNESS_CONF"; exit 1; }
     say "план выката (ничего не выполняется):"
     say "  репозиторий продукта: $PRODUCT_TREE (тег deploy-…, сверка секретов, манифесты)"
     case "$(readlink -f -- "$PRODUCT_TREE")/" in

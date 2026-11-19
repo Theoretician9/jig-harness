@@ -19,7 +19,8 @@
 # его права, длину и то, входит ли в него harness-panel.
 #
 # Дверь для мутаций: GATES_SCRIPT — путь к gates.sh.
-# Итог: «КАТАЛОГ ВОРОТ: …; проверок 3: ок K, красных M», код 0 только при K = 3.
+# Итог: «КАТАЛОГ ВОРОТ: …; проверок 3: ок K, красных M», код 0 только при K = 3 и
+# входе второго пользователя в каталог прогона.
 set -uo pipefail
 export LC_ALL=C.UTF-8
 
@@ -58,6 +59,10 @@ rc=0
 env -u TMPDIR LOG_DIR="$W/log" GATES_TIMING_DIR="$W" REACH_LOG="$W/reach.tsv" REACH_USER="$SECOND_USER" \
     PATH="$W/bin:$PATH" timeout 900 bash "$GATES" --только "$only" > "$W/gates.out" 2>&1 || rc=$?
 
+# Вход второго пользователя судится сам: три проверки ниже могут уйти со стендом
+# из-под каталога ворот и позеленеть при каталоге 0700 — тогда ворота без chmod
+# снова уронят первую пробу, которая туда придёт.
+reach=нет
 if [ -s "$W/reach.tsv" ]; then
     IFS=$'\t' read -r run_dir mode reach < "$W/reach.tsv"
     echo "КАТАЛОГ ВОРОТ: $run_dir права $mode длина ${#run_dir}; $SECOND_USER входит: $reach"
@@ -78,6 +83,10 @@ echo "ворота: rc=$rc; проверок ${#CHECKS[@]}: найдено $foun
 if [ "$found" -ne "${#CHECKS[@]}" ]; then
     echo "ПРОБА СЛОМАНА: ворота прогнали не все проверки (имя сменилось?) — хвост вывода:"
     tail -n 15 "$W/gates.out"
+    exit 1
+fi
+if [ "$reach" != да ]; then
+    echo "ПРОБА КРАСНАЯ: $SECOND_USER не входит в каталог прогона ворот (права ${mode:-—})"
     exit 1
 fi
 if [ "$ok" -eq "${#CHECKS[@]}" ] && [ "$rc" -eq 0 ]; then

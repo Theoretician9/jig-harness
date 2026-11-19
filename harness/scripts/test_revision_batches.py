@@ -86,6 +86,10 @@ with tempfile.TemporaryDirectory() as врем:
     # выпадала из круга молча. Теперь последний путь приходит доводом.
     (проект / "scripts" / "x.sh").write_text("z" * 10, encoding="utf-8")
     os.utime(проект / "scripts" / "x.sh", (10_000, 10_000))   # стал самым свежим
+    # Курсор до шага — ДРУГОЙ путь: иначе в файле уже лежит y.sh от шага выше,
+    # и «записали названный путь» неотличимо от «не записали ничего».
+    (Path(врем) / "revizia" / "курсор.json").write_text(
+        json.dumps({"проба": "scripts/x.sh"}, ensure_ascii=False), encoding="utf-8")
     cli("проба", "--продвинуть", "scripts/y.sh")
     курсор = json.loads((Path(врем) / "revizia" / "курсор.json").read_text(encoding="utf-8"))
     проба("курсор ставится по НАЗВАННОМУ пути, а не по пересчитанной порции",

@@ -119,6 +119,8 @@ ack_stand() {  # $1=ok|- — есть ли удачная квитанция н�
     echo "стенд" > "$T/log/inbox/обработано/$msg_id.txt"
     jq -cn --arg s "$(( now - 7200 ))" \
         '{event:"delivery.ack_journal_on", outcome:"ok", data:{started_at:$s}}' >> "$T/log/доставка.jsonl"
+    # Квитанцию ждёт только сообщение канала: строку delivery.queued пишет диспетчер.
+    jq -cn --arg ts "$msg_id" '{event:"delivery.queued", outcome:"ok", data:{ts:$ts}}' >> "$T/log/доставка.jsonl"
     [ "$1" = ok ] && jq -cn --arg ts "$msg_id" --arg s "$(( now - 89 ))" \
         '{event:"delivery.ack", outcome:"ok", data:{ts:$ts, sent_at:$s}}' >> "$T/log/доставка.jsonl"
     return 0

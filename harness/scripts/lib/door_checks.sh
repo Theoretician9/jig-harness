@@ -10,7 +10,8 @@
 # Зависимости: функция say (ставит зовущий), git -C "$PRODUCT_REPO", соседние
 # server_checks.py и events.sh. Ключи: PROJECT_NAME PRODUCT_REPO LOG_DIR
 # STACK_CHECKS_FILE STACK_CHECKS_ONLY STACK_CHECK_MIN_FREE_MB STACK_CHECK_UID
-# STACK_RUN_AS STACK_STAND_IMAGES («pg=<образ> redis=<образ>») STACK_STAND_ENV_PREFIX.
+# STACK_RUN_AS STACK_STAND_IMAGES («pg=<образ> redis=<образ>») STACK_STAND_ENV_PREFIX
+# STACK_STAND_PG («user=<имя> db=<база> password=<пароль>»).
 #
 # Записка tests=success — единственное, чему верит выкат на прод, поэтому «не
 # отработало» (установка, таймаут, память, отказ docker) всегда error, а не failure:
@@ -47,6 +48,9 @@ DCHK_PASSED=0
 DCHK_SKIPPED=0
 DCHK_RESULTS="[]"
 DCHK_TESTS=""
+DCHK_PG_USER=app_user
+DCHK_PG_DB=app_test
+DCHK_PG_PASSWORD=test
 
 # Префикс — граница между установками на одном docker: уборка сирот и всё прочее
 # судят по нему одному.
@@ -80,13 +84,33 @@ dchk_uid_resolve() {
     DCHK_UID="$uid:$(id -g "$user")"
 }
 
+# Учётка pg стенда — контракт с тестами продукта, как и адреса (STACK_STAND_ENV_PREFIX): тесты
+# копии входят в базу своими именем, базой и паролем, и вшитая учётка роняла бы их на входе.
+# Слово, которого нет, — умолчание. Пароль — стенда в сети --internal, не секрет продукта, но
+# в отказ не печатается: ключ назван, значение нет.
+dchk_stand_pg_parse() {
+    local word name
+    DCHK_PG_USER=app_user; DCHK_PG_DB=app_test; DCHK_PG_PASSWORD=test
+    for word in ${STACK_STAND_PG:-}; do
+        name=${word%%=*}
+        [[ $word =~ ^[a-z]+=[A-Za-z0-9_]+$ ]] \
+            || { say "ОШИБКА: проверки: STACK_STAND_PG: слово «$name=…» — нужно имя=значение из букв, цифр и _; отказ до docker"; return 1; }
+        case "$name" in
+            user) DCHK_PG_USER=${word#*=} ;;
+            db) DCHK_PG_DB=${word#*=} ;;
+            password) DCHK_PG_PASSWORD=${word#*=} ;;
+            *) say "ОШИБКА: проверки: STACK_STAND_PG: незнакомое слово «$name» (известны: user db password); отказ до docker"; return 1 ;;
+        esac
+    done
+}
+
 dchk_keys_ok() {
     local key missing=""
     for key in PROJECT_NAME PRODUCT_REPO LOG_DIR STACK_CHECKS_FILE STACK_CHECK_MIN_FREE_MB; do
         [ -n "${!key:-}" ] || missing="$missing $key"
     done
     [ -z "$missing" ] || { say "ОШИБКА: проверки: не заданы ключи:$missing — отказ до docker"; return 1; }
-    dchk_uid_resolve
+    dchk_uid_resolve && dchk_stand_pg_parse
 }
 
 dchk_cleanup() {
@@ -147,7 +171,7 @@ dchk_stand_up() {  # $1 = лог
     if ! docker network create --internal "$net" >>"$1" 2>&1 </dev/null 6>&-; then
         DCHK_REASON="стенд не поднялся: сеть не создана"
     elif ! docker run -d --name "$net-pg" --memory 512m --memory-swap 512m --network "$net" --network-alias pg \
-            -e POSTGRES_USER=app_user -e POSTGRES_PASSWORD=test -e POSTGRES_DB=app_test \
+            -e "POSTGRES_USER=$DCHK_PG_USER" -e "POSTGRES_PASSWORD=$DCHK_PG_PASSWORD" -e "POSTGRES_DB=$DCHK_PG_DB" \
             "$pg_image" >>"$1" 2>&1 </dev/null 6>&-; then
         DCHK_REASON="стенд не поднялся: postgres не запущен"
     elif ! docker run -d --name "$net-redis" --memory 128m --memory-swap 128m --network "$net" --network-alias stand-kv \
@@ -159,7 +183,7 @@ dchk_stand_up() {  # $1 = лог
         # -h 127.0.0.1: временный сервер initdb слушает только unix-сокет, и без -h
         # pg_isready даёт ложное «готов» до настоящего старта. Потолок на сам exec:
         # зависший docker иначе съел бы срок ожидания целиком.
-        until timeout "${DEPLOY_CHECK_STAND_EXEC_SEC:-10}" docker exec "$net-pg" pg_isready -h 127.0.0.1 -U app_user -d app_test >>"$1" 2>&1 </dev/null 6>&-; do
+        until timeout "${DEPLOY_CHECK_STAND_EXEC_SEC:-10}" docker exec "$net-pg" pg_isready -h 127.0.0.1 -U "$DCHK_PG_USER" -d "$DCHK_PG_DB" >>"$1" 2>&1 </dev/null 6>&-; do
             if [ "$SECONDS" -ge "$deadline" ]; then
                 DCHK_REASON="стенд не поднялся: postgres не готов за ${DEPLOY_CHECK_STAND_WAIT_SEC:-120} с"
                 break
@@ -270,7 +294,8 @@ dchk_steps() {  # $1 = JSON набора, $2 = лог, $3 = начало наб�
     limit=$(jq -r .timeout_s <<<"$1")
     if [ -n "$DCHK_STAND_NET" ]; then
         local pfx=${STACK_STAND_ENV_PREFIX:-STAND_}
-        stand_env=(-e "${pfx}PG_HOST=pg" -e "${pfx}PG_PORT=5432" -e "${pfx}REDIS_HOST=stand-kv" -e "${pfx}REDIS_PORT=6379")
+        stand_env=(-e "${pfx}PG_HOST=pg" -e "${pfx}PG_PORT=5432" -e "${pfx}PG_USER=$DCHK_PG_USER" -e "${pfx}PG_DB=$DCHK_PG_DB"
+                   -e "${pfx}PG_PASSWORD=$DCHK_PG_PASSWORD" -e "${pfx}REDIS_HOST=stand-kv" -e "${pfx}REDIS_PORT=6379")
     fi
     while IFS= read -r step; do
         left=$((limit - (SECONDS - $3)))

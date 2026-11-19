@@ -199,6 +199,38 @@ else
     fi
 fi
 
+# ── 7. журнал, сжатый ротацией, на месте ────────────────────────────────────
+# Месячный демон пишет журнал раз в месяц, остальное время от него лежит только
+# <имя>.gz: имя верное, писали под ним — это не претензия. Подмена имени (случай 2)
+# сжатой копии не имеет и по-прежнему краснит.
+rm -rf "$T/logs-gz"; mkdir -p "$T/logs-gz"
+while IFS= read -r name; do : > "$T/logs-gz/$name.gz"; done < "$T/names"
+LOG_DIR="$T/logs-gz" HARNESS_INSTALL_STEPS_DIR="$T/steps-none" \
+    python3 "$T/live/scripts/check-registry.py" > "$T/gz.out" 2>&1
+N_GZ=$(count_missing "$T/gz.out")
+if [ ! -s "$T/names" ]; then
+    bad "7. условие не создано: список журналов реестра пуст"
+elif [ "$N_GZ" = "0" ]; then
+    ok "7. журналы с сжатой копией <имя>.gz не претензия"
+else
+    bad "7. журналов из реестра нет: ${N_GZ:-?} при сжатых копиях всех (ждём 0)"
+fi
+
+# ── 8. задание с «если_задан» при пустом ключе журнала не пишет ─────────────
+printf 'PRODUCT_HEALTH_URL=""\n' > "$T/conf-off"
+printf 'PRODUCT_HEALTH_URL="http://127.0.0.1:1/health"\n' > "$T/conf-on"
+HARNESS_CONF="$T/conf-off" LOG_DIR="$T/logs-empty" HARNESS_INSTALL_STEPS_DIR="$T/steps-none" \
+    python3 "$T/live/scripts/check-registry.py" > "$T/gate-off.out" 2>&1
+HARNESS_CONF="$T/conf-on" LOG_DIR="$T/logs-empty" HARNESS_INSTALL_STEPS_DIR="$T/steps-none" \
+    python3 "$T/live/scripts/check-registry.py" > "$T/gate-on.out" 2>&1
+if ! claimed "product-health.log" "$T/gate-on.out"; then
+    bad "8. условие не создано: при заданном PRODUCT_HEALTH_URL журнал product-health.log не назван"
+elif claimed "product-health.log" "$T/gate-off.out"; then
+    bad "8. PRODUCT_HEALTH_URL пуст, задание не ставится, а журнал product-health.log назван претензией"
+else
+    ok "8. пустой PRODUCT_HEALTH_URL: журнала задания нет — не претензия; заданный — претензия"
+fi
+
 if [ "$FAIL" -ne 0 ]; then
     echo "КРАСНАЯ: сверка журналов из реестра"
     exit 1

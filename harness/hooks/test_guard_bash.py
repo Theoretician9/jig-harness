@@ -1890,6 +1890,73 @@ def проверить_коммит_мимо_обёртки() -> tuple[int, int]
     return bad, путей
 
 
+def проверить_пробу_мимо_места() -> tuple[int, int]:
+    """Помощник запускает пробу (scripts/**/test_*, --selftest) только через общий пул
+    тяжёлых прогонов scripts/heavy-slot.sh (спека тяжёлых прогонов шаг 2 § 4.2).
+    Судится ЗАПУСК, а не подстрока: чтение файла пробы проходит; оркестратора правило
+    не касается. Фоновая форма правил пачки (setsid nohup … &) с обёрткой проходит."""
+    os.environ["HARNESS_GUARD_NOLOG"] = "1"     # отказы пробы — не в боевой журнал отмен
+    фон = "> /var/log/harness/o-x.log 2>&1 < /dev/null &"
+    помощнику = [
+        (2, "голый python3 scripts/test_x.py", "python3 scripts/test_x.py"),
+        (2, "голый под hooks/", "python3 scripts/hooks/test_guard_bash.py"),
+        (2, "голый фоном setsid nohup", f"setsid nohup bash scripts/test_x.sh {фон}"),
+        (2, "timeout и флаг интерпретатора", "timeout 600 python3 -u /var/www/p/scripts/test_x.py"),
+        (2, "--selftest скрипта не test_*", "python3 scripts/acceptance.py --selftest"),
+        (2, "--selftest-devmap", "bash scripts/pre-commit-gate.sh --selftest-devmap"),
+        (2, "прямой запуск файла пробы", "./scripts/test_x.sh"),
+        (2, "в нагрузке bash -c", "bash -c 'ulimit -v 3500000; python3 scripts/test_x.py'"),
+        (2, "обёртка в одном звене, голая проба в другом",
+         "bash scripts/heavy-slot.sh -- true && python3 scripts/test_x.py"),
+        (2, "метка места из команды — не место", "HEAVY_SLOT_HELD=1 python3 scripts/test_x.py"),
+        (2, "обёртка в одном звене, голая нагрузка bash -c в другом",
+         "bash scripts/heavy-slot.sh -- true; bash -c 'python3 scripts/test_x.py'"),
+        (0, "через обёртку", "bash scripts/heavy-slot.sh -- python3 scripts/test_x.py"),
+        (0, "обёртка с пределом ожидания", "bash scripts/heavy-slot.sh --не-дольше 60 -- python3 scripts/test_x.py"),
+        (0, "обёртка фоном setsid nohup (правила пачки)",
+         f"setsid nohup bash scripts/heavy-slot.sh -- bash scripts/test_x.sh {фон}"),
+        (0, "обёртка в нагрузке bash -c под ulimit",
+         "bash -c 'ulimit -v 3500000; bash scripts/heavy-slot.sh -- python3 scripts/test_x.py'"),
+        (0, "нагрузка bash -c под обёрткой", "bash scripts/heavy-slot.sh -- bash -c 'python3 scripts/test_x.py'"),
+        (0, "обёртка над --selftest", "bash scripts/heavy-slot.sh -- python3 scripts/acceptance.py --selftest"),
+        (0, "слитые флаги -ec с обёрткой внутри",
+         "bash -ec 'bash scripts/heavy-slot.sh -- bash /p/scripts/test_x.sh'"),
+        (0, "grep по слову --selftest", "grep -rn -- --selftest scripts/"),
+        (0, "grep по файлу пробы", "grep -n ПЛОХО scripts/test_x.py"),
+        (0, "sed по файлу пробы", "sed -n 1,20p scripts/hooks/test_guard_bash.py"),
+        (0, "py_compile файла пробы", "python3 -m py_compile scripts/test_x.py"),
+        (0, "bash -n файла пробы", "bash -n scripts/test_x.sh"),
+        (0, "не проба", "python3 scripts/check-registry.py"),
+        (0, "строка в echo", "echo 'python3 scripts/test_x.py'"),
+    ]
+    оркестратору = [
+        (0, "оркестратор: голый python3 scripts/test_x.py", "python3 scripts/test_x.py"),
+        (0, "оркестратор: голый фоном", f"setsid nohup bash scripts/test_x.sh {фон}"),
+        (0, "оркестратор: --selftest", "python3 scripts/acceptance.py --selftest"),
+    ]
+    bad, paths = 0, 0
+    прежний = ГВАРД.ПОМОЩНИК
+    try:
+        for helper, cases in ((True, помощнику), (False, оркестратору)):
+            ГВАРД.ПОМОЩНИК = helper
+            b, p = _judge_cases(cases, None, "проба мимо места")
+            bad, paths = bad + b, paths + p
+    finally:
+        ГВАРД.ПОМОЩНИК = прежний
+    # Процессом, как его зовёт оболочка помощника: agent_id во входе хука; отказ называет обёртку.
+    for agent_id, want, name in (("a-proba", 2, "помощник"), ("", 0, "оркестратор")):
+        paths += 1
+        p = subprocess.run(GUARD, capture_output=True, text=True, input=json.dumps(
+            {"tool_name": "Bash", "agent_id": agent_id,
+             "tool_input": {"command": "python3 scripts/test_x.py"}}))
+        ok = p.returncode == want and (want == 0 or "оберни: bash scripts/heavy-slot.sh -- python3 scripts/test_x.py"
+                                       in (p.stderr or "") + (p.stdout or ""))
+        bad += not ok
+        print(f"  {'ок ' if ok else 'ПЛОХО'} ждали={want} получили={p.returncode}  проба мимо места: "
+              f"процесс сторожа, {name}, текст отказа называет обёртку")
+    return bad, paths
+
+
 def проверить_сеть_мимо_двери() -> tuple[int, int]:
     """G1–G8: push в общий репозиторий сети — только дверью evolution-net.py --отправить.
 
@@ -2820,6 +2887,9 @@ def main() -> int:
     _плохо_к, _путей_к = проверить_коммит_мимо_обёртки()
     bad += _плохо_к
     total += _путей_к
+    _плохо_м, _путей_м = проверить_пробу_мимо_места()
+    bad += _плохо_м
+    total += _путей_м
     _плохо_сеть, _путей_сеть = проверить_сеть_мимо_двери()
     bad += _плохо_сеть
     total += _путей_сеть
@@ -3098,6 +3168,10 @@ if __name__ == "__main__":
     # Только правило коммита мимо обёртки.
     if sys.argv[1:] == ["--случай", "коммит"]:
         плохо, путей = проверить_коммит_мимо_обёртки()
+        print(f"падений {плохо} из {путей} путей")
+        sys.exit(1 if плохо else 0)
+    if sys.argv[1:] == ["--случай", "место"]:
+        плохо, путей = проверить_пробу_мимо_места()
         print(f"падений {плохо} из {путей} путей")
         sys.exit(1 if плохо else 0)
     if sys.argv[1:] == ["--случай", "13"]:

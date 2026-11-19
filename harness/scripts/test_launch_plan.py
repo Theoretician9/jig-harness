@@ -463,7 +463,7 @@ class Stand:
                      "тип": WORKER}})
 
     def launch_row(self, mark: str | None = None, lead: str | None = None,
-                   age_min: float = 1, outcome: str = "ok") -> None:
+                   age_min: float = 1, outcome: str = "ok", call: str | None = None) -> None:
         """Строка agent_budget_guard.py в боевом формате: task «-», у запуска
         управляющим — data.управляющий, метка — data.часть (если была в prompt)."""
         data = {"ревью": False, "описание": "исполнитель",
@@ -474,6 +474,8 @@ class Stand:
             data["управляющий"] = lead
         if mark:
             data["часть"] = mark
+        if call:
+            data["вызов"] = call
         self.append(LAUNCH_JOURNAL, {
             "v": 1, "ts": iso_ago(age_min), "src": BUDGET_SRC, "event": "agent.launch",
             "outcome": outcome, "task": "-", "task_from": "arg", "session": "проба",
@@ -1854,11 +1856,14 @@ SPEED_MODES = {1: "slow", 3: "medium", 5: "fast", 10: "ultra"}
 def speed_stand(tmp: Path, name: str, eff: int | None, wip: int = 1, age_min: float = 0,
                 raw: str | None = None, selected: str | None = None, accident: bool = False) -> tuple:
     """Стенд со своим скорость.json и судьёй; (стенд, доп. окружение). В работе у судьи — wip
-    карточек wip (T и ещё wip−1); eff None — состояния нет вовсе."""
+    карточек (T и ещё wip−1), каждую ведёт свежий меченый запуск: судья считает живых
+    помощников, а не статус wip; eff None — состояния нет вовсе."""
     s = Stand(tmp / f"скорость-{name}", roles={"предохранитель.порог_сверх_режима": 1})
     s.task_in_plan("T", plain_parts(s, "v", 4))
     for i in range(1, wip):
         s.card(f"раб-{i}")
+    for task in (["T"] + [f"раб-{i}" for i in range(1, wip)])[:wip]:
+        s.launch_row(f"Часть: {task}#1", call=f"вызов-{task}")
     s.write()
     demons = s.root / "harness" / "demons"
     demons.mkdir(parents=True, exist_ok=True)
@@ -1938,7 +1943,7 @@ def case_speed_capacity(tmp: Path) -> None:
         check(f"эффективный {eff}, в работе {wip} (порог {eff + 1}): «нагрузка» "
               f"{'выбрана' if loaded else 'не выбрана'}",
               (wip, loaded), (get(d, "ёмкость", "задач_в_работе"), d.get("правило") == "нагрузка"))
-    s, env = speed_stand(tmp, "несвеж-нагрузка", 10, wip=1, age_min=30)
+    s, env = speed_stand(tmp, "несвеж-нагрузка", 10, wip=0, age_min=30)
     load(s)
     d, got, _ = speed_cap(s, env)
     check("судья несвеж, 3 задачи по журналу запусков: порог 3 из данных — «нагрузка»",

@@ -392,6 +392,13 @@ def _занят_выкат() -> bool:
     return готово.returncode != 0
 
 
+# Ключи прежнего выката копии и их места в эталоне. Старый задан, новый пуст — эталон старого
+# не читает и катил бы мимо хранилища (пуш и pull прода идут по STACK_REMOTE) или без снимка
+# :previous (его делает дверь по STACK_IMAGES), и всё это — молча.
+RETIRED_KEYS = (("STACK_CI_REMOTE", "STACK_REMOTE"), ("STACK_CI_BRANCH", "STACK_BRANCH"),
+                  ("STACK_IMAGE_SNAPSHOT_CMD", "STACK_IMAGES"))
+
+
 def замок_раскладки() -> str:
     """Причина не ставить обновление или пусто (эталонный выкат §6.2 п. 2).
 
@@ -401,6 +408,12 @@ def замок_раскладки() -> str:
     """
     путь = конф_модуль.путь_harness_conf()
     ключи = конф_модуль.конфиг(путь)
+    moved = [f"{old} → {new}" for old, new in RETIRED_KEYS
+               if ключи.get(old) and not ключи.get(new)]
+    if moved:
+        return (f"в {путь} заданы ключи прежнего выката, а их места в эталоне пусты: "
+                f"{', '.join(moved)} — эталон прежних не читает; перенеси значения (прежние можно "
+                f"оставить) и обнови снова; раскладка не начата, пакет и проект не тронуты")
     if ключи.get("STACK_ROLLOUT") != "server" or ключи.get("STACK_CHECKS_FILE"):
         return ""
     return (f"в {путь} STACK_ROLLOUT=server, а STACK_CHECKS_FILE пуст: новый выкат продукта идёт "

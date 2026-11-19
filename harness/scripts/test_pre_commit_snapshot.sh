@@ -16,6 +16,13 @@
 # прошёл бы все «не краснит», а гейт по диску — все «краснит» с диском.
 # Поэтому есть случаи, где индекс и диск РАСХОДЯТСЯ в обе стороны.
 #
+# Пакет стенда — свой репозиторий $T/pkg, его называет HARNESS_STARTER (тот же
+# искатель пакета, что ведёт поезд на срез). На время каждого коммита стенд кладёт в
+# него двойников файлов харнеса из индекса: package_sync зелёный по построению,
+# как библиотека_процессов. После коммита пакет пуст: гейты, обходящие пакет
+# (check-config-loading.py), иначе судили бы двойника отвергнутого коммита. С живым пакетом стенд краснел на собственных файлах
+# (stray_writer.py, probe_clean.py — в живом пакете их нет и быть не должно).
+#
 # Двери мутаций: PRE_COMMIT_GATE_UNDER_TEST — хук, EVENT_WRITERS_UNDER_TEST и
 # EXTERNAL_CALLERS_UNDER_TEST — гейты; копии кладутся в стенд вместо боевых.
 set -uo pipefail
@@ -146,6 +153,9 @@ echo "заметка 0" > "$S/probe-note.txt"
 printf 'x = 1\n' > "$S/scripts/probe_import.py"
 printf 'x = 1\n' > "$S/scripts/probe_clean.py"
 stand_sources "$S" "$T" || { echo "ПЛОХО: источники стенда не выведены из библиотеки"; echo "ИТОГ: путей 1, неудач 1"; exit 1; }
+# Строка журнала правок пакета за сегодня: без неё package_sync краснел бы в день,
+# когда в дереве проекта ещё нет записи за число прогона.
+printf '| %s | стенд пробы | доказано здесь |\n' "$(date +%d.%m)" >> "$S/docs/ИЗМЕНЕНИЯ-ПАКЕТА.md"
 g add -A && g commit -q --no-verify -m "стенд" || { echo "ПЛОХО: коммит стенда"; echo "ИТОГ: путей 1, неудач 1"; exit 1; }
 # Git-хуки — те, что называет библиотека (записи git-<хук>), симлинками, как в живом проекте.
 while read -r hook file; do
@@ -153,6 +163,37 @@ while read -r hook file; do
 done < "$T/hooks.lines"
 [ -x "$S/.git/hooks/pre-commit" ] || { echo "ПЛОХО: библиотека клона не назвала хук pre-commit"; echo "ИТОГ: путей 1, неудач 1"; exit 1; }
 BASE_REV="$(g rev-parse HEAD)"
+
+PKG="$T/pkg"
+pg() { git -C "$PKG" -c user.name=proba -c user.email=proba@stend "$@"; }
+git init -q "$PKG" && pg commit -q --allow-empty -m "пакет стенда" \
+    || { echo "ПЛОХО: пакет стенда не создан"; echo "ИТОГ: путей 1, неудач 1"; exit 1; }
+export HARNESS_STARTER="$PKG"
+# Двойники файлов харнеса из индекса стенда — в пакет стенда, коммитом пакета
+# (незакоммиченного двойника гейт отвергает).
+# Карта путей — из compare-with-package.py клона: та же, по которой судит гейт.
+pkg_mirror_index() {
+    python3 - "$S" "$PKG" <<'PY'
+import importlib.util, subprocess, sys
+from pathlib import Path
+root, pkg = Path(sys.argv[1]), Path(sys.argv[2])
+spec = importlib.util.spec_from_file_location("cmp", root / "scripts/compare-with-package.py")
+cmp = importlib.util.module_from_spec(spec); spec.loader.exec_module(cmp)
+names = subprocess.run(["git", "-C", str(root), "diff", "--cached", "--name-only", "-z"],
+                       capture_output=True, check=True).stdout.decode().split("\0")
+for name in filter(None, names):
+    twin = cmp.место_в_пакете(name)
+    body = subprocess.run(["git", "-C", str(root), "show", f":{name}"], capture_output=True)
+    if twin is None or body.returncode != 0:
+        continue
+    (pkg / twin).parent.mkdir(parents=True, exist_ok=True)
+    (pkg / twin).write_bytes(body.stdout)
+PY
+    pg add -A && { pg diff --cached --quiet || pg commit -q -m "двойники"; }
+}
+pkg_clear() {
+    pg rm -rq --ignore-unmatch -- . && { pg diff --cached --quiet || pg commit -q -m "пусто"; }
+}
 
 # Нарушитель — прямая дозапись в журнал мимо emit, файла нет ни в долге, ни в реестре.
 STRAY="scripts/hooks/stray_writer.py"
@@ -174,7 +215,9 @@ commit_note() {  # [-o] — только заметка
         OUT="$(g commit -m "заметка $n" -o probe-note.txt 2>&1)"; RC=$?
     else
         g add probe-note.txt
+        pkg_mirror_index
         OUT="$(g commit -m "заметка $n" 2>&1)"; RC=$?
+        pkg_clear
     fi
 }
 passed() {  # коммит прошёл: код 0, хук дошёл до конца, HEAD — эта заметка

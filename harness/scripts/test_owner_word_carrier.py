@@ -26,6 +26,7 @@ python-файл сам ставит HARNESS_OWNER_WORD_STEND=1, свой пас�
   П-12 publish.sh пути (АР-2)  каждая цель «bash|python3 "$VAR/…"» из разбора publish.sh — от места
             скрипта: копия publish.sh (перепись, --по-слову, пропуск ворот) с PROJECT_DIR на подлог с
             заглушками; зов подлога или ни одного зова цели рядом с копией — провал; push перехвачен.
+            Данные замка 3 (карта, трейлеры) и доводы целей — от PROJECT_DIR паспорта, не окружения.
   П-12 ключи двери (АР-4)  копия drop-database.sh с законным «Да» в журнале паспорта стенда:
             DB_ADMIN_EXEC, BACKUP_DIR, LOG_DIR подлогом в окружении → снос заглушкой паспорта, дамп и
             след у паспорта, метки подлога нет. Каждая bash-дверь режима двери из разбора: её ключи
@@ -840,15 +841,18 @@ def judge_bash_gate_doors(doors: dict) -> None:
 
 EXEC_CALL = re.compile(r'(?:^|[\s;(|&!{])(?:bash|python3(?:\s+-I)?)\s+"\$\{?([A-Za-z_]\w*)\}?/([^"$]+\.(?:sh|py))"')
 STAND_TASK = "задача-стенд"
+ENV_TASK = "задача-подлог-окружения"   # трейлер подложного PROJECT_DIR окружения; его карта — done
 TYPICAL_JUDGE = "check-typical-copy.py"
 STUB_ANSWERS = {   # что цель печатает настоящему вызывающему: без ответа путь дальше не идёт
     "build-public.py": "собрано", "version.py": json.dumps({"следующая": "0.0.1", "почему": "стенд"}),
     "vitrina_status.py": f"{STAND_TASK} (статус test)", "deploy_guard.py": "предмет: стенд"}
-EXEC_STUB = '''import json, sys, uuid
+EXEC_STUB = '''import json, os, sys, uuid
 from pathlib import Path
 key, side, trace, args = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4:]
+data = {k: os.environ.get(k, "") for k in ("DEVMAP", "DEVMAP_ARCHIVE", "IDS")}
 with open(trace, "a", encoding="utf-8") as s:
-    s.write(json.dumps({"цель": key, "сторона": side, "argv": args}, ensure_ascii=False) + "\\n")
+    s.write(json.dumps({"цель": key, "сторона": side, "argv": args, "данные": data},
+                       ensure_ascii=False) + "\\n")
 if "--selftest" in args:
     raise SystemExit(0)
 answer = json.loads(%r).get(key.rsplit("/", 1)[-1], "")
@@ -911,6 +915,11 @@ class PublishPathStand:
             # а без него публикация кончалась отказом 6г, не дойдя до сверки предмета перед пушем.
             self.stub(top / "scripts" / TYPICAL_JUDGE, helper, TYPICAL_JUDGE, side)
             repo_with_trailer(top)
+        # PROJECT_DIR окружения — третий корень, не паспорт: его карта «done» не должна открыть замок 3.
+        self.env_project = self.root / "env-project"
+        repo_with_trailer(self.env_project, ENV_TASK)
+        (self.env_project / "dev-map.yaml").write_text(
+            f"lines:\n  - tasks:\n      - id: {ENV_TASK}\n        status: done\n", encoding="utf-8")
         self.bin = self.root / "bin"
         self.bin.mkdir()
         (self.bin / "git").write_text(GIT_WRAPPER % (self.pushes, shutil.which("git")), encoding="utf-8")
@@ -945,7 +954,7 @@ class PublishPathStand:
                 if k not in STAND_ENV_KEYS + ("PROJECT_DIR", "STARTER_DIR") and "TOKEN" not in k
                 and not k.startswith(("TG_", "PUBLIC_"))}
         return {**base, "PATH": f"{self.bin}:{base.get('PATH', '/usr/bin:/bin')}",
-                "PROJECT_DIR": str(self.fake), "STARTER_DIR": str(self.package),
+                "PROJECT_DIR": str(self.env_project), "STARTER_DIR": str(self.package),
                 "HARNESS_LOG_DIR": str(self.log), "LOG_DIR": str(self.log),
                 "HARNESS_INSTALL_CONF": str(self.etc / "install.conf"),
                 # Паспорт сборщику и гейту чистоты — от паспорта двери (АР-4): окружение называет подлог.
@@ -985,14 +994,14 @@ class PublishPathStand:
         shutil.rmtree(self.root, ignore_errors=True)
 
 
-def repo_with_trailer(path: Path) -> None:
+def repo_with_trailer(path: Path, task: str = STAND_TASK) -> None:
     """Корень проекта стенда: репозиторий с трейлером задачи позже публичной ветки (замку 3 есть что судить)."""
     path.mkdir(parents=True, exist_ok=True)
     git("init", "-q", "-b", "main", str(path))
     later = datetime.datetime.now().astimezone() + datetime.timedelta(hours=1)
     when = later.isoformat(timespec="seconds")
     done = subprocess.run(["git", "-c", "user.name=nrp", "-c", "user.email=nrp@stand", "commit", "-q",
-                           "--allow-empty", "-m", f"стенд\n\nDev-Map: {STAND_TASK}"], cwd=path,
+                           "--allow-empty", "-m", f"стенд\n\nDev-Map: {task}"], cwd=path,
                           capture_output=True, text=True, timeout=60,
                           env={**os.environ, "GIT_AUTHOR_DATE": when, "GIT_COMMITTER_DATE": when})
     if done.returncode != 0:
@@ -1051,6 +1060,19 @@ def case_publish_exec_paths() -> None:
         report(f"П-12 АР-4 publish.sh: {key} получает паспорт двери, не PUBLIC_PASPORT/HARNESS_HOME окружения",
                bool(given) and all(p == passport for p in given),
                f"паспорта зовов: {given or 'зовов с --паспорт нет'} ({said})")
+    # Данные замка 3 (карта задач и трейлеры истории) и доводы целей — от PROJECT_DIR паспорта:
+    # подложный PROJECT_DIR окружения с картой «done» открыл бы замок 3 (И-4).
+    status = [c["данные"] for c in door_calls if c["цель"] == "vitrina_status.py"
+              and c["сторона"] == "настоящая" and c["данные"].get("IDS")]
+    own_map = str(stand.fake / "dev-map.yaml")
+    report("П-12 publish.sh: замок 3 судит карту и историю PROJECT_DIR паспорта, не окружения",
+           bool(status) and all(d["DEVMAP"] == own_map and STAND_TASK in d["IDS"]
+                                and ENV_TASK not in d["IDS"] for d in status),
+           f"данные зовов: {status or 'зова разбора статусов нет'} ({said})")
+    env_root = str(stand.env_project)
+    leaked = [c["argv"] for c in door_calls if any(env_root in a for a in c["argv"])]
+    report("П-12 publish.sh: доводы целей (--проект и прочие) не называют PROJECT_DIR окружения",
+           bool(door_calls) and not leaked, f"зовы с ним: {leaked[:2]}")
 
 
 # ── П-12 срок: --свежесть-на и потолок из окружения (АР-1, находка 1) ────────

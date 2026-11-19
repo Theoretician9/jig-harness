@@ -19,7 +19,8 @@
 #   G  -m: сверка идёт и для него; H  формы, где сверка солгала бы, — отказ до коммита;
 #   I  повторный вход по пути своего замка; J  личный индекс без путей, -F -;
 #   K  чужой коммит мимо замка после нашего — не расхождение;
-#   L  замок занят дольше предела или не открывается — коммита нет.
+#   L  замок занят дольше предела или не открывается — коммита нет;
+#   M  замок на дерево: коммиты двух worktree в свои ветки идут разом, одного — по одному.
 #
 # Дверь мутаций: GIT_COMMIT_LOCKED_UNDER_TEST — путь к копии обёртки.
 # Имена переменных ЛАТИНИЦЕЙ: bash не берёт кириллические идентификаторы.
@@ -273,6 +274,55 @@ rm -f "$lock_l"; mkdir "$lock_l"
 case_check "L замок не открыть: код ≠ 0" "да" "$([ "$?" -ne 0 ] && echo да || echo нет)"
 case_check "L замок не открыть: коммита нет (HEAD тот же)" "да" \
     "$([ "$(git -C "$repo_l" rev-parse HEAD)" = "$head_before" ] && echo да || echo нет)"
+
+echo "== M: замок — на дерево: разные worktree идут параллельно, одно дерево — по одному"
+repo_m="$STAND/m"
+new_repo "$repo_m" 'true'
+git -C "$repo_m" worktree add -q -b w1 "$STAND/m-w1"
+git -C "$repo_m" worktree add -q -b w2 "$STAND/m-w2"
+# Хук общий для всех деревьев (<common-dir>/hooks): барьер — свою метку ставит, чужую
+# ждёт до 3 с. Встретились оба — хуки шли одновременно; замок на все деревья
+# держит второго до конца первого, и барьер первого не сходится.
+cat > "$repo_m/.git/hooks/pre-commit" <<'HOOK'
+#!/bin/sh
+: > "$BARRIER_ME"
+i=0
+while [ "$i" -lt 30 ]; do [ -e "$BARRIER_OTHER" ] && exit 0; sleep 0.1; i=$((i + 1)); done
+echo "барьер: соседа нет" >&2
+exit 1
+HOOK
+chmod +x "$repo_m/.git/hooks/pre-commit"
+barrier_commit() { # $1 = дерево, $2 = имя, $3 = имя соседа
+    local idx="$STAND/m-index-$2"
+    echo "$2" > "$1/$2.txt"
+    GIT_INDEX_FILE=$idx git -C "$1" read-tree HEAD
+    GIT_INDEX_FILE=$idx git -C "$1" add -- "$2.txt"
+    (cd "$1" && BARRIER_ME="$STAND/m-bar-$2" BARRIER_OTHER="$STAND/m-bar-$3" \
+        GIT_INDEX_FILE=$idx HARNESS_COMMIT_LOCK_WAIT=20 bash "$WRAPPER" -q -m "Тема $2" -- "$2.txt") \
+        >"$STAND/m-$2.out" 2>&1
+    echo $? > "$STAND/m-$2.rc"
+}
+barrier_commit "$STAND/m-w1" a b & barrier_commit "$STAND/m-w2" b a & wait
+case_check "M два worktree: коммиты идут одновременно (оба барьера сошлись)" "0 0" \
+    "$(cat "$STAND/m-a.rc") $(cat "$STAND/m-b.rc")"
+case_check "M два worktree: каждый коммит в своей ветке" "Тема a|Тема b" \
+    "$(git -C "$repo_m" log -1 --format=%s w1)|$(git -C "$repo_m" log -1 --format=%s w2)"
+barrier_commit "$STAND/m-w1" c d & barrier_commit "$STAND/m-w1" d c & wait
+case_check "M одно дерево: коммиты по одному (барьер не сошёлся у одного)" "1" \
+    "$(cat "$STAND/m-c.rc" "$STAND/m-d.rc" | grep -cvx 0)"
+# Замок дерева w1 держит сосед — коммит в w2 его не ждёт, коммит в w1 ждёт до предела.
+rm -f "$repo_m/.git/hooks/pre-commit"
+lock_m="$(git -C "$STAND/m-w1" rev-parse --path-format=absolute --git-dir)/harness-commit.lock"
+( exec 8>> "$lock_m"; flock 8; exec sleep 60 ) &
+holder=$!
+for _ in $(seq 100); do flock -n "$lock_m" true || break; sleep 0.05; done
+echo e > "$STAND/m-w2/e.txt"; git -C "$STAND/m-w2" add e.txt
+(cd "$STAND/m-w2" && HARNESS_COMMIT_LOCK_WAIT=1 bash "$WRAPPER" -q -m 'Тема e') >"$STAND/m-e.out" 2>&1
+case_check "M замок w1 занят: коммит в w2 идёт, код 0" "0" "$?"
+echo f > "$STAND/m-w1/f.txt"; git -C "$STAND/m-w1" add f.txt
+(cd "$STAND/m-w1" && HARNESS_COMMIT_LOCK_WAIT=1 bash "$WRAPPER" -q -m 'Тема f') >"$STAND/m-f.out" 2>&1
+case_check "M замок w1 занят: коммит в w1 ждёт, код 4" "4" "$?"
+kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null
 
 printf '\nКОММИТ-ОБЁРТКА: путей %d, неудач %d\n' "$CASES_PATHS" "$CASES_FAILED"
 [ "$CASES_FAILED" -eq 0 ]

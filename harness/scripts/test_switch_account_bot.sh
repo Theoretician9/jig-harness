@@ -396,6 +396,28 @@ case_check "Б-7 кнопка первого меню после второго 
     "жива|Это старое меню — напиши «аккаунт» заново|0" \
     "$([ "$TTL_FRESH" = "Принято|1" ] && echo жива || echo мертва)|$(old_menu_press)"
 
+echo "── Б-10: канал-группа — chat.id группы, from.id владельца (улика bkb 19.11) ──"
+group_press() {  # $1 = from.id, $2 = chat.id → «ответ|выборов в журнале»; канал — группа, владелец — $OWNER
+    local d="$T/group-$1-$2"; mkdir -p "$d"
+    HARNESS_ACCOUNT_DIR="$d" python3 -I - "$HERE/lib" "$d" "$OWNER" "$1" "$2" 2>"$d/err" <<'PY'
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+import account_buttons as ab
+log, owner, sender, chat = Path(sys.argv[2]), sys.argv[3], int(sys.argv[4]), int(sys.argv[5])
+nonce, group = "E" * 22, "-1001234567"
+ab.append_row(log, {"событие": "меню", "nonce": nonce, "message_id": 5, "имена": ["login"]})
+verdict = ab.judge(log, group, {"from": {"id": sender}, "message": {"chat": {"id": chat}, "message_id": 5},
+                                "data": f"a:{nonce}:login"}, owner)
+chosen = sum(1 for r in ab.read_rows(log) if r.get("событие") == "выбор")
+print(f"{verdict.get('answer')}|{chosen}")
+PY
+}
+case_check "Б-10 владелец нажал в группе — выбор записан" "Принято|1" "$(group_press "$OWNER" -1001234567)"
+case_check "Б-10 чужой в группе — не выбор" "Это не твой запрос|0" "$(group_press 555000 -1001234567)"
+case_check "Б-10 владелец из лички, когда канал — группа — не выбор" "Это не твой запрос|0" \
+    "$(group_press "$OWNER" "$OWNER")"
+
 echo "── 1в-С: сторож — ротация смены в лимите, ответ --ждёт, помощники в лимите ──"
 # Чистые функции сторожа судятся вырезанным телом (как 1б-С в test_switch_account.sh):
 # полный обход сторожа на стенде — 5 тыс. строк и tmux, а решение живёт в этих функциях.

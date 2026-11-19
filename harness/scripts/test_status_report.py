@@ -132,9 +132,17 @@
     поздний agent.finish журнала); концов в журнале нет — «пока нового нет». Идущий оркестратор — в ДЕЛАЕТСЯ, его новые
     законченные исполнители — в СДЕЛАНО под ним, показанные раньше не повторяются;
     законченный оркестратор показан один раз.
-    ДАЛЬШЕ — 2–3 первых строки «  N. <id> · <вес> · <почему>» вывода
-    `work-queue.py <карта> --порядок`, кроме карточки строки «сейчас делаем: <id> — …»
-    и начатых (wip); названия из карты без id; нет таких — строка «очередь пуста».
+    ДАЛЬШЕ — одна строка: первая «  N. <id> · <вес> · <почему>» вывода
+    `work-queue.py <карта> --порядок`, кроме карточки строки «сейчас делаем: <id> — …»,
+    показанных выше и сданных (начатая — тоже следующая); нет такой — первая пачка
+    `--пачки` («пачка из N: <название первой>», файлом — ключ --пачки F); нет и её —
+    «очередь пуста». Название из карты без id.
+    СДЕЛАНО первыми строками называет шаги машины после среза: теги PUBLIC_BUILD_DIR
+    («выпуск vX опубликован в HH:MM»), события «mq.слито» $LOG_DIR/merge-queue.jsonl
+    («слито веток: N»), письма — файлы почта/<копия>/…, добавленные на origin/main клона
+    EVOLUTION_DIR коммитами автора PROJECT_NAME («письма копиям: N — кому»).
+    Потолок — меньшее из STATUS_STRUCT_MAX_CHARS и мягкого потолка $PROJECT_DIR/память/TONE.md.
+    Оборванный запуск, после которого задачу продолжил другой, — не потеря: в ⚠ его нет.
 
 ПОТЕРЯННЫЕ ЗАПУСКИ (04.11: помощник оборвался на лимите API, agent.finish не записан —
 запуск и его оркестратор висели в ДЕЛАЕТСЯ вечно), случаи 36–46:
@@ -696,14 +704,17 @@ def tg_stand(stand: Path) -> Path:
 
 # Подставной сборщик на месте $PROJECT_DIR/scripts/status-report.py стенда: зовёт
 # НАСТОЯЩИЙ сборщик с аргументами стенда и дописывает хвост — так сторож судит
-# самокомментарий и превышение потолка на боевом пути без аргумента.
+# самокомментарий и превышение потолка на боевом пути без аргумента. Сборщик видит проект
+# стенда без TONE.md (STAND_REPORT_PROJECT): иначе мягкий потолок тона дерева tg_send
+# ужал бы статус до 700, и дверь сторожа для длинного статуса осталась бы без суда.
 BUILDER_STUB = """#!/usr/bin/env python3
 import json, os, subprocess, sys
 with open(os.environ["STAND_BUILDER_LOG"], "a", encoding="utf-8") as log:
     log.write("vyzvan\\n")
 done = subprocess.run([sys.executable, os.environ["STAND_REAL_REPORT"],
                        *json.loads(os.environ["STAND_REPORT_ARGS"])],
-                      capture_output=True, text=True)
+                      capture_output=True, text=True,
+                      env={**os.environ, "PROJECT_DIR": os.environ["STAND_REPORT_PROJECT"]})
 sys.stderr.write(done.stderr)
 sys.stdout.write(done.stdout.rstrip("\\n") + os.environ.get("STAND_STATUS_TAIL", "") + "\\n")
 sys.exit(done.returncode)
@@ -718,7 +729,7 @@ def install_builder(stand: Path, tree: Path, journal: Path, tail: str = "") -> d
     return {"STAND_BUILDER_LOG": str(stand / "log" / "builder.log"),
             "STAND_REAL_REPORT": str(REPORT),
             "STAND_REPORT_ARGS": json.dumps(report_args(stand, journal), ensure_ascii=False),
-            "STAND_STATUS_TAIL": tail}
+            "STAND_STATUS_TAIL": tail, "STAND_REPORT_PROJECT": str(stand / "project")}
 
 
 def builder_calls(stand: Path) -> int:
@@ -1144,7 +1155,8 @@ import json, os, subprocess, sys
 args = sys.argv[1:] or json.loads(os.environ["STAND_REPORT_ARGS"])
 with open(os.environ["STAND_BUILDER_LOG"], "a", encoding="utf-8") as log:
     log.write(json.dumps(sys.argv[1:], ensure_ascii=False) + "\\n")
-sys.exit(subprocess.run([sys.executable, os.environ["STAND_REAL_REPORT"], *args]).returncode)
+sys.exit(subprocess.run([sys.executable, os.environ["STAND_REAL_REPORT"], *args],
+                        env={**os.environ, "PROJECT_DIR": os.environ["STAND_REPORT_PROJECT"]}).returncode)
 """
 
 # Curl стенда с отказом API по переменной пробы: ok:false — доставки нет.
@@ -1171,7 +1183,8 @@ def mark_stand(stand: Path, journal: Path) -> tuple:
     stub.chmod(0o755)
     return tree, {"STAND_BUILDER_LOG": str(stand / "log" / "builder.log"),
                   "STAND_REAL_REPORT": str(REPORT),
-                  "STAND_REPORT_ARGS": json.dumps(since_args(stand, journal), ensure_ascii=False)}
+                  "STAND_REPORT_ARGS": json.dumps(since_args(stand, journal), ensure_ascii=False),
+                  "STAND_REPORT_PROJECT": str(stand / "project")}
 
 
 def case_two_statuses(stand: Path) -> None:
@@ -1264,15 +1277,14 @@ def next_stand(stand: Path, queue: str) -> list:
 
 
 def case_next_list(stand: Path) -> None:
+    # Отчёт 19.11 01:4x: первые десять очереди начаты (wip), и пропуск начатых давал «очередь пуста»
+    # при 221 задаче карты. Начатая, которую выше никто не показал, — и есть следующая.
     out = run_report(stand, Path(), args=next_stand(stand, NEXT_QUEUE))
     nxt = blocks(out).get(HEADERS[2], [])
     text = "\n".join(nxt)
-    PROBE.check(f"ДАЛЬШЕ — 2–3 строки (сейчас {len(nxt)})", 2 <= len(nxt) <= 3, nxt)
-    order = [NEXT_TITLES[c] for c in ("hr.demo-a", "hr.demo-b", "hr.demo-c")][:max(len(nxt), 2)]
-    PROBE.check("ДАЛЬШЕ — первые по очереди не начатые, по порядку",
-                len(nxt) >= 2 and all(t in l for t, l in zip(order, nxt)), nxt)
-    PROBE.check("ДАЛЬШЕ без карточки «сейчас делаем» и начатой",
-                NEXT_TITLES["hr.demo-head"] not in text and WIP_TITLE not in text, nxt)
+    PROBE.check(f"ДАЛЬШЕ — одна строка (сейчас {len(nxt)})", len(nxt) == 1, nxt)
+    PROBE.check("БОЛЬНОЙ: ДАЛЬШЕ — первая после «сейчас делаем», начатая тоже", WIP_TITLE in text, nxt)
+    PROBE.check("ДАЛЬШЕ без карточки «сейчас делаем»", NEXT_TITLES["hr.demo-head"] not in text, nxt)
     PROBE.check("ДАЛЬШЕ без id и слов «сейчас делаем»",
                 not CARD_ID.search(text) and "сейчас делаем" not in text, nxt)
     PROBE.check("ДАЛЬШЕ: строки ≤ 80 знаков", nxt and all(len(l) <= 80 for l in nxt), nxt)
@@ -1560,16 +1572,11 @@ def case_lost_real(stand: Path) -> None:
     PROBE.check("карточка plan: оркестратор кончил, ребёнок потерян — ДЕЛАЕТСЯ с «сейчас никто не работает» "
                 "(потерянный не «делает»)",
                 NOBODY in guard.get("rest", []) and not field(guard, "делают"), doing or out)
-    lost = got.get(LOST_HEADER, [])
-    line = line_with(lost, STAND_CARDS["hr.demo-guard"])
-    PROBE.check(f"потерянный ребёнок в ⚠ задачей словами, с моделью и временем {clock(lost_at)}",
-                len(bullets(lost)) == 1 and clock(lost_at) in line and LABELS["sonnet"] in line, lost or out)
-    PROBE.check(f"после него задачу продолжил R2 — под пунктом «{CONTINUED}»",
-                lost[1:] == ["   " + CONTINUED], lost or out)
+    PROBE.check("после потерянного R1 задачу продолжил R2 — работа не брошена, блока ⚠ нет",
+                LOST_HEADER not in out and CONTINUED not in out, out)
     pairs = who_pairs(field(guard, "делали"))
     PROBE.check("в «делали»: оркестратор и законченное продолжение",
                 pairs == [(LABELS["sonnet"], "вёл"), (LABELS["sonnet"], "код")], doing)
-    PROBE.check("оркестратор в ⚠ не попал: там один пункт, не два", len(bullets(lost)) == 1, lost or out)
 
 
 def case_lost_sibling(stand: Path) -> None:
@@ -1579,8 +1586,11 @@ def case_lost_sibling(stand: Path) -> None:
                "opus", ts=at(300)),
         launch("c-W1", "Часть: hr.demo-chapters#2 Старая глава справки", "harness-worker",
                "sonnet", "c-L", ts=lost_at),
+        # Брат запущен ДО потерянного и жив свежей записью: работу W1 после обрыва никто не взял.
         launch("c-W2", "Часть: hr.demo-chapters#3 Новая глава справки", "harness-worker",
-               "sonnet", "c-L", ts=at(30)),
+               "sonnet", "c-L", ts=at(280)),
+        {"v": 1, "ts": at(5), "src": "scripts/hooks/agent_budget_guard.py", "event": "agent.tool",
+         "outcome": "ok", "task": "hr.demo-wip", "session": SESSION, "data": {"вызов": "c-W2"}},
     ]
     out, got = lost_report(stand, rows)
     doing = got.get(HEADERS[1], [])
@@ -2482,11 +2492,8 @@ def case_lost_work_continued(stand: Path) -> None:
     rows = cut + [launch("c-B", "Код", "harness-worker", "sonnet", ts=at(60), part="Часть: hr.demo-young#2"),
                   finish("c-B", ts=at(20))]
     out, got = lost_report(stand, rows)
-    line = line_with(got.get(LOST_HEADER, []), STAND_CARDS["hr.demo-young"])
-    lost = got.get(LOST_HEADER, [])
-    PROBE.check(f"БОЛЬНОЙ: после него в задаче был новый запуск — под пунктом «{CONTINUED}», не голое «потерян»",
-                clock(at(200)) in line and lost[lost.index(line) + 1:][:1] == ["   " + CONTINUED] if line else False,
-                lost or out)
+    PROBE.check("БОЛЬНОЙ (отчёт 19.11 01:4x): после него в задаче был новый запуск — работа не брошена, "
+                "в ⚠ его нет", LOST_HEADER not in out and CONTINUED not in out, out)
     PROBE.check("у одиночного оборванного приписки нет", CONTINUED not in "\n".join(
         lost_report(stand, cut)[1].get(LOST_HEADER, [])), out)
 
@@ -2872,8 +2879,9 @@ def case_lies_family_sibling_lost(stand: Path) -> None:
 
 def case_lies_nocard_lost(stand: Path) -> None:
     # Задача без карточки сдана по запускам, но её оборванный запуск — тревога: прощает только зонтик.
-    rows = [launch("c-A", "Сверка журнала смены", "harness-worker", "sonnet", ts=at(80), part=part("hr.lie-nocard")),
-            finish("c-A", ts=at(50)),
+    # A кончил ДО запуска B: после B задачу никто не продолжил — брошено (19.11: продолженное — не потеря).
+    rows = [launch("c-A", "Сверка журнала смены", "harness-worker", "sonnet", ts=at(210), part=part("hr.lie-nocard")),
+            finish("c-A", ts=at(205)),
             launch("c-B", "Сверка журнала смены", "harness-worker", "sonnet", ts=at(200), part=part("hr.lie-nocard"))]
     out, got = lies_report(stand, family(), rows)
     PROBE.check("условие: задача без карточки в СДЕЛАНО", bool(titles_in(got, HEADERS[0])), out)
@@ -2915,6 +2923,138 @@ def case_lies_family_child_over_umbrella(stand: Path) -> None:
     PROBE.check("D: зонтик с работой позже ребёнка — строка семьи ребёнка, одна",
                 [t for _, t in task_lines(got)] == [UMB_A_TITLE], out)
 
+
+# ── шаги машины в СДЕЛАНО; пачка в ДАЛЬШЕ; потолок тона ─────────────────────
+# Отчёт 19.11 01:4x: «с 22:43 нового нет», хотя выпуск 0.14.2 вышел в 00:30, письма копиям ушли,
+# слито пять веток. СДЕЛАНО судило одни карточки; шаги машины видны только в их журналах: теги
+# публичной сборки, merge-queue.jsonl, ветка main общего репозитория в клоне сети.
+OWN_COPY = "Копия-проба"
+
+
+def stand_git(root: Path, *args: str, moment: str = "", author: str = "proba") -> None:
+    env = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
+    if moment:
+        env.update(GIT_AUTHOR_DATE=moment, GIT_COMMITTER_DATE=moment)
+    subprocess.run(["git", *GIT_STAND, "-c", f"user.name={author}", "-C", str(root), *args],
+                   check=True, capture_output=True, env=env)
+
+
+def release_stand(root: Path, tags: list) -> None:
+    """Публичная сборка стенда: на каждый (тег, ISO) — коммит и аннотированный тег этим временем."""
+    git_stand(root, [])
+    for tag, moment in tags:
+        stand_git(root, "commit", "-q", "--allow-empty", "-m", tag, moment=moment)
+        stand_git(root, "tag", "-a", tag, "-m", f"релиз {tag}", moment=moment)
+
+
+def mail_stand(root: Path, letters: list) -> None:
+    """Клон общего репозитория: письма (путь, автор, ISO) коммитами; origin/main — на последнем."""
+    git_stand(root, [])
+    for rel, author, moment in letters:
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / rel).write_text(rel + "\n", encoding="utf-8")
+        stand_git(root, "add", "--", rel)
+        stand_git(root, "commit", "-q", "-m", f"письмо {rel}", moment=moment, author=author)
+    stand_git(root, "update-ref", "refs/remotes/origin/main", "HEAD")
+
+
+def mq_row(event: str, moment: str) -> dict:
+    return {"v": 1, "ts": moment, "src": "scripts/merge-queue.py", "event": event,
+            "outcome": "ok" if event == "mq.слито" else "error", "task": "hr.demo-wip",
+            "session": SESSION, "data": {"итог": event[3:], "ветка": "<СКРЫТО>"}}
+
+
+def work_steps_stand(stand: Path, mark: str) -> tuple:
+    """Шаги машины: до метки — старый выпуск, слияние и письмо; после — новые и шум (отказы, входящее)."""
+    before, after = at(300), at(30)
+    release_stand(stand / "сборка", [("v9.9.1", before), ("v9.9.2", after)])
+    mail_stand(stand / "сеть", [("почта/bkb/старое.md", OWN_COPY, before),
+                                ("почта/bkb/выпуск.md", OWN_COPY, after),
+                                ("почта/sample-26/выпуск.md", OWN_COPY, at(25)),
+                                (f"почта/{OWN_COPY}/входящее.md", "bkb", at(20)),
+                                ("почта/sample-26/от-bkb.md", "bkb", at(18)),
+                                ("находки/bkb/своя.md", OWN_COPY, at(15))])
+    with (stand / "log" / "merge-queue.jsonl").open("w", encoding="utf-8") as out:
+        for event, moment in (("mq.слито", before), ("mq.слито", at(50)), ("mq.ворота", at(45)),
+                              ("mq.слито", at(40)), ("mq.конфликт", at(35))):
+            out.write(json.dumps(mq_row(event, moment), ensure_ascii=False) + "\n")
+    conf = mode_conf(stand, "1")
+    with (stand / conf).open("a", encoding="utf-8") as out:
+        out.write(f'PUBLIC_BUILD_DIR="{stand / "сборка"}"\nEVOLUTION_DIR="{stand / "сеть"}"\n')
+    # Имя копии — из паспорта установки стенда (HARNESS_HOME стенда): чьи письма «ушли».
+    (stand / "install.conf").write_text(f'PROJECT_NAME="{OWN_COPY}"\n', encoding="utf-8")
+    set_mark(stand, mark)
+    return conf, write_journal(stand, []), after
+
+
+def steps_report(stand: Path, conf: str, journal: Path) -> tuple:
+    out = run_report(stand, journal, conf, since_args(stand, journal))
+    return out, blocks(out).get(HEADERS[0], [])
+
+
+def case_done_work_steps(stand: Path) -> None:
+    conf, journal, after = work_steps_stand(stand, at(120))
+    out, done = steps_report(stand, conf, journal)
+    release = line_with(done, "v9.9.2")
+    PROBE.check(f"БОЛЬНОЙ: выпуск после метки назван тегом и временем {clock(after)}",
+                bool(release) and "выпуск" in release and clock(after) in release, done or out)
+    PROBE.check("выпуск до метки не назван", "v9.9.1" not in out, done)
+    merged = line_with(done, "слит")
+    PROBE.check("БОЛЬНОЙ: слияния после метки — числом 2 (не до метки, не отказы)",
+                bool(re.search(r"\b2\b", merged)), done or out)
+    mail = line_with(done, "письм")
+    PROBE.check("БОЛЬНОЙ: письма копиям после метки — числом 2 и кому: bkb, sample-26",
+                bool(re.search(r"\b2\b", mail)) and "bkb" in mail and "sample-26" in mail, done or out)
+    PROBE.check("входящее и находки письмами не считаются", "3" not in mail and OWN_COPY not in mail, mail)
+    PROBE.check("шаги — по строке, каждая ≤ 80 знаков",
+                all(len(l) <= 80 for l in done) and all((release, merged, mail)), done)
+    text = "\n".join(done)
+    PROBE.check("БОЛЬНОЙ: при шагах нет «нового нет»/«ничего не сдано»",
+                "нового нет" not in text and "ничего не сдано" not in text, done)
+
+
+def case_done_work_steps_quiet(stand: Path) -> None:
+    conf, journal, _ = work_steps_stand(stand, at(5))
+    out, done = steps_report(stand, conf, journal)
+    text = "\n".join(done)
+    PROBE.check("всё до метки — шагов нет, СДЕЛАНО прежнее «нового нет»",
+                not any(w in text for w in ("v9.9", "слит", "письм")) and "нового нет" in text, done or out)
+    out, _ = steps_report(stand, mode_conf(stand, "1"), journal)
+    PROBE.check("без PUBLIC_BUILD_DIR и EVOLUTION_DIR сборка не падает", HEADERS[0] in out, out)
+
+
+BATCHES = (
+    "пачек: 2 из 9 задач\n"
+    "файлы:scripts/publish.sh: hr.demo-a, hr.demo-b, hr.demo-c\n"
+    "файлы:scripts/gates.sh: hr.demo-d\n"
+    "одиночки: hr.demo-head\n")
+
+
+def case_next_batch(stand: Path) -> None:
+    queue = "работа: 1\nждут: \nсейчас делаем: hr.demo-head — важность 1\n  1. hr.demo-head · 48 · важность 1\n"
+    args = next_stand(stand, queue)
+    (stand / "batches.txt").write_text(BATCHES, encoding="utf-8")
+    out = run_report(stand, Path(), args=args + ["--пачки", str(stand / "batches.txt")])
+    nxt = blocks(out).get(HEADERS[2], [])
+    line = nxt[0] if nxt else ""
+    PROBE.check("БОЛЬНОЙ: очередь кончилась, карта не пуста — ДАЛЬШЕ одной строкой первая пачка",
+                len(nxt) == 1 and QUEUE_EMPTY not in line and "пачк" in line
+                and NEXT_TITLES["hr.demo-a"] in line and "3" in line, nxt or out)
+    PROBE.check("пачка без id и путей файлов", not CARD_ID.search(line) and "scripts/" not in line, nxt)
+
+
+def case_tone_ceiling(stand: Path) -> None:
+    journal = long_journal(stand)
+    wide = run_report(stand, journal, "harness-wide.conf")
+    PROBE.check(f"условие: без TONE.md отчёт длиннее 700 ({len(wide)})", len(wide) > 700, len(wide))
+    tone = stand / "project" / "память" / "TONE.md"
+    tone.parent.mkdir(parents=True, exist_ok=True)
+    tone.write_text("# Тон\n\n<!-- потолки: мягкий=700 жёсткий=1400 -->\n", encoding="utf-8")
+    out = run_report(stand, journal, "harness-wide.conf")
+    PROBE.check(f"БОЛЬНОЙ: мягкий потолок TONE.md 700 — отчёт {len(out)} ≤ 700", 0 < len(out) <= 700, len(out))
+    PROBE.check("в 700 все три блока на месте", list(blocks(out)) == list(HEADERS), out[:300])
+
+
 CASES = (
     ("(1) нет работающих → «пока ничего», без метки → «прочее 1»", case_empty_doing),
     ("(2) группировка по задачам: «делали/делают» с подписями и ролями", case_nesting),
@@ -2939,7 +3079,7 @@ CASES = (
     ("(21) метку пишет только --отметить, не сборка", case_mark_command),
     ("(22) два статуса подряд через tg_send — без повторов", case_two_statuses),
     ("(23) отказ доставки метку не двигает", case_refused_keeps_mark),
-    ("(24) ДАЛЬШЕ — 2–3 следующих без «сейчас делаем»", case_next_list),
+    ("(24) ДАЛЬШЕ — одна следующая без «сейчас делаем», начатая тоже", case_next_list),
     ("(25) ДАЛЬШЕ при пустой очереди — «очередь пуста»", case_next_empty),
     ("(26) оркестратор кончил до метки, исполнитель после — задача по исполнителю",
      case_lead_before_mark),
@@ -2954,7 +3094,8 @@ CASES = (
     ("(35) длинная тема коммита обрезана, отчёт ≤ 700 и проходит сторожа", case_commit_truncated),
     ("(36 a) сирота старше порога — в ⚠ ПОТЕРЯН с временем, не в ДЕЛАЕТСЯ", case_lost_orphan),
     ("(37 b) тот же запуск моложе порога — в ДЕЛАЕТСЯ, блока нет", case_lost_young),
-    ("(38 c) оркестратор кончил, ребёнок потерян — ДЕЛАЕТСЯ пусто (04.11)", case_lost_real),
+    ("(38 c) оркестратор кончил, ребёнок оборван, продолжение кончило — ДЕЛАЕТСЯ без «делают», ⚠ нет",
+     case_lost_real),
     ("(39 d) оркестратор без конца: потерянный в ⚠, свежий в ДЕЛАЕТСЯ", case_lost_sibling),
     ("(40 e) свежий конец потомка любой глубины — не потерян", case_lost_descendant_finish),
     ("(41) свежая запись с data.вызов — не потерян", case_lost_own_record),
@@ -3023,8 +3164,12 @@ CASES = (
     ("(94 D) зонтик работал позже ребёнка — строка семьи ребёнка", case_lies_family_child_over_umbrella),
     ("(95) БОЛЬНОЙ: живой помощник с тихим журналом, но свежим транскриптом — не в ⚠",
      case_lost_transcript_alive),
-    ("(96) БОЛЬНОЙ: оборванный, после которого задачу продолжили, — «оборван, работу продолжили»",
+    ("(96) БОЛЬНОЙ: оборванный, после которого задачу продолжили, — не потеря, в ⚠ нет",
      case_lost_work_continued),
+    ("(97) БОЛЬНОЙ: СДЕЛАНО называет выпуск, слияния и письма после метки", case_done_work_steps),
+    ("(98) шаги до метки не повторяются; без настроек сети и сборки — не падает", case_done_work_steps_quiet),
+    ("(99) БОЛЬНОЙ: очередь кончилась — ДАЛЬШЕ первая пачка, не «очередь пуста»", case_next_batch),
+    ("(100) БОЛЬНОЙ: отчёт в мягком потолке TONE.md", case_tone_ceiling),
 )
 
 

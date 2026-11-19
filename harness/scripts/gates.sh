@@ -22,6 +22,12 @@
 # Код выхода = число красных проверок (0 = чисто).
 set -uo pipefail
 export LC_ALL=C.UTF-8
+# Весь прогон — в общий пул тяжёлых прогонов: вне среза пробы помощников иначе идут
+# мимо любого потолка (scripts/heavy-slot.sh). Вложенный pre-commit места не ждёт.
+# Стенд пробы, куда скопированы одни ворота без обёртки, идёт как прежде.
+HEAVY_SLOT="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/heavy-slot.sh"
+[ -n "${HEAVY_SLOT_HELD:-}" ] || [ ! -f "$HEAVY_SLOT" ] \
+    || exec bash "$HEAVY_SLOT" -- bash "$(readlink -f "${BASH_SOURCE[0]}")" "$@"
 
 # Место журнала — от КОРНЯ установки, общим загрузчиком: зашитый
 # «/var/log/harness» ставил ворота ровно на одну машину. Имя переменной
@@ -108,16 +114,29 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # Что проверяется — снимаем ДО первой проверки: коммит или правка, появившиеся
 # за время ворот, ворота не видели, и итог не вправе называть их проверенными.
 GATES_SHA=$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || echo "")
-if [ -z "$(git -C "$ROOT" status --porcelain 2>/dev/null)" ]; then GATES_CLEAN_START=true; else GATES_CLEAN_START=false; fi
+# Служебные отметки разбора (только добавленные строки в классе DAEMON_OWNED_PATHS
+# под память/) пишут механизмы и демон памяти во время ворот: «чисто» они не снимают
+# ни в начале, ни в конце, иначе зелёный итог не годился бы никогда (9 из 9 — false).
+# Судит один судья — service-only-diff.py, разница от sha начала до рабочего дерева.
+gates_service_only() {
+    (cd "$ROOT" && python3 scripts/service-only-diff.py "$GATES_SHA" --под память/ >/dev/null 2>&1)
+}
+if [ -z "$(git -C "$ROOT" status --porcelain 2>/dev/null)" ] || gates_service_only; then
+    GATES_CLEAN_START=true
+else
+    GATES_CLEAN_START=false
+fi
 # «чисто» итога = чисто в начале И в конце И HEAD не сдвинулся: правку или коммит
 # посреди прогона ворота не видели. Производные документы, которые ворота сами
 # собирают на свежей установке (цикл «Производные документы» ниже), дерево не пачкают.
 gates_clean_at_end() {
     [ "$GATES_CLEAN_START" = true ] || { echo false; return; }
-    [ -z "$(git -C "$ROOT" status --porcelain -- . ':!docs/УСТРОЙСТВО-ХАРНЕСА.md' \
-        ':!docs/живая-проверка-механизмов.md' 2>/dev/null)" ] || { echo false; return; }
-    [ "$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || echo "")" = "$GATES_SHA" ] || { echo false; return; }
-    echo true
+    if [ -z "$(git -C "$ROOT" status --porcelain -- . ':!docs/УСТРОЙСТВО-ХАРНЕСА.md' \
+            ':!docs/живая-проверка-механизмов.md' 2>/dev/null)" ] \
+       && [ "$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || echo "")" = "$GATES_SHA" ]; then
+        echo true; return
+    fi
+    gates_service_only && echo true || echo false
 }
 cd "$ROOT" || { echo "не нашёл корень проекта"; exit 1; }
 
@@ -254,6 +273,7 @@ done
 проверка "общий индекс после личного коммита" bash scripts/test_post_commit_heal_index.sh
 проверка "контейнеры в отчёте старта" bash scripts/test_session_state_containers.sh
 проверка "первая задача: путь продукта" bash scripts/test_first_task_product_path.sh
+проверка "пул мест-проба" bash scripts/test_heavy_slot.sh
 проверка "известный отказ хоста" bash scripts/test_session_known_failed.sh
 проверка "повтор квитанции" bash scripts/test_ack_retry.sh
 проверка "глубина автоматом" python3 scripts/test_depth_automatic.py
@@ -551,6 +571,11 @@ done
 проверка "чтение скила-проба" python3 scripts/test_security_skill_by_read.py
 проверка "коды двери отправки" bash scripts/test_tg_send_door_codes.sh
 проверка "эталон обновления" python3 scripts/test_update_etalon_text.py
+# Пробы боевых путей, которых не звал никто («население кода» 19.11.2026): строка аккаунта,
+# файл истории захода мутаций, судья служебных путей. Все на своих стендах, вместе секунды.
+проверка "строка аккаунта-проба" python3 scripts/test_accounts_now.py
+проверка "история мутаций-проба" python3 scripts/test_mutations_history_read.py
+проверка "судья служебных путей-проба" python3 scripts/test_service_only_diff.py
 проверка "quotepath"      python3 scripts/check-quotepath-flag.py
 # Расширения ставит код, а не человек слэш-командой: список жил текстом скила
 # со слэш-формами и простоял месяц с нулём установок (замер 12.09.2026).
@@ -927,6 +952,7 @@ if [ "${1:-}" = "--всё" ]; then
     проверка "показ диспетчера" python3 scripts/test_process_dispatcher_v2.py
     проверка "ревью спеки"      python3 scripts/test_spec_review.py
     проверка "суть спеки"       python3 scripts/test_spec_human_block.py
+    проверка "актуальный RFC"   python3 scripts/test_standard_current.py
     проверка "фоновая обёртка"  bash scripts/test_run_background.sh
     проверка "порт после смены" bash scripts/test_shift_leftover_port.sh
     проверка "пинок сторожа"    bash scripts/test_warden_kick.sh

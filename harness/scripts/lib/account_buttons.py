@@ -11,8 +11,9 @@ account-buttons.jsonl пишет только этот модуль, по выз
 Вызовы (каталог журналов — первый аргумент):
   menu  <log>                    → одна строка JSON {nonce, text, reply_markup, names}
   sent  <log> <nonce> <names>    → ответ sendMessage на stdin; строка «меню» только при ok:true
-  judge <log> <owner_id>         → callback_query на stdin → JSON {answer, log, edit?, target?};
-                                   принятое нажатие пишет строкой «выбор»
+  judge <log> <chat_id> [<owner_id>] → callback_query на stdin → JSON {answer, log, edit?, target?};
+                                   принятое нажатие пишет строкой «выбор»; chat.id = канал,
+                                   from.id = владелец (пусто — равен каналу, как в личке)
 """
 from __future__ import annotations
 
@@ -142,13 +143,15 @@ def reject(answer: str, why: str) -> dict:
     return {"answer": answer, "log": f"нажатие отвергнуто: {why}"}
 
 
-def judge(log: Path, owner_id: str, callback: dict) -> dict:
+def judge(log: Path, chat_id: str, callback: dict, owner_id: str = "") -> dict:
+    # В группе chat.id — id группы, from.id — личный id владельца; в личке они равны.
+    owner_id = owner_id or chat_id
     sender = (callback.get("from") or {}).get("id")
     message = callback.get("message") or {}
     chat = (message.get("chat") or {}).get("id")
     if str(sender) != owner_id:
         return reject("Это не твой запрос", f"чужой from.id={sender}")
-    if str(chat) != owner_id:
+    if str(chat) != chat_id:
         return reject("Это не твой запрос", f"чужой chat.id={chat}")
     found = CALLBACK_RE.match(str(callback.get("data") or ""))
     if not found:
@@ -189,7 +192,8 @@ def main(argv: list[str]) -> int:
             callback = json.loads(sys.stdin.read())
         except ValueError:
             callback = {}
-        print(json.dumps(judge(log, argv[3], callback if isinstance(callback, dict) else {}), ensure_ascii=False))
+        print(json.dumps(judge(log, argv[3], callback if isinstance(callback, dict) else {},
+                               argv[4] if len(argv) > 4 else ""), ensure_ascii=False))
     return 0
 
 

@@ -67,6 +67,9 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
 GUARD = Path(os.environ.get("HARNESS_AGENT_BUDGET_GUARD") or HERE / "agent_budget_guard.py")
 PIPELINE = ROOT / "harness" / "config" / "pipeline.yaml"
+SPEED_DATA = ROOT / "harness" / "config" / "speed-modes.yaml"
+# Потолок, который берёт число у режима скорости: столько живых, сколько задач одновременно.
+SPEED_CEILING = "режим_скорости"
 JOURNAL_NAME = "вызовы-агентов.jsonl"
 SRC = "scripts/hooks/agent_budget_guard.py"
 LAUNCH_EVENT = "agent.launch"
@@ -109,12 +112,16 @@ class Stand:
     """Свой каталог журналов, своя карта и своя копия pipeline.yaml."""
 
     def __init__(self, base: Path, ceilings: dict, cards: Path | None = None,
-                 etalon: Path | None = None):
+                 etalon: Path | None = None, speed_mode: str | None = None,
+                 speed_data: Path = SPEED_DATA):
         self.base = base
+        self.speed_data = speed_data
         self.cards = cards or STAND_SELF["cards"]
         self.etalon = etalon or STAND_SELF["etalon"]
         self.logs = base / "logs"
         self.logs.mkdir(parents=True, exist_ok=True)
+        self.conf = base / "harness.conf"
+        self.conf.write_text(f'SPEED_MODE="{speed_mode}"\n' if speed_mode else "", encoding="utf-8")
         self.devmap = base / "dev-map.yaml"
         self.pipeline = base / "pipeline.yaml"
         self.pipeline.write_text(
@@ -133,7 +140,7 @@ class Stand:
 
     def env(self) -> dict:
         env = {k: v for k, v in os.environ.items()
-               if k != "HARNESS_TASK" and k not in SELF_DOORS}
+               if k not in ("HARNESS_TASK", "SPEED_MODE") and k not in SELF_DOORS}
         env.update(SELF_ETALON_DIR=str(self.etalon), SELF_CARDS_DIR=str(self.cards),
                    SELF_TREE_DIR=str(ROOT))
         env.update(HARNESS_LOG_DIR=str(self.logs), LOG_DIR=str(self.logs),
@@ -141,16 +148,17 @@ class Stand:
                    HARNESS_EVENTS_STATE=str(self.base / "state"),
                    HARNESS_PIPELINE_CONF=str(self.pipeline),
                    HARNESS_HELPER_ROLES=str(self.roles),
+                   HARNESS_CONF=str(self.conf), SPEED_MODE_DATA=str(self.speed_data),
                    PYTHONDONTWRITEBYTECODE="1")
         return env
 
     def launch(self, description: str = "помощник: код", tool: str = "Agent",
                session: str = "проба", subagent_type: str | None = LIGHT_TYPE,
-               caller_depth: int | None = None, lead: str | None = None):
+               caller_depth: int | None = None, lead: str | None = None, call: str = ""):
         """(код, stderr). subagent_type None — тип не задан; caller_depth — spawnDepth
         зовущего помощника (None — зовёт смена); lead — agent_id управляющего-зовущего
-        (глубина 1, agent_type harness-lead)."""
-        proc = self.launch_proc(description, tool, session, subagent_type, caller_depth, lead)
+        (глубина 1, agent_type harness-lead); call — tool_use_id запуска."""
+        proc = self.launch_proc(description, tool, session, subagent_type, caller_depth, lead, call)
         return proc.returncode, proc.stderr
 
     def verdict(self, subagent_type: str | None = LIGHT_TYPE, caller_depth: int | None = None):
@@ -165,11 +173,13 @@ class Stand:
         return out.get("permissionDecision") == "deny", str(out.get("permissionDecisionReason") or "")
 
     def launch_proc(self, description: str, tool: str, session: str, subagent_type: str | None,
-                    caller_depth: int | None, lead: str | None):
+                    caller_depth: int | None, lead: str | None, call: str = ""):
         tool_input = {"description": description, "prompt": "работа"}
         if subagent_type is not None:
             tool_input["subagent_type"] = subagent_type
         payload = {"tool_name": tool, "session_id": session, "tool_input": tool_input}
+        if call:
+            payload["tool_use_id"] = call
         if caller_depth is not None:
             payload.update(agent_id="глубина", transcript_path=str(self.base / "s.jsonl"))
             meta = self.base / session / "subagents" / "agent-глубина.meta.json"
@@ -392,6 +402,33 @@ def judge_fail_open(tmp: Path) -> None:
     before = len(stand.rows())
     check("чужой инструмент пропускается", 0, stand.launch(tool="Bash")[0])
     check("чужой инструмент следа не оставляет", before, len(stand.rows()))
+
+
+def judge_speed_mode(tmp: Path) -> None:
+    """Владелец 19.11: потолок «без-задачи» — число режима скорости (одна мера с судьёй),
+    и счёт — живые помощники сессии, а не все её запуски: кончившийся место освобождает."""
+    modes = (yaml.safe_load(SPEED_DATA.read_text(encoding="utf-8")) or {}).get("режимы") or {}
+    for mode in ("medium", "ultra"):
+        n = int(modes[mode]["задач"])
+        stand = Stand(tmp / f"скорость-{mode}", {NO_TASK: {"всего": SPEED_CEILING, "ревью": 2}},
+                      speed_mode=mode)
+        stand.set_map([])
+        codes = [stand.launch(call=f"вызов-{i}")[0] for i in range(n)]
+        check(f"{mode}: {n} живых без задачи проходят (задач режима {n})", [0] * n, codes)
+        code, text = stand.launch(call="вызов-лишний")
+        check(f"{mode}: {n + 1}-й живой — отказ, назван потолок {n} из {n}",
+              (2, True), (code, f"{n} из {n}" in text))
+    stand.journal_event("agent.finish", "вызов-0", FINISH_SRC)
+    check("ultra: один кончился — следующий запуск проходит", 0, stand.launch(call="вызов-ещё")[0])
+    check("ultra: место снова занято — отказ", 2, stand.launch(call="вызов-сверх")[0])
+    broken = tmp / "скорость-битые.yaml"
+    broken.write_text("режимы: [\n", encoding="utf-8")
+    stand = Stand(tmp / "скорость-без-данных", {NO_TASK: {"всего": SPEED_CEILING, "ревью": 2}},
+                  speed_mode="ultra", speed_data=broken)
+    stand.set_map([])
+    check("данных режима нет — проход со следом «потолок не определён»", (0, "skipped", "потолок не определён"),
+          (stand.launch()[0], (stand.launch_rows() or [{}])[-1].get("outcome"),
+           ((stand.launch_rows() or [{}])[-1].get("data") or {}).get("почему")))
 
 
 def history_rows(session: str, skipped: int) -> list:
@@ -658,12 +695,17 @@ def main() -> int:
         return 1
     levels = levels_from_data(PIPELINE)
     check("в pipeline.yaml есть уровни ключа «помощники»", True, bool(levels))
+    check("потолок «без-задачи» в pipeline.yaml — режим скорости, не вшитое число", SPEED_CEILING,
+          (levels.get(NO_TASK) or {}).get("всего"))
     with tempfile.TemporaryDirectory() as raw:
         tmp = Path(raw)
         make_stand_cards(tmp / "личность")
         for level, ceiling in levels.items():
+            if ceiling.get("всего") == SPEED_CEILING:
+                continue    # число у режима скорости — судит judge_speed_mode
             judge_level(tmp, str(level), int(ceiling.get("всего") or 0),
                         int(ceiling.get("ревью") or 0))
+        judge_speed_mode(tmp)
         judge_counting(tmp)
         judge_neighbour_refusal(tmp)
         judge_race(tmp)

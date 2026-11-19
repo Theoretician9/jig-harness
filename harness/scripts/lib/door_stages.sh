@@ -953,8 +953,8 @@ prod_git() {
 prod_dirt() {
     local own head incoming
     head=$(prod_git rev-parse HEAD 2>/dev/null) || return 1
-    own=$(prod_git status --porcelain --untracked-files=all 2>/dev/null) || return 1
-    incoming=$(git -C "$PRODUCT_TREE" diff --name-only "$head" "$DEPLOY_SHA" 2>/dev/null) || return 1
+    own=$(prod_git -c core.quotepath=false status --porcelain --untracked-files=all 2>/dev/null) || return 1
+    incoming=$(git -C "$PRODUCT_TREE" -c core.quotepath=false diff --name-only "$head" "$DEPLOY_SHA" 2>/dev/null) || return 1
     comm -12 <(cut -c4- <<<"$own" | sort -u) <(sort -u <<<"$incoming")
 }
 

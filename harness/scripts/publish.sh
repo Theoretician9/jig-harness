@@ -35,6 +35,8 @@ set -uo pipefail
 source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/lib/config.sh"
 # shellcheck disable=SC1091
 source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/lib/events.sh"
+# shellcheck disable=SC1091
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/lib/release_mark.sh"
 # PUBLIC_PASPORT — путь паспорта для сборщика: только от паспорта двери (ниже), не из окружения;
 # самотест называет свой двор присваиванием уже ПОСЛЕ загрузки.
 # Так же TYPICAL_COPY_CHECK — судья замка 6г: из окружения боевой запуск подменил бы его и прошёл замок.
@@ -164,32 +166,50 @@ propustit_statusy_po_slovu() {
 # выходят кодом суда карантина, красные под записью карантина ими приняты —
 # принимает и замок. Строки хакатона и выборки полную не заслоняют; строка без
 # «код» (старый формат) права не даёт.
+# Строка на sha-предке HEAD годна, если с неё и в рабочем дереве легли только
+# служебные отметки — добавленные строки в классе DAEMON_OWNED_PATHS под память/
+# (судья service-only-diff.py): их пишут демоны, коды и проверки они не меняют.
 # Печатает время итога; 0 — итог годен.
 gates_summary_reusable() { # $1=каталог журнала
-    local summary="$1/ворота-итог.jsonl" head
+    local summary="$1/ворота-итог.jsonl" head found sha ts
     [ -s "$summary" ] || return 1
-    [ -z "$(git -C "$PROJECT_DIR" status --porcelain 2>/dev/null)" ] || return 1
     head=$(git -C "$PROJECT_DIR" rev-parse HEAD 2>/dev/null) || return 1
-    python3 -I - "$summary" "$head" <<'PY'
-import json, sys
+    found=$(python3 -I - "$summary" "$head" "$PROJECT_DIR" <<'PY'
+import json, subprocess, sys
 try:
     lines = open(sys.argv[1], encoding="utf-8").read().splitlines()
 except OSError:
     sys.exit(1)
-last = None
+head, project = sys.argv[2], sys.argv[3]
+
+
+def on_head_line(sha):
+    return sha == head or subprocess.run(
+        ["git", "-C", project, "merge-base", "--is-ancestor", sha, head],
+        capture_output=True).returncode == 0
+
+
+rows = []
 for line in lines:
     try:
         row = json.loads(line)
     except ValueError:
         continue
-    if (isinstance(row, dict) and row.get("режим") in ("обычный", "всё")
-            and row.get("sha") == sys.argv[2]):
-        last = row
+    if isinstance(row, dict) and row.get("режим") in ("обычный", "всё") and row.get("sha"):
+        rows.append(row)
+last = next((row for row in reversed(rows) if on_head_line(str(row["sha"]))), None)
 if last is None or not (last.get("код") == 0 and last.get("новых") == 0
                         and last.get("чисто") is True):
     sys.exit(1)
-print("итог от " + str(last.get("ts", "?")))
+print(f'{last["sha"]}\t{last.get("ts", "?")}')
 PY
+) || return 1
+    sha=${found%%$'\t'*}; ts=${found#*$'\t'}
+    if [ "$sha" != "$head" ] || [ -n "$(git -C "$PROJECT_DIR" status --porcelain 2>/dev/null)" ]; then
+        (cd "$PROJECT_DIR" && python3 -I "$SCRIPTS_REAL/service-only-diff.py" "$sha" --под память/ \
+            >/dev/null 2>&1) || return 1
+    fi
+    printf 'итог от %s\n' "$ts"
 }
 
 # Путь «по слову» не гоняет check-secrets.sh сам: скан секретов в составе быстрых
@@ -251,6 +271,7 @@ cleanup_on_exit() {
     train_slice_tree_remove
     release_train_lock
     release_merge_queue_lock
+    release_mark_drop
     local d
     for d in "${CLEANUP_DIRS[@]}"; do rm -rf "$d"; done
 }
@@ -1953,7 +1974,7 @@ PY
              train_package_view "$SREZ" || exit 1
              PAKET_SHA="$SREZ" PREDMET_ZAMKA="$PREDMET_SREZA" proba_publ "$T/срез"; rc=$?
              rm -rf "$PACKAGE_VIEW"; exit "$rc" ) 2>&1 ); RC=$?
-    OPUBL=$(git -C "$T/срез/удалённый.git" ls-tree -r --name-only master 2>/dev/null)
+    OPUBL=$(git -C "$T/срез/удалённый.git" -c core.quotepath=false ls-tree -r --name-only master 2>/dev/null)
     SOOBSH=$(git -C "$T/срез/удалённый.git" log -1 --format=%s master 2>/dev/null)
     if [ "$RC" = 0 ] && [ -n "$PREDMET_SREZA" ] && printf '%s\n' "$OPUBL" | grep -qx 'harness/demons/srez.sh' \
        && ! printf '%s\n' "$OPUBL" | grep -q 'posle-sreza.txt' \
@@ -2182,6 +2203,10 @@ if [ "$CHECK_ONLY" = 0 ] && [ "$TRAIN" = 0 ]; then
     take_merge_queue_lock "${LOG_DIR:?пуст LOG_DIR — не прочитан паспорт установки}" \
         "$(( ${MERGE_QUEUE_WAIT_MIN:-30} * 60 ))" || exit 1
 fi
+# Метка выпуска — до ворот (у поезда они в train_board): пул тяжёлых прогонов не выдаёт
+# мест новым заявкам, кроме потомков выпуска, и ворота не стоят в очереди за помощниками.
+release_mark_take \
+    || say "внимание: метка выпуска не поставлена — ворота делят пул тяжёлых прогонов на общих правах"
 # Поезд: срез, прошлый выпуск и ворота по разнице — первыми. Кнопка просится после зелёных
 # ворот и на срез, а не на HEAD, поэтому слияния после среза её не сжигают.
 # Почему у поезда ворота идут ДО замка 6в (у обычного хода — после): ворота поезда судят срез

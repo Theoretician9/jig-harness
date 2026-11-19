@@ -189,7 +189,14 @@ class Stand:
         except subprocess.TimeoutExpired:
             return -1, "ТАЙМАУТ (рекурсия?)", jsonl(self.calls)
 
-    def acceptance(self, env: dict):
+    def acceptance(self, env: dict, ids: str = "hr.проба-среза"):
+        """Заход мутаций так, как его зовёт исполнитель очереди: через дверь, с acceptance.py."""
+        return self.run(["bash", str(self.root / "scripts" / "run-in-checks-slice.sh"), sys.executable,
+                         str(self.root / "scripts" / "acceptance.py"), "--мутации-задачи", ids],
+                        env, self.work)
+
+    def acceptance_direct(self, env: dict):
+        """acceptance.py без двери: заявитель сам решает, идти ли в очередь."""
         return self.run([sys.executable, str(self.root / "scripts" / "acceptance.py"),
                          "--мутации-задачи", "hr.проба-среза"], env, self.work)
 
@@ -331,21 +338,21 @@ def session(pid: int) -> int:
 # ── Круг 1: перезапуск через дверь ─────────────────────────────────────────
 
 def probe_outside(s: Stand) -> None:
-    """Вне среза: обёртка ровно один раз, код и вывод ребёнка доходят."""
-    rc, out, recs = s.acceptance(s.env())
-    check("acceptance вне среза: обёртка вызвана ровно 1 раз", 1, len(recs))
-    check("acceptance вне среза: код ребёнка сохранён (2 — история не прочитана)", 2, rc)
-    check("acceptance вне среза: ответил сам acceptance", True, "история не прочитана" in out)
-    check("acceptance вне среза: обёртке передан cwd вызова", str(s.work),
-          positional(recs[0])[0] if recs else None)
-    check_env("acceptance", s, recs)
+    """Вне среза: acceptance с нечитаемой историей (стенд — не репозиторий) не занимает ни
+    очередь, ни дверь — прогонять нечего; дверь, позванная напрямую, зовёт обёртку ровно
+    один раз, код и вывод ребёнка доходят. Прибор вне среза встаёт в очередь тяжёлых
+    прогонов (heavy_probe_request), а не в дверь."""
+    rc, out, recs = s.acceptance_direct(s.env())
+    check("acceptance вне среза без читаемой истории: дверь не звана (нечего прогонять)", 0, len(recs))
+    check("acceptance вне среза: ответил сам acceptance кодом 2", (2, True), (rc, "история не прочитана" in out))
 
-    rc, out, recs = s.probe(s.env())
-    check("mutation-probe вне среза: обёртка вызвана ровно 1 раз", 1, len(recs))
-    check("mutation-probe вне среза: код ребёнка сохранён (2 — записей нет)", 2, rc)
-    check("mutation-probe вне среза: ответил сам прибор", True, "записей для механизма нет" in out)
-    check("mutation-probe вне среза: обёртке передан корень прибора", str(s.root),
+    rc, out, recs = s.acceptance(s.env())
+    check("дверь напрямую: обёртка вызвана ровно 1 раз", 1, len(recs))
+    check("дверь напрямую: код ребёнка сохранён (2 — история не прочитана)", 2, rc)
+    check("дверь напрямую: ответил сам acceptance", True, "история не прочитана" in out)
+    check("дверь напрямую: обёртке передан cwd вызова", str(s.work),
           positional(recs[0])[0] if recs else None)
+    check_env("дверь", s, recs)
 
 
 def check_env(who: str, s: Stand, recs: list) -> None:
@@ -364,7 +371,7 @@ def check_env(who: str, s: Stand, recs: list) -> None:
 
 def probe_inside(s: Stand) -> None:
     """В срезе обёртка не зовётся вовсе: ни по метке, ни по файлу cgroup."""
-    for who, run in (("acceptance", s.acceptance), ("mutation-probe", s.probe)):
+    for who, run in (("acceptance", s.acceptance_direct), ("mutation-probe", s.probe)):
         rc, _, recs = run(s.env(HARNESS_IN_CHECKS_SLICE="1"))
         check(f"{who} с меткой HARNESS_IN_CHECKS_SLICE=1: обёртка не вызвана", 0, len(recs))
         check(f"{who} с меткой: код ребёнка 2", 2, rc)
@@ -586,52 +593,85 @@ def g13(tmp: Path) -> None:
         check(f"G-13: {label} — идёт через дверь (обёртка 1 раз)", 1, len(recs))
 
 
-def probe_batch_guard(s: Stand) -> None:
-    """Сторож пачки: заход в дверь мимо очереди, пока первый ждёт или идёт, —
-    отказ кодом 75 с законным путём; заявка acceptance при живом заходе не
-    отказывается, а ждёт очереди пачек; прочие прогоны и заход после — свободны."""
+def probe_no_batch_guard(s: Stand) -> None:
+    """Второго замка на «мутации задач» в двери нет: ждёт очередь тяжёлых прогонов, а не
+    дверь. Поломка: сторож пачки остался — прямой вызов двери при живом первом получает
+    мгновенный 75, и заявка очереди, дошедшая до двери, выкидывается."""
     marker = s.tmp / "в-обёртке"
     slow = executable(s.tmp / "slow-wrapper.sh",
-                      f"#!/usr/bin/env bash\ntouch {marker}\nsleep 8\nexec {s.wrapper} \"$@\"\n")
-    first = subprocess.Popen([sys.executable, str(s.root / "scripts" / "acceptance.py"),
-                              "--мутации-задачи", "hr.первая"], cwd=str(s.work),
+                      f"#!/usr/bin/env bash\ntouch {marker}\nsleep 6\nexec {s.wrapper} \"$@\"\n")
+    door = str(s.root / "scripts" / "run-in-checks-slice.sh")
+    command = [sys.executable, str(s.root / "scripts" / "acceptance.py"), "--мутации-задачи"]
+    first = subprocess.Popen(["bash", door, *command, "hr.первая"], cwd=str(s.work),
                              env=s.env(HARNESS_CHECKS_SLICE_WRAPPER=str(slow)),
-                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     deadline = time.time() + 20
     while not marker.exists() and time.time() < deadline:
         time.sleep(0.1)
-    door = str(s.root / "scripts" / "run-in-checks-slice.sh")
-    rc, out, recs = s.run(["bash", door, sys.executable, str(s.root / "scripts" / "acceptance.py"),
-                           "--мутации-задачи", "hr.проба-среза"], s.env(), s.work)
+    rc, out, recs = s.run(["bash", door, *command, "hr.проба-среза"], s.env(), s.work)
     own = [r for r in recs if "hr.проба-среза" in r]
-    check("пачка: второй заход в дверь мимо очереди при живом первом — отказ 75, обёртка не звана",
-          (BUSY_RC, 0), (rc, len(own)))
-    check("пачка: отказ называет законный путь — свои id в пачку через запятую", True,
-          "--мутации-задачи hr.проба-среза,<id2>" in out)
-    check("пачка: отказ называет держателя (задачи первого)", True, "hr.первая" in out)
-    rc_probe, _, recs_probe = s.probe(s.env())
-    rc, out, recs = s.acceptance(s.env())
-    own = [r for r in recs if "hr.проба-среза" in r]
-    check("пачка: заявка acceptance при живом заходе не отказана, а дождалась своего захода",
-          (2, 1, False), (rc, len(own), "отказ" in out))
-    check("пачка: заявка видит итог своей задачи, а не первой", (True, False),
-          ("hr.проба-среза: история не прочитана" in out, "hr.первая" in out))
-    first_rc = first.wait(timeout=60)
-    check("пачка: прибор механизма при живом заходе задач не режется", 1, len(recs_probe))
-    check("пачка: первый заход дошёл сам (код 2 — история не прочитана)", 2, first_rc)
-    rc, _, recs = s.acceptance(s.env())
-    check("пачка: после конца первого заход свободен", (2, 1), (rc, len(recs)))
-    # Фоновый потомок прогона переживает дверь; замок пачки ему не достаётся.
-    pidfile = s.tmp / "потомок.pid"
-    s.run(["bash", door, "bash", "-c", f"sleep 30 >/dev/null 2>&1 & echo $! > {pidfile}",
-           "--мутации-задачи", "hr.потомок"], s.env(), s.work)
-    try:
-        rc, _, recs = s.acceptance(s.env())
-        check("пачка: фоновый потомок захода не держит замок пачки после двери",
-              (2, 1), (rc, len(recs)))
-    finally:
-        if pidfile.is_file():
-            os.kill(int(pidfile.read_text().strip()), signal.SIGTERM)
+    check("дверь: второй вызов с --мутации-задачи при живом первом не отказан сторожем пачки",
+          (1, False), (len(own), "уже в очереди или идут" in out))
+    first.wait(timeout=60)
+
+
+# ── Одна очередь тяжёлых прогонов (спека тяжёлых прогонов §А.1, §А.3) ──
+
+def heavy_probe_request(s: Stand) -> None:
+    """А.1. Поломка: mutation-probe.sh вне среза по-прежнему делает exec двери мимо очереди —
+    прибор и мутации задач встают в flock среза врозь, «занято» выкидывает (код 75).
+    Место очереди — $LOG_DIR/очередь-мутаций стенда; исполнитель.lock держит проба, чтобы
+    пущенный заявителем исполнитель не гнал заявку в стенде."""
+    place = s.tmp / "logs" / "очередь-мутаций"
+    place.mkdir(parents=True)
+    s.calls.unlink(missing_ok=True)
+    found: list = []
+    with open(place / "исполнитель.lock", "a+") as held:
+        fcntl.flock(held, fcntl.LOCK_EX)
+        proc = subprocess.Popen(["bash", str(s.root / "scripts" / "mutation-probe.sh"),
+                                 "--механизм", "scripts/нет-такого.sh"], cwd=str(s.work), env=s.env(),
+                                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL, start_new_session=True)
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline and not found:
+            try:
+                state = json.loads((place / "очередь.json").read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                state = {}
+            found = [з for з in state.get("заявки", []) if "--механизм" in " ".join(з.get("команда", []))]
+            if not found and proc.poll() is not None:
+                break
+            time.sleep(0.3)
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+        proc.wait()
+    request = found[0] if found else {}
+    check("А.1: mutation-probe вне среза оставил заявку в очередь.json места стенда", True, bool(found))
+    check("А.1: заявка прибора — без ids, дерево — корень прибора", ([], str(s.root)),
+          (request.get("ids"), request.get("дерево")))
+    check("А.1: дверь (обёртка) заявителем не звана", 0, len(jsonl(s.calls)))
+
+
+def heavy_lock_wait(tmp: Path) -> None:
+    """А.3. Поломка: «ждать в очереди» сделано правкой ключа conf (MUTATION_LOCK_WAIT_MIN=2) —
+    ручной прогон через дверь перестаёт ждать 30 мин. Значение ключа берётся из образца
+    harness.conf, а не вписано пробой."""
+    conf_line = ""
+    for sample in (SRC.parent / "harness" / "config" / "harness.conf", SRC.parent / "config" / "harness.conf"):
+        if sample.is_file():
+            conf_line = next((line for line in sample.read_text(encoding="utf-8").splitlines()
+                              if line.startswith("MUTATION_LOCK_WAIT_MIN=")), "")
+            break
+    check("А.3: образец harness.conf держит MUTATION_LOCK_WAIT_MIN=30", "MUTATION_LOCK_WAIT_MIN=30", conf_line)
+    for label, env_value, wait in (("env MUTATION_LOCK_WAIT_MIN=2", "2", 120), ("без env", None, 1800)):
+        s = SliceStand(tmp / f"wait-{wait}", conf=conf_line + "\n")
+        s.door_run("true", env=s.env(MUTATION_LOCK_WAIT_MIN=env_value))
+        calls = s.systemd_run_calls()
+        joined = " ".join(calls[-1]) if calls else ""
+        check(f"А.3: дверь {label} при ключе conf 30 → flock ждёт {wait} с", True,
+              bool(re.search(rf"(-w|--wait|--timeout)[ =]?{wait}\b", joined)))
 
 
 def main() -> int:
@@ -648,7 +688,9 @@ def main() -> int:
                             ("G-07", lambda: g07(tmp / "g07")),
                             ("G-11", g11),
                             ("G-13", lambda: g13(tmp / "g13")),
-                            ("пачка", lambda: probe_batch_guard(Stand(tmp / "batch")))):
+                            ("без сторожа пачки", lambda: probe_no_batch_guard(Stand(tmp / "batch"))),
+                            ("А.1 прибор в очередь", lambda: heavy_probe_request(Stand(tmp / "heavy"))),
+                            ("А.3 ожидание", lambda: heavy_lock_wait(tmp / "heavy-wait"))):
             try:
                 probe()
             except Exception as error:  # упавший стенд — красный путь, а не трассировка

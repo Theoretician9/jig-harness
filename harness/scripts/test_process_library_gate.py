@@ -437,6 +437,36 @@ def case_installation_layer() -> None:
            [f"rc={rc}", f"нарушения {found[:4]}"])
 
 
+def case_own_mechanism() -> None:
+    print("── 19г. свой механизм копии — паспорт в поле «механизмы» слоя установки ──")
+    # Копия bkb 19.11.2026 (0.14.2): демон cf-exchange-watch записан в слой процессов,
+    # а его паспорт — в mechanisms.yaml пакета; обновление паспорт затирает, судья
+    # краснел «нет механизма». Место паспорта своего механизма — тот же слой.
+    stand = Stand("own-mech")
+    stand.touch("harness/demons/own-watch.sh")
+    stand.cron.append(f"*/10 * * * * {stand.root}/scripts/run-background.sh own-watch -- "
+                      f"{stand.root}/harness/demons/own-watch.sh >>/tmp/own-watch.log 2>&1")
+    layer = stand.root.parent / "layer-own-mech.json"
+    own = record("own-watch", "крон", ["harness/demons/own-watch.sh"], ["harness/demons/own-watch.sh"])
+    env = dict(os.environ, HARNESS_PROCESS_LIBRARY_LOCAL=str(layer))
+    layer.write_text(json.dumps({"процессы": [own]}, ensure_ascii=False), encoding="utf-8")
+    rc, out, found = stand.judge(env)
+    named = [line for line in found if "нет механизма: own-watch :: harness/demons/own-watch.sh" in line
+             and "«механизмы»" in line and str(layer) in line]
+    report(rc == 1 and len(found) == 1 and bool(named),
+           "паспорта нет ни в пакете, ни в слое → «нет механизма» и названо место: «механизмы» слоя",
+           [f"rc={rc}", f"нарушения {found[:3]}"])
+    passport = {"файл": "harness/demons/own-watch.sh", "вид": "демон", "имя": "Свой сторож копии"}
+    layer.write_text(json.dumps({"процессы": [own], "механизмы": [passport]}, ensure_ascii=False),
+                     encoding="utf-8")
+    rc, out, found = stand.judge(env)
+    wanted = len(stand.library["процессы"]) + 1
+    tail = out.splitlines()[-1] if out else ""
+    report(rc == 0 and not found and tail == f"check-process-library: чисто, записей {wanted}",
+           "паспорт в поле «механизмы» слоя → чисто",
+           [f"rc={rc}", f"нарушения {found[:3]}", f"хвост «{tail[:200]}»"])
+
+
 def case_sources_unavailable() -> None:
     print("── 20. crontab / systemctl недоступны → код 3 вслух, не «чисто» ──")
     variants = [("crontab нет", dict(crontab=False), "crontab"),
@@ -631,7 +661,7 @@ def main() -> int:
         for fn in (case_clean, case_new_demon, case_record_without_source, case_cron_wrapped, case_cron_bare,
                    case_hook, case_ghost_mechanism, case_removed_demon, case_unit, case_schedule,
                    case_empty_root, case_wiring, case_precommit_live_prefix, case_cron_bypasses,
-                   case_dead_sources, case_gate_key_live_conf, case_cron_not_executable, case_installation_layer,
+                   case_dead_sources, case_gate_key_live_conf, case_cron_not_executable, case_installation_layer, case_own_mechanism,
                    case_sources_unavailable, case_live_machine_wording):
             try:
                 fn()

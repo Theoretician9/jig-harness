@@ -37,9 +37,11 @@ from orders_write_guard import write_targets  # noqa: E402
 ROOT = Path(os.environ.get("HARNESS_FILES_GUARD_ROOT") or HERE.parent.parent)
 DENY = ("{rel} — файл харнеса (положен раскладкой, .layout-manifest): у копии только для чтения, "
         "обновление затрёт правку.\n"
-        "Хочешь изменить — находка строителю харнеса: репозиторий HarnessEvolution, "
-        "находки/<сервер>/<ГГГГ-ММ-ДД>-<суть>.md, подписанным коммитом; формат записи — README сети; "
-        "отправка — scripts/evolution-net.py --отправить <sha>.\n"
+        "Хочешь изменить — находка строителю харнеса в репозиторий HarnessEvolution "
+        "(ляжет в находки/<сервер>/<ГГГГ-ММ-ДД>-<суть>.md; формат записи — README сети). "
+        "Запиши файл <ГГГГ-ММ-ДД>-<суть>.md вне файлов харнеса, затем:\n"
+        "  python3 scripts/evolution-net.py --находка <файл>    # печатает sha подписанного коммита\n"
+        "  python3 scripts/evolution-net.py --отправить <sha>\n"
         "Своё — в слое копии: {places}.")
 
 

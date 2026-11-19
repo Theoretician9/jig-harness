@@ -18,8 +18,11 @@ process-library.yaml, таймер ПОРОЖДАЕТСЯ из него: тай�
   1 у каждого id есть service+timer, Slice=harness-checks.slice, OnCalendar
     равен расписанию библиотеки (по ближайшим срабатываниям: systemd-analyze
     calendar против разбора крон-строки), Persistent=false;
-  2 в срезе CPUQuota/MemoryHigh/MemoryMax — числа из конфига; systemd-analyze
-    verify без замечаний на наших файлах;
+  2 в срезе CPUWeight/CPUQuota/MemoryHigh/MemoryMax — значения из конфига;
+    systemd-analyze verify без замечаний на наших файлах;
+  2б срез из образца harness.conf: CPUWeight=idle (ночь берёт свободные ядра и
+    уступает их днём — решение владельца, шаг 2 М3.2) и все четыре значения —
+    из образца;
   3 cron_lines (функция и CLI установщика) не выдаёт ни одного id с признаком,
     а прочие задания выдаёт;
   4 run-background.sh при off: запись с признаком идёт (след-файл) и пишет
@@ -45,7 +48,7 @@ konf_zagruzit не перекрывает значение окружения). 
 установщика: он живёт только в пакете, дверь HARNESS_USTANOVIT.
 
 Контракт кода (имена — для кодера шага Г):
-  harness.conf: CHECKS_CPU_QUOTA, CHECKS_MEMORY_HIGH, CHECKS_MEMORY_MAX
+  harness.conf: CHECKS_CPU_WEIGHT, CHECKS_CPU_QUOTA, CHECKS_MEMORY_HIGH, CHECKS_MEMORY_MAX
   process_library.py checks-units <каталог> <проект> <журналы> <пользователь>
       пишет harness-checks.slice и пары юнитов в каталог; потолки — из файла
       $HARNESS_CONF, библиотека — через свои двери.
@@ -72,11 +75,13 @@ PL = HERE / "lib" / "process_library.py"
 SIGN = "служба-проверок"
 SLICE = "harness-checks.slice"
 UNIT_DIR = "/etc/systemd/system"
-CEILING_KEYS = ("CHECKS_CPU_QUOTA", "CHECKS_MEMORY_HIGH", "CHECKS_MEMORY_MAX")
-CEILING_UNIT = dict(zip(CEILING_KEYS, ("CPUQuota", "MemoryHigh", "MemoryMax")))
+CEILING_KEYS = ("CHECKS_CPU_WEIGHT", "CHECKS_CPU_QUOTA", "CHECKS_MEMORY_HIGH", "CHECKS_MEMORY_MAX")
+CEILING_UNIT = dict(zip(CEILING_KEYS, ("CPUWeight", "CPUQuota", "MemoryHigh", "MemoryMax")))
 # Два набора потолков: число, зашитое в генератор, совпадёт не больше чем с одним.
-CEILINGS_A = {"CHECKS_CPU_QUOTA": "150%", "CHECKS_MEMORY_HIGH": "1536M", "CHECKS_MEMORY_MAX": "1792M"}
-CEILINGS_B = {"CHECKS_CPU_QUOTA": "175%", "CHECKS_MEMORY_HIGH": "1G", "CHECKS_MEMORY_MAX": "1280M"}
+CEILINGS_A = {"CHECKS_CPU_WEIGHT": "idle", "CHECKS_CPU_QUOTA": "150%", "CHECKS_MEMORY_HIGH": "1536M",
+              "CHECKS_MEMORY_MAX": "1792M"}
+CEILINGS_B = {"CHECKS_CPU_WEIGHT": "40", "CHECKS_CPU_QUOTA": "175%", "CHECKS_MEMORY_HIGH": "1G",
+              "CHECKS_MEMORY_MAX": "1280M"}
 SUDO_VERBS = ("enable", "disable", "start", "stop")
 # Форма живой строки 50-agent (переключение 06.11): sudo сверяет доводы буквально,
 # поэтому «enable --now» — отдельное правило, а не следствие «enable».
@@ -287,7 +292,8 @@ def judge_units(label: str, out: Path, ids: list, library_yaml: dict, records: d
     s = unit_keys(slice_text or "")
     wrong = [f"{CEILING_UNIT[k]}={s.get(CEILING_UNIT[k])} (ждали {v})" for k, v in ceilings.items()
              if s.get(CEILING_UNIT[k]) != [v]]
-    report(slice_text is not None and not wrong, f"{label}: {SLICE} — CPUQuota/MemoryHigh/MemoryMax из конфига",
+    report(slice_text is not None and not wrong,
+           f"{label}: {SLICE} — CPUWeight/CPUQuota/MemoryHigh/MemoryMax из конфига",
            wrong or ([f"файла {SLICE} нет"] if slice_text is None else ()))
     files = [out / n for n in sorted(made)]
     if not shutil.which("systemd-analyze"):
@@ -426,8 +432,18 @@ def judge_installer(stand: Path, yaml_path: Path, json_path: Path, ids: list, ce
     pkg.mkdir()
     shutil.copy2(installer, pkg / "USTANOVIT.sh")
     for entry in package.iterdir():
-        if entry.name != "USTANOVIT.sh":
+        if entry.name not in ("USTANOVIT.sh", "harness"):
             (pkg / entry.name).symlink_to(entry)
+    # Код и данные установщика стенда — этого дерева, а не пакета: в проекте пакет догоняет
+    # ветку только при слиянии, и до него проба судила бы прежний генератор. Данные — копией:
+    # установщик идёт от них к scripts через «config/..», а ссылка увела бы мимо стенда.
+    (pkg / "harness").mkdir()
+    for entry in (package / "harness").iterdir():
+        if entry.name not in ("scripts", "config", "demons"):
+            (pkg / "harness" / entry.name).symlink_to(entry)
+    (pkg / "harness" / "scripts").symlink_to(HERE)
+    (pkg / "harness" / "demons").symlink_to(DEMONS)
+    shutil.copytree(CONFIG, pkg / "harness" / "config")
     conf = stand / "u-harness.conf"
     write_conf(conf, ceilings)
     env = stand_env(stand, yaml_path, json_path, conf)
@@ -477,6 +493,33 @@ def judge_installer(stand: Path, yaml_path: Path, json_path: Path, ids: list, ce
     reload_after = [n for n, c in commands if "systemctl daemon-reload" in c and last_unit is not None and n > last_unit]
     report(bool(ids) and not missing and bool(reload_after), "5 daemon-reload после записи юнитов",
            ["нет daemon-reload после последнего юнита"])
+    judge_installer_resume(stand, pkg, env, want, ceilings)
+
+
+def judge_installer_resume(stand: Path, pkg: Path, env: dict, want: list, ceilings: dict) -> None:
+    """5б: поставленная машина (штампы всех шагов) получает новый потолок и расписание
+    через `--resume` — иначе правка данных среза до неё не доезжает ни одной дверью."""
+    stamps = stand / "stamps"
+    stamps.mkdir()
+    source = (pkg / "USTANOVIT.sh").read_text(encoding="utf-8")
+    line = re.compile(r"^STAMP_DIR=/var/lib/harness/install-steps$", re.M)
+    steps = re.findall(r"^(шаг_\S+)$", source, re.M)
+    report(len(line.findall(source)) == 1 and bool(steps), "5б строка STAMP_DIR и список шагов установщика найдены",
+           [f"STAMP_DIR {len(line.findall(source))}, шагов {len(steps)}"])
+    for step in steps:
+        (stamps / f"{step}.done").touch()
+    resumed = pkg / "USTANOVIT-resume.sh"
+    resumed.write_text(line.sub(f"STAMP_DIR={stamps}", source), encoding="utf-8")
+    done = subprocess.run(["bash", str(resumed), "--dry-run", "--resume"], capture_output=True, text=True,
+                          timeout=300, env=env, stdin=subprocess.DEVNULL, cwd=str(stand))
+    files, _, _ = parse_dry_run(done.stdout)
+    missing = [p for p in want if p not in files]
+    s = unit_keys(files.get(f"{UNIT_DIR}/{SLICE}", ""))
+    wrong = [f"{CEILING_UNIT[k]}={s.get(CEILING_UNIT[k])} (ждали {v})" for k, v in ceilings.items()
+             if s.get(CEILING_UNIT[k]) != [v]]
+    report(bool(steps) and not missing and not wrong,
+           f"5б --resume со штампами всех {len(steps)} шагов пишет срез и юниты из $HARNESS_CONF",
+           missing[:3] + wrong or [f"rc={done.returncode}"])
 
 
 # ── перевод календаря вне живой библиотеки ────────────────────────────────
@@ -540,6 +583,33 @@ def same_quote_in_fstring(source: str) -> list:
         if token.type == tokenize.FSTRING_START:
             stack.append(quote)
     return found
+
+
+def sample_ceilings(conf_text: str) -> dict:
+    """Ключи потолка образца — разбором строк KEY=value, а не вписанным числом."""
+    found = {}
+    for line in conf_text.splitlines():
+        key, sep, value = line.partition("=")
+        if sep and key.strip() in CEILING_KEYS:
+            found[key.strip()] = value.strip().strip('"')
+    return found
+
+
+def judge_sample(stand: Path, yaml_path: Path, json_path: Path, project: Path, logs: Path, user: str) -> None:
+    """2б: срез, который установщик построит из образца harness.conf пакета."""
+    print("── 2б. срез из образца harness.conf ──")
+    sample = CONFIG / "harness.conf"
+    ceilings = sample_ceilings(sample.read_text(encoding="utf-8"))
+    report(set(ceilings) == set(CEILING_KEYS), f"2б в образце {sample.name} все ключи потолка",
+           sorted(set(CEILING_KEYS) - set(ceilings)))
+    out = stand / "units-sample"
+    done = generate_units(stand, stand_env(stand, yaml_path, json_path, sample), out, project, logs, user)
+    s = unit_keys((out / SLICE).read_text(encoding="utf-8") if (out / SLICE).is_file() else "")
+    report(done.returncode == 0 and s.get("CPUWeight") == ["idle"], "2б срез образца — CPUWeight=idle",
+           [f"rc={done.returncode}, CPUWeight={s.get('CPUWeight')}"])
+    wrong = [f"{CEILING_UNIT[k]}={s.get(CEILING_UNIT[k])} (в образце {v})" for k, v in ceilings.items()
+             if s.get(CEILING_UNIT[k]) != [v]]
+    report(bool(ceilings) and not wrong, "2б потолки среза — значения образца", wrong)
 
 
 def judge_min_python() -> None:
@@ -614,6 +684,7 @@ def main() -> int:
         done = generate_units(stand, env_a, stand / "units-a", project, logs, user)
         judge_units("А", stand / "units-a", ids, base_yaml, records, CEILINGS_A, project, logs, user, done)
         judge_cron("А", env_a, ids, project, logs)
+        judge_sample(stand, yaml_a, json_a, project, logs, user)
 
         # Проход Б: другие расписания, признак у чужой записи, другие потолки.
         extra = next((name for name, entry in processes.items()

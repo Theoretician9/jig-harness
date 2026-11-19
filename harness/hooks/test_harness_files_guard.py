@@ -60,7 +60,8 @@ for role, path in CONF.items():
 X = str(ROOT / "scripts" / "x.py")
 LAYER_PLACES = [p["место"] for p in yaml.safe_load(LAYER.read_text(encoding="utf-8"))["места"]]
 DOOR_WORDS = ["только для чтения", "HarnessEvolution", "находки/<сервер>/<ГГГГ-ММ-ДД>-<суть>.md",
-              "подписанным коммитом", "scripts/evolution-net.py --отправить", "README",
+              "python3 scripts/evolution-net.py --находка <файл>",
+              "python3 scripts/evolution-net.py --отправить <sha>", "README",
               "слое копии"] + LAYER_PLACES
 
 checked = failed = 0

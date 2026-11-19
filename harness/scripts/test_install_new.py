@@ -1854,6 +1854,102 @@ def ключи_образца_доезжают():
        ключи_образца_доезжают)
 
 
+# Д-26 (R8, 11.11): живой конфиг клался, только если его нет, и НОВОЕ ЗНАЧЕНИЕ стоящего
+# ключа (DEVMAP_SERVICE_PREFIXES 0.9.3) на обновлённую машину не приезжало. Умолчание,
+# которого владелец не менял (равно прежнему образцу), идёт за образцом; своё — цело.
+ПРЕЖНИЙ_Д26 = 'SAME="1"\nCHANGED="old"\nOWNED="old"\n'
+ОБРАЗЕЦ_Д26 = 'SAME="1"\nCHANGED="new"   # хвост образца\nOWNED="new"\n'
+ЖИВОЙ_Д26 = '# комментарий владельца\nSAME="1"\nCHANGED="old"\nOWNED="mine"\n'
+
+
+def стенд_д26(двор: Path) -> Path:
+    проект = двор / "proj"
+    (проект / "harness" / "config").mkdir(parents=True)
+    (двор / "pkg" / "harness" / "память").mkdir(parents=True)
+    return проект
+
+
+def значения_доезжают(через_git: bool):
+    двор = Path(tempfile.mkdtemp(prefix="proba-d26-"))
+    try:
+        проект = стенд_д26(двор)
+        образец = проект / "harness" / "config" / "harness.conf"
+        след = двор / "harness.conf.образец"
+        if через_git:   # копия старше следа: прежний образец — в HEAD проекта
+            образец.write_text(ПРЕЖНИЙ_Д26, encoding="utf-8")
+            git_стенда(проект, "init", "-q")
+            git_стенда(проект, "add", "-A")
+            git_стенда(проект, "commit", "-qm", "прежняя версия")
+        else:
+            след.write_text(ПРЕЖНИЙ_Д26, encoding="utf-8")
+        образец.write_text(ОБРАЗЕЦ_Д26, encoding="utf-8")
+        код, вывод = прогон_main(двор / "pkg", проект, [], ЖИВОЙ_Д26)
+        итог = (двор / "harness.conf").read_text(encoding="utf-8")
+        значения = доустановка.конф_модуль.из_текста(итог)
+        повтор = прогон_main(двор / "pkg", проект, [], итог)[1]
+        return (код == 0 and значения.get("CHANGED") == "new" and значения.get("OWNED") == "mine"
+                and значения.get("SAME") == "1" and "# хвост образца" in итог
+                and "# комментарий владельца" in итог and итог.count("CHANGED=") == 1
+                and re.search(r"значени.*CHANGED", вывод) and "OWNED" not in вывод
+                and след.is_file() and след.read_text(encoding="utf-8") == ОБРАЗЕЦ_Д26
+                and not re.search(r"значени.*CHANGED", повтор),
+                f"код {код}, значения {значения}, след {след.is_file()}, вывод {вывод!r}, повтор {повтор!r}")
+    finally:
+        shutil.rmtree(двор, ignore_errors=True)
+
+
+случай("Д-26: новое значение образца сменило нетронутое умолчание (след образца), своё владельца цело",
+       lambda: значения_доезжают(через_git=False))
+случай("Д-26: следа нет — прежний образец взят из HEAD проекта, значение доехало",
+       lambda: значения_доезжают(через_git=True))
+
+
+def показ_не_пишет_след():
+    двор = Path(tempfile.mkdtemp(prefix="proba-d26s-"))
+    try:
+        проект = стенд_д26(двор)
+        (двор / "harness.conf.образец").write_text(ПРЕЖНИЙ_Д26, encoding="utf-8")
+        (проект / "harness" / "config" / "harness.conf").write_text(ОБРАЗЕЦ_Д26, encoding="utf-8")
+        код, вывод = прогон_main(двор / "pkg", проект, ["--показать"], ЖИВОЙ_Д26)
+        return (код == 0 and re.search(r"значени.*CHANGED", вывод)
+                and (двор / "harness.conf").read_text(encoding="utf-8") == ЖИВОЙ_Д26
+                and (двор / "harness.conf.образец").read_text(encoding="utf-8") == ПРЕЖНИЙ_Д26,
+                f"код {код}, вывод {вывод!r}")
+    finally:
+        shutil.rmtree(двор, ignore_errors=True)
+
+
+случай("Д-26: --показать называет ключ со сменой значения, ни конфиг, ни след не тронуты",
+       показ_не_пишет_след)
+
+
+# Дубль ключа (живая проверка 17.10): SKILL_SILENT_MAX стоял в живом конфиге дважды.
+# Загрузчик берёт последнее, и правка владельца в первой строке при разных значениях
+# молча не работает. Повтор с ТЕМ ЖЕ значением снимается (действующее значение то же),
+# с другим — остаётся: выбор значения за владельцем, его называет гейт ключей образца.
+def повтор_ключа_снят():
+    двор = Path(tempfile.mkdtemp(prefix="proba-dup-"))
+    try:
+        проект = стенд_д26(двор)
+        (проект / "harness" / "config" / "harness.conf").write_text(
+            'TWICE="1"\nDIFFER="a"\nBACK="x"\n', encoding="utf-8")
+        живой = 'TWICE="1"\nDIFFER="a"\nBACK="x"\n# второй блок\nTWICE=1\nDIFFER="b"\nBACK="y"\nBACK="x"\n'
+        код, вывод = прогон_main(двор / "pkg", проект, [], живой)
+        итог = (двор / "harness.conf").read_text(encoding="utf-8")
+        значения = доустановка.конф_модуль.из_текста(итог)
+        строк = lambda ключ: len(re.findall(rf"^{ключ}=", итог, re.M))  # noqa: E731
+        return (код == 0 and строк("TWICE") == 1 and строк("DIFFER") == 2 and строк("BACK") == 3
+                and {к: значения.get(к) for к in ("TWICE", "DIFFER", "BACK")} == {"TWICE": "1", "DIFFER": "b", "BACK": "x"}
+                and re.search(r"повтор.*TWICE", вывод) and not re.search(r"повтор.*(DIFFER|BACK)", вывод),
+                f"код {код}, итог {итог!r}, вывод {вывод!r}")
+    finally:
+        shutil.rmtree(двор, ignore_errors=True)
+
+
+случай("дубль: повтор ключа с тем же значением снят, с другим — оставлен, действующие значения те же",
+       повтор_ключа_снят)
+
+
 print(f"ДОУСТАНОВКА: путей {путей}, неудач {неудач}")
 if неудач:
     sys.exit(1)

@@ -12,13 +12,15 @@ pre-commit-gate.sh (в среднем 2,37 раза на HEAD), а merge-queue.p
     pre-commit-gate.sh: {gate:"pre-commit", verdict, tree, secs, …};
   * дерево очереди — `git write-tree` того, что развёрнуто во временном дереве (то же,
     что `<вершина>^{tree}` после rebase);
-  * в ветке один коммит над master и ПОСЛЕДНЯЯ строка gate "pre-commit" с этим tree —
-    verdict "pass" → pre-commit-gate.sh не запускается,
+  * ПОСЛЕДНЯЯ строка gate "pre-commit" для пары (tree = дерево вершины, base = текущий
+    master) — verdict "pass" → pre-commit-gate.sh не запускается (спека
+    тяжёлых прогонов, раздел В: base — полный `git rev-parse HEAD` хука; в
+    дереве очереди HEAD = master, значит своя строка очереди годится),
     `ворота_с` = 0, запись merge-queue.jsonl (data) называет «то же дерево», слияние идёт
     как обычно (код 0, ff);
   * записи нет / запись красная (verdict "fail") / дерево другое / master ушёл вперёд и
-    rebase дал новое дерево / два коммита над master (хук судил против родителя, очередь —
-    против master) / после зелёной записи — красная / запись других ворот → ворота
+    rebase дал новое дерево / base строки — не текущий master (родитель вершины, старый
+    master) / строка без base / после зелёной записи — красная / запись других ворот → ворота
     гоняются как сейчас (заглушка стенда видела прогон; она спит MQ_STUB_SLEEP=1,
     и `ворота_с` ≥ 1; «то же дерево» не названо).
 
@@ -26,11 +28,17 @@ pre-commit-gate.sh (в среднем 2,37 раза на HEAD), а merge-queue.p
 ворот, которая краснеет по файлу GATE_RED в дереве). Боевые журналы не трогаются.
 Дверь мутаций: HARNESS_MERGE_QUEUE — путь механизма (мутировать КОПИЮ).
 
+Самотест хука: `pre-commit-gate.sh --selftest-base` (случай т12) — base в строке журнала
+равен HEAD, когда HEAD — коммит ветки, а не master (ревью-3 спеки, п. 12). Дверь мутаций
+хука: HARNESS_PRE_COMMIT_GATE.
+
 Прогон: python3 scripts/test_merge_queue_same_tree.py
 """
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -39,12 +47,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import test_merge_queue as mq  # noqa: E402
 
 SAME_TREE = "то же дерево"
+HOOK = Path(os.environ.get("HARNESS_PRE_COMMIT_GATE") or mq.HERE / "pre-commit-gate.sh")
+MASTER = "master"   # base строки = текущий master стенда (то, что пишет хук в дереве очереди)
 
 
-def record(s: mq.Stand, tree: str, verdict: str = "pass", gate: str = "pre-commit") -> None:
+def record(s: mq.Stand, tree: str, verdict: str = "pass", gate: str = "pre-commit",
+           base: str | None = MASTER) -> None:
+    """Строка хука в gates.jsonl. base=None — строка старого вида, без поля base."""
     line = {"ts": "2026-11-16T00:00:00+00:00", "gate": gate, "head": "0000000",
             "staged": 1, "verdict": verdict, "failed": "" if verdict == "pass" else "x",
             "secs": 42, "tree": tree}
+    if base is not None:
+        line["base"] = s.sha() if base == MASTER else base
     with (s.logs / "gates.jsonl").open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(line, ensure_ascii=False) + "\n")
 
@@ -145,15 +159,16 @@ def case_master_moved(tmp: Path) -> None:
 
 
 def case_two_commits(tmp: Path) -> None:
-    # Поломка: условие одного коммита снято. Хук судил последний коммит против его
-    # родителя, очередь судит ветку против master — дерево то же, предмет другой (Р-10).
-    print("т6) два коммита над master, зелёная запись дерева вершины → ворота гоняются")
+    # В(б). Поломка «пропуск по зелёным коммитам»: хук второго коммита писал base =
+    # родитель вершины (HEAD в момент коммита), строки с base = master нет. Ломка
+    # «base = tip^» в checked_tree тоже оставила бы ворота пропущенными.
+    print("т6) два коммита над master, зелёная строка хука с base = родитель → ворота гоняются")
     s = mq.Stand(tmp / "т6")
     branch, wt = s.tree("t6")
     s.change(wt, "a.txt", "a1\n")
     tip = s.change(wt, "GATE_RED", "красная заглушка: ворота шли\n")
     tree = written_tree(wt)
-    record(s, tree)
+    record(s, tree, base=mq.git(s.proj, "rev-parse", f"{tip}^").strip())
     mq.check("т6: стенд — родитель вершины не master",
              True, mq.git(s.proj, "rev-parse", f"{tip}^").strip() != s.sha())
     mq.check("т6: стенд — дерево записи = дерево вершины",
@@ -191,8 +206,69 @@ def case_other_gate(tmp: Path) -> None:
     gates_ran(s, "т8", data, last_row(s))
 
 
+def case_two_commits_master_base(tmp: Path) -> None:
+    # В(а). Поломка: осталось условие «один коммит над master». Строка с base = master и
+    # деревом вершины (своя строка очереди или хук в дереве, где HEAD = master) — тот же
+    # предмет проверки, что у очереди, и ворота второй раз не нужны.
+    print("т9) два коммита над master, зелёная строка base = master и дерево вершины → ворота 0 с")
+    s = mq.Stand(tmp / "т9")
+    branch, wt = s.tree("t9")
+    s.change(wt, "a.txt", "a1\n")
+    tip = s.change(wt, "GATE_RED", "красная заглушка, если ворота пойдут\n")
+    record(s, written_tree(wt))
+    mq.check("т9: стенд — родитель вершины не master",
+             True, mq.git(s.proj, "rev-parse", f"{tip}^").strip() != s.sha())
+    code, data, out = s.queue(branch, "--json", MQ_STUB_SLEEP="1")
+    mq.check("т9: код 0 (слито без прогона)", 0, code)
+    mq.check("т9: master == вершина ветки", tip, s.sha())
+    mq.check("т9: заглушка ворот не запускалась", 0, len(s.gate_blocks()))
+    mq.check("т9: ворота_с = 0", True, data.get("ворота_с") == 0 and data.get("ворота_с") is not None)
+    mq.check(f"т9: запись называет «{SAME_TREE}»", True, names_same_tree(last_row(s)))
+
+
+def case_old_master_base(tmp: Path) -> None:
+    # В(в). Поломка: base не судится или судится «предок master» — строка, снятая против
+    # старого master, пропускает ворота, хотя master с тех пор принёс другое.
+    print("т10) один коммит, зелёная строка дерева вершины, base = старый master → ворота гоняются")
+    s = mq.Stand(tmp / "т10")
+    old = s.sha()
+    s.change(s.proj, "b.txt", "b1\n", "master ушёл до ветки")
+    branch, wt = s.tree("t10")
+    s.change(wt, "GATE_RED", "красная заглушка: ворота шли\n")
+    record(s, written_tree(wt), base=old)
+    code, data, out = s.queue(branch, "--json", MQ_STUB_SLEEP="1")
+    mq.check("т10: код 3 (ворота шли и красные)", 3, code)
+    gates_ran(s, "т10", data, last_row(s))
+
+
+def case_no_base(tmp: Path) -> None:
+    # В(г). Поломка: строка без base (хук до правки В) принята как годная — неизвестно,
+    # против чего её судили.
+    print("т11) один коммит, зелёная строка дерева вершины без base → ворота гоняются")
+    s = mq.Stand(tmp / "т11")
+    branch, wt = s.tree("t11")
+    s.change(wt, "GATE_RED", "красная заглушка: ворота шли\n")
+    record(s, written_tree(wt), base=None)
+    code, data, out = s.queue(branch, "--json", MQ_STUB_SLEEP="1")
+    mq.check("т11: код 3 (ворота шли и красные)", 3, code)
+    gates_ran(s, "т11", data, last_row(s))
+
+
+def case_hook_writes_base(tmp: Path) -> None:
+    # Хук. Поломка: pre-commit-gate.sh не пишет base или пишет `rev-parse master` вместо
+    # HEAD — самотест держит HEAD на коммите ветки (≠ master), поэтому вторую ломку видно.
+    print("т12) хук пишет base = HEAD (HEAD — коммит ветки, не master)")
+    proc = subprocess.run(["bash", str(HOOK), "--selftest-base"], capture_output=True,
+                          text=True, errors="replace", cwd=tmp, timeout=120,
+                          env={**os.environ, **mq.GIT_ENV})
+    tail = " | ".join((proc.stdout + proc.stderr).strip().splitlines()[-3:])
+    mq.check(f"т12: самотест хука --selftest-base зелёный ({tail})", 0, proc.returncode)
+
+
 CASES = (case_same_tree_green, case_no_record, case_red_record, case_other_tree,
-         case_master_moved, case_two_commits, case_red_after_green, case_other_gate)
+         case_master_moved, case_two_commits, case_red_after_green, case_other_gate,
+         case_two_commits_master_base, case_old_master_base, case_no_base,
+         case_hook_writes_base)
 
 
 def main() -> int:

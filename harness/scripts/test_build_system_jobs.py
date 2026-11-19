@@ -338,8 +338,31 @@ def case_insert_key(root: Path) -> None:
            "7 вставить_ключ(«ключи.…»): вставлено вне блока, блок не тронут", reason or "вставка не там")
 
 
+def case_heavy_queue(root: Path) -> None:
+    """Спека тяжёлых прогонов §А.5: брошенные заявки очереди тяжёлых прогонов
+    дослуживает своя строка cron. Поломка: строки heavy-queue нет в библиотеке (заявка без
+    заявителя висит вечно, без итога и тревоги) или библиотеку правили, а system-jobs.yaml
+    не перегенерировали (установщик строку не ставит)."""
+    library = yaml.safe_load(LIBRARY_SRC.read_text(encoding="utf-8")) or {}
+    record = (library.get("процессы") or {}).get("heavy-queue") or {}
+    report((record.get("запуск"), record.get("расписание")) == ("крон", "*/10 * * * *"),
+           "8 библиотека: heavy-queue — запуск крон, расписание */10 * * * *",
+           f"запись {record}")
+    report("scripts/lib/batch_queue.py --дослужить" in str(record.get("команда")),
+           "8 библиотека: heavy-queue зовёт scripts/lib/batch_queue.py --дослужить",
+           f"команда {record.get('команда')}")
+    jobs = (yaml.safe_load(JOBS_SRC.read_text(encoding="utf-8")) or {}).get("задания") or []
+    report("heavy-queue" in [job.get("имя") for job in jobs],
+           "8 system-jobs.yaml: порождённое задание heavy-queue есть (генератор прогнан)",
+           "задания heavy-queue нет")
+    stand = Stand(root, "8-heavy-queue")
+    rc, out = stand.run("--check")
+    report(rc == 0, "8 --check на копии живых файлов — выход 0 (библиотека и system-jobs сошлись)",
+           f"выход {rc}, {short(out)}")
+
+
 CASES = (case_generate, case_outside_untouched, case_library_changed, case_manual_edit,
-         case_marks_checked, case_idempotent, case_insert_key)
+         case_marks_checked, case_idempotent, case_insert_key, case_heavy_queue)
 
 
 def main() -> int:

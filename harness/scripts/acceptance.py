@@ -48,6 +48,7 @@
     python3 scripts/acceptance.py --selftest
     python3 scripts/acceptance.py --мутации-задачи <id>  # шаг «мутации»: бумага .tasks/<id>/мутации.log
     python3 scripts/acceptance.py --мутации-задачи <id1>,<id2>  # пачка: один заход в срез
+    python3 scripts/acceptance.py --история <id1>,<id2> --в <файл>  # чтения истории для захода в срезе (зовёт очередь)
     python3 scripts/acceptance.py --кандидаты  # «сделано, но не заявлено»: только список
 Код возврата: 0 — прогон состоялся, 1 — есть провалы.
 """
@@ -64,6 +65,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
 import config as конф                                    # noqa: E402
+import events                                           # noqa: E402
 import cards as разбор_карточки                     # noqa: E402
 import patterns as формы                            # noqa: E402
 
@@ -395,18 +397,76 @@ def журнал_мутаций(корень: Path, ид: str) -> Path:
     return корень / ".tasks" / ид / "мутации.log"
 
 
-def _git_lines(корень: Path, *args: str) -> list[str] | None:
-    """Строки вывода git; None — git молчит (не запустился или отказал)."""
-    try:
-        ответ = subprocess.run(["git", "-C", str(корень), "-c", "core.quotepath=false", *args],
-                               capture_output=True, text=True, timeout=120)
-    except (OSError, subprocess.SubprocessError):
+GIT_TRIES = 3
+GIT_TIMEOUT_SEC = 120
+# Запись ответов git режима --история: ключ «дерево + доводы git» → строки или None.
+_recorded: dict | None = None
+_slice_answers: dict | None = None
+
+
+class HistoryUnread(Exception):
+    """История git не прочитана: git молчал все попытки или без неё судить нечем."""
+
+
+def _event(name: str, outcome: str, **data) -> None:
+    events.emit("scripts/acceptance.py", name, outcome, journal="checks-slice", data=data)
+
+
+def _history_key(корень: Path, args: tuple) -> str:
+    return json.dumps([str(Path(корень).resolve()), *args], ensure_ascii=False)
+
+
+def _answers_from_file() -> dict | None:
+    """Ответы git из файла истории, который записал исполнитель вне среза: в срезе git
+    ждёт память, и каждый его вызов — таймаут. Вне среза файл не читается."""
+    global _slice_answers
+    path = os.environ.get("HARNESS_GIT_HISTORY")
+    if not path or not os.environ.get("HARNESS_IN_CHECKS_SLICE"):
         return None
-    return ответ.stdout.splitlines() if ответ.returncode == 0 else None
+    if _slice_answers is None:
+        _slice_answers = json.loads(Path(path).read_text(encoding="utf-8"))
+    return _slice_answers
+
+
+def _git_answer(корень: Path, args: tuple) -> list[str] | None:
+    """Живой git. Повторяется только молчание — таймаут и отказ запуска; код не 0 —
+    ответ (merge-base --is-ancestor кодом 1 отвечает «не предок»), его не повторяют."""
+    reason = ""
+    for _ in range(GIT_TRIES):
+        try:
+            done = subprocess.run(["git", "-C", str(корень), "-c", "core.quotepath=false", *args],
+                                  capture_output=True, text=True, timeout=GIT_TIMEOUT_SEC)
+        except subprocess.TimeoutExpired:
+            reason = f"таймаут {GIT_TIMEOUT_SEC} с"
+        except OSError as error:
+            reason = f"{type(error).__name__}: {error}"
+        else:
+            return done.stdout.splitlines() if done.returncode == 0 else None
+    if _recorded is not None:
+        raise HistoryUnread(f"git {' '.join(args[:3])}: {reason}")
+    return None
+
+
+def _git_lines(корень: Path, *args: str) -> list[str] | None:
+    """Строки вывода git; None — git ответил отказом или молчит. В срезе с файлом
+    истории ответ берётся из файла; ключа нет — живой git и событие."""
+    key = _history_key(корень, args)
+    answers = _answers_from_file()
+    if answers is not None:
+        if key in answers:
+            return answers[key]
+        _event("mutations.history-miss", "held", ключ=key)
+    answer = _git_answer(корень, args)
+    if _recorded is not None:
+        _recorded[key] = answer
+    return answer
 
 
 def mutation_table(корень: Path) -> tuple[set, dict]:
-    """(механизмы с записями мутаций, файл-доказательство -> его механизм)."""
+    """(механизмы с записями мутаций, файл-доказательство -> его механизмы).
+
+    Поле «механизм» — файл или список: проба судит несколько файлов
+    (test_limit_silence.sh — четыре), и её правка — шаг каждого из них."""
     import yaml
 
     def load(name: str, key: str):
@@ -416,9 +476,10 @@ def mutation_table(корень: Path) -> tuple[set, dict]:
         return (yaml.safe_load(путь.read_text(encoding="utf-8")) or {}).get(key)
 
     invariants = [e for e in load("invariants.yaml", "инварианты") or [] if e.get("мутация")]
-    proofs = {п: з["механизм"] for п, з in (load("probe-mutations.yaml", "пробы") or {}).items()
+    proofs = {п: tuple(з["механизм"] if isinstance(з["механизм"], list) else [з["механизм"]])
+              for п, з in (load("probe-mutations.yaml", "пробы") or {}).items()
               if з and з.get("мутация")}
-    return {e.get("файл") for e in invariants} | set(proofs.values()), proofs
+    return {e.get("файл") for e in invariants} | {м for мм in proofs.values() for м in мм}, proofs
 
 
 def механизмы_задачи(ид: str, корень: Path) -> list[str] | None:
@@ -428,7 +489,8 @@ def механизмы_задачи(ид: str, корень: Path) -> list[str] 
     if файлы is None:
         return None
     mechanisms, proofs = mutation_table(корень)
-    return sorted({ф for ф in файлы if ф in mechanisms} | {proofs[ф] for ф in файлы if ф in proofs})
+    return sorted({ф for ф in файлы if ф in mechanisms}
+                  | {м for ф in файлы if ф in proofs for м in proofs[ф]})
 
 
 def paper_sections(текст: str, mechanisms: list[str]) -> dict[str, str]:
@@ -459,7 +521,7 @@ def stale_debts(ид: str, корень: Path, sha: str, mechanisms: list[str]) 
     """Правки задачи после sha бумаги в механизмы, их доказательства и таблицы."""
     _, proofs = mutation_table(корень)
     watched = {м: м for м in mechanisms}
-    watched.update({п: м for п, м in proofs.items() if м in mechanisms})
+    watched.update({п: м for п, мм in proofs.items() for м in мм if м in mechanisms})
     watched.update({т: т for т in ТАБЛИЦЫ_МУТАЦИЙ})
     после = _git_lines(корень, "log", "--format=", "--name-only",
                        f"--grep=^Dev-Map: {ид}$", "--extended-regexp", f"{sha}..HEAD")
@@ -649,7 +711,10 @@ def мутации_задачи(ид: str, корень: Path, прибор: lis
     """Прогнать мутации механизмов задачи в её бумагу. Дыр N; None — механизмов
     нет или история не прочитана (бумага тогда не пишется). Срок захода вышел
     до конца задачи — QueueBusy: прогон не состоялся, его повторят."""
-    итог = мутации_пачки([ид], корень, прибор, narrow)
+    try:
+        итог = мутации_пачки([ид], корень, прибор, narrow)
+    except HistoryUnread:
+        return None
     if ид not in итог:
         raise QueueBusy("срок захода вышел раньше, чем механизмы задачи догнаны")
     return итог[ид]
@@ -742,7 +807,7 @@ def мутации_пачки(ids: list[str], корень: Path, прибор: 
     по_задаче = {ид: механизмы_задачи(ид, корень) for ид in ids}
     head = _git_lines(корень, "rev-parse", "HEAD")
     if not head:
-        return dict.fromkeys(ids)
+        raise HistoryUnread("git rev-parse HEAD не ответил")
     итог: dict[str, int | None] = {ид: None for ид, m in по_задаче.items() if not m}
     оценки = mechanism_estimates()
     чьи = {м: [ид for ид in ids if м in (по_задаче[ид] or ())] for м in batch_plan(по_задаче, оценки)}
@@ -763,6 +828,8 @@ def мутации_пачки(ids: list[str], корень: Path, прибор: 
             env["MUT_ONLY_LINES"] = lines
         else:
             env.pop("MUT_ONLY_LINES", None)
+        # Файл истории — для захода; самотесты копий прибора во временных репо он бы сбил.
+        env.pop("HARNESS_GIT_HISTORY", None)
         начало = time.monotonic()
         ответ = subprocess.run(прибор + ["--механизм", файл], cwd=str(корень), env=env,
                                capture_output=True, text=True, errors="replace")
@@ -855,6 +922,10 @@ def _task_mutations(ids: list[str]) -> int:
     except QueueBusy as busy:
         print(f"мутации задач {','.join(ids)}: не прогнано: очередь среза занята — {busy}", flush=True)
         return QUEUE_BUSY_RC
+    except HistoryUnread as error:
+        for ид in ids:
+            print(f"мутации задачи {ид}: история не прочитана ({error})", flush=True)
+        return 2
     for ид, дыр in итог.items():
         if дыр is None:
             print(f"мутации задачи {ид}: механизмов с записями нет — шаг пуст", flush=True)
@@ -865,20 +936,13 @@ def _task_mutations(ids: list[str]) -> int:
     return 2 if unread or short else 1 if any(итог.values()) else 0
 
 
-# Закон пачек (слово владельца 14.11): умолчания, если ключей нет в
-# pipeline.yaml → пачка. Окно 0 — пачка копится, только пока заход идёт.
-ПАЧКА_МУТАЦИЙ = {"задач": 6, "окно_сбора_сек": 0, "ждать_итога_мин": 300}
+# Закон пачек (слово владельца 14.11): ключи — pipeline.yaml → пачка, умолчания — в очереди.
 ИТОГ_ЗАДАЧИ = re.compile(r"^мутации задачи (\S+): (.*)$")
 
 
 def _batch_settings() -> dict:
-    import yaml
-    try:
-        конфиг = yaml.safe_load((КОРЕНЬ / "harness" / "config" / "pipeline.yaml")
-                                .read_text(encoding="utf-8")) or {}
-    except (OSError, yaml.YAMLError):
-        конфиг = {}
-    return {**ПАЧКА_МУТАЦИЙ, **(конфиг.get("пачка") or {})}
+    import batch_queue
+    return batch_queue.settings(КОРЕНЬ)
 
 
 def _own_view(ids: list[str], код: int, строки: list[str]) -> tuple[int, list[str]]:
@@ -907,6 +971,11 @@ def _queued_mutations(ids: list[str]) -> int:
     настройки = _batch_settings()
     door = str(Path(__file__).resolve().parent / "run-in-checks-slice.sh")
     команда = ["/bin/bash", door, sys.executable, str(Path(__file__).resolve()), "--мутации-задачи"]
+    # Заход берёт место общего пула тяжёлых прогонов: ЦП среза — та же машина. Место
+    # заявителя уже взято (его позвали через heavy-slot.sh) — второе заход не ждёт:
+    # иначе N заявителей на N местах ждали бы заход, которому места нет.
+    if not os.environ.get("HEAVY_SLOT_HELD"):
+        команда = ["/bin/bash", str(Path(__file__).resolve().parent / "heavy-slot.sh"), "--", *команда]
 
     def ход(строка: str) -> None:
         # Ход захода — сразу в журнал запуска; итоги чужих задач заявителю не нужны.
@@ -918,10 +987,31 @@ def _queued_mutations(ids: list[str]) -> int:
     код, строки = batch_queue.request(
         ids, команда, Path(конф.log_dir()) / "очередь-мутаций",
         float(настройки["окно_сбора_сек"]), int(настройки["задач"]),
-        float(настройки["ждать_итога_мин"]) * 60, ход)
+        float(настройки["ждать_итога_мин"]) * 60, ход, tree=str(КОРЕНЬ))
     код, видно = _own_view(ids, код, строки)
     print("\n".join(видно))
     return код
+
+
+def _record_history(ids: list[str], target: str) -> int:
+    """`--история <ids> --в <файл>`: те же чтения git, что у шага «мутации», — без прогона.
+    Исполнитель зовёт это вне среза и отдаёт файл заходу. Код 0 — файл записан."""
+    global _recorded
+    _recorded = {}
+    try:
+        for task in ids:
+            mechanisms = механизмы_задачи(task, КОРЕНЬ)
+            if mechanisms:
+                mutation_paper_debts(task, КОРЕНЬ)
+            for mechanism in mechanisms or []:
+                task_changed_lines(task, КОРЕНЬ, mechanism)
+        _git_lines(КОРЕНЬ, "rev-parse", "HEAD")
+    except HistoryUnread as error:
+        _event("mutations.history-unread", "error", ids=ids, причина=str(error))
+        print(f"история не прочитана: {error}", flush=True)
+        return 2
+    Path(target).write_text(json.dumps(_recorded, ensure_ascii=False), encoding="utf-8")
+    return 0
 
 
 def _batch_ids() -> list[str]:
@@ -2344,11 +2434,14 @@ def _печать_долга(порция: int = 0) -> int:
 
 
 def main() -> int:
+    if "--история" in sys.argv:
+        names, target = sys.argv[sys.argv.index("--история") + 1], sys.argv[sys.argv.index("--в") + 1]
+        return _record_history([n for n in names.split(",") if n], target)
     if "--мутации-задачи" in sys.argv and not os.environ.get("HARNESS_IN_CHECKS_SLICE"):
         # Под потолок среза идёт только настоящий прогон мутаций: пустой набор
         # (нет механизмов, git молчит) дёшев и очередь не занимает.
         # Заявка встаёт в очередь пачек, а не гонит заход сама.
-        if any(механизмы_задачи(ид, КОРЕНЬ) != [] for ид in _batch_ids()):
+        if any(механизмы_задачи(ид, КОРЕНЬ) for ид in _batch_ids()):
             return _queued_mutations(_batch_ids())
     if "--selftest" in sys.argv:
         return _selftest()

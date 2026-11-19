@@ -8,7 +8,8 @@
   механизм не в реестре -> «нет механизма»;
   команда задания крона без бита исполнения -> «не исполняется».
 Запись со статусом «снят …» судья не трогает: её файлов и расписания уже нет.
-Записи слоя установки (PROCESS_LIBRARY_LOCAL — свои процессы машины) судятся вместе с пакетными;
+Записи слоя установки (PROCESS_LIBRARY_LOCAL — свои процессы машины) судятся вместе с пакетными,
+паспорта поля «механизмы» того же слоя — вместе с mechanisms.yaml;
 расписания в process-library.yaml пакета у своих записей нет, его судья у них не требует.
 
 Применение:
@@ -148,6 +149,9 @@ def judge(root: Path, cron_lines: list, unit_lines: list, project_dir: str) -> t
     mech_file = cfg / "mechanisms.yaml"
     mechanisms = {m.get("файл") for m in (yaml.safe_load(mech_file.read_text(encoding="utf-8")) or {}).get("механизмы") or []} \
         if mech_file.is_file() else set()
+    mechanisms |= {m.get("файл") for m in process_library.local_mechanisms()}
+    mechanism_note = (" (паспорт харнеса — в harness/config/mechanisms.yaml; свой механизм копии — запиши в "
+                      f"{process_library.local_mechanisms_place()})")
     active = [r for r in records if not str(r.get("статус", "")).startswith("снят")]
     by_id = {r["id"]: r for r in records}
     dropped = [r for r in records if r not in active]
@@ -249,7 +253,7 @@ def judge(root: Path, cron_lines: list, unit_lines: list, project_dir: str) -> t
             violation("не исполняется", rec["id"], command[0])
         for mech in rec.get("механизмы", []):
             if mech not in mechanisms:
-                violation("нет механизма", rec["id"], mech)
+                violation("нет механизма", rec["id"], mech + mechanism_note)
     return bad, len(records)
 
 

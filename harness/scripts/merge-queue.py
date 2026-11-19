@@ -63,6 +63,10 @@ LOCK_RETRY_SECONDS = 2
 LOCK_RETRY_TIMES = 5
 REMEMBERED_PATHS = 500
 CC_LOCK_NOTE = "держит Claude Code, уберёт --убрать"
+DIRTY_NOTE = "есть незакоммиченное"
+QUEUED_NOTE = "ждёт заявка очереди тяжёлых прогонов"
+IDLE_NOTE = "ещё не простаивает"
+HOUR_SECONDS = 3600
 SAMPLE_CONF = "harness/config/harness.conf"
 MAP = "dev-map.yaml"
 # Писатели держат лок карты секунды; демон — до получаса, и очередь за ним не стоит:
@@ -108,6 +112,7 @@ class Context:
         values = config.конфиг(config.путь_harness_conf())
         self.retries = int(values.get("MERGE_QUEUE_RETRIES") or 3)
         self.wait_seconds = float(values.get("MERGE_QUEUE_WAIT_MIN") or 30) * 60
+        self.idle_seconds = float(values.get("WORKTREE_IDLE_H") or 6) * HOUR_SECONDS
         self.mq_dir = self.project / ".claude" / "worktrees"
 
 
@@ -211,11 +216,30 @@ def merged_branches(ctx: Context) -> set[str]:
                        "--format=%(refname:short)").splitlines())
 
 
-def helper_worked(ctx: Context, branch: str) -> bool:
-    """Ветка с одной записью журнала ссылок только создана: сейчас она «слита» в master
-    лишь потому, что помощник ещё не успел сделать коммит — снимать её нельзя."""
-    entries = git_out(ctx.project, "reflog", "show", "--format=%gs", f"refs/heads/{branch}")
-    return len(entries.splitlines()) > 1
+def helper_worked(ctx: Context, tree: dict) -> bool:
+    """Дерево можно убирать: помощник коммитил (в журнале ссылок ветки больше одной
+    записи) либо ветка создана и индекс дерева не трогали дольше WORKTREE_IDLE_H.
+    Условие «И»: помощник, недавно тронувший индекс, работает. Нет журнала ссылок —
+    время создания неизвестно, дерево остаётся."""
+    created = git_out(ctx.project, "reflog", "show", "--date=unix", "--format=%gd",
+                      f"refs/heads/{tree['branch']}").split()
+    if len(created) > 1:
+        return True
+    index = git_out(tree["path"], "rev-parse", "--path-format=absolute", "--git-path", "index")
+    if not created or not index or not Path(index).is_file():
+        return False
+    limit = time.time() - ctx.idle_seconds
+    return int(created[0].rsplit("@{", 1)[1].rstrip("}")) < limit and Path(index).stat().st_mtime < limit
+
+
+def queued_trees(ctx: Context) -> set[Path]:
+    """Деревья из поля «дерево» висящих заявок очереди тяжёлых прогонов, и ожидающих, и
+    взятых в заход. Читается без замка записи: файл пишется целиком и атомарно."""
+    try:
+        state = json.loads((ctx.log_dir / "очередь-мутаций" / "очередь.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return set()
+    return {Path(request["дерево"]).resolve() for request in state.get("заявки", []) if request.get("дерево")}
 
 
 def remove_tree(ctx: Context, tree: dict, force: bool = False) -> str | None:
@@ -235,7 +259,9 @@ def clean_helper_tree(ctx: Context, tree: dict) -> str | None:
     if tree["locked"]:
         return f"{tree['path'].name}: {CC_LOCK_NOTE}"
     if git_out(tree["path"], "status", "--porcelain"):
-        return f"{tree['path'].name}: есть незакоммиченное"
+        return f"{tree['path'].name}: {DIRTY_NOTE}"
+    if tree["path"].resolve() in queued_trees(ctx):
+        return f"{tree['path'].name}: {QUEUED_NOTE}"
     failure = remove_tree(ctx, tree)
     return f"{tree['path'].name}: {failure}" if failure else None
 
@@ -257,7 +283,9 @@ def cleanup(ctx: Context, skip_branch: str | None = None) -> dict:
         elif name.startswith("agent-") and tree["branch"]:
             if tree["branch"] not in merged:
                 unmerged.append(tree["branch"])
-            elif helper_worked(ctx, tree["branch"]):
+            elif not helper_worked(ctx, tree):
+                left.append(f"{name}: {IDLE_NOTE}")
+            else:
                 reason = clean_helper_tree(ctx, tree)
                 (left if reason else removed).append(reason or name)
     return {"убрано": removed, "оставлено": left, "неслитых": unmerged}
@@ -286,15 +314,13 @@ def branch_trailers(project: Path, tip: str) -> str:
 
 
 def checked_tree(ctx: Context, tip: str) -> str:
-    """Дерево вершины, если хук коммита уже судил его зелёным (иначе пусто).
-    Только для одного коммита над master: у хука набор файлов — против родителя,
-    у очереди — против master, и у ветки из двух коммитов предмет проверки другой."""
-    parent = rev(ctx.project, f"{tip}^")
-    if parent is None or parent != rev(ctx.project, "master"):
-        return ""
+    """Дерево вершины, если ПОСЛЕДНЯЯ строка хука для пары (дерево вершины, base =
+    текущий master) зелёная (иначе пусто). base — HEAD, против которого хук судил:
+    строка без base или с другим base судила другой предмет."""
     tree = rev(ctx.project, f"{tip}^{{tree}}")
+    master = rev(ctx.project, "master")
     journal = ctx.log_dir / "gates.jsonl"
-    if not tree or not journal.is_file():
+    if not tree or not master or not journal.is_file():
         return ""
     last = None
     for line in journal.read_text(encoding="utf-8", errors="replace").splitlines():
@@ -302,14 +328,15 @@ def checked_tree(ctx: Context, tip: str) -> str:
             row = json.loads(line)
         except ValueError:
             continue
-        if isinstance(row, dict) and row.get("gate") == "pre-commit" and row.get("tree") == tree:
+        if (isinstance(row, dict) and row.get("gate") == "pre-commit"
+                and row.get("tree") == tree and row.get("base") == master):
             last = row
     return tree if last and last.get("verdict") == "pass" else ""
 
 
 def run_gates(ctx: Context, tip: str, report: Report) -> None:
     """Ворота на вершине ветки во временном дереве; дерево снимается всегда.
-    Один коммит над master и зелёная запись хука на то же дерево — ворота не гоняются."""
+    Зелёная запись хука на то же дерево против текущего master — ворота не гоняются."""
     same = checked_tree(ctx, tip)
     if same:
         report.fields["ворота_с"] = 0
@@ -698,6 +725,12 @@ def tidy(ctx: Context, report: Report) -> None:
     say("убрано: " + (", ".join(found["убрано"]) or "ничего"))
     for line in found["оставлено"]:
         say(f"оставлено: {line}")
+    notes = [line.rsplit(": ", 1)[-1] for line in found["оставлено"]]
+    # Оставленные по возрасту — отдельно: `git status` в дереве освежает mtime индекса,
+    # и мерило «0 слитых чистых старше срока» без этого числа не сверить.
+    say(f"убрано {len(found['убрано'])}, оставлено {len(found['оставлено'])} "
+        f"(грязных {notes.count(DIRTY_NOTE)}, неслитых {len(found['неслитых'])}, "
+        f"в очереди {notes.count(QUEUED_NOTE)}); не простояли срок: {notes.count(IDLE_NOTE)}")
     say(f"неслитых веток {len(found['неслитых'])}: " + ", ".join(found["неслитых"]))
 
 

@@ -7,6 +7,11 @@
 inbox/ и inbox/обработано/ за последние часы сверяются с этими строками:
 сообщение старше порога без удачной квитанции — нарушение.
 
+Квитанцию ждёт только сообщение, которое диспетчер принял из канала: на него в
+журнале есть строка delivery.queued или delivery.ack (любой исход) с его меткой.
+Файл во входящих без такой строки — не сообщение канала (нажатие кнопки,
+записка другого писателя): «принял» на него не шлётся, и тревога о нём ложная.
+
 Что НЕ судится:
   - сообщения до первой записи журнала квитанций (delivery.ack_journal_on или
     любой delivery.ack): раньше диспетчер квитанций не записывал, и «нет
@@ -28,23 +33,27 @@ from pathlib import Path
 
 JOURNAL = "доставка.jsonl"
 START_EVENTS = {"delivery.ack_journal_on", "delivery.ack"}
+CHANNEL_EVENTS = {"delivery.queued", "delivery.ack"}
 
 
-def read_journal(path: Path) -> tuple[float | None, set[str]]:
-    """Начало журнала квитанций и метки с удачной квитанцией."""
+def read_journal(path: Path) -> tuple[float | None, set[str], set[str]]:
+    """Начало журнала квитанций, метки с удачной квитанцией и метки сообщений канала."""
     started: float | None = None
     acked: set[str] = set()
+    channel: set[str] = set()
     if not path.is_file():
-        return started, acked
+        return started, acked, channel
     for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
         try:
             row = json.loads(raw)
         except ValueError:
             continue
         event = row.get("event")
+        data = row.get("data") or {}
+        if event in CHANNEL_EVENTS:
+            channel.add(str(data.get("ts")))
         if event not in START_EVENTS:
             continue
-        data = row.get("data") or {}
         when = data.get("sent_at") or data.get("started_at") or data.get("ts")
         try:
             when = float(when)
@@ -53,7 +62,7 @@ def read_journal(path: Path) -> tuple[float | None, set[str]]:
         started = when if started is None else min(started, when)
         if event == "delivery.ack" and row.get("outcome") == "ok":
             acked.add(str(data.get("ts")))
-    return started, acked
+    return started, acked, channel
 
 
 def inbox_stamps(log_dir: Path) -> list[tuple[str, float]]:
@@ -69,12 +78,12 @@ def inbox_stamps(log_dir: Path) -> list[tuple[str, float]]:
 
 
 def violations(log_dir: Path, hours: float, grace: int, now: float) -> list[str]:
-    started, acked = read_journal(log_dir / JOURNAL)
+    started, acked, channel = read_journal(log_dir / JOURNAL)
     if started is None:
         return []
     found = []
     for stem, received in sorted(inbox_stamps(log_dir), key=lambda s: s[1]):
-        if received < started or received < now - hours * 3600:
+        if received < started or received < now - hours * 3600 or stem not in channel:
             continue
         if now - received > grace and stem not in acked:
             found.append(f"{stem}: принято {int(now - received)} с назад, квитанции «принял» нет")
