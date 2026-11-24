@@ -2,7 +2,7 @@
 #
 # heavy-slot.sh — общий пул мест для тяжёлых прогонов вне среза (job server).
 #
-#   bash scripts/heavy-slot.sh [--не-дольше <сек>] -- <команда> [доводы...]
+#   bash scripts/heavy-slot.sh [--не-дольше <сек>] [--место-очереди] -- <команда> [доводы...]
 #
 # Зачем. Пробы и ворота помощников идут в cgroup сессии, мимо потолка
 # harness-checks.slice: при 13–16 помощниках машина занята на 7,4 ядра из 8,
@@ -25,11 +25,23 @@
 # index.lock. Бессрочное ожидание за часовыми воротами валило бы чужие коммиты по
 # пределу замка; по сроку команда идёт без места, событие heavy.slot-overflow.
 #
+# --место-очереди — своё место ворот очереди слияния (mq.lock) сверх HEAVY_SLOTS: очередь
+# держит общий замок, за ней стоят все подачи, и каждая минута её ожидания места
+# умножается на число ждущих (замер 21.11: 40 ожиданий за 6 суток, 5,0 ч, до 7020 с).
+# Очередь одна (замок merge-queue.lock), поэтому место одно; занято — как все, в общий пул.
+#
 # Пока идут ворота выпуска (метка lib/release_mark.sh), новым заявкам места нет,
 # кроме потомков выпуска (HARNESS_RELEASE_PID); взявшие место дослуживают.
 set -u
 MAX_WAIT=""
-[ "${1:-}" = "--не-дольше" ] && { MAX_WAIT="${2:-}"; shift 2; }
+QUEUE_PLACE=""
+while :; do
+    case "${1:-}" in
+        --не-дольше) MAX_WAIT="${2:-}"; shift 2 ;;
+        --место-очереди) QUEUE_PLACE=1; shift ;;
+        *) break ;;
+    esac
+done
 [ "${1:-}" = "--" ] && shift
 [ $# -gt 0 ] || { echo "heavy-slot: нет команды (bash scripts/heavy-slot.sh -- <команда>)" >&2; exit 2; }
 # Срез узнаётся и по cgroup: ночные юниты стоят в нём без метки HARNESS_IN_CHECKS_SLICE.
@@ -58,7 +70,7 @@ take_slot() {  # ставит FD на открытый и взятый замо�
     local k
     RELEASE=$(release_mark_owner) && [ "$RELEASE" != "${HARNESS_RELEASE_PID:-}" ] && return 1
     RELEASE=""
-    for k in $(seq 1 "$SLOTS"); do
+    for k in ${QUEUE_PLACE:+mq} $(seq 1 "$SLOTS"); do
         exec {FD}>>"$DIR/$k.lock" || continue
         flock -n "$FD" && return 0
         exec {FD}>&-

@@ -597,6 +597,10 @@ train_judge_slice() { # $1=дерево проекта на срезе $2=жур
     # (HARNESS_STARTER): без этих двух они судили бы живые проект и пакет, которые очередь
     # двигает во время ворот, а не срез.
     local -x PROJECT_DIR="$1" HARNESS_STARTER="$PACKAGE_VIEW"
+    # Карточки агентов несут путь проекта: собранные под живое дерево, они не равны сборке под
+    # PROJECT_DIR среза, и сторож запуска помощников отказывает каждой пробе, что его зовёт.
+    (cd "$1" && python3 -I scripts/self-prompt.py --карточки --в "$1/.claude/agents") >> "$2" 2>&1 \
+        || say "карточки агентов в дереве среза не пересобраны — пробы сторожа запуска покраснеют; журнал: $2"
     t0=$(date +%s)
     train_core "$1" "$2"; rc=$?
     TRAIN_SEC_CORE=$(( $(date +%s) - t0 ))
@@ -819,6 +823,18 @@ ids_iz_istorii() { # $1=момент ISO (пусто — вся история) 
     fi
     say "замок 5 · секретов в сборке нет"
 
+    # Прошлые секции CHANGELOG опубликованы до замка имён копий сети: обезличить их до
+    # суда тем же кодом, что и version.py --оформить, иначе замок 6 отказывает по старой истории.
+    if [ -f "$sborka/CHANGELOG.md" ]; then
+        python3 -I - "$SCRIPTS_REAL" "$sborka/CHANGELOG.md" <<'PY' || { say "ОТКАЗ: прошлый CHANGELOG сборки не обезличен"; return 1; }
+import sys
+sys.path.insert(0, sys.argv[1])
+import version
+журнал = open(sys.argv[2], encoding="utf-8").read()
+журнал = version._судья_чистоты().обезличить_имена_копий(журнал, version._паспорт())
+open(sys.argv[2], "w", encoding="utf-8").write(журнал)
+PY
+    fi
     # Замок 6: следы установки. Образцы берутся не из данных сборщика.
     if ! vyvod=$(python3 -I "$SCRIPTS_REAL/check-public-clean.py" "$sborka" \
                          --пакет "$paket" --проект "$PROJECT_DIR" \
@@ -833,7 +849,7 @@ ids_iz_istorii() { # $1=момент ISO (пусто — вся история) 
 
     # Замок 6г: типовая чистая копия — прошлый выпуск обновляется до этого сборкой
     # копии (не наш пользователь, не наш tmux, без HARNESS_DEV_GATES), самопроверка без
-    # новых красных. Копия bkb 14.11.2026 откатывала 0.12.1 на двух красных, которых
+    # новых красных. Копия сети 14.11.2026 откатывала 0.12.1 на двух красных, которых
     # наша машина не видела. Первой публикации сравнивать не с чем.
     # TYPICAL_COPY_CHECK — дверь самотеста: подставной судья вместо стенда на гигабайт; загрузчик
     # двери снял его из окружения, назвать его может только присваивание после загрузки.
@@ -1781,6 +1797,9 @@ SH
             > "$p/harness/config/release-train.yaml"
         printf 'механизмы: []\n' > "$p/harness/config/mechanisms.yaml"
         ln -s "$SCRIPTS_REAL/select-checks.py" "$p/scripts/select-checks.py"
+        # Подставной сборщик карточек: пишет, изолирован ли питон и куда легли карточки.
+        printf 'import sys\nwith open("%s/звали", "a", encoding="utf-8") as f:\n    f.write(f"карточки isolated={sys.flags.isolated} {chr(32).join(sys.argv[1:])}\\n")\n' \
+            "$d" > "$p/scripts/self-prompt.py"
         git -C "$p" init -q -b master
         git -C "$p" add -A && git -C "$p" -c user.name=t -c user.email=t@t commit -qm "прошлый выпуск"
         printf '# правка\n' >> "$p/scripts/a.sh"
@@ -1805,6 +1824,9 @@ SH
        && grep -qx 'gates --только правленая --всё' "$PD/звали" && grep -qx "ядро $S0..$S2" "$PD/звали"; then
         echo "  ок    БОЛЬНОЙ СЛУЧАЙ: поезд — красное вне диапазона не останавливает, выбор по диапазону и ядро"
     else echo "  ПЛОХО поезд: красное вне диапазона: $(printf '%s' "$OUT" | tail -3 | tr '\n' ' ') | $(tr '\n' ' ' < "$PD/звали" 2>/dev/null)"; ok=0; fi
+    if grep -qx "карточки isolated=1 --карточки --в $PD/проект/.claude/worktrees/release-train-.*/.claude/agents" "$PD/звали"; then
+        echo "  ок    БОЛЬНОЙ СЛУЧАЙ: поезд — карточки агентов пересобраны в дереве среза, сборщик позван с python3 -I"
+    else echo "  ПЛОХО поезд: карточки в дереве среза: $(grep '^карточки' "$PD/звали" 2>/dev/null | tr '\n' ' ')"; ok=0; fi
     echo 1 > "$PD/ядро-код"
     OUT=$(proba_poezd_vorota "$PD" "$S0" "$S2")
     rm -f "$PD/ядро-код"

@@ -20,7 +20,7 @@ LOG_DIR, свой PANEL_STATE_DIR, свой harness.conf. Живая карта 
 механизма. Остальное — НАСТОЯЩИЕ функции гейта (`долг_задачи`, `шаги_для_задачи`, `корень_бумаг`,
 `беды_в_двух_корнях`, `spec_approval.беды_одобрения`): доска и гейт обязаны
 говорить одно, а сверка с переписанной копией гейта зеленела бы всегда.
-Корень гейта (`КОРЕНЬ`) переставлен на каталог фикстуры — значит снимок обязан
+Корни гейта (`КОРЕНЬ` и корень бумаг `БУМАГИ`) переставлены на каталог фикстуры — значит снимок обязан
 брать модуль цены через `judge._модуль_цены()`, карточки — через
 `judge._все_карточки()` и корень бумаг — через `judge.корень_бумаг()`.
 
@@ -236,6 +236,10 @@ put(MECHANISM)
 put(MUTATION_TABLE, yaml.safe_dump({"пробы": {"scripts/probe.txt": {"механизм": MECHANISM, "мутация": "s/а/б/"}}},
                                    allow_unicode=True))
 git_root("init", "-q")
+# Коммит механизма — не корневой: шаг судит механизм, пока в нём живы строки задачи
+# (task_changed_lines), а разница считается от родителя первого коммита задачи —
+# у корневого коммита родителя нет, и механизм выпал бы из шага.
+git_root("commit", "-q", "--allow-empty", "-m", "база")
 git_root("add", MECHANISM, MUTATION_TABLE)
 git_root("commit", "-qm", "механизм\n\n" + "\n".join(f"Dev-Map: {t}" for t in (*GREEN_PAPER_TASKS, "t.done")))
 for task_id in GREEN_PAPER_TASKS:
@@ -285,6 +289,7 @@ def make_judge(root: Path, features: dict):
     setattr(fake_price, "признаки_задачи", fake_features)
     setattr(gate, "_модуль_цены", lambda: fake_price)
     setattr(gate, "КОРЕНЬ", root)
+    setattr(gate, "БУМАГИ", root)
     setattr(gate.spec_approval, "КОРЕНЬ", root)
     return gate, fake_price
 

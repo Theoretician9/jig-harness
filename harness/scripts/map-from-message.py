@@ -45,6 +45,7 @@ from pathlib import Path
 import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
+import architecture  # noqa: E402
 import events  # noqa: E402
 import launch_plan_lib as планы_запуска  # noqa: E402
 from config import из_файла, конфиг, корень_дерева, путь_harness_conf  # noqa: E402
@@ -164,7 +165,46 @@ def наши_строки(журнал_отправок: Path, до: float, ге
     return строки
 
 
-def спросить_модель(текст: str, реплика_агента: str = "") -> tuple[dict | None, str]:
+# Исход сообщения называет модель, решает код. Без этого каждое сообщение
+# становилось карточкой: 21.11 из восьми сообщений владельца семь стали
+# дублями идущих задач (слово владельца 21.11).
+ИСХОД_ВОПРОС = ("Ещё назови «исход» сообщения одним словом: «вопрос» — владелец "
+                "спрашивает или рассуждает, работы не ставит; «уточнение» — "
+                "он дополняет или поправляет задачу из списка идущих (тогда в "
+                "«карточка» дай её id ТОЧНО из списка); «новая» — ставит новую "
+                "работу, которой в списке нет. Нет списка — «карточка» пустая.\n")
+СПИСОК_ИДУЩИХ = "ИДУЩИЕ ЗАДАЧИ (id [статус] заголовок — суть):\n"
+ИДУЩИЕ_СТАТУСЫ = ("wip", "plan", "test")
+ОКНО_ДНЕЙ_УМОЛЧАНИЕ = 3
+ОКНО_ПОСЛЕДНИХ_УМОЛЧАНИЕ = 15
+ПОТОЛОК_СУТИ_В_СПИСКЕ = 120
+
+
+БЛОК_ЭЛЕМЕНТОВ = (
+    "ЭЛЕМЕНТЫ АРХИТЕКТУРЫ (id — имя: что):\n{меню}\n"
+    "Для КАЖДОЙ задачи — поле «элементы» в той же позиции: id ТОЧНО из списка "
+    "или «новый: <id части>: <имя>», если подходящего места нет.\n\n")
+
+
+def место_в_архитектуре(данные: dict, линия: str | None, судимые: set) -> tuple:
+    """(реестр, меню) для вопроса модели; (None, "") — места карточкам не писать.
+
+    Судимость линии известна заранее, только если линия названа доводом;
+    иначе её назовёт модель, и меню кладётся, когда в карте есть судимая линия."""
+    ид_линий = {л.get("id") for л in данные.get("lines") or []}
+    судится = (линия in судимые) if линия else bool(ид_линий & судимые)
+    if not судится:
+        return None, ""
+    try:
+        реестр = architecture.load()
+    except architecture.RegistryError as беда:
+        print(f"реестр не читается: {беда} — карточки без элемента")
+        return None, ""
+    return реестр, architecture.element_menu(реестр)
+
+
+def спросить_модель(текст: str, реплика_агента: str = "",
+                    идущие: str = "", элементы: str = "") -> tuple[dict | None, str]:
     """Данные о сообщении от модели или (None, причина). Единственный вход —
     scripts/ask-the-model.py: схема ответа, журнал вызова и потолок в сутки
     живут там, а не у каждого зовущего (владелец 12.09.2026)."""
@@ -192,7 +232,12 @@ def спросить_модель(текст: str, реплика_агента: 
               "(только строчные латинские буквы, цифры и дефис), и «слои» — "
               "одно слово: harness, если беда в самом харнесе (установщик, "
               "сторожа, карта, память, канал), либо product, если в продукте.\n\n"
+              + (БЛОК_ЭЛЕМЕНТОВ.format(меню=элементы) if элементы else "")
+              + ИСХОД_ВОПРОС + (СПИСОК_ИДУЩИХ + идущие + "\n\n" if идущие else "")
               + перед + "СООБЩЕНИЕ ВЛАДЕЛЬЦА:\n" + текст)
+    if элементы:
+        # База цены вопроса: меню реестра удлиняет каждый вызов модели.
+        print(f"длина вопроса: {len(вопрос)}")
     with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False,
                                      encoding="utf-8") as ф:
         ф.write(вопрос)
@@ -234,7 +279,8 @@ def заголовок_из(текст: str, наши_строки: set | None =
 
 
 def карточка(ид: str, заголовок: str, сообщение: str, ид_сообщения: str,
-             разбор: dict | None, отказ_модели: str, глава: str | None = None) -> str:
+             разбор: dict | None, отказ_модели: str, глава: str | None = None,
+             элемент: str | None = None, новый_элемент: str | None = None) -> str:
     """Текст карточки. Поля — те, что требует гейт манифеста: id, status,
     title, summary; плюс источник, по которому гейт канала видит исход."""
     сегодня = datetime.date.today().isoformat()
@@ -276,6 +322,9 @@ def карточка(ид: str, заголовок: str, сообщение: str
         *([f"        глава: {глава}"] if глава else []),
         "        owner_testable: true",
         f"        источник: inbox:{ид_сообщения}",
+        *([f"        элемент: {элемент}"] if элемент else []),
+        *([f"        новый_элемент: {json.dumps(новый_элемент, ensure_ascii=False)}"]
+          if новый_элемент else []),
         f"        заведено: \"{сегодня}\"",
         "        завёл: scripts/map-from-message.py",
         f"        глубина: {глубина_строкой(заголовок + ' ' + целиком[:500], сегодня)}",
@@ -416,6 +465,100 @@ def не_работа_по_форме(свои: str, реплика_агента
     return "не-задача: по форме — " + ", ".join(dict.fromkeys(виды))
 
 
+# ── разбор против идущих задач ─────────────────────────────────────────────
+
+def intake_window() -> tuple[int, int]:
+    """(дней, последних карточек) — окно идущих задач из harness.conf.
+    Окно — данные установки: на плотной карте три дня — десятки карточек, на
+    тихой — ни одной, и одно число на всех не подходит."""
+    conf = из_файла(путь_harness_conf())
+
+    def number(key: str, default: int) -> int:
+        try:
+            return int(conf.get(key) or default)
+        except ValueError:
+            return default
+
+    return (number("MAP_INTAKE_CONTEXT_DAYS", ОКНО_ДНЕЙ_УМОЛЧАНИЕ),
+            number("MAP_INTAKE_CONTEXT_RECENT", ОКНО_ПОСЛЕДНИХ_УМОЛЧАНИЕ))
+
+
+def touched_at(card: dict) -> datetime.date | None:
+    """Самая поздняя из дат карточки: заведена, начата, сделана, проверена."""
+    when = card.get("when") or {}
+    stamps = []
+    for raw in (card.get("заведено"), when.get("started"), when.get("done"), when.get("tested")):
+        try:
+            stamps.append(datetime.date.fromisoformat(str(raw)[:10]))
+        except ValueError:
+            continue
+    return max(stamps) if stamps else None
+
+
+def active_cards(data: dict, today: datetime.date | None = None) -> list:
+    """Идущие карточки для вопроса модели: тронутые за окно дней плюс
+    последние K из идущих по порядку карты."""
+    today = today or datetime.date.today()
+    days, recent = intake_window()
+    going = [c for line in data.get("lines") or [] for c in line.get("tasks") or []
+             if c.get("status") in ИДУЩИЕ_СТАТУСЫ]
+    limit = today - datetime.timedelta(days=days)
+    fresh = {c["id"] for c in going if (touched_at(c) or datetime.date.min) >= limit}
+    last = {c["id"] for c in going[-recent:]} if recent > 0 else set()
+    return [c for c in going if c["id"] in fresh | last]
+
+
+def active_cards_text(cards: list) -> str:
+    return "\n".join(
+        f"{c['id']} [{c.get('status')}] {c.get('title', '')} — "
+        f"{str(c.get('summary') or '')[:ПОТОЛОК_СУТИ_В_СПИСКЕ]}" for c in cards)
+
+
+def resolve_outcome(reply: dict | None, shown_ids: set) -> tuple[str, str]:
+    """(исход, карточка). Уточнение принимается, только если названный id был
+    в показанном списке: выдуманный id увёл бы слово владельца в журнал, который
+    никто не прочтёт. Любое сомнение — «новая»: слово не теряется (И-1)."""
+    outcome = str((reply or {}).get("исход") or "").strip().lower()
+    card = str((reply or {}).get("карточка") or "").strip()
+    if outcome == "вопрос":
+        return outcome, ""
+    if outcome == "уточнение" and card in shown_ids:
+        return outcome, card
+    return "новая", ""
+
+
+def append_task_journal(root: Path, card: str, message_id: str, text: str) -> None:
+    """Дописывает слово владельца в .tasks/<card>/журнал.md, прежнее цело."""
+    journal = root / ".tasks" / card / "журнал.md"
+    journal.parent.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.datetime.fromtimestamp(float(message_id)).strftime("%d.%m %H:%M")
+    words = " ".join(без_ключей(text).split())
+    before = journal.read_text(encoding="utf-8") if journal.exists() else ""
+    gap = "" if not before or before.endswith("\n") else "\n"
+    journal.write_text(f"{before}{gap}слово владельца {stamp}: {words}\n", encoding="utf-8")
+
+
+def record_outcome(message_id: str, outcome: str, card: str) -> None:
+    """Исход — событием журнала и строкой в map-from-message.log (stdout)."""
+    events.emit("scripts/map-from-message.py", "message.triaged", "ok",
+                journal="разбор-сообщений", task=card or None,
+                data={"сообщение": message_id, "исход": outcome, "карточка": card})
+    print(f"{message_id}: исход={outcome} карточка={card}")
+
+
+def settle_without_card(outcome: str, card: str, message_id: str, text: str,
+                        карта: Path, dry: bool) -> int:
+    """Исход «вопрос» или «уточнение»: карта не трогается, исход — в спутник."""
+    reason = f"уточнение {card}" if outcome == "уточнение" else "не-задача: вопрос"
+    if dry:
+        print(f"сухой прогон: {message_id} — {reason}")
+        return 0
+    if outcome == "уточнение":
+        append_task_journal(карта.parent, card, message_id, text)
+    record_outcome(message_id, outcome, card)
+    return модуль("tasks-from-channel").пометить(карта.parent, message_id, reason)
+
+
 def завести(ид_сообщения: str, карта: Path, инбокс: Path, лок: Path,
             линия: str | None, сухой: bool) -> int:
     файл = файл_сообщения(инбокс, ид_сообщения)
@@ -473,7 +616,14 @@ def завести(ид_сообщения: str, карта: Path, инбокс:
     # Вставленный экран и сводки — не слова владельца: ни модели, ни в карточку.
     свои = гейт.слова_владельца(текст, наши)
     реплика = последняя_реплика_агента(инбокс.parent / "tg_out.jsonl", float(ид_сообщения))
-    разбор, отказ = спросить_модель(свои, реплика)
+    данные = yaml.safe_load(карта.read_text(encoding="utf-8")) or {}
+    идущие = active_cards(данные)
+    судимые = architecture.settings()["линии"]
+    реестр, меню = место_в_архитектуре(данные, линия, судимые)
+    разбор, отказ = спросить_модель(свои, реплика, active_cards_text(идущие), меню)
+    исход, названная = resolve_outcome(разбор, {c["id"] for c in идущие})
+    if исход != "новая":
+        return settle_without_card(исход, названная, ид_сообщения, свои, карта, сухой)
     задачи = [str(з).strip() for з in (разбор or {}).get("задачи") or [] if str(з).strip()]
     # Модель ответила и задач не нашла — это вопрос или реплика, а не работа.
     # Заголовок из текста — запасной путь только для отказа модели: иначе
@@ -496,10 +646,10 @@ def завести(ид_сообщения: str, карта: Path, инбокс:
         return гейт.пометить(карта.parent, ид_сообщения, почему)
     заголовки = задачи[:МАКСИМУМ_ЗАДАЧ] or [заголовок_из(текст, наши)]
 
-    данные = yaml.safe_load(карта.read_text(encoding="utf-8")) or {}
     # Слои и имена модель отдаёт списками в тех же позициях, что задачи.
     слои = [str(с).strip() for с in (разбор or {}).get("слои") or []]
     имена = [str(и).strip() for и in (разбор or {}).get("имена") or []]
+    места = (разбор or {}).get("элементы") or []
     # Слой берётся по ПЕРВОЙ задаче: сообщение владельца почти всегда об одном,
     # а карточки одного сообщения пишутся одной правкой под одним локом.
     # Расхождение называется вслух — молча разложенное по чужим слоям
@@ -511,6 +661,9 @@ def завести(ид_сообщения: str, карта: Path, инбокс:
     линия_ид = линия_данные.get("id")
     занятые = {з.get("id") for л in данные.get("lines") or [] for з in л.get("tasks") or []}
     приставка = приставка_линии(линия_данные)
+    # Реестр читали по судимости линии из довода или карты; итоговая линия
+    # карточки (слой модели) могла уйти в несудимую — тогда места не пишем.
+    пишем_место = реестр is not None and линия_ид in судимые
 
     названа = глава_по_сообщению(свои, данные)
     блоки = []
@@ -519,8 +672,11 @@ def завести(ид_сообщения: str, карта: Path, инбокс:
         ид = идентификатор(приставка, з, занятые,
                            имена[номер] if номер < len(имена) else "")
         занятые.add(ид)
+        элемент, новый = (architecture.resolve_element(
+            реестр, места[номер] if номер < len(места) else None)
+            if пишем_место else (None, None))
         блоки.append(карточка(ид, з[:110], свои, ид_сообщения, разбор, отказ,
-                              названа[1] if названа else None))
+                              названа[1] if названа else None, элемент, новый))
         для_печати.append(ид)
 
     if сухой:
@@ -537,6 +693,7 @@ def завести(ид_сообщения: str, карта: Path, инбокс:
     for новая in для_печати if названа else ():
         events.emit("scripts/map-from-message.py", "nesting.chapter", "ok", journal="вложенность",
                     task=новая, data={"задача": новая, "глава": названа[1], "источник": "сообщение"})
+    record_outcome(ид_сообщения, "новая", для_печати[0])
     источник = "разбор модели" if разбор else f"без модели ({отказ})"
     print(f"{ид_сообщения}: заведено {len(блоки)} — {', '.join(для_печати)} "
           f"[{источник}]")

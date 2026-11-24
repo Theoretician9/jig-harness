@@ -29,6 +29,8 @@ export LC_ALL=C.UTF-8
 
 # shellcheck disable=SC1091
 source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../../scripts/lib/config.sh"
+# shellcheck disable=SC1091
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../../scripts/lib/channel_send.sh"
 konf_zagruzit
 
 PROJECT_DIR="${PROJECT_DIR:?пуст PROJECT_DIR — не прочитан паспорт установки}"
@@ -201,11 +203,15 @@ or_start_episode() {  # $1=сейчас, $2=строки прибора
             or_event owner_reply.silent skipped "$name" "$age" "${decision#silent:}" ;;
         told)
             text_out=$(or_text "$name" "${hms:0:5}" "$age" "$text" "$count")
-            timeout 60 bash "$PROJECT_DIR/scripts/tg_send.sh" --не-досылать "$text_out" >/dev/null 2>&1 || rc=$?
+            CHANNEL_SEND_TIMEOUT=60 channel_send harness/demons/dispatcher-stall-watch.sh \
+                --не-досылать "$text_out" || rc=$?
             case "$rc" in
                 0) or_event owner_reply.told ok "$name" "$age" "смена жива, ответа нет, дверь открыта" ;;
                 3) decision="silent:лимит"
                    or_event owner_reply.silent skipped "$name" "$age" "лимит начался до отправки" ;;
+                # Тот же текст на следующей минуте получил бы тот же отказ: эпизод закрыт.
+                "$CHANNEL_RULES_REFUSED") decision="silent:отказ-правил"
+                   or_event owner_reply.silent skipped "$name" "$age" "правила канала отвергли текст вести" ;;
                 *) or_event owner_reply.send_failed error "$name" "$age" "дверь канала отдала код $rc"
                    say "страж ответа: весть о $name не ушла (код $rc), повтор на следующей минуте"
                    return 0 ;;

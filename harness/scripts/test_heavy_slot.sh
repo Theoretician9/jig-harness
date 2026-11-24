@@ -253,5 +253,31 @@ PY
 )
 case_check "(и) publish.sh: метка до ворот, снятие в cleanup_on_exit" ок "$verdict"
 
+echo "(к) --место-очереди: своё место ворот очереди сверх HEAVY_SLOTS"
+# БОЛЬНОЙ СЛУЧАЙ 21.11.2026: ворота очереди слияния ждали место пула, держа общий замок
+# очереди, — за ними стояли все подачи (40 ожиданий за 6 суток, 5,0 ч, до 7020 с). Очередь
+# одна, поэтому место у неё одно, своё (mq.lock); второй её вызов ждёт, как все.
+hold_one 30
+HEAVY_SLOTS=1 timeout 3 bash "$SLOT" -- true 2>/dev/null
+case_check "(к) контроль: все места заняты — обычная заявка ждёт (timeout 124)" 124 "$?"
+HEAVY_SLOTS=1 timeout 3 bash "$SLOT" --место-очереди -- true 2>/dev/null
+case_check "(к) все места заняты — заявка с --место-очереди идёт сразу, код 0" 0 "$?"
+HEAVY_SLOTS=1 timeout 3 bash "$SLOT" --не-дольше 60 --место-очереди -- bash -c 'exit 5' 2>/dev/null
+case_check "(к) вместе с --не-дольше (так зовёт очередь) — сразу, код команды 5" 5 "$?"
+HEAVY_SLOTS=1 setsid bash "$SLOT" --место-очереди -- sleep 30 </dev/null >/dev/null 2>&1 &
+QHOLDER=$!
+PIDS+=("$QHOLDER")
+held=0
+for i in $(seq 1 40); do
+    [ -e "$T/log/heavy-slots/mq.lock" ] && ! flock -n "$T/log/heavy-slots/mq.lock" true 2>/dev/null && { held=1; break; }
+    sleep 0.1
+done
+case_check "(к) держатель места очереди взял замок mq.lock" 1 "$held"
+HEAVY_SLOTS=1 timeout 3 bash "$SLOT" --место-очереди -- true 2>/dev/null
+case_check "(к) место очереди занято, обычные тоже — второй вызов с флагом ждёт (timeout 124)" 124 "$?"
+kill -KILL -- "-$QHOLDER" 2>/dev/null
+kill -KILL -- "-$HOLDER" 2>/dev/null
+sleep 0.3
+
 echo "heavy-slot: путей $CASES_PATHS, неудач $CASES_FAILED"
 [ "$CASES_FAILED" = 0 ]

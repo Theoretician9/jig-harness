@@ -76,7 +76,10 @@ def stand(base: Path, name: str) -> tuple[Path, Path, Path]:
 
 
 def run_gate(prj: Path, conf: Path, staged: list[str]) -> tuple[int, str]:
-    env = {k: v for k, v in os.environ.items() if k not in ("GIT_INDEX_FILE", "EVOLUTION_ROLE")}
+    # HARNESS_STARTER зовущего (стенд поезда выпуска) старше STARTER_DIR стенда — гейт
+    # сверял бы с чужим пакетом.
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("GIT_INDEX_FILE", "EVOLUTION_ROLE", "HARNESS_STARTER")}
     env["HARNESS_CONF"] = str(conf)
     r = subprocess.run([sys.executable, str(GATE)], input="\n".join(staged) + "\n",
                        capture_output=True, text=True, cwd=prj, env=env, timeout=60)
@@ -179,7 +182,7 @@ def main() -> int:
             check(title, rc == rc_want, out)
 
         # (е) Раскладка у копии: агенты собраны с instance.yaml, settings.json
-        # сведён, в mechanisms.yaml своя запись (копия bkb, 0.14.2, 19.11.2026).
+        # сведён, в mechanisms.yaml своя запись (копия сети, 0.14.2, 19.11.2026).
         # Правку файлов харнеса у копии держит harness_files_guard; второй сторож
         # с советом «cp в пакет» гнал бы данные копии в пакет строителя.
         diverged = {".claude/agents/harness-worker.md": "harness/agents/harness-worker.md",

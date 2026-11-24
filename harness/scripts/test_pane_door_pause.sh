@@ -36,6 +36,9 @@
 # Имена переменных ЛАТИНИЦЕЙ (память: cyrillic-in-bash-names).
 set -uo pipefail
 export LC_ALL=C.UTF-8
+# Проект и пакет стенда — из его конфига: у механизмов окружение старше конфига, и
+# PROJECT_DIR/HARNESS_STARTER зовущего (стенд поезда выпуска) увели бы их в чужое дерево.
+unset PROJECT_DIR HARNESS_STARTER
 
 KOREN="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
 PANE_LIB="$KOREN/scripts/lib/pane.sh"
@@ -239,6 +242,11 @@ if want дверь; then
         "$(passed "$(door_call "$OWNER" "проба: сообщение владельца")")"
     door_stand rotdone; rotation_event "$D/log" rotate_command 120; rotation_event "$D/log" agent_restarted 60
     case_check "ротация завершена (agent_restarted после команды) — дверь пропускает" "пропустила" \
+        "$(passed "$(door_call "$OWNER" "проба: сообщение владельца")")"
+    # БОЛЬНОЙ СЛУЧАЙ 19.11 18:34: дверь ротации отменила смену (передачи нет) —
+    # ротации больше нет, а сообщение владельца ждало «ротацию» ещё 15 мин.
+    door_stand rotrefused; rotation_event "$D/log" rotate_command 240; rotation_event "$D/log" rotate_refused 60
+    case_check "БОЛЬНОЙ 19.11: ротация отменена дверью (rotate_refused после команды) — дверь пропускает" "пропустила" \
         "$(passed "$(door_call "$OWNER" "проба: сообщение владельца")")"
 
     # П-8: держится лимит — отказ «лимит».
@@ -616,6 +624,10 @@ PYEOF
         "$@"
     }
     offset_is() { [ "$(cat "$1/log/tg_offset" 2>/dev/null)" = "$2" ]; }
+    d_kicks_done() {
+        grep -qE '"event": *"delivery\.kick_' "$1/log/доставка.jsonl" 2>/dev/null \
+            && ! compgen -G "$1/log/kick-state/inflight-*" >/dev/null
+    }
 
     # $1 = имя, $2 = when: before (пауза до сообщения) | between (пока толчок ждёт лока) | none,
     # $3 = comment — ещё и заявка панели (срочный комментарий): её толчок ждёт того же лока.
@@ -662,7 +674,11 @@ EOF
         sleep 1
         [ "$when" = between ] && pause_on "$S/panel"
         : > "$S/release"
-        sleep 5   # предел ожидания лока у толчка 17 с; отпущен — нажатия идут сразу
+        # Лок отпущен — ждать исхода толчков, а не часов: под нагрузкой судьи ворот
+        # толчка шли дольше прежних 5 с, и группу гасили до нажатия (флейк в общем
+        # прогоне ворот). Исход сообщения — метка delivery.kick_*, комментария —
+        # снятая метка inflight-<ts>.
+        wait_for 40 d_kicks_done "$S" || d_bad "толчок не кончился за 40 с после снятия лока"
         kill -KILL -- "-$DPID" 2>/dev/null; kill -KILL "$DPID" 2>/dev/null
         DS="$S"
     }

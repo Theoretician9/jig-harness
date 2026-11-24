@@ -18,7 +18,7 @@ owner_word.ЗАПРОС_КНОПКИ — обёрткой ask-consent с тем 
 отдельным процессом). Диспетчер носителя не получает, его срок кнопки — машинный (machine_ttl).
 
     python3 scripts/test_consent_buttons.py [--случай <имя>]...
-Случаи: запрос да чужой группа группа-текст повтор срок битый дверь носитель охрана; виды-1 … виды-11 —
+Случаи: запрос да чужой группа группа-текст группа-без-ключа повтор срок битый дверь носитель охрана; виды-1 … виды-11 —
 пробы 1-11 задачи hr.consent-buttons-for-every-yes (виды согласия «удаление» и «пуш»,
 .tasks/hr.consent-buttons-for-every-yes/spec.md §7).
 Код возврата: 0 — «падений 0», 1 — красная (или отказ фикстуры: строка «ФИКСТУРА»).
@@ -94,7 +94,7 @@ sys.argv = [ask, *sys.argv[1:]]
 runpy.run_path(ask, run_name="__main__")
 """
 KIND_CASES = tuple(f"виды-{n}" for n in range(1, 12))
-CASE_NAMES = ("запрос", "да", "чужой", "группа", "группа-текст", "повтор", "срок", "битый", "дверь", "носитель", "охрана",
+CASE_NAMES = ("запрос", "да", "чужой", "группа", "группа-текст", "группа-без-ключа", "повтор", "срок", "битый", "дверь", "носитель", "охрана",
               *KIND_CASES)
 
 cases = Cases()
@@ -719,7 +719,7 @@ def judge_cli(log: Path, chat_id: int, owner_id: str, callback: dict) -> dict:
 
 
 def probe_group(yard: Yard) -> None:
-    """Улика bkb 19.11: в группе chat.id — id группы, from.id — личный id владельца;
+    """Улика копии сети 19.11: в группе chat.id — id группы, from.id — личный id владельца;
     судья сверял оба с одним TG_CHAT_ID, и «Да» владельца в группе не проходило никогда."""
     print("— 3г. канал-группа: chat.id сверяется с TG_CHAT_ID, from.id — с TG_OWNER_ID")
     st = Stand(yard, "group", chat_id=GROUP, owner_id=OWNER)
@@ -791,7 +791,8 @@ def probe_group_text(yard: Yard) -> None:
     bare = Stand(yard, "group-text-nokey", chat_id=GROUP)
     before = owner_word_counts(bare)
     bare.say_in("да")
-    check("д5) группа без TG_OWNER_ID: «да» не засчитано", before, owner_word_counts(bare))
+    # Очередь сессии здесь не судится: неузнанное слово ложится туда с пометкой (случай группа-без-ключа).
+    check("д5) группа без TG_OWNER_ID: «да» не засчитано", before[:2], owner_word_counts(bare)[:2])
     told = [r["form"].get("text", "") for r in bare.calls("sendMessage")
             if r["form"].get("chat_id") == str(GROUP)]
     check("д5) группа без TG_OWNER_ID: ответ в группу называет ключ", True,
@@ -800,6 +801,66 @@ def probe_group_text(yard: Yard) -> None:
         for one in (st, bare):
             one.show()
 
+
+
+# ── 3е. группа без TG_OWNER_ID: слово не теряется и не становится словом владельца ──
+def queue_files(st: Stand) -> list:
+    return sorted((st.log / "inbox").glob("*.txt"))
+
+
+def probe_group_no_key(yard: Yard) -> None:
+    """Находка копии сети 20.11 (0.14.3): в группе без TG_OWNER_ID диспетчер выбрасывал каждое
+    сообщение — ни в очереди сессии, ни квитанции, три слова владельца потеряны. Договор починки:
+    неузнанное сообщение ложится в очередь сессии с пометкой (ключа нет, from.id отправителя),
+    но НЕ в носители дверей (согласия, машинный журнал входящих): без ключа любой участник
+    группы иначе открывал бы необратимое. В канал — одна строка о паспорте на окно, а не по
+    строке на каждое слово."""
+    print("— 3е. группа без TG_OWNER_ID: в очередь с пометкой, мимо дверей, одна строка о паспорте")
+    st = Stand(yard, "group-no-key", chat_id=GROUP)
+    before = owner_word_counts(st)
+    st.say_in("проба слова из группы без ключа")
+    files = queue_files(st)
+    body = files[-1].read_text(encoding="utf-8") if files else ""
+    check("б1) группа без ключа: сообщение легло в очередь сессии файлом", 1, len(files))
+    check("б2) файл очереди несёт текст, пометку TG_OWNER_ID и from.id отправителя", (True, True, True),
+          ("проба слова из группы без ключа" in body, "TG_OWNER_ID" in body, f"from.id={OWNER}" in body))
+    st.say_in("да")
+    st.say_in("да", from_id=STRANGER)
+    check("б3) без ключа «да» (своё и чужое) мимо дверей: ни согласия, ни машинного журнала", before[:2],
+          owner_word_counts(st)[:2])
+    check("б4) все три сообщения — в очереди (ни одно не потеряно)", 3, len(queue_files(st)))
+    time.sleep(2)   # квитанции уходят фоном: считать после них
+    told = [r["form"].get("text", "") for r in st.calls("sendMessage")
+            if r["form"].get("chat_id") == str(GROUP)]
+    check("б5) на три сообщения — ОДНА строка в канал о паспорте без TG_OWNER_ID", 1,
+          sum("TG_OWNER_ID" in t for t in told))
+    check("б6) неузнанному слову «принял» не говорится: в канал ушла только строка о паспорте",
+          [], [t for t in told if "TG_OWNER_ID" not in t])
+    # Ключ, присланный в группу без TG_OWNER_ID, идёт мимо судьи секретов, если очередь
+    # берёт сырой текст: значение легло бы открытым в inbox/ и в окно сессии (И-3).
+    value = secrets.token_hex(20)
+    st.say_in(f"ключ склада: {value}")
+    wait_for(lambda: len(queue_files(st)) == 4, 10)
+    time.sleep(2)   # пинок сессии уходит фоном: окно сессии (tmux-calls) судить после него
+    leaked = sorted(str(p.relative_to(st.dir)) for p in [*st.log.rglob("*"), st.dir / "tmux-calls"]
+                    if p.is_file() and "секреты" not in p.parts
+                    and value in p.read_text(encoding="utf-8", errors="replace"))
+    check("б7) ключ из группы без ключа: в очереди, значения нет вне хранилища секретов",
+          (4, []), (len(queue_files(st)), leaked))
+    check("б8) сессия разбужена: пинок называет сообщение непроверенным", True,
+          "НЕ ПРОВЕРЕНО" in st.text("tmux-calls"))
+    # Отметка «сказано» глушит строку о паспорте на окно, а не навсегда.
+    told_mark = st.log / "owner-key-missing.told"
+    past = time.time() - 61 * 60
+    os.utime(told_mark, (past, past))
+    st.say_in("слово после окна")
+    time.sleep(2)
+    told = [r["form"].get("text", "") for r in st.calls("sendMessage")
+            if r["form"].get("chat_id") == str(GROUP)]
+    check("б9) окно кончилось — строка о паспорте сказана снова", 2,
+          sum("TG_OWNER_ID" in t for t in told))
+    if not cases.ok:
+        st.show()
 
 # ── 4. повтор и прежнее сообщение ───────────────────────────────────────────
 def probe_repeat(st: Stand) -> None:
@@ -1589,6 +1650,7 @@ def main() -> int:
     for name, needs_stand, run in (("запрос", True, probe_request), ("да", True, probe_yes),
                                    ("чужой", True, probe_stranger), ("группа", False, probe_group),
                                    ("группа-текст", False, probe_group_text),
+                                   ("группа-без-ключа", False, probe_group_no_key),
                                    ("повтор", True, probe_repeat),
                                    ("срок", True, probe_ttl), ("битый", True, probe_broken),
                                    ("дверь", False, probe_door), ("носитель", False, probe_carrier),

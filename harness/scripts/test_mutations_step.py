@@ -205,8 +205,70 @@ def probe_paper(acc, cp, stand: Stand) -> None:
     orphan = stand.git("commit-tree", "HEAD^{tree}", "-m", "вне истории")
     stand.paper("hr.orphan", orphan, {MECHANISM: GREEN})
     got = debts(cp, root, "hr.orphan")
-    check("10 БОЛЬНОЙ: sha бумаги не предок HEAD", True,
-          any("не предок HEAD" in б for б in got))
+    check("10 sha бумаги вне истории HEAD, код тот же — бумага годна", [], got)
+
+
+def rebased_stand(root: Path, task: str) -> tuple[Stand, str]:
+    """Стенд, где ветка задачи с бумагой перебазирована на сдвинутый master, как
+    это делает очередь слияния: sha бумаги вне истории HEAD, файлы механизма те же."""
+    stand = Stand(root)
+    trunk = stand.git("rev-parse", "--abbrev-ref", "HEAD")
+    stand.git("checkout", "-q", "-b", "side")
+    sha = stand.commit(task, MECHANISM)
+    stand.paper(task, sha, {MECHANISM: GREEN})
+    stand.git("checkout", "-q", trunk)
+    stand.commit("hr.map-daemon", PLAIN)
+    stand.git("checkout", "-q", "side")
+    stand.git("rebase", "-q", trunk)
+    return stand, sha
+
+
+def probe_rewritten_history(cp, tmp: Path) -> None:
+    """Очередь слияния перебазирует ветку на вершину master: sha ветки меняются,
+    содержимое — нет. Бумага судит код, а не sha (22.11: ветка lmnp2 — код 3
+    «не предок HEAD» на неизменном коде)."""
+    stand, sha = rebased_stand(tmp / "rebase", "hr.rb")
+    check("41 ветка перебазирована, механизм тот же — бумага годна",
+          (False, []),
+          (sha in stand.git("log", "--format=%H"), debts(cp, stand.root, "hr.rb")))
+
+    stand, _ = rebased_stand(tmp / "rebase-edit", "hr.rb")
+    stand.commit("hr.rb", MECHANISM)
+    got = debts(cp, stand.root, "hr.rb")
+    check("42 БОЛЬНОЙ: перебазирована, механизм правлен после бумаги — отказ с файлом",
+          True, bool(got) and any(MECHANISM in б for б in got))
+
+    stand, _ = rebased_stand(tmp / "rebase-proof", "hr.rb")
+    stand.commit("hr.someone-else", PROOF)
+    got = debts(cp, stand.root, "hr.rb")
+    check("43 БОЛЬНОЙ: перебазирована, доказательство правлено после бумаги — отказ с файлом",
+          True, any("другой код" in б and PROOF in б for б in got))
+
+    stand, _ = rebased_stand(tmp / "rebase-table", "hr.rb")
+    table = stand.root / "harness" / "config" / "probe-mutations.yaml"
+    table.write_text(PROBES.replace("'s@a@b@'", "'s@a@c@'"), encoding="utf-8")
+    stand.git("commit", "-q", "-am", "таблица\n\nDev-Map: hr.rb")
+    got = debts(cp, stand.root, "hr.rb")
+    check("44 БОЛЬНОЙ: перебазирована, запись мутаций механизма правлена — отказ с таблицей",
+          True, any("probe-mutations.yaml" in б for б in got))
+
+    stand = Stand(tmp / "ancestor")
+    sha = stand.commit("hr.anc", MECHANISM)
+    stand.paper("hr.anc", sha, {MECHANISM: GREEN})
+    stand.commit("hr.map-daemon", PLAIN)
+    check("45 sha бумаги — предок HEAD — бумага годна", [], debts(cp, stand.root, "hr.anc"))
+
+    stand.paper("hr.anc", "deadbeef" * 5, {MECHANISM: GREEN})
+    got = debts(cp, stand.root, "hr.anc")
+    check("46 БОЛЬНОЙ: коммита бумаги нет в репозитории — отказ", True,
+          any("не найден" in б for б in got))
+
+    stand, _ = rebased_stand(tmp / "squash", "hr.sq")
+    stand.commit("hr.sq", SECOND)
+    stand.paper("hr.sq", stand.git("rev-parse", "HEAD"), {MECHANISM: GREEN, SECOND: GREEN})
+    stand.git("reset", "-q", "--soft", "HEAD~2")
+    stand.git("commit", "-q", "-m", "сжато\n\nDev-Map: hr.sq")
+    check("47 ветка сжата (squash), код тот же — бумага годна", [], debts(cp, stand.root, "hr.sq"))
 
 
 def probe_levels(cp) -> None:
@@ -306,7 +368,9 @@ def probe_batch(cp, stand: Stand, tmp: Path) -> None:
     acc = load(scripts / "acceptance.py", "acceptance_batch_stand")
     lines = {i: set((acc.task_changed_lines(i, root, MECHANISM) or "").split(","))
              for i in ("hr.a", "hr.b")}
-    env = {**os.environ, "HARNESS_MUTATION_PROBE": f"{sys.executable} {stub}",
+    # Пула мест тяжёлых прогонов на стенде нет: без метки заход зовёт heavy-slot.sh,
+    # которого в стенде нет, и падает кодом 127 раньше двери.
+    env = {**os.environ, "HARNESS_MUTATION_PROBE": f"{sys.executable} {stub}", "HEAVY_SLOT_HELD": "1",
            "STUB_CALLS": str(calls), "STUB_DOOR_LOG": str(door), "LOG_DIR": str(tmp / "batch-logs")}
     env.pop("HARNESS_IN_CHECKS_SLICE", None)
     rc = subprocess.run([sys.executable, str(scripts / "acceptance.py"), "--мутации-задачи",
@@ -416,6 +480,21 @@ def probe_comment_lines(acc, stand: Stand) -> None:
           acc.task_changed_lines("hr.own", stand.root, MECHANISM))
 
 
+def probe_rewritten_by_other(acc, stand: Stand) -> None:
+    """Механизм задачи — файл, где ещё живы её строки: коммит задачи, затем
+    другая задача переписала все его строки — механизм в шаг первой не входит.
+    Иначе старый коммит с трейлером тянул в шаг чужие механизмы на часы
+    (06.11: 6fb1a932 и session-warden.sh в шаге hr.prikaz-vykata-vopros-i-na-potom)."""
+    stand.commit("hr.old", MECHANISM, PROOF)
+    stand.commit("hr.old", SECOND)
+    for name in (MECHANISM, PROOF):
+        (stand.root / name).write_text("y = 2\nz = 3\n", encoding="utf-8")
+    stand.git("commit", "-q", "-am", "переписано\n\nDev-Map: hr.new")
+    check("40 строки задачи переписаны другой задачей — механизма и доказательства нет в шаге,"
+          " живой механизм остаётся", ([SECOND], [MECHANISM]),
+          (acc.механизмы_задачи("hr.old", stand.root), acc.механизмы_задачи("hr.new", stand.root)))
+
+
 def probe_batch_law(stand: Stand, tmp: Path) -> None:
     """Закон пачек (слово владельца 14.11): два вызова ПОДРЯД по одному id в окне
     сбора — один заход в срез, бумага каждой задаче; очередь — в своём LOG_DIR."""
@@ -431,7 +510,9 @@ def probe_batch_law(stand: Stand, tmp: Path) -> None:
     calls, door = tmp / "law-calls.log", tmp / "law-door.log"
     stand.commit("hr.a", MECHANISM)
     stand.commit("hr.b", SECOND)
-    env = {**os.environ, "HARNESS_MUTATION_PROBE": f"{sys.executable} {stub}",
+    # Пула мест тяжёлых прогонов на стенде нет: без метки заход зовёт heavy-slot.sh,
+    # которого в стенде нет, и падает кодом 127 раньше двери.
+    env = {**os.environ, "HARNESS_MUTATION_PROBE": f"{sys.executable} {stub}", "HEAVY_SLOT_HELD": "1",
            "STUB_CALLS": str(calls), "STUB_DOOR_LOG": str(door), "LOG_DIR": str(tmp / "law-logs")}
     env.pop("HARNESS_IN_CHECKS_SLICE", None)
 
@@ -583,6 +664,74 @@ def probe_resume(cp, stand: Stand, tmp: Path) -> None:
           acc.batch_plan({"hr.big": [MECHANISM, PLAIN], "hr.small": [SECOND]}, {}))
 
 
+# Подставной прибор, у которого вышел свой срок: итог с «из кэша» и строка НЕДОГНАНА,
+# как у mutation-probe.sh; каждый вызов спит STUB_SLEEP с и пишет механизм в STUB_CALLS.
+SHORT_PROBE = '''#!/usr/bin/env python3
+import os, sys, time
+with open(os.environ["STUB_CALLS"], "a", encoding="utf-8") as fh:
+    fh.write(sys.argv[-1] + "\\n")
+time.sleep(float(os.environ.get("STUB_SLEEP", "0")))
+print("=== мутационная проба: покраснели как надо 5, дыр 1, из кэша 2 ===")
+print("=== мутационная проба НЕДОГНАНА: не прогнано 4 из 10 (по сроку 4, выпало 0) ===")
+sys.exit(1)
+'''
+
+PROGRESS_LINE = re.compile(r"^мутации задачи (\S+): не догнана, новых мутаций (\d+)", re.M)
+
+
+def probe_short_progress(stand: Stand, tmp: Path) -> None:
+    """Недогнанная задача называет, сколько мутаций заход
+    прогнал по-новой (покраснели + дыр − из кэша по её прогнанным механизмам), — по
+    этому числу очередь не тратит попытку заявке с ходом. Поломки: строка механизма
+    отбрасывает «из кэша»/«не прогнано» (недогнанный механизм выглядит готовым);
+    «не догнана» без числа; K считает кэш новым или забывает дыры; K у задачи без
+    единого прогнанного механизма не 0."""
+    root = stand.root
+    scripts = root / "scripts"
+    shutil.copy(ACCEPTANCE, scripts / "acceptance.py")
+    (scripts / "lib").symlink_to(ACCEPTANCE.resolve().parent / "lib")
+    stub = tmp / "short-probe.py"
+    stub.write_text(SHORT_PROBE, encoding="utf-8")
+    calls, logs = tmp / "short-calls.log", tmp / "short-logs"
+    logs.mkdir()
+    stand.commit("hr.part", MECHANISM, SECOND)
+    env = {**os.environ, "HARNESS_MUTATION_PROBE": f"{sys.executable} {stub}",
+           "HARNESS_IN_CHECKS_SLICE": "1", "STUB_CALLS": str(calls), "LOG_DIR": str(logs),
+           "STUB_SLEEP": "6", "MUTATION_DEADLINE_TS": str(int(time.time()) + 4)}
+    env.pop("PYTHONUNBUFFERED", None)
+
+    def run() -> subprocess.CompletedProcess:
+        return subprocess.run([sys.executable, str(scripts / "acceptance.py"), "--мутации-задачи",
+                               "hr.part"], cwd=str(root), env=env, capture_output=True,
+                              text=True, timeout=90)
+
+    done = run()
+    ran = calls.read_text(encoding="utf-8").split() if calls.is_file() else []
+    mech = [l for l in done.stdout.splitlines() if l.startswith("механизм 1/2 ")]
+    check("35 недогнан: прибор зван для одного механизма из двух, задача без бумаги, код 2",
+          (1, False, 2), (len(ran), (root / ".tasks" / "hr.part" / "мутации.log").is_file(),
+                          done.returncode))
+    check("36 строка механизма (одна) несёт «из кэша 2» и «не прогнано 4» из итога прибора",
+          (1, True, True), (len(mech), any("из кэша 2" in l for l in mech),
+                            any("не прогнано 4" in l for l in mech)))
+    check("37 недогнанная задача: «мутации задачи hr.part: не догнана, новых мутаций 4»"
+          " (5 покраснели + 1 дыра − 2 из кэша)",
+          [("hr.part", "4")], PROGRESS_LINE.findall(done.stdout))
+    calls.unlink(missing_ok=True)
+    env["MUTATION_DEADLINE_TS"] = str(int(time.time()) - 1)
+    done = run()
+    check("38 срок вышел до первого механизма: прибор не зван, «новых мутаций 0»",
+          (False, [("hr.part", "0")]), (calls.is_file(), PROGRESS_LINE.findall(done.stdout)))
+    # Упавший без итога прибор ничего не прогнал: засчитай ему ход — и сломанный прибор
+    # гонял бы заявку по кругу без траты попыток до предела возраста.
+    stub.write_text("import os, sys, time\ntime.sleep(float(os.environ[\"STUB_SLEEP\"]))\nsys.exit(1)\n",
+                    encoding="utf-8")
+    env["MUTATION_DEADLINE_TS"] = str(int(time.time()) + 4)
+    done = run()
+    check("39 прибор упал без итога: «новых мутаций 0» (дыра есть, хода нет)",
+          [("hr.part", "0")], PROGRESS_LINE.findall(done.stdout))
+
+
 def probe_live(cp) -> None:
     live = cp._модуль_цены().конфиг()
     steps = live.get("шаги") or {}
@@ -603,6 +752,7 @@ def main() -> int:
         os.environ["GIT_CEILING_DIRECTORIES"] = str(tmp)
         for name, probe in (
                 ("бумага", lambda: probe_paper(acc, cp, Stand(tmp / "repo"))),
+                ("перепись истории", lambda: probe_rewritten_history(cp, tmp)),
                 ("уровни", lambda: probe_levels(cp)),
                 ("без git", lambda: probe_no_git(acc, cp, tmp / "nogit")),
                 ("команда", lambda: probe_command(cp, Stand(tmp / "cmd"), tmp)),
@@ -613,9 +763,11 @@ def main() -> int:
                 ("своё удаление", lambda: probe_own_deletion_shifted(acc, Stand(tmp / "odel"))),
                 ("комментарии", lambda: probe_comment_lines(acc, Stand(tmp / "comments"))),
                 ("механизм списком", lambda: probe_mechanism_list(acc, Stand(tmp / "pair"))),
+                ("переписано другой", lambda: probe_rewritten_by_other(acc, Stand(tmp / "rewritten"))),
                 ("закон пачек", lambda: probe_batch_law(Stand(tmp / "law"), tmp)),
                 ("дерево заявки", lambda: probe_queued_tree(Stand(tmp / "queued"), tmp)),
                 ("обрыв захода", lambda: probe_resume(cp, Stand(tmp / "resume"), tmp)),
+                ("недогнана с ходом", lambda: probe_short_progress(Stand(tmp / "short"), tmp)),
                 ("пульт", lambda: probe_live(cp))):
             try:
                 probe()

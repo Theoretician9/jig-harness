@@ -227,7 +227,8 @@ build_stand() {  # $1 = каталог, $2 = файл сторожа, $3 = им�
     printf '%s\n' "$name" > "$s/name"
     printf '%s\n' "$mode" > "$s/mode"
     cp "$src" "$s/tree/harness/demons/$name.sh"
-    cp "$HERE/lib/config.sh" "$HERE/lib/config.py" "$s/tree/scripts/lib/"
+    cp "$HERE/lib/config.sh" "$HERE/lib/config.py" "$HERE/lib/channel_send.sh" "$HERE/lib/events.sh" "$HERE/lib/events.py" "$HERE/lib/patterns.py" \
+       "$s/tree/scripts/lib/"
 
     cat > "$s/tree/scripts/tg_send.sh" <<'DOOR'
 #!/usr/bin/env bash

@@ -71,6 +71,54 @@ def is_hackathon(card):
     return isinstance(depth, dict) and depth.get("уровень") == LEVEL
 
 
+def level_for_commit(price, settings, price_value, card_is_hackathon):
+    """Уровень коммита: «хакатон» у карточки-хакатона, иначе по цене.
+
+    Зовут гейт тестов и стадия commit-msg check-pipeline. Развилку закрытия
+    (`check-pipeline.шаги_закрытия`) держит своя копия по карточке из трейлера.
+    """
+    if card_is_hackathon:
+        return LEVEL
+    return price.уровень(price_value, settings["пороги"])
+
+
+def wip_cards(node):
+    """Все wip-карточки данных карты."""
+    if isinstance(node, dict):
+        found = [node] if "id" in node and node.get("status") == "wip" else []
+        for value in node.values():
+            found += wip_cards(value)
+        return found
+    if isinstance(node, list):
+        return [card for value in node for card in wip_cards(value)]
+    return []
+
+
+def single_wip(data):
+    """(id, карточка) единственной wip-карточки данных карты. Неоднозначно — (None, None)."""
+    cards_wip = wip_cards(data)
+    if len(cards_wip) != 1:
+        return None, None
+    return cards_wip[0]["id"], cards_wip[0]
+
+
+def index_wip_card():
+    """Единственная wip-карточка dev-map.yaml из ИНДЕКСА (что уйдёт в коммит) или None.
+
+    Карта не прочитана или wip не одна — None: уровень тогда считается по цене.
+    Трейлера Dev-Map на pre-commit нет, поэтому при параллельной работе (несколько
+    wip) хакатон гейтом тестов не узнаётся; дыры нет: «выключено» требует уровня в пульте.
+    """
+    done = subprocess.run(["git", "-C", str(HERE.parent), "show", ":dev-map.yaml"],
+                          capture_output=True, text=True, errors="replace", timeout=30)
+    if done.returncode != 0:
+        return None
+    try:
+        return single_wip(yaml.safe_load(done.stdout))[1]
+    except yaml.YAMLError:
+        return None
+
+
 _PIPELINES = {}
 
 

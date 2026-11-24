@@ -465,13 +465,18 @@ def decide(log: Path, callback: dict, sender, message: dict) -> dict:
 
 
 def sender_verdict(chat_id: str, owner_id: str, message: dict) -> dict:
-    """Текст в канале: {} — слово владельца; отказ говорится в канал (tell), только когда
-    владельца не узнать без ключа — чужим участникам группы бот не отвечает."""
+    """Текст в канале: {} — слово владельца; отказ — чужому участнику группы бот не отвечает;
+    без ключа владельца — unverified: о паспорте говорит очередь «не проверено» диспетчера."""
     refusal = sender_refusal(chat_id, owner_id, (message.get("from") or {}).get("id"),
                              (message.get("chat") or {}).get("id"))
     if refusal is None:
         return {}
-    return {"answer": refusal[0], "log": refusal[1], "tell": refusal[0] == NO_OWNER_KEY}
+    verdict = {"answer": refusal[0], "log": refusal[1]}
+    if refusal[0] == NO_OWNER_KEY:
+        # Без ключа слово не отличить от чужого: диспетчер кладёт его в очередь сессии с пометкой
+        # «не проверено» (не теряет), но дверей оно не открывает.
+        verdict.update(unverified=True, from_id=(message.get("from") or {}).get("id"))
+    return verdict
 
 
 def main(argv: list[str]) -> int:

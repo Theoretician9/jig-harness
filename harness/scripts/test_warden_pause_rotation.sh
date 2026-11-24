@@ -258,6 +258,8 @@ ROTATE_FINISH_TIMEOUT_SEC=60
 ROTATE_EXIT_WAIT_SEC=30
 AGENT_START_TIMEOUT_SEC=15
 AGENT_WAKE_DELAY=0
+# 4б судит прежний путь «/exit» в ту же панель; путь преемника — test_rotation_successor_warden.sh.
+ROTATE_SUCCESSOR=0
 CONF
 GOT="$T/agent-got.txt"
 stand; pause_on

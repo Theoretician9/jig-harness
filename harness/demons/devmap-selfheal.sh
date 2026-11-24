@@ -131,7 +131,8 @@ MSG
 fi
 
 # shellcheck disable=SC1091
-source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../../scripts/lib/config.sh"
+HARNESS_SCRIPTS="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../../scripts"
+source "$HARNESS_SCRIPTS/lib/config.sh"
 INSTALL_CONF="${HARNESS_INSTALL_CONF:-${INSTALL_CONF:-$(konf_koren)/install.conf}}"
 HARNESS_CONF="${HARNESS_CONF:-$(konf_koren)/harness.conf}"
 [ -r "$INSTALL_CONF" ] || { echo "devmap-selfheal: нет $INSTALL_CONF — установка не завершена (01-SPEC §0)"; exit 1; }
@@ -268,6 +269,11 @@ head_statuses() {  # $1 — коммит
 # привязанного коммита это самовольная смена статуса. Ту же границу называет
 # промт: расходясь, они стоили 17.11.2026 отказа всей правки (plan -> wip).
 #
+# Взятие в работу судит гейт пайплайна в pre-commit: глубина назначена и
+# подтверждена сменой. Сторож зовёт ту же функцию гейта, а не свою копию
+# правила: пропущенный сторожем переход гейт отказывал, и коммит карты не
+# проходил вовсе вместе со всеми пропусками.
+#
 # Смена, которую принёс коммит, влитый в HEAD за время прогона, — не модели:
 # модель думает минутами, очередь слияний за это время пишет в то же дерево.
 # 19.11.2026 влитая ветка перевела три карточки wip -> test, и сторож записал
@@ -278,14 +284,14 @@ head_statuses() {  # $1 — коммит
 # откатывает к снимку, а не обрывает скрипт под set -e.
 смененные_статусы() {  # $1 — снимок «до», $2 — файл с SHA выборки
     python3 - "$1" <(statusy_kart) "$2" "$DEVMAP" \
-        <(head_statuses "$HEAD_AT_AUDIT") <(head_statuses HEAD) <<'PY'
-import json, re, sys, yaml
+        <(head_statuses "$HEAD_AT_AUDIT") <(head_statuses HEAD) "$HARNESS_SCRIPTS/check-pipeline.py" <<'PY'
+import importlib.util, json, re, sys, yaml
 def читать(путь):
     return dict(строка.split(" ", 1) for строка in open(путь, encoding="utf-8").read().splitlines() if строка)
 def collect_cards(node, found):
     if isinstance(node, dict):
         if "id" in node and "status" in node:
-            found[node["id"]] = json.dumps(node, ensure_ascii=False, default=str)
+            found[node["id"]] = node
         for value in node.values():
             collect_cards(value, found)
     elif isinstance(node, list):
@@ -293,18 +299,25 @@ def collect_cards(node, found):
             collect_cards(value, found)
     return found
 try:
-    card_texts = collect_cards(yaml.safe_load(open(sys.argv[4], encoding="utf-8")), {})
+    cards_after = collect_cards(yaml.safe_load(open(sys.argv[4], encoding="utf-8")), {})
 except yaml.YAMLError:
     print("MAP_UNREADABLE")
     sys.exit(0)
 до, после = читать(sys.argv[1]), читать(sys.argv[2])
 shas = open(sys.argv[3], encoding="utf-8").read().split()
 head_then, head_now = читать(sys.argv[5]), читать(sys.argv[6])
+spec = importlib.util.spec_from_file_location("check_pipeline", sys.argv[7])
+pipeline_gate = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(pipeline_gate)
+def card_text(id):
+    return json.dumps(cards_after.get(id, {}), ensure_ascii=False, default=str)
+def depth_confirmed(id):
+    return not pipeline_gate.проверить_взятие([(id, cards_after.get(id, {}))])
 def came_by_commit(id):
     return head_then.get(id) != head_now.get(id) and после.get(id) == head_now.get(id)
 def is_legit(id):
     return came_by_commit(id) or до[id] == "plan" and после.get(id) in ("wip", "test") and any(
-        re.search("(?<![0-9a-f])" + sha[:8], card_texts.get(id, "")) for sha in shas)
+        re.search("(?<![0-9a-f])" + sha[:8], card_text(id)) for sha in shas) and depth_confirmed(id)
 def base(id):
     return head_now[id] if head_then.get(id) != head_now.get(id) and id in head_now else до[id]
 print(" ".join(f"{id}({base(id)}->{после.get(id, 'удалена')})" for id in до if до[id] != после.get(id) and not is_legit(id)))
@@ -439,7 +452,8 @@ $ITEMS
    Даже если задача стоит «ждёт теста» или «готово» — пункт всё равно нужен: иначе
    дневной работе негде оказаться.
 2б. Статус меняй только у карточки в plan: на wip или test, и только если в её новом
-   пункте назван SHA коммита из списка выше. Любой другой статус существующей
+   пункте назван SHA коммита из списка выше, а поле «глубина» карточки подтверждено сменой
+   (уровень, характер и «кем: смена»; заготовку автомата не переподписывай). Любой другой статус существующей
    карточки не трогай: демон вернёт его к прежнему, а удалённую карточку не
    простит — отвергнет всю правку вместе с пропусками.
 3. Если это самостоятельная работа — заведи новую задачу в подходящем направлении:

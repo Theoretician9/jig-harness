@@ -70,6 +70,7 @@ ENV_NAMES = re.compile(r"(HARNESS_|MUTATION_|MUT_|MUTPROBE_|CHECKS_|NIGHTLY_)\w*
                        r"GIT_CEILING_DIRECTORIES|PATH|HOME|LANG|LC_\w+|TERM|TMPDIR|VIRTUAL_ENV")
 ENV_SKIP = re.compile(r"HARNESS_(CHECKS_SLICE_|GIT_HISTORY$|IN_CHECKS_SLICE$)")
 RESULT_LINE = re.compile(r"^мутации задачи (\S+): (.*)$")
+PROGRESS_LINE = re.compile(r"^мутации задачи (\S+): не догнана, новых мутаций (\d+)")
 
 
 def settings(root: Path | None = None) -> dict:
@@ -364,9 +365,17 @@ def _own_codes(ids: list[str], lines: list[str]) -> dict[str, int]:
     return codes
 
 
+def _progressed(lines: list[str]) -> set[str]:
+    """id, которые недогнанным заходом сдвинулись: «не догнана, новых мутаций K», K > 0."""
+    return {m[1] for m in map(PROGRESS_LINE.match, lines) if m and int(m[2])}
+
+
 def settle(place: Path, signs: list[str], code: int, lines: list[str]) -> None:
     """Итог захода — заявкам пачки. 0 — всем закрыто; 75 — все вернулись без попытки;
-    1 и 2 — каждая по своим id (нет итога — вернулась с попыткой); иной код — всем."""
+    1 и 2 — каждая по своим id; иной код — всем. Заявка с id без итога возвращается без
+    попытки, если заход дал ход по КАЖДОМУ такому id (новые мутации легли в кэш
+    прибора, повтор доберёт остальное); иначе — с попыткой. От вечного круга страхует
+    предел_возраста_ч."""
     pause = float(settings()["пауза_повтора_сек"])
     with _state(place) as state:
         for request in [з for з in state["заявки"] if з["знак"] in signs]:
@@ -375,7 +384,8 @@ def settle(place: Path, signs: list[str], code: int, lines: list[str]) -> None:
                 continue
             own = _own_codes(request["ids"], lines)
             if code in (1, 2) and request["ids"] and set(request["ids"]) - set(own):
-                _give_back(request, True, pause)
+                lost = set(request["ids"]) - set(own)
+                _give_back(request, not lost <= _progressed(lines), pause)
                 continue
             own_code = max(own.values()) if code in (1, 2) and own else code
             _close(state, [request["знак"]], own_code, lines)

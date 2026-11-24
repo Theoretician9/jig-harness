@@ -26,6 +26,9 @@
 # Имена переменных ЛАТИНИЦЕЙ (память: cyrillic-in-bash-names).
 set -uo pipefail
 export LC_ALL=C.UTF-8
+# Проект и пакет стенда — из его конфига: у механизмов окружение старше конфига, и
+# PROJECT_DIR/HARNESS_STARTER зовущего (стенд поезда выпуска) увели бы их в чужое дерево.
+unset PROJECT_DIR HARNESS_STARTER
 
 KOREN="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
 DISPATCHER="$KOREN/scripts/tg-dispatcher.sh"

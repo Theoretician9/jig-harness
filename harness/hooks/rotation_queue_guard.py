@@ -7,6 +7,10 @@ scripts/lib/rotation_flag.py); пока флаг живой и принадле�
 запуск Agent/Task и новое поручение SendMessage отказаны (код 2) и ложатся
 строкой в `rotation-queue.jsonl`. Преемник получает очередь списком.
 
+Этап «дорабатывает» (ротация с преемником, спека раздел 14.8): старая смена —
+отказ и очередь преемника, но текст другой (канал уже не её); преемник — пропуск.
+Флаг ищется по session_id среди всех `rotation-waits-helpers*.json`.
+
 Без флага выход сразу: хук стоит на КАЖДОМ запуске помощника.
 Пропуски со следом: флаг другой сессии, флаг протухший (сторож давно его не
 освежал), SendMessage управляющего harness-lead своему исполнителю — доведение
@@ -48,8 +52,14 @@ REFUSAL = (
     "и не вписывай её в передачу. Перезапуск делает смена сама, после конца помощников. "
     "Идущих помощников не трогаю; идущему помощнику можно один раз послать SendMessage, "
     "начатое словами «{stop}». Сообщения владельца это не касается: отвечай ему в канал как обычно.")
+# Дорабатывающая смена: ротация её уже не ждёт, задачи и канал у преемника. Слов «отвечай в канал»
+# здесь нет: канал закрыт ей хуком guard_bash (раздел 14.7).
+FINISHING_REFUSAL = (
+    "Запуск отложен: ты дорабатывающая смена, задачи берёт преемник (tmux `{tmux}`). "
+    "Поручение в очереди преемника; не повторяй, не делай сам. "
+    "Доведи идущих помощников и остановись; «/exit» подаст сторож.")
 # Управляющий, начатый до ротации, запускал новых исполнителей, и «идущих помощников»
-# всегда было ≥ 1: смена ждала ротацию 69+ мин (находка копии bkb 12.11.2026).
+# всегда было ≥ 1: смена ждала ротацию 69+ мин (находка копии сети 12.11.2026).
 LEAD_REFUSAL = (
     "Запуск исполнителя отложен: смена ждёт ротации. Поручение в очереди преемника. "
     "Новых не запускай — доведи уже идущих исполнителей, отчитайся смене и остановись.")
@@ -160,10 +170,15 @@ def release() -> int:
 def hook(payload: dict) -> int:
     if payload.get("tool_name") not in TOOLS:
         return 0
-    kind, flag = rotation_flag.state()
-    if kind == "нет":
-        return 0                # флаг исчез между проверкой в main и здесь
     session = str(payload.get("session_id") or "")
+    kind, flag = rotation_flag.state()
+    if rotation_flag.successor_enabled() and flag.get("сессия") != session:
+        # Флаг другой роли (не `TMUX_SESSION`), где эта сессия — старая смена или преемник.
+        other_kind, other = rotation_flag.state_for(session)
+        if other_kind != "нет":
+            kind, flag = other_kind, other
+    if kind == "нет":
+        return 0                # флаг исчез между проверкой в main и здесь, либо это не наш флаг
     if kind == "протух":
         log_fail_open("флаг ожидания ротации протух — хук очереди его не исполняет", str(rotation_flag.path()))
         log_event("rotation_flag_stale", "error", session, str(rotation_flag.path()))
@@ -179,7 +194,10 @@ def hook(payload: dict) -> int:
         return 0
     Queue().add(row)
     log_event("rotation_queued", "refused", session, f"{payload.get('tool_name')}: {row.get('часть') or '—'}")
-    print(REFUSAL.format(n=flag.get("помощников", "?"), stop=STOP_PREFIX), file=sys.stderr)
+    if rotation_flag.finishing_flag(session):
+        print(FINISHING_REFUSAL.format(tmux=flag.get("tmux_роли") or rotation_flag.main_tmux()), file=sys.stderr)
+    else:
+        print(REFUSAL.format(n=flag.get("помощников", "?"), stop=STOP_PREFIX), file=sys.stderr)
     return 2
 
 
@@ -214,7 +232,7 @@ def main(argv: list[str]) -> int:
         Queue().mark({int(a) for a in argv[1:] if a.isdigit()})
         return 0
     # Без флага — выход сразу, не разбирая stdin.
-    if not rotation_flag.path().exists():
+    if not rotation_flag.any_flag():
         return 0
     try:
         payload = json.loads(sys.stdin.read())

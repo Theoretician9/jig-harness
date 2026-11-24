@@ -65,10 +65,13 @@ refs/remotes/origin/main клона EVOLUTION_DIR коммитами автор�
 (начатая тоже); нет — первая пачка `--пачки` с открытыми карточками. --очередь F без --пачки F — пачек нет.
 В СДЕЛАНО при STATUS_DONE_SINCE_LAST=1 и пустом блоке: живы помощники — «с HH:MM ничего не сдано, работа
 идёт», иначе — «с HH:MM нового нет; последний помощник кончил HH:MM».
+--json — вместо текста один JSON-объект version 1 (поле text — тот же текст) для status_widget.py.
 Этапы берутся из $PROJECT_DIR/.tasks/<id>/ (журнал.md, harness-code-review.md, мутации.log) и
 из git (коммиты со строкой «Dev-Map: <id>»). Вывод в stdout, код 0.
 """
 import argparse
+import functools
+import importlib.util
 import json
 import os
 import re
@@ -92,15 +95,19 @@ NOTHING = "пока ничего"
 NOTHING_NEW = "пока нового нет"
 # Простой виден как простой: с какого часа тихо и когда кончил последний помощник журнала.
 IDLE_SINCE = "с {since} нового нет; последний помощник кончил {last}"
-# Помощники живы — «нового нет» читается как «стоим» (находка bkb 12.11): сказать, что работа идёт.
+# Помощники живы — «нового нет» читается как «стоим» (находка копии сети 12.11): сказать, что работа идёт.
 STILL_WORKING = "с {since} ничего не сдано, работа идёт"
 COMMITS_NOTE = "коммитов {count}, последний: {subject}"
 NOBODY_NOTE = "сейчас никто не работает"
+ORCHESTRATOR_NOTE = "сейчас: оркестратор, помощников нет"
+MAP_FILE = "dev-map.yaml"
 GIT_TIMEOUT = 30
 QUEUE_EMPTY = "очередь пуста"
 QUEUE_UNAVAILABLE = "очередь недоступна"
 # ДАЛЬШЕ — одна строка: владельцу нужен следующий шаг, а не список.
 NEXT_MAX = 1
+WHAT_MAX = 140
+WAITING_MAX = 5
 BATCH_LINE = "пачка из {count}: {title}"
 DEFAULT_LOST_HOURS = 2
 LOST_MAX = 3
@@ -137,7 +144,12 @@ TASK_MARK = re.compile(r"Часть:\s*((?:hr|pr)\.[\w.-]*\w)")
 CARD_ID = re.compile(r"\b(?:hr|pr)\.[\w.-]*\w(?:#\d+)?")
 EMPTY_BRACKETS = re.compile(r"\(\s*[,;]?\s*\)")
 # Служебное слово или тире в хвосте читается как оборванная мысль: «…, а не…», «… — с…».
-DANGLING_TAIL = re.compile(r"(?:\s+(?:для|по|в|на|из|к|ко|с|со|и|а|но|не|от|за|о|об|у|что|как|или|при|без|до|во|—|-))+\s*$")
+FUNCTION_WORDS = "для|по|в|на|из|к|ко|с|со|и|а|но|не|от|за|о|об|у|что|как|или|при|без|до|во|—|-"
+DANGLING_TAIL = re.compile(rf"(?:\s+(?:{FUNCTION_WORDS}))+\s*$")
+# Начало с служебного слова или одно слово после выкидывания латиницы — обрубок, не название задачи.
+STUB_HEAD = re.compile(rf"(?:{FUNCTION_WORDS})(?:\s|$)", re.IGNORECASE)
+EVOLUTION_TITLE = re.compile(r"^(\S+) от (\S+): [a-z0-9-]+$")
+EVOLUTION_KIND_UNKNOWN = "?"
 TITLE_SPLITS = (" — ", ": ")
 # Место под «N. » перед заголовком в строке LINE_MAX.
 NUMBER_ROOM = 4
@@ -226,8 +238,13 @@ def clean_desc(text: str) -> str:
 
 def russian_only(text: str) -> str:
     """Описание без латинских слов: английские ярлыки запусков владельцу ничего не говорят."""
-    text = re.sub(r"\s+", " ", LATIN_TOKEN.sub("", text)).strip(" :,-")
-    return DANGLING_TAIL.sub("", text).strip()
+    original, stripped = text, LATIN_TOKEN.sub("", text)
+    text = re.sub(r"\s+", " ", stripped).strip(" :,-")
+    text = DANGLING_TAIL.sub("", text).strip()
+    # Латиница была и осталась одна приставка или предлог («Пачка», «В спеках») — это обрубок, а не суть.
+    if LATIN_TOKEN.search(original) and (len(text.split()) < 2 or STUB_HEAD.match(text)):
+        return ""
+    return text
 
 
 def parse_labels(raw: str) -> dict:
@@ -356,6 +373,25 @@ def transcript_heard(project: str, silent: list) -> dict:
     return heard
 
 
+def orchestrator_alive(project: str, sessions: set, lost_after: timedelta) -> bool:
+    """Оркестратор сам сливает, выпускает и зовёт помощников — в журнале вызовов его нет; признак жизни —
+    транскрипт его сессии моложе порога потери."""
+    if not project:
+        return False
+    base = Path(os.environ.get("CLAUDE_PROJECTS_DIR") or Path.home() / ".claude" / "projects")
+    folders = {base / project.replace("/", "-"), base / re.sub(r"[^a-zA-Z0-9]", "-", project)}
+    now = datetime.now(timezone.utc)
+    for folder in folders:
+        for session in sessions:
+            try:
+                heard = datetime.fromtimestamp((folder / f"{session}.jsonl").stat().st_mtime, timezone.utc)
+            except OSError:
+                continue
+            if now - heard <= lost_after:
+                return True
+    return False
+
+
 def split_lost(launches: dict, rows: list, cut: Cut, lost_after: timedelta, project: str) -> tuple:
     """(потерянные для показа, их вызовы): без конца и без жизни дольше порога — ни в журнале, ни в
     транскрипте. С меткой потерянный показывается, если запущен в окне или жил после метки."""
@@ -395,7 +431,7 @@ def task_key(launch: Launch, launches: dict) -> str:
     while len(chain) <= len(launches) and chain[-1].parent in launches:
         chain.append(launches[chain[-1].parent])
     marked = next((n.task for n in chain if n.task), "")
-    return marked or next((f"{SYNTHETIC_PREFIX}{n.call}" for n in reversed(chain) if CYRILLIC.search(n.desc)), "")
+    return marked or next((f"{SYNTHETIC_PREFIX}{n.call}" for n in reversed(chain) if russian_only(n.desc)), "")
 
 
 def assign_keys(launches: dict) -> None:
@@ -502,10 +538,23 @@ def card_index(dev_map: dict) -> dict:
     return {t.get("id"): t for line in dev_map.get("lines") or [] for t in line.get("tasks") or []}
 
 
+def evolution_title(title: str) -> str:
+    """Заголовок карточки сети копий «<вид> от <копия>: <ярлык>» — по-человечески: латинский ярлык и «?»
+    владельцу ничего не говорят. Другой заголовок возвращается как есть."""
+    found = EVOLUTION_TITLE.match(title)
+    if not found:
+        return title
+    kind, sender = found.groups()
+    sender = "" if sender == EVOLUTION_KIND_UNKNOWN else f" {sender}"
+    if kind == EVOLUTION_KIND_UNKNOWN:
+        return f"Находка копии{sender}, не разобрана"
+    return f"{kind.capitalize()} от копии{sender}"
+
+
 def short_title(card: dict) -> str:
     """Подпись для строки: поле «коротко»; иначе целый заголовок, а длинный — часть до « — » или «: »."""
     own = str(card.get("коротко") or "").strip()
-    title = str(card.get("title") or "").strip()
+    title = evolution_title(str(card.get("title") or "").strip())
     if own or len(title) <= LINE_MAX - NUMBER_ROOM:
         return own or title
     # Тире отделяет суть от пояснения грубее, чем двоеточие: «Скорость: харнес … — мощность по …».
@@ -598,13 +647,13 @@ def done_entry(task: Task, titles: dict, labels: dict, project: str, commits: li
     return Entry(task.key, titles[task.key], notes + commit_note(commits))
 
 
-def doing_entry(task: Task, titles: dict, labels: dict, commits: list) -> Entry:
+def doing_entry(task: Task, titles: dict, labels: dict, commits: list, orchestrating: bool = False) -> Entry:
     """«делают» — только идущие; кто уже закончил, — строкой «делали»; идущих нет — «сейчас никто не работает»."""
     notes = who_notes("делали", [m for m in task.window if m.done], labels)
     if task.running:
         notes += [f"делают: {who_line(task.running, labels)}", f"этап: {STAGE_OF_ROLE[task.running[-1].role]}"]
     else:
-        notes.append(NOBODY_NOTE)
+        notes.append(ORCHESTRATOR_NOTE if orchestrating else NOBODY_NOTE)
     return Entry(task.key, titles[task.key], notes + commit_note(commits))
 
 
@@ -814,10 +863,13 @@ def card_commits(project: str, since: datetime) -> dict:
     """Карточка → коммиты после среза с её трейлером «Dev-Map: <id>», новые первыми. Коммит без трейлера
     ничьей работой не считается."""
     # Срез — в коде, не в `--since`: git обрывает обход на первом старом коммите, а даты в истории бывают не по порядку.
-    log = git_output(project, "log", "--grep=^Dev-Map:", "--format=%x01%ct%x02%s%x02%b")
+    log = git_output(project, "log", "--grep=^Dev-Map:", "--name-only", "--format=%x01%ct%x02%s%x02%b%x02")
     found = {}
     for record in log.split("\x01")[1:]:
-        stamp, subject, body = record.split("\x02", 2)
+        stamp, subject, body, files = record.split("\x02", 3)
+        # Служебная запись карты (правит один dev-map.yaml) — не работа над задачей.
+        if files.split() == [MAP_FILE]:
+            continue
         commit = Commit(datetime.fromtimestamp(int(stamp), timezone.utc), human_subject(subject))
         if commit.ts < since:
             continue
@@ -949,6 +1001,105 @@ def assemble(report: Report, ceiling: int) -> str:
     return report.text()
 
 
+@functools.lru_cache(maxsize=None)
+def load_script(name: str, file: str):
+    """Модуль с дефисом в имени файла — как у доски (build-board.py:load_script); один раз за запуск."""
+    spec = importlib.util.spec_from_file_location(name, HERE / file)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def line_titles(dev_map: dict) -> dict:
+    """id карточки → название линии карты: подпись «часть чего», пока карты направлений нет."""
+    return {t.get("id"): line.get("title") or line.get("id") or ""
+            for line in dev_map.get("lines") or [] for t in line.get("tasks") or []}
+
+
+def optional(what: str, build, empty):
+    """Вызов чужого модуля, без которого статус живёт: подпись, полоса, «ждёт тебя».
+    Сбой — empty и строка в stderr (tg_send.sh её не глушит): статус не падает, но и не молчит."""
+    try:
+        return build()
+    # Широко намеренно: модуль чужой и грузится в процесс — его ConfigError, битый yaml, KeyError
+    # на чужой схеме, SyntaxError правки соседа заранее не перечислить, а любой из них ронял бы
+    # весь статус (tg_send.sh --статус зовёт только --json).
+    except Exception as error:  # noqa: BLE001
+        print(f"status-report: {what}: {type(error).__name__}: {str(error)[:200]}", file=sys.stderr)
+        return empty
+
+
+@functools.lru_cache(maxsize=1)
+def gate():
+    """(build-board.py, суждение гейта) — один раз за запуск, а не на каждую карточку."""
+    board = load_script("build_board", "build-board.py")
+    return board, board.load_gate()
+
+
+def direction_names(dev_map: dict) -> dict:
+    """id карточки → название направления. Нет модуля или конфига, конфиг сломан — пусто: статус
+    из-за подписи падать не должен, подпись откатывается на линию карты."""
+    package = Path(os.environ.get("HARNESS_DIRECTIONS") or HERE.parent / "harness" / "config" / "directions.yaml")
+    if not (HERE / "build-directions.py").is_file() or not package.is_file():
+        return {}
+
+    def build() -> dict:
+        module = load_script("build_directions", "build-directions.py")
+        settings = module.load_config(package, module.local_layer())
+        names = {d["id"]: d["название"] for group in settings["группы"] for d in group["направления"]}
+        names[module.OTHER] = settings["прочее"]["название"]
+        assigned = module.assign(dev_map.get("lines") or [], settings)
+        return {c.get("id"): names[home] for home, group in assigned.items() for c in group}
+    return optional("направления", build, {})
+
+
+def stage_bar(card: dict) -> list:
+    """Полоса стадий суждением гейта доски: пройдены / текущая (первая непройденная) / остались.
+    Шаги «не положен этой задаче» не показываются. Гейт не прочёл бумаги — полосы нет, статус идёт."""
+    if not card:
+        return []
+    steps = optional("полоса стадий", lambda: gate()[0].column(card, gate()[1])[2], None)
+    if steps is None:
+        return []
+    bar, current_given = [], False
+    for step in (s for s in steps if not str(s["почему"]).startswith("не положен")):
+        if step["есть"] is True:
+            state = "passed"
+        elif not current_given:
+            state, current_given = "current", True
+        else:
+            state = "left"
+        bar.append({"step": step["шаг"], "state": state})
+    return bar
+
+
+def human(text: str) -> str:
+    """Видимая строка без id карточек и переносов."""
+    return re.sub(r"\s+", " ", CARD_ID.sub("", text or "")).strip()
+
+
+def what_of(card: dict) -> str:
+    """Что и зачем: первая фраза summary, не длиннее WHAT_MAX."""
+    summary = human(str(card.get("summary") or ""))
+    first = re.match(r"(.+?[.!?])(?:\s|$)", summary)
+    return clip(first.group(1) if first else summary, WHAT_MAX)
+
+
+def task_json(task: Task, titles: dict, cards: dict, labels: dict, parts: dict, lines: dict) -> dict:
+    card = cards.get(task.key) or {}
+    who = [{"model": label_of(labels, m.model), "role": m.role, "running": True} for m in task.running]
+    return {"id": task.key, "title": human(titles[task.key]), "what": what_of(card),
+            "part": human(parts.get(task.key) or lines.get(task.key) or ""),
+            "status": card.get("status") or "", "stages": stage_bar(card), "who": who}
+
+
+def waiting_json(dev_map: dict) -> tuple:
+    """(до WAITING_MAX названий, всего решений) из work-queue.py:ждёт_владельца."""
+    waiting = optional("ждёт тебя", lambda: load_script("work_queue", "work-queue.py").ждёт_владельца(dev_map),
+                       {"имена": [], "решений": 0})
+    return [{"title": human(name), "what": ""} for name in waiting["имена"][:WAITING_MAX]], waiting["решений"]
+
+
 def account_line() -> str:
     """Строка «аккаунт: …» из account-switch.py --сейчас; профили не заведены или вызов не удался — строки нет."""
     try:
@@ -970,6 +1121,7 @@ def main() -> int:
     parser.add_argument("--сессия", dest="session")
     parser.add_argument("--с", dest="since")
     parser.add_argument("--отметить", dest="mark")
+    parser.add_argument("--json", dest="as_json", action="store_true")
     args = parser.parse_args()
 
     conf = config.из_файла(config.путь_harness_conf())
@@ -1017,7 +1169,9 @@ def main() -> int:
     shown_roots = {family_root(t.key, cards) for t in shown}
     taken = {cid for cid in cards if family_root(cid, cards) in shown_roots}
     upcoming, fallback = upcoming_lines(args, map_path, dev_map, taken)
-    working = any(not n.done and n.call not in gone for n in launches.values())
+    sessions = {r["session"] for r in rows if r.get("session")}
+    orchestrating = orchestrator_alive(project, sessions, lost_after)
+    working = orchestrating or any(not n.done and n.call not in gone for n in launches.values())
     done_empty = idle_phrase(quiet_from, last_finish(rows), working) if since_last else NOTHING
     fresh_loose = [n for n in loose if n.fresh and n.call not in gone]
     commits_of = lambda t: family_commits(family_root(t.key, cards), cards, commits)
@@ -1025,7 +1179,7 @@ def main() -> int:
         Section(H_DONE, [done_entry(t, titles, labels, project, commits_of(t)) for t in done],
                 sum(n.done for n in fresh_loose), done_empty,
                 work_steps(conf, log_dir, passport.get("PROJECT_NAME", ""), quiet_from)),
-        Section(H_DOING, [doing_entry(t, titles, labels, commits_of(t)) for t in doing], sum(not n.done for n in fresh_loose), NOTHING),
+        Section(H_DOING, [doing_entry(t, titles, labels, commits_of(t), orchestrating) for t in doing], sum(not n.done for n in fresh_loose), NOTHING),
     ]
     umbrellas_done = {root for t in done if (root := family_root(t.key, cards)) != t.key}
     finished = lambda n: task_finished(n, cards, project, umbrellas_done)
@@ -1033,7 +1187,18 @@ def main() -> int:
     account = account_line()
     room = ceiling - (len(account) + 1 if account else 0)
     text = assemble(Report(sections, lost_items(lost, titles, labels, finished, continued), upcoming, fallback), room)
-    print(text + ("\n" + account if account else ""))
+    text += "\n" + account if account else ""
+    if args.as_json:
+        parts, lines = direction_names(dev_map), line_titles(dev_map)
+        make = lambda t: task_json(t, titles, cards, labels, parts, lines)
+        waiting, waiting_total = waiting_json(dev_map)
+        report = {"version": 1, "built_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+                  "text": text, "doing": [make(t) for t in doing], "doing_more": 0,
+                  "delivered": [make(t) for t in done], "delivered_more": 0, "other": len(fresh_loose),
+                  "waiting_owner": waiting, "waiting_total": waiting_total, "next": upcoming, "account": account}
+        print(json.dumps(report, ensure_ascii=False))
+    else:
+        print(text)
     write_atomic(Path(log_dir) / PENDING_NAME, json.dumps(sections[0].hidden_keys(), ensure_ascii=False))
     return 0
 

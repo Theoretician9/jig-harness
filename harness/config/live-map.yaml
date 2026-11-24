@@ -1,0 +1,18 @@
+# Таблица рёбер живой карты (scripts/live-map.py): какое событие какого журнала
+# означает переход данных по какому контракту реестра architecture.yaml.
+# Событие без строки — вспышка своей части, не ребра. Сверку с реестром и
+# journals.yaml делает самотест сборщика.
+версия: 1
+рёбра:
+  - {журнал: inbox,            события: [inbox.received],                        от: "внешний:владелец", к: channel}
+  - {журнал: tg_out,           события: [tg.sent],                               от: channel,   к: "внешний:владелец"}
+  - {журнал: разбор-сообщений, события: [message.triaged],                       от: channel,   к: map}
+  - {журнал: consent-buttons,  события: [consent.yes],                           от: channel,   к: release}
+  - {журнал: доставка,         события: [delivery.kick_sent, delivery.send_now], от: channel,   к: executors}
+  - {журнал: вызовы-агентов,   события: [agent.launch],                          от: pipeline,  к: executors}
+  - {журнал: gates,            события: [gate.verdict],                          от: executors, к: quality}
+  - {журнал: merge-queue,      события: [mq.ворота, mq.слито],                   от: quality,   к: release}
+  - {журнал: тревоги-сторожей, события: [заведена],                              от: quality,   к: map}
+  - {журнал: release-train,    события: ["*"],                                   от: release,   к: network}
+  - {журнал: deploy-releases,  события: [deploy.release],                        от: release,   к: machine}
+  - {журнал: process-runs,     события: [process.start],                         от: machine,   к: "*"}

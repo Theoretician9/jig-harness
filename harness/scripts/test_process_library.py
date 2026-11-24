@@ -421,7 +421,7 @@ with tempfile.TemporaryDirectory(prefix="pl-layer-") as layer_dir:
             os.environ["HARNESS_PROCESS_LIBRARY_LOCAL"] = saved_door
 
 print("── 12б. раскладка: свои записи копии уходят в слой установки, а не пропадают ──")
-# Находка копии bkb 14.11.2026: своя запись копии в process-library.json раскладка снимала
+# Находка копии сети 14.11.2026: своя запись копии в process-library.json раскладка снимала
 # («записей, которых в пакете нет, не переносим»), и самопроверка обновления краснела.
 # Своя — нет ни в пакете, ни в прежней сборке пакета; запись прежней сборки — снята пакетом.
 CARRY = HERE / "lib" / "process_library.py"

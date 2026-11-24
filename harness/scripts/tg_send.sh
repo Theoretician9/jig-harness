@@ -71,12 +71,13 @@ OUT_LOG="$LOG_DIR/tg_out.jsonl"
 # его собирались отправить. Уровень языка кладётся рядом с текстом — иначе
 # следующий замер не отличит «написано сложно при простом уровне» от
 # «написано сложно, когда простого ещё не просили».
-zapisat_ishodyashchee() {
+zapisat_ishodyashchee() {  # $1 = текст, $2 = способ доставки (widget|text)
     mkdir -p "$LOG_DIR" 2>/dev/null || true
     LANG_LEVEL_NOW=$(python3 "$PROJECT_DIR/scripts/language-level.py" 2>/dev/null || echo "")
     jq -cn --arg ts "$(date -Is)" --arg text "$1" --arg uroven "$LANG_LEVEL_NOW" \
            --arg iz_sessii "$([ -n "${CLAUDE_CODE_SESSION_ID:-}" ] && echo 1 || echo 0)" \
-           '{ts: $ts, uroven: $uroven, iz_sessii: ($iz_sessii == "1"), text: $text}' \
+           --arg method "${2:-text}" \
+           '{ts: $ts, uroven: $uroven, iz_sessii: ($iz_sessii == "1"), method: $method, text: $text}' \
         >> "$OUT_LOG" 2>/dev/null || true
 }
 
@@ -112,7 +113,8 @@ refuse() {  # причина, хвост-ответа-api
 [ -n "${TG_CHAT_ID:-}" ] || refuse "TG_CHAT_ID пуст в install.conf"
 [ -n "${TG_TOKEN_FILE:-}" ] && [ -s "$TG_TOKEN_FILE" ] || refuse "TG_TOKEN_FILE пуст или файла нет: ${TG_TOKEN_FILE:-«не задан»}"
 TOKEN=$(tr -d '[:space:]' < "$TG_TOKEN_FILE")
-API="https://api.telegram.org/bot$TOKEN"
+# Дверь базового адреса: проба и стенд подставляют свой Bot API, боевой путь — умолчание.
+API="${TG_API_BASE:-https://api.telegram.org}/bot$TOKEN"
 
 # Признак успеха — ОТДЕЛЬНОЙ функцией, чтобы его можно было проверить без сети.
 # Мутационная проба 10.09.2026: подменённый на «.ok != null» признак остался
@@ -166,6 +168,21 @@ send_text() {  # кусок текста
         --data-urlencode "chat_id=$TG_CHAT_ID" \
         --data-urlencode "text=$1" 2>&1) || refuse "curl не дошёл до API" "$(printf '%.300s' "$resp")"
     verdict "$resp" "текст ${#1} зн."
+}
+
+# Статус виджетом: status_widget.py --send читает JSON со stdin. Токен и чат идут окружением
+# одной команды, не argv: argv виден любому в ps. Отказ не refuse: пульс не теряется, статус
+# уходит текстом, а в журнал отказов ложится причина (stderr рендера без токена и адреса).
+отправить_виджет() {  # JSON статуса в $STATUS_JSON; rc=0 — доставлено
+    local widget="$PROJECT_DIR/scripts/status_widget.py" why rc=0
+    [ -r "$widget" ] || return 1
+    why=$(printf '%s' "$STATUS_JSON" | TG_TOKEN_FILE="$TG_TOKEN_FILE" TG_CHAT_ID="$TG_CHAT_ID" \
+        STATUS_WIDGET_PREFIX="${WIDGET_CAPTION_PREFIX:-}" STATUS_WIDGET_STATE="$LOG_DIR/status-widget.json" python3 "$widget" --send 2>&1 >/dev/null) || rc=$?
+    [ "$rc" = 0 ] && return 0
+    jq -cn --arg ts "$(date -Is)" --arg why "виджет не принят — статус ушёл текстом" \
+        --arg api "$(printf '%.300s' "$why")" --argjson code "$rc" \
+        '{ts:$ts, script:"tg_send", why:$why, api:$api, widget_code:$code}' >> "$FAIL_LOG" 2>/dev/null || true
+    return 1
 }
 
 # Потолок Telegram — 4096 знаков на сообщение; режем по 4000, по возможности по
@@ -452,7 +469,13 @@ if [ "$STATUS_DOOR" = 1 ]; then
     [ -r "$STATUS_BUILDER" ] || refuse "нет сборщика статуса $STATUS_BUILDER"
     # Время запоминается ДО сборки: что кончилось за время сборки, попадёт в следующий статус.
     STATUS_MARK_AT=$(date -Iseconds)
-    STATUS_BUILT=$(python3 "$STATUS_BUILDER") || refuse "сборщик статуса упал (код $?)"
+    STATUS_BUILT=$(python3 "$STATUS_BUILDER" --json) || refuse "сборщик статуса упал (код $?)"
+    # JSON с полем text — статус и данные виджета; иначе прежний сборщик, весь вывод — текст.
+    STATUS_JSON=""
+    if STATUS_TEXT=$(printf '%s' "$STATUS_BUILT" | jq -er '.text' 2>/dev/null); then
+        STATUS_JSON="$STATUS_BUILT"
+        STATUS_BUILT="$STATUS_TEXT"
+    fi
     set -- "$STATUS_BUILT"
 fi
 
@@ -711,16 +734,23 @@ sys.exit(3)
 PY
 case "$MARK_RC" in
     0) TEXT="$HACKATHON_MARK
-$TEXT" ;;
+$TEXT"; WIDGET_CAPTION_PREFIX="$HACKATHON_MARK" ;;
     3) ;;
     *) echo "tg_send: метка хакатона потеряна (блок метки упал, код $MARK_RC): $(tail -n 1 "$MARK_ERR" | cut -c1-200)" >&2 ;;
 esac
 rm -f "$MARK_ERR"
 
-отправить_текст_частями "$TEXT"
+# Окружение главнее harness.conf (konf_zagruzit); ни там, ни там — виджет включён.
+STATUS_WIDGET="${STATUS_WIDGET:-1}"
+DELIVERY_METHOD=text
+if [ "$STATUS_DOOR" = 1 ] && [ -n "${STATUS_JSON:-}" ] && [ "$STATUS_WIDGET" != 0 ] && отправить_виджет; then
+    DELIVERY_METHOD=widget
+else
+    отправить_текст_частями "$TEXT"
+fi
 [ "$LIFT_AFTER_DELIVERY" = 0 ] || $LIMIT_MARK --снять --транскрипт "${CLAUDE_CODE_SESSION_ID:-}" >/dev/null 2>&1 || true
 отметить_отчёт
-zapisat_ishodyashchee "$TEXT"
+zapisat_ishodyashchee "$TEXT" "$DELIVERY_METHOD"
 # Метка «сделано показано» — только после подтверждённой доставки: отказ оставляет её на месте.
 if [ "$STATUS_DOOR" = 1 ]; then
     python3 "$STATUS_BUILDER" --отметить "$STATUS_MARK_AT" \

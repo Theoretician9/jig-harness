@@ -45,7 +45,9 @@ PROJECT_DIR="${PROJECT_DIR:-$HOME}"
 raised=0
 
 поднять() {  # имя сессии, рабочий каталог, команда
-    if tmux has-session -t "$1" 2>/dev/null; then
+    # Точное имя: после ротации с преемником рядом живёт «<имя>-old-<epoch>», а голое
+    # `-t agent` находит сессию по префиксу и принял бы дорабатывающую за агента.
+    if tmux has-session -t "=$1" 2>/dev/null; then
         echo "сессия '$1' уже есть — не трогаю (в ней может работать агент)"
         return 0
     fi
@@ -67,7 +69,7 @@ raised=0
     # Запись панели включается ДО команды: выход агента сразу после ввода — как
     # раз тот случай, ради которого она нужна.
     [ -z "${LOG_DIR:-}" ] || pane_log_attach "$1" "$LOG_DIR"
-    tmux send-keys -t "$1" "$3" Enter
+    tmux send-keys -t "=$1:" "$3" Enter
     [ -z "${LOG_DIR:-}" ] || agent_started_mark "$LOG_DIR"
     echo "сессия '$1' поднята с оболочкой, агент запущен вводом: $3"
 }
@@ -82,17 +84,33 @@ if [ "${1:-}" = "--команда" ]; then
     exit 0
 fi
 if [ "${1:-}" = "--в-панель" ]; then
-    if tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
-        pane_now=$(tmux display-message -p -t "$TMUX_SESSION" '#{pane_current_command}')
+    if tmux has-session -t "=$TMUX_SESSION" 2>/dev/null; then
+        pane_now=$(tmux display-message -p -t "=$TMUX_SESSION:" '#{pane_current_command}')
         case "$pane_now" in
             bash|sh|zsh|dash)
-                tmux send-keys -t "$TMUX_SESSION" "$AGENT_START_CMD" Enter
+                tmux send-keys -t "=$TMUX_SESSION:" "$AGENT_START_CMD" Enter
                 [ -z "${LOG_DIR:-}" ] || agent_started_mark "$LOG_DIR"
                 echo "в панели сессии '$TMUX_SESSION' была оболочка — агент запущен вводом: $AGENT_START_CMD" ;;
             *) echo "в панели сессии '$TMUX_SESSION' работает «$pane_now», не оболочка — ничего не ввожу" ;;
         esac
         exit 0
     fi
+fi
+
+# Остановка юнита (ExecStop): гасит преемника и всех дорабатывающих, чужие сессии не трогает.
+# Код всегда 0: отсутствие сессий агента — не провал остановки (systemd счёл бы его таким).
+погасить_смены() {
+    local sess
+    while IFS= read -r sess; do
+        if [ "$sess" = "$TMUX_SESSION" ] || [[ "$sess" =~ ^"$TMUX_SESSION"-old-[0-9]+$ ]]; then
+            tmux kill-session -t "=$sess" 2>/dev/null || true
+        fi
+    done < <(tmux list-sessions -F '#{session_name}' 2>/dev/null || true)
+    return 0
+}
+if [ "${1:-}" = "--stop" ]; then
+    погасить_смены
+    exit 0
 fi
 
 if [ "${1:-}" = "--selftest" ]; then
@@ -185,9 +203,24 @@ if [ "${1:-}" = "--selftest" ]; then
         || { printf '  ПЛОХО пинок ушёл в сессию, где уже кто-то работает\n'; ok=0; }
     tmux kill-session -t "$S-пинок" 2>/dev/null || true
 
+    # ЗДОРОВЫЙ: --stop гасит сессию агента и дорабатывающих, соседей по префиксу не трогает, код 0.
+    # Свой сервер стенда: --stop перебирает ВСЕ сессии сервера, а на боевом рядом живут
+    # настоящие смены. Сокет — тот, что голый tmux возьмёт по TMUX_TMPDIR.
+    stand_tmp="$T/tmux-stop"; stand_sock="$stand_tmp/tmux-$(id -u)/default"
+    mkdir -p -m 700 "$stand_tmp/tmux-$(id -u)"
+    printf 'TMUX_SESSION="%s-ст"\nPROJECT_DIR="%s"\n' "$S" "$T" > "$T/install.conf"
+    for n in "$S-ст" "$S-ст-old-1795209000" "$S-стX"; do tmux -S "$stand_sock" new-session -d -s "$n" -c "$T" "sleep 60"; done
+    env -u TMUX -u TMUX_PANE TMUX_TMPDIR="$stand_tmp" TMUX_SESSION="$S-ст" HARNESS_INSTALL_CONF="$T/install.conf" HARNESS_CONF="$T/harness.conf" bash "$0" --stop >/dev/null 2>&1; stop_rc=$?
+    alive=""
+    for n in "$S-ст" "$S-ст-old-1795209000" "$S-стX"; do tmux -S "$stand_sock" has-session -t "=$n" 2>/dev/null && alive="$alive $n"; done
+    tmux -S "$stand_sock" kill-server 2>/dev/null || true
+    [ "$stop_rc" = 0 ] && [ "$alive" = " $S-стX" ] \
+        && printf '  ок    --stop гасит агента и его «-old-», соседа по префиксу не трогает, код 0\n' \
+        || { printf '  ПЛОХО --stop: код %s, живы:%s\n' "$stop_rc" "$alive"; ok=0; }
+
     tmux kill-session -t "$S" 2>/dev/null || true
     rm -rf "$T"
-    (( ok )) && { echo "SELFTEST: зелёный (8 путей, первый, третий и седьмой — больные случаи)"; exit 0; }
+    (( ok )) && { echo "SELFTEST: зелёный (9 путей, первый, третий и седьмой — больные случаи)"; exit 0; }
     echo "SELFTEST: КРАСНЫЙ"; exit 1
 fi
 

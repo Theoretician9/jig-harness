@@ -13,7 +13,7 @@
     stack_freshness.py --сводка             # решение: «шлю: N» + текст | «отложено: …» | «молчу: …» (коды 0 | 3)
     stack_freshness.py --отправлено --неделя N [--вне-очереди]   # после кода 0 от tg_send.sh
     stack_freshness.py --ответы             # «стек да/нет N» из inbox.jsonl; печатает несказанные отказы
-    stack_freshness.py --сказано <текст>    # после кода 0 от tg_send.sh: отказ доставлен, второй раз не печатать
+    stack_freshness.py --сказано <текст>    # после кода 0 (доставлен) или 4 (отвергнут правилами канала) от tg_send.sh: второй раз не печатать
     stack_freshness.py --selftest           # пробы рядом (фоном)
 
 Двери стенда (окружение): HARNESS_STACK_REGISTRY, HARNESS_STACK_SOURCES (каталог
@@ -52,7 +52,6 @@ ITEMS_MAX = 5
 CHANNEL_CEILING = 1400                  # жёсткий потолок канала из память/TONE.md: сверх него tg_send отказывает навсегда
 EVENT_NAMES_MAX = 160                   # длина перечня имён в строке «мимо двери»
 UNKNOWN_DAYS = 21                       # столько суток подряд «не узнать свежую» — часть считается немеряемой
-APT_LISTS_MAX_AGE = dt.timedelta(days=1)
 MARKER = "стек"                         # единственный носитель метки вопроса; ключ данных заведёт З-1
 QUESTIONS_LOG = "stack-вопросы.jsonl"
 
@@ -308,11 +307,11 @@ def source_pypi(part, current, ctx):
 
 POLICY_VERSION = re.compile(r"^\s{1,5}(?:\*\*\*\s)?(\S+) \d+(?: \(phased [^)]*\))?\s*$")
 POLICY_SOURCE = re.compile(r"^\s+\d+ https?://\S+ (\S+?)/")
+POLICY_SOURCE_URL = re.compile(r"^\s+\d+ (https?://\S+) (\S+?)/")
 
 
-def parse_policy(text, package):
-    """(кандидат, стоящая, поэтапный, карман кандидата) из блока `apt-cache policy <пакет>`; None — блока нет.
-    Стоящая None — пакет не стоит (Installed: (none))."""
+def policy_block(text, package):
+    """Строки блока пакета из `apt-cache policy`; None — блока нет."""
     lines = text.split("\n")
     try:
         start = lines.index(f"{package}:")
@@ -323,6 +322,15 @@ def parse_policy(text, package):
         if line and not line[0].isspace():
             break
         block.append(line)
+    return block
+
+
+def parse_policy(text, package):
+    """(кандидат, стоящая, поэтапный, карман кандидата) из блока `apt-cache policy <пакет>`; None — блока нет.
+    Стоящая None — пакет не стоит (Installed: (none))."""
+    block = policy_block(text, package)
+    if block is None:
+        return None
     candidate = next((l.split(":", 1)[1].strip() for l in block if l.strip().startswith("Candidate:")), None)
     if not candidate or candidate == "(none)":
         return None
@@ -340,13 +348,36 @@ def parse_policy(text, package):
     return candidate, None if installed == "(none)" else installed, phased, pocket
 
 
+def parse_policy_pockets(text, package):
+    """[(адрес, карман)] у ВСЕХ источников кандидата из блока `apt-cache policy <пакет>`; пусто — блока нет.
+    parse_policy отдаёт только первый карман, а кандидат бывает сразу в -updates и -security."""
+    block = policy_block(text, package) or []
+    candidate = next((l.split(":", 1)[1].strip() for l in block if l.strip().startswith("Candidate:")), None)
+    pockets, inside = [], False
+    for line in block:
+        found = POLICY_VERSION.match(line)
+        if found:
+            inside = found.group(1) == candidate
+            continue
+        source = POLICY_SOURCE_URL.match(line)
+        if inside and source:
+            pockets.append((source.group(1), source.group(2)))
+    return pockets
+
+
+def apt_lists_outdated(stamp_day, today):
+    """Списки устарели, если дата штампа раньше вчерашней: правило check_stamp из apt.systemd.daily (календарные дни, не 24 ч)."""
+    return stamp_day < today - dt.timedelta(days=1)
+
+
 def stale_apt_lists(ctx):
-    """Unknown, если списки apt не обновлялись больше суток: кандидат из старых списков равен установленной версии, и часть молча «свежая»."""
+    """Unknown, если списки apt не обновлялись ни вчера, ни сегодня: кандидат из старых списков равен установленной версии, и часть молча «свежая»."""
     try:
         moment = dt.datetime.fromtimestamp(ctx.apt_lists_stamp.stat().st_mtime, dt.timezone.utc)
     except OSError:
         return Unknown("apt-списки: штампа обновления нет")
-    return Unknown("apt-списки старше суток") if ctx.now - moment > APT_LISTS_MAX_AGE else None
+    stamp_day = moment.astimezone(ctx.now.tzinfo).date()
+    return Unknown("apt-списки не обновлялись ни вчера, ни сегодня") if apt_lists_outdated(stamp_day, ctx.now.date()) else None
 
 
 def source_apt(part, current, ctx):
@@ -595,6 +626,21 @@ def exit_code(rows):
     return 0
 
 
+def python_minor():
+    """Минор интерпретатора, на котором идёт замер: часть python3 меряет пакет python3.<минор>, не метапакет (его журнал — пересборка без изменений)."""
+    return os.environ.get("HARNESS_STACK_PY_MINOR") or str(sys.version_info[1])
+
+
+def fill_minor(value, minor):
+    if isinstance(value, str):
+        return value.replace("{минор}", minor)
+    if isinstance(value, list):
+        return [fill_minor(item, minor) for item in value]
+    if isinstance(value, dict):
+        return {key: fill_minor(item, minor) for key, item in value.items()}
+    return value
+
+
 def load_registry(path):
     try:
         data = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
@@ -606,6 +652,10 @@ def load_registry(path):
         if not (isinstance(part, dict) and isinstance(part.get("имя"), str)
                 and isinstance(part.get("свежая"), dict) and part["свежая"].get("источник") in SOURCES):
             return Broken(f"часть без имени или с неизвестным источником: {str(part)[:60]}")
+    minor = python_minor()
+    for part in data["части"]:
+        for field_name in ("текущая", "свежая"):
+            part[field_name] = fill_minor(part.get(field_name), minor)
     return Registry(data["части"], data.get("в_общей_строке_ОС") or [], data.get("не_судим") or {})
 
 

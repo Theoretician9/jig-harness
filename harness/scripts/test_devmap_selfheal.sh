@@ -65,6 +65,7 @@ lines:
       - id: hr.a
         status: $1
         title: "Карточка А"
+        глубина: { уровень: обычная, характер: разработка, кем: смена }
 YAML
     if [ "$5" = 1 ]; then
         cat <<'YAML'
@@ -493,6 +494,36 @@ map_text wip wip 1 0 1 > "$T/model-map.yaml"           # пункт без SHA
 run_daemon "$T" >/dev/null
 verdict "$([ "$before" != "$(head_of "$T")" ] && [ "$(status_in_head "$T" hr.a)" = plan ] && echo 1 || echo 0)" \
     "сосед: plan→wip без привязанного SHA — статус возвращён в plan" "hr.a в HEAD = $(status_in_head "$T" hr.a)"
+# БОЛЬНОЙ СЛУЧАЙ 22.11.2026: модель перевела plan→wip с SHA карточку, чья
+# глубина — заготовка автомата (кем: автомат). Сторож пропустил, гейт пайплайна
+# в pre-commit отказал «взята в работу без назначенной глубины» — коммит карты
+# не прошёл, 17 пропусков не уехали, код 1. Взятие в работу судит одно правило:
+# сторож демона зовёт то же проверить_взятие, что гейт.
+depth_stand() {  # $1 — строка глубины hr.a вместо подтверждённой сменой
+    plan_stand
+    sed -i "s/^        глубина: .*/$1/" "$T/repo/dev-map.yaml"
+    git -C "$T/repo" -c user.name=t -c user.email=t@t commit -q -am 'карта: глубина hr.a
+
+Dev-Map: hr.a'
+    git -C "$T/repo" -c user.name=t -c user.email=t@t commit -q --allow-empty -m 'работа над hr.a'
+    PLAN_SHA=$(git -C "$T/repo" log -1 --format=%H)
+}
+depth_stand '        глубина: { уровень: обычная, характер: разработка, кем: автомат }'
+before=$(head_of "$T")
+map_text wip wip 1 0 1 | sed "s/Дописано демоном/коммит ${PLAN_SHA:0:10}/; s/кем: смена/кем: автомат/" > "$T/model-map.yaml"
+run_daemon "$T" >/dev/null
+verdict "$([ "$before" != "$(head_of "$T")" ] && [ "$(status_in_head "$T" hr.a)" = plan ] && [ "$(cat "$T/rc")" = 0 ] && echo 1 || echo 0)" \
+    "БОЛЬНОЙ 22.11: plan→wip с SHA, глубина от автомата — статус возвращён в plan, пункт закоммичен, код 0" \
+    "hr.a в HEAD = $(status_in_head "$T" hr.a), rc=$(cat "$T/rc")"
+depth_stand '        title2: "без глубины"'
+before=$(head_of "$T")
+map_text test wip 1 0 1 | sed "s/Дописано демоном/коммит ${PLAN_SHA:0:10}/; s/^        глубина: .*/        title2: \"без глубины\"/" > "$T/model-map.yaml"
+run_daemon "$T" >/dev/null
+verdict "$([ "$before" != "$(head_of "$T")" ] && [ "$(status_in_head "$T" hr.a)" = plan ] && [ "$(cat "$T/rc")" = 0 ] && echo 1 || echo 0)" \
+    "сосед: plan→test с SHA без глубины — статус возвращён в plan, код 0" \
+    "hr.a в HEAD = $(status_in_head "$T" hr.a), rc=$(cat "$T/rc")"
+verdict "$(grep -q 'поле «глубина» карточки подтверждено сменой' "$T/prompt.txt" 2>/dev/null && echo 1 || echo 0)" \
+    "БОЛЬНОЙ 22.11: промт называет и границу глубины, что держит гейт пайплайна"
 # Промт и сторож — одно правило: промт 17.11 звал «сменой её статуса» без
 # границы, а сторож пропускал одну смену. Модель шла за промтом и теряла всю
 # правку. Промт обязан назвать ту же границу, что держит сторож.

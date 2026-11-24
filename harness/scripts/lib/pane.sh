@@ -111,8 +111,9 @@ source "$PANE_SCRIPTS/lib/events.sh"
 # 0 = ротацию ведёт другой прогон и ждёт выхода звонящего. Признак берётся из
 # журнала, а не из «бежит ли процесс»: обычный прогон сторожа виден в ps так же,
 # но преемника не поднимет. Судья один — им пользуются и сторож, и дверь толчка.
+# -I: судью зовёт и Stop-хук, дверь пуша, — чужой PYTHONPATH (sitecustomize) в нём не исполняется.
 rotation_in_progress() {
-    python3 - "$LOG_DIR/rotation.jsonl" "${ROTATE_FINISH_TIMEOUT_SEC:-900}" <<'PYEOF' 2>/dev/null
+    python3 -I - "$LOG_DIR/rotation.jsonl" "${ROTATE_FINISH_TIMEOUT_SEC:-900}" <<'PYEOF' 2>/dev/null
 import json, sys, datetime
 путь, окно = sys.argv[1], int(sys.argv[2])
 последняя = None
@@ -123,7 +124,7 @@ try:
         except ValueError:
             continue
         if событие.get("event") in ("rotate_command", "agent_restarted",
-                                    "rotate_timeout", "restart_failed"):
+                                    "rotate_timeout", "restart_failed", "rotate_refused"):
             последняя = событие
 except OSError:
     sys.exit(1)

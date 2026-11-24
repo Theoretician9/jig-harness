@@ -119,7 +119,7 @@ RE_BACKGROUND_ITEM="^[[:space:]]*${PICK_MARK}?[[:space:]]*[0-9]+\\.[[:space:]]+M
 # там между ними « · ». Теперь ждём: «hit your … limit», «limit» рядом с
 # reached/exceeded/resets в пределах строки, «/upgrade …» — и не выдумываем.
 # «В пределах строки» — это «.»: grep судит построчно, и точка перевода строки
-# не видит. «[^\n]» в ERE значит «не n и не \» (находка копии bkb 11.11.2026):
+# не видит. «[^\n]» в ERE значит «не n и не \» (находка копии сети 11.11.2026):
 # «session» содержит «n», и строка лимита без « · resets» не узнавалась.
 LIMIT_RE='(hit|reached|exceeded).{0,40}limit|limit.{0,20}(reached|exceeded|resets?|will reset)|out of (usage|credits)|/upgrade (to|or)|upgrade to continue'
 признак_лимита_в() {  # $1 = текст панели
@@ -187,7 +187,7 @@ limit_active() {
 }
 
 # Подписка отказала в доступе (403) — по журналу смены, тем же судьёй, что лимит
-# (scripts/limit-in-log.py --отказ-доступа). Находка копии bkb 11.11.2026: два
+# (scripts/limit-in-log.py --отказ-доступа). Находка копии сети 11.11.2026: два
 # часа сторож пинал мёртвую смену «признака лимита нет», а владелец узнал о
 # простое сам. Выход: ACCESS_REFUSED (0/1), ACCESS_TEXT — ответ подписки.
 access_refused() {
@@ -365,13 +365,20 @@ print(f"в {сброс:%H:%M}, через {сколько}")
 # Транскрипт СМЕНЫ в каталоге проекта — тем же разрешателем, что `stall-in-log.py --shift`:
 # headless-прогоны (sdk-cli) пишут рядом и бывают свежее смены, но помощники и флаг
 # ротации принадлежат смене. Печатает путь; пусто — смены в каталоге нет.
-shift_transcript_in() {  # $1 = каталог транскриптов проекта
-    python3 - "$HARNESS_SCRIPTS/stall-in-log.py" "$1" 2>/dev/null <<'PY' || true
+# Второй довод — sid, который не считается сменой: дорабатывающая (флаг «дорабатывает»)
+# пишет рядом с преемником, и её журнал бывает свежее (спека 14.3 п. 5).
+shift_transcript_in() {  # $1 = каталог транскриптов проекта, [$2 = исключаемый sid]
+    python3 - "$HARNESS_SCRIPTS/stall-in-log.py" "$1" "${2:-}" 2>/dev/null <<'PY' || true
 import importlib.util, pathlib, sys
 spec = importlib.util.spec_from_file_location("stall_in_log", sys.argv[1])
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
-print(module.shift_transcript(pathlib.Path(sys.argv[2])) or "")
+folder, skip = pathlib.Path(sys.argv[2]), sys.argv[3]
+if not skip:
+    print(module.shift_transcript(folder) or "")
+else:
+    files = sorted(folder.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
+    print(next((str(p) for p in files if p.stem != skip and module._entrypoint(p) == "cli"), ""))
 PY
 }
 
@@ -408,8 +415,10 @@ judge_work() {
         JUDGE_WORK_MIN=$(( ( $(date +%s) - $(stat -c '%Y' "$tr") ) / 60 ))
     [[ "$JUDGE_WORK_SEC" =~ ^[0-9]+$ ]] || JUDGE_WORK_SEC=$(( JUDGE_WORK_MIN * 60 ))
 }
+# Строкой, не трубой: awk уходит на первом ключе, и писатель в трубу получал бы
+# SIGPIPE — под pipefail + set -e прогон сторожа обрывался молча.
 judge_field() {  # $1 = ключ строки судьи → значение
-    printf '%s\n' "$JUDGE_OUT" | awk -F'\t' -v key="$1" '$1 == key { print $2; exit }'
+    awk -F'\t' -v key="$1" '$1 == key { print $2; exit }' <<< "$JUDGE_OUT"
 }
 # Есть ли помощники: «?» (судья не знает) читается как «есть», число — как число.
 helpers_present() { [ "${JUDGE_HELPERS:-0}" != 0 ]; }
@@ -595,7 +604,7 @@ rotation_failed_recently() {  # журнал, сессия, сейчас-эпо�
                 failed=0 ;;
             *) failed=1; fail_at="$e" ;;
         esac
-    done < <(grep -E "\"event\":\"(rotate_command|clear_failed|clear_timeout|rotate_timeout)\"" "$log" \
+    done < <(grep -E "\"event\":\"(rotate_command|clear_failed|clear_timeout|rotate_timeout|rotate_refused)\"" "$log" \
              | jq -r --arg s "$sess" 'select(.session == $s) | [.ts, .event] | @tsv' 2>/dev/null | tail -40)
     [ "$failed" = 1 ] && [ "$attempts" -le "${ROTATE_EARLY_RETRY_MAX:-2}" ] && echo да || echo нет
 }
@@ -627,14 +636,25 @@ rotation_failed_recently() {  # журнал, сессия, сейчас-эпо�
 # сменил имя — значит пишет уже не та сессия.
 #
 # Печатает одно слово: ушла | оболочка | преемник | ждём
-смена_состоялась() {  # $1=сессия tmux жива(1/0) $2=команда в панели $3=id свежайшего транскрипта $4=id уходящей
-    local alive="$1" pane="$2" fresh_id="$3" old_id="$4"
+#
+# Два режима. Прежний (4 довода): преемника видно по смене свежайшего транскрипта.
+# С пятым доводом «pid» ($3/$4 — pane_pid сейчас и у старой): судит по tmux-сессии
+# =$TMUX_SESSION — при двух живых сменах свежайший транскрипт пишет любая из них,
+# а «в новой сессии claude с другим pid» отличить нельзя (спека 14.4).
+смена_состоялась() {  # $1=сессия tmux жива(1/0) $2=команда в панели $3=id свежайшего транскрипта | pane_pid сейчас $4=id уходящей | pane_pid старой [$5=pid]
+    local alive="$1" pane="$2" fresh_id="$3" old_id="$4" mode="${5:-}"
     [ "$alive" = 1 ] || { printf 'ушла\n'; return 0; }
     # «мертва» — панель пережила свой процесс: агент вышел, сессия цела.
     case "$pane" in
         bash|sh|zsh|dash) printf 'оболочка\n'; return 0 ;;
         мертва) printf 'ушла\n'; return 0 ;;
     esac
+    if [ "$mode" = pid ]; then
+        case "$pane" in
+            claude|node) [ -n "$fresh_id" ] && [ "$fresh_id" != "$old_id" ] && { printf 'преемник\n'; return 0; } ;;
+        esac
+        printf 'ждём\n'; return 0
+    fi
     if [ -n "$fresh_id" ] && [ "$fresh_id" != "$old_id" ]; then printf 'преемник\n'; return 0; fi
     printf 'ждём\n'
 }
@@ -1192,7 +1212,7 @@ nest_guard() {
             say "сокет tmux '$TMUX_SESSION' пропал, а сервер с агентом жив — возвращаю сокет сигналом USR1, второй сервер не поднимаю"
             agent_proc restore-nest >/dev/null 2>&1 || true
             while :; do
-                if tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
+                if tmux has-session -t "=$TMUX_SESSION" 2>/dev/null; then
                     say "сокет tmux вернулся"
                     return 0
                 fi
@@ -1218,9 +1238,39 @@ nest_guard() {
 # TWO_AGENTS_CONFIRM_SEC: короткоживущий второй (каждый круг новый pid) — не
 # смена. Порог 540, а не 600: круги cron расходятся на секунды. Смена состава
 # сбрасывает since. Метка .told хранит, о каком составе уже сказано.
+# Потомок ли pid панели tmux-сессии: claude дорабатывающей смены под своей сессией.
+pid_в_сессии() {  # $1=pid $2=имя tmux-сессии → 0 да
+    local panes pane cur="$1" hops=0
+    panes=$(tmux list-panes -t "=$2:" -F '#{pane_pid}' 2>/dev/null) || return 1
+    while [[ "$cur" =~ ^[0-9]+$ ]] && [ "$cur" -gt 1 ] && [ "$hops" -lt 64 ]; do
+        for pane in $panes; do [ "$cur" = "$pane" ] && return 0; done
+        cur=$(ps -o ppid= -p "$cur" 2>/dev/null | tr -d ' ' || true)
+        hops=$((hops + 1))
+    done
+    return 1
+}
+
+# При живом флаге «дорабатывает» второй основной claude в сессии флага законен:
+# старая смена доводит помощников (спека 14.3 п. 3). Тревога — при третьем или
+# при claude вне сессии флага. Печатает pid'ы без дорабатывающей.
+без_дорабатывающей() {  # $1 = номера процессов через пробел
+    local old pid out=""
+    [ "$(rotation_flag_read этап)" = дорабатывает ] || { printf '%s' "$1"; return 0; }
+    old=$(rotation_flag_read tmux)
+    [ -n "$old" ] || { printf '%s' "$1"; return 0; }
+    for pid in $1; do
+        pid_в_сессии "$pid" "$old" || out="${out:+$out }$pid"
+    done
+    printf '%s' "$out"
+}
+
 check_two_agents() {
     local state="$LOG_DIR/two-agents.state" pids rc=0 since="" since_epoch="" now fresh=1
     pids=$(agent_proc two-agents 2>/dev/null) || rc=$?
+    if [ "$rc" = 1 ]; then
+        pids=$(без_дорабатывающей "$pids")
+        [ "$(wc -w <<<"$pids")" -ge 2 ] || rc=0
+    fi
     case "$rc" in
         0)
             # Условие ушло — снимаем по журналу тревог, а не по метке .told:
@@ -1265,7 +1315,7 @@ early_exit_alarm() {
     [ -s "$started" ] && [ -s "$file" ] || return 0
     at=$(cat "$started" 2>/dev/null); [[ "$at" =~ ^[0-9]+$ ]] || return 0
     [ "$(cat "$told" 2>/dev/null)" = "$at" ] && return 0
-    if tmux has-session -t "$TMUX_SESSION" 2>/dev/null && pane_is_agent "$(pane_cmd)"; then return 0; fi
+    if tmux has-session -t "=$TMUX_SESSION" 2>/dev/null && pane_is_agent "$(pane_cmd)"; then return 0; fi
     last=$(stat -c '%Y' "$file")
     # Вывод должен быть ПОСЛЕ ввода команды: иначе это хвост прошлого запуска.
     [ "$last" -ge "$at" ] && [ $(( last - at )) -le "$AGENT_EARLY_EXIT_SEC" ] || return 0
@@ -1339,40 +1389,33 @@ start_agent() {
     # HARNESS_CONF со смоук-порогом «ротация при 1% окна» остался в глобале
     # после пробы ротации; поднятая сессия унаследовала его, и первый же
     # ручной прогон сторожа объявил ротацию на 26% окна.
-    tmux set-environment -gu HARNESS_CONF 2>/dev/null || true
-    tmux set-environment -gu HARNESS_INSTALL_CONF 2>/dev/null || true
     # Та же беда, но дороже: носитель чужого входа. Сервер tmux нёс его с
     # 30.09 (поднят, когда переменная стояла в профиле), и каждая созданная
     # им панель получала ЧУЖУЮ подписку — владелец 10.10: «при ротации
     # подключается аккаунт, в котором у меня закончился лимит». У команды
     # запуска носитель срывает komanda_agenta; здесь он снимается у сервера,
     # чтобы его не унаследовала панель, открытая руками.
-    tmux set-environment -gu "$NOSITEL_CHUZHOGO_VHODA" 2>/dev/null || true
-    if ! tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
+    очистить_окружение_сервера
+    if ! tmux has-session -t "=$TMUX_SESSION" 2>/dev/null; then
         local nest=0
         nest_guard || nest=$?
         case "$nest" in 0) return 0 ;; 1) return 1 ;; esac
     fi
-    if ! tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
+    if ! tmux has-session -t "=$TMUX_SESSION" 2>/dev/null; then
         say "tmux-сессии '$TMUX_SESSION' нет — поднимаю её вместе с агентом"
         if [ -x "$PROJECT_DIR/scripts/start-agent.sh" ]; then
             "$PROJECT_DIR/scripts/start-agent.sh" 8>&- || return 1
-        else
-            # С оболочкой, а не командой: сессия, созданная командой, умирает
-            # вместе с агентом и выбрасывает приаттаченного владельца из tmux
-            # (улика 13.08.2026 — та же, что в scripts/start-agent.sh).
-            # tmux-боевой: запуск агента: сессия смены на боевом сервере и есть цель
-            tmux new-session -d -s "$TMUX_SESSION" -c "$PROJECT_DIR" 8>&- || return 1
-            pane_log_attach "$TMUX_SESSION" "$LOG_DIR"
-            pane_command keys "$zapusk" Enter || return 1
+            agent_started_mark "$LOG_DIR"
+            while [ "$waited" -lt "$AGENT_START_TIMEOUT_SEC" ]; do
+                sleep 5; waited=$((waited + 5))
+                case "$(pane_cmd)" in claude|node) say "агент поднялся вместе с сессией за ${waited}с"; return 0 ;; esac
+            done
+            say "сессия поднята, но агента в панели нет за ${AGENT_START_TIMEOUT_SEC}с (там: $(pane_cmd))"
+            return 1
         fi
-        agent_started_mark "$LOG_DIR"
-        while [ "$waited" -lt "$AGENT_START_TIMEOUT_SEC" ]; do
-            sleep 5; waited=$((waited + 5))
-            case "$(pane_cmd)" in claude|node) say "агент поднялся вместе с сессией за ${waited}с"; return 0 ;; esac
-        done
-        say "сессия поднята, но агента в панели нет за ${AGENT_START_TIMEOUT_SEC}с (там: $(pane_cmd))"
-        return 1
+        # Запасной путь — тот же подъём, что у преемника при ротации.
+        поднять_сессию_с_агентом
+        return $?
     fi
     pane_log_attach "$TMUX_SESSION" "$LOG_DIR"
     cmd=$(pane_cmd)
@@ -1543,6 +1586,15 @@ if [ "${1:-}" = "--selftest" ]; then
     проба ждём    bash   1 $((NOW-300))  "панель простаивает, но агента нет всего 5 мин — сперва порог" 40
     проба поднять bash   0 $((NOW-1200)) "20 минут не claude и никого нет — поднять агента"
     проба поднять vim    0 $((NOW-1200)) "в панели редактор без человека — то же (сессия брошена)"
+    # Судья печатает строки, judge_field читает до первого ключа и уходит. Через
+    # трубу писатель мог писать уже после ухода читателя: SIGPIPE (141), и под
+    # pipefail + set -e прогон сторожа обрывался молча. Длинный вывод с ключом
+    # в первой строке делает этот уход читателя неизбежным, а не делом нагрузки.
+    JUDGE_OUT="работа_мин	7"$'\n'"$(seq 1 20000 | sed 's/^/хвост	/')"
+    jf_rc=0; jf_got=$(judge_field работа_мин) || jf_rc=$?
+    if [ "$jf_got;$jf_rc" = "7;0" ]; then printf '  ок    %s\n' "judge_field: ключ в начале длинного вывода судьи — значение есть, код 0"
+    else printf '  ПЛОХО judge_field: ключ в начале длинного вывода судьи: ждали «7;0», получили «%s;%s»\n' "$jf_got" "$jf_rc"; ok_flag=0; fi
+    JUDGE_OUT=""
     AGENT_DEAD_RESPECT_ATTACHED=0 проба поднять bash 2 $((NOW-1200)) \
         "уважение к приаттаченному выключено конфигом — поднимаем"
 
@@ -1784,6 +1836,8 @@ if [ "${1:-}" = "--selftest" ]; then
     случай да  0 "команда 45 мин назад без вести о провале давит: ротация может ещё идти"
     : > "$LOG"; строка rotate_command 45; строка clear_timeout 30
     случай нет 0 "БОЛЬНОЙ СЛУЧАЙ 06.11: команда не применилась (clear_timeout), сессия та же, прошло ≥ 30 мин — повтор разрешён"
+    : > "$LOG"; строка rotate_command 45; строка rotate_refused 41
+    случай нет 0 "БОЛЬНОЙ СЛУЧАЙ 19.11: дверь отменила смену (rotate_refused), прошло ≥ 30 мин — повтор разрешён, не через 120"
     : > "$LOG"; строка rotate_command 20; строка clear_failed 15
     случай да  0 "провал есть, но с команды прошло 20 < 30 мин — рано"
     : > "$LOG"; строка rotate_command 100; строка clear_failed 95; строка rotate_command 60; строка clear_failed 55
@@ -1816,7 +1870,7 @@ if [ "${1:-}" = "--selftest" ]; then
         *"(3)"*) printf '  ок    весть называет число идущих помощников\n' ;;
         *) echo "  ПЛОХО весть не называет число помощников"; ok_flag=0 ;;
     esac
-    # Находка bkb 12.11.2026: смена не могла сказать управляющему «доведи и
+    # Находка копии сети 12.11.2026: смена не могла сказать управляющему «доведи и
     # остановись» — весть называет служебную дверь хука очереди.
     case "$HOLD_TEXT" in
         *"[ротация] доведи и остановись"*) printf '  ок    весть называет дверь «[ротация] доведи и остановись»\n' ;;
@@ -1928,7 +1982,7 @@ if [ "${1:-}" = "--selftest" ]; then
     hold_proba nemota "$(stall_reason 0 0 2>&1)" \
         "немота при работе — повод «nemota»"
     hold_proba access "$(stall_reason 1 1 1 2>&1)" \
-        "БОЛЬНОЙ СЛУЧАЙ находки bkb 11.11: подписка отказала в доступе — повод «access» сильнее лимита и приглашения"
+        "БОЛЬНОЙ СЛУЧАЙ находки копии сети 11.11: подписка отказала в доступе — повод «access» сильнее лимита и приглашения"
     unset -f hold_proba hold_got
 
     # ── признак завершения смены ─────────────────────────────────────────────
@@ -1951,6 +2005,24 @@ if [ "${1:-}" = "--selftest" ]; then
     смена ушла     1 мертва s1 s1 "панель мертва — агент вышел, сессия цела (владельца не выбросило)"
     смена оболочка 1 bash   s1 s1 "панель снова оболочка — агент вышел"
     смена ждём     1 claude ""  s1 "транскрипта не видно — на пустом признаке смену не объявляем"
+
+    # С преемником (спека 14.4): при двух живых сменах свежайший транскрипт пишет любая,
+    # поэтому преемника судит сама tmux-сессия: claude|node в панели и pane_pid не прежний.
+    смена_pid() {  # ждём, сессия жива, панель, pane_pid сейчас, pane_pid старой, имя случая
+        local want="$1" got
+        got=$(смена_состоялась "$2" "$3" "$4" "$5" pid)
+        [ "$got" = "$want" ] \
+            && printf '  ок    %s\n' "$6" \
+            || { printf '  ПЛОХО %s: ждали «%s», получили «%s»\n' "$6" "$want" "$got"; ok_flag=0; }
+    }
+    смена_pid преемник 1 claude 200 100 "БОЛЬНОЙ СЛУЧАЙ 21.11: новая сессия с claude и другим pid — преемник, даже если старая пишет свежее"
+    смена_pid преемник 1 node   200 100 "в новой сессии node — тоже агент"
+    смена_pid ждём     1 claude 100 100 "в панели тот же процесс — старая ещё не ушла"
+    смена_pid ждём     1 claude ""  100 "pane_pid новой не прочитан — на пустом признаке смену не объявляем"
+    смена_pid ждём     1 sleep  200 100 "в новой сессии пока не агент — ждём"
+    смена_pid оболочка 1 bash   200 100 "в новой сессии оболочка — агент ещё не введён или вышел"
+    смена_pid ушла     0 ""     200 100 "новой сессии нет"
+    смена_pid ушла     1 мертва 200 100 "панель новой сессии мертва"
 
     # ── длинный ответ в канал уходит целиком ─────────────────────────────────
     # БОЛЬНОЙ СЛУЧАЙ 13.08.2026: владелец — «твои сообщения обрезаются, а они
@@ -2346,10 +2418,10 @@ PYEOF
     # её НЕ ловил: между «limit» и «resets» стоит « · ».
     лимит да  "You've hit your session limit · resets 2:50pm (Asia/Qostanay)" \
         "БОЛЬНОЙ СЛУЧАЙ: живая строка лимита со снимка владельца"
-    # Находка bkb 11.11.2026: «[^\n]» в ERE — это «не n и не \», а не «не перевод
+    # Находка копии сети 11.11.2026: «[^\n]» в ERE — это «не n и не \», а не «не перевод
     # строки»; «session» содержит «n», и строка без « · resets» не узнавалась.
     лимит да  "You've hit your session limit" \
-        "БОЛЬНОЙ СЛУЧАЙ находки bkb: строка лимита без срока — буква n не рвёт признак"
+        "БОЛЬНОЙ СЛУЧАЙ находки копии сети: строка лимита без срока — буква n не рвёт признак"
     лимит да  "You've reached your session limit" "reached … session limit без срока"
     лимит нет "$(printf 'hit the build step\nlimit=5 in config')" \
         "признак не тянется через строки: «hit» и «limit» в разных строках — не лимит"
@@ -2798,7 +2870,7 @@ PYEOF
         printf '  ок    итоговая строка сходится с файлом: %s пути живого диалога\n' "$COUNTED_Z"
     fi
 
-    (( ok_flag )) && { echo "SELFTEST: зелёный (7 путей распознавания диалога выхода + 4 пути живого диалога (текст + кто в панели) + 2 пути висячего Escape в оболочке + 6 путей лестницы ответов + 3 пути подсвеченного пункта + 3 пути номера пункта выхода + 11 путей решения по панели + 3 пути доставки в панель + 13 путей антиповтора + 5 путей кулдауна пинка + 6 путей признака смены + 11 путей выхода из ротации + 3 пути признака живой фоновой задачи + 4 пути метки конца хода + 2 пути доставки длинного текста владельцу целиком + 3 пути кулдауна разговора о блокировке + 4 пути замера окна + 9 путей выбора способа ротации + 4 пути эталона версии CLI + 11 путей двери ротации (передача дел, лимит и аккаунт в лимите) + 6 путей выбора по ответу «ждёт» + 5 путей помощников для ротации + 2 пути решения «слать ли весть о ротации» + 3 пути суточной сверки меню бота + 5 путей отката без передачи + 13 путей признака лимита подписки + 3 пути кнопки ревизии + 3 пути паузы владельца + 4 пути решения «будить ли смену» + 13 путей решения лимитной ветки + 12 путей времени сброса и пинка по нему + 17 путей «работы нет, смена у приглашения» + 4 пути текста вести о ждущей ротации, в каждой группе первым — больной случай)"; exit 0; }
+    (( ok_flag )) && { echo "SELFTEST: зелёный (7 путей распознавания диалога выхода + 4 пути живого диалога (текст + кто в панели) + 2 пути висячего Escape в оболочке + 6 путей лестницы ответов + 3 пути подсвеченного пункта + 3 пути номера пункта выхода + 11 путей решения по панели + 3 пути доставки в панель + 14 путей антиповтора + 5 путей кулдауна пинка + 6 путей признака смены + 8 путей признака смены по tmux-сессии (преемник) + 11 путей выхода из ротации + 3 пути признака живой фоновой задачи + 4 пути метки конца хода + 2 пути доставки длинного текста владельцу целиком + 3 пути кулдауна разговора о блокировке + 4 пути замера окна + 9 путей выбора способа ротации + 4 пути эталона версии CLI + 11 путей двери ротации (передача дел, лимит и аккаунт в лимите) + 6 путей выбора по ответу «ждёт» + 5 путей помощников для ротации + 2 пути решения «слать ли весть о ротации» + 3 пути суточной сверки меню бота + 5 путей отката без передачи + 13 путей признака лимита подписки + 3 пути кнопки ревизии + 3 пути паузы владельца + 4 пути решения «будить ли смену» + 13 путей решения лимитной ветки + 12 путей времени сброса и пинка по нему + 17 путей «работы нет, смена у приглашения» + 4 пути текста вести о ждущей ротации, в каждой группе первым — больной случай)"; exit 0; }
     exit 1
 fi
 
@@ -2817,6 +2889,12 @@ konf_zagruzit
 # функции разъезжаются при первой же правке (находка ревью кода 12.09.2026).
 # shellcheck disable=SC1091
 [ -r "$PROJECT_DIR/scripts/lib/models.sh" ] && source "$PROJECT_DIR/scripts/lib/models.sh"
+# Метка «идёт выпуск» — для тишины скорости: пул тяжёлых прогонов при выпуске
+# мест не даёт (scripts/lib/release_mark.sh). Путь — от самого сторожа, как у
+# pane.sh: у стенда и копии в PROJECT_DIR библиотеки может не быть, а source
+# мимо файла под set -e роняет весь обход.
+# shellcheck disable=SC1091
+source "$HARNESS_SCRIPTS/lib/release_mark.sh"
 # Работа по подменённому конфигу — законна (смоук ротации), но обязана быть
 # видна: тот же прогон с чужими порогами выглядит в журнале как штатный.
 [ "$HARNESS_CONF" = "$(konf_koren)/harness.conf" ] || \
@@ -2838,6 +2916,17 @@ AGENT_DEAD_RESPECT_ATTACHED="${AGENT_DEAD_RESPECT_ATTACHED:-1}"
 AGENT_DEAD_COOLDOWN_MIN="${AGENT_DEAD_COOLDOWN_MIN:-120}"
 AGENT_ATTACHED_IDLE_MIN="${AGENT_ATTACHED_IDLE_MIN:-10}"
 
+# Ротация с преемником (спека ротация-ждёт-помощников, раздел 14). 1 — преемник
+# поднимается сразу после передачи, старая смена дорабатывает помощников в
+# переименованной tmux-сессии; 0 — прежний путь (ожидание помощников, «/clear»):
+# старый код остаётся путём отката. ROTATE_FINISHING_MAX_MIN — только срок, после
+# которого владельцу уходит одно письмо: никого не убивается (слово 02.11.2026).
+ROTATE_SUCCESSOR="${ROTATE_SUCCESSOR:-1}"
+ROTATE_FINISHING_MAX_MIN="${ROTATE_FINISHING_MAX_MIN:-360}"
+# Имя сессии оркестратора: обновить_роль подменяет TMUX_SESSION на время ротации
+# роли, а флаг, хуки и юнит помнят только это имя.
+ROTATION_MAIN_SESSION="${TMUX_SESSION:-agent}"
+
 
 
 # П-2 (ревью №2): делитель замера окна; ноль, пустота или не-число валили
@@ -2857,6 +2946,7 @@ mkdir -p "$LOG_DIR" "$HEARTBEAT_DIR"
 # scripts/lib/rotation_flag.py и по нему кладёт новые запуски помощников в очередь.
 ROTATION_STATE_DIR="${HARNESS_PANEL_STATE:-$(python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import config; print(config.panel_state_dir())' "$HARNESS_SCRIPTS/lib" 2>/dev/null || true)}"
 ROTATION_FLAG="$ROTATION_STATE_DIR/rotation-waits-helpers.json"
+FLAG_EXTRA=()
 
 rotation_flag_read() {  # $1 = поле флага → значение (пусто — флага или поля нет)
     jq -r --arg k "$1" '.[$k] // empty' "$ROTATION_FLAG" 2>/dev/null || true
@@ -2864,11 +2954,23 @@ rotation_flag_read() {  # $1 = поле флага → значение (пус�
 
 # Записать флаг: одна точка записи — CLI scripts/lib/rotation_flag.py (перенос
 # полей «с»/«причина»/«принуждена»/«сказано» и атомарная запись — там).
+# Ротация с преемником добавляет поля: слово-причина (ROTATE_CAUSE) вместо слов
+# в «причине», слова — в «подробно»; роль и её tmux (ROTATE_ROLE); ЧЬЯ сессия во
+# флаге (FLAG_FOR_SESSION: у дорабатывающей — её, а не смены, что пишет сейчас);
+# FLAG_EXTRA — --successor/--tmux/--ordered/--finishing-since. Без них вызов
+# прежний, байт в байт.
 rotation_flag_put() {  # $1=этап $2=помощников $3=ждали_сек [$4=принуждена] [$5=сказано epoch]
     local args=(--set --stage "$1" --helpers "$2" --waited "$3")
     [ -z "${4:-}" ] || args+=(--forced "$4")
     [ -z "${5:-}" ] || args+=(--told "$5")
-    args+=(--session "${SHIFT_SESSION_ID:-${SESSION_ID:-}}" --reason "${REASON:-}")
+    args+=(--session "${FLAG_FOR_SESSION:-${SHIFT_SESSION_ID:-${SESSION_ID:-}}}")
+    if [ -n "${ROTATE_CAUSE:-}" ]; then
+        args+=(--reason "$ROTATE_CAUSE" --detail "${REASON:-}")
+    else
+        args+=(--reason "${REASON:-}")
+    fi
+    [ -z "${ROTATE_ROLE:-}" ] || args+=(--role "$ROTATE_ROLE" --tmux-role "${ROLE_TMUX:-${TMUX_SESSION:-}}")
+    args+=(${FLAG_EXTRA[@]+"${FLAG_EXTRA[@]}"})
     local err
     err=$(HARNESS_PANEL_STATE="$ROTATION_STATE_DIR" python3 "$HARNESS_SCRIPTS/lib/rotation_flag.py" "${args[@]}" 2>&1 >/dev/null) \
         || say "флаг ротации записать не вышло: $ROTATION_FLAG: $(printf %s "$err" | tail -n 1)"
@@ -2880,8 +2982,9 @@ rotation_flag_put() {  # $1=этап $2=помощников $3=ждали_се�
 # запуски помощников до своего протухания.
 rotation_flag_clear() {  # $1 = повод
     [ -e "$ROTATION_FLAG" ] || return 0
-    local err
-    err=$(HARNESS_PANEL_STATE="$ROTATION_STATE_DIR" python3 "$HARNESS_SCRIPTS/lib/rotation_flag.py" --clear 2>&1 >/dev/null) \
+    local err clear_args=(--clear) role_tmux="${ROLE_TMUX:-${TMUX_SESSION:-}}"
+    [ -z "$role_tmux" ] || [ "$role_tmux" = "${ROTATION_MAIN_SESSION:-$role_tmux}" ] || clear_args+=(--tmux-role "$role_tmux")
+    err=$(HARNESS_PANEL_STATE="$ROTATION_STATE_DIR" python3 "$HARNESS_SCRIPTS/lib/rotation_flag.py" "${clear_args[@]}" 2>&1 >/dev/null) \
         || say "флаг ротации снять не вышло: $ROTATION_FLAG: $(printf %s "$err" | tail -n 1)"
     jlog "rotation_flag_cleared" "${SESSION_ID:-?}" "$1: $ROTATION_FLAG"
 }
@@ -2920,6 +3023,8 @@ ROTATE_OWNER_OVERRIDE=0
 rotate_now_gate() {  # 0 — отвязывать можно; 1 — смена отложена, агенту сказано
     local out="" rc=0 running=0 hung=0 sid="" verdict who
     [ "$ROTATE_OWNER_OVERRIDE" != 1 ] || return 0
+    # С преемником помощники ротацию не держат: они доживают в старой сессии (спека 14.15).
+    [ "$ROTATE_SUCCESSOR" != 1 ] || return 0
     out=$(python3 "$HARNESS_SCRIPTS/stall-in-log.py" --работа --shift 2>/dev/null) || rc=$?
     # Код 1 — транскрипта смены нет: судить нечем, отвязка идёт как раньше.
     [ "$rc" != 1 ] || return 0
@@ -3028,6 +3133,13 @@ fi
 jlog() {  # событие, сессия, детали
     jq -cn --arg ts "$(date -Is)" --arg ev "$1" --arg s "$2" --arg d "$3" \
         '{ts:$ts, event:$ev, session:$s, detail:$d}' >> "$ROTATION_LOG"
+}
+
+# То же событие с числами меры в поле data (спека 14.14): слова остаются в detail,
+# числа — для отчёта владельцу, который берёт их jq, а не пересказом модели.
+jlog_data() {  # событие, сессия, детали, JSON чисел
+    jq -cn --arg ts "$(date -Is)" --arg ev "$1" --arg s "$2" --arg d "$3" --argjson data "$4" \
+        '{ts:$ts, event:$ev, session:$s, detail:$d, data:$data}' >> "$ROTATION_LOG"
 }
 
 # Отправка владельцу. Успех ТОЛЬКО при ok:true (норма 01-SPEC §7) — лог
@@ -3198,7 +3310,7 @@ fi
 # Новые сессии поднимаются с оболочкой и переживают выход сами; эта опция
 # закрывает и те, что уже подняты старым способом — включая живую сейчас.
 беречь_сессию() {
-    tmux has-session -t "$TMUX_SESSION" 2>/dev/null || return 0
+    tmux has-session -t "=$TMUX_SESSION" 2>/dev/null || return 0
     tmux set-option -t "$TMUX_SESSION" remain-on-exit on 2>/dev/null || true
 }
 
@@ -3460,7 +3572,9 @@ rotation_queue_note() {  # $1 = вывод `rotation_queue_guard.py --release`
 # пинка они подаются отдельным толчком и помечаются только после доставки.
 rotation_queue_rescue() {
     local guard="$HARNESS_SCRIPTS/hooks/rotation_queue_guard.py" out numbers age
-    [ ! -e "$ROTATION_FLAG" ] || return 0
+    # На этапе «дорабатывает» очередь, что старая смена положила ПОСЛЕ подъёма
+    # преемника, принадлежит преемнику и выпускается ему; ждёт/идёт — держат её.
+    [ ! -e "$ROTATION_FLAG" ] || [ "$(rotation_flag_read этап)" = дорабатывает ] || return 0
     [ -f "$guard" ] || return 0
     age=$(возраст_пинка)
     [ -z "$age" ] || [ "$age" -ge $(( ${KICK_COOLDOWN_SEC:-120} * 5 )) ] || return 0
@@ -3487,6 +3601,9 @@ shift_leftover_sweep() {
 if [ "${LOCK_TAKEN:-1}" = 0 ] && ротация_в_ходу; then
     say "--rotate-now: смену уже ведёт другой прогон — просто выхожу, преемника поднимет он"
     jlog "rotate_already_running" "?" "лок держит идущая ротация — агент выходит, не мешая ей"
+    # С преемником «/exit» не подаётся: идущий прогон сам поднимет новую сессию, а старая
+    # доработает; свой «/exit» оборвал бы её помощников.
+    [ "$ROTATE_SUCCESSOR" != 1 ] || exit 0
     agent_rotation_prompt "/exit" || {
         say "команда выхода в панель НЕ ушла — сессия остаётся, смена не состоится"
         tg_send "Смену ведёт сторож, но команда выхода не дошла до панели — сессия жива. Нужно вмешаться." --несмотря-на-лимит || true
@@ -3522,7 +3639,9 @@ KICK_STAMP="${KICK_STAMP:-${LOG_DIR}/kick.stamp}"
     # пути пинка (полный перезапуск, --kick, дозор, подъём выпавшего агента).
     local had_flag=0 queue_out="" queue_numbers="" queue_note=""
     [ ! -e "$ROTATION_FLAG" ] || had_flag=1
-    rotation_flag_clear "новая смена получает пинок"
+    # Флаг «дорабатывает» принадлежит СТАРОЙ смене, а пинок идёт преемнику: снять его
+    # значило бы вернуть старой канал и запуски помощников (спека 14.3 п. 6).
+    [ "$(rotation_flag_read этап)" = дорабатывает ] || rotation_flag_clear "новая смена получает пинок"
     # Пинок зовут несколько рук сразу: сторож после ротации, sentinel после
     # загрузки, пусковой скрипт после подъёма юнитом. Кулдаун — чтобы свежая
     # сессия не получила три одинаковых поручения подряд и не начала работу
@@ -3593,7 +3712,7 @@ fi
 # за собой никого. Теперь оставляет: дозор смотрит каждые 20с и поднимает
 # преемника в тот же момент, когда панель освободилась.
 агента_нет() {
-    tmux has-session -t "$TMUX_SESSION" 2>/dev/null || return 0
+    tmux has-session -t "=$TMUX_SESSION" 2>/dev/null || return 0
     case "$(pane_cmd)" in claude|node) return 1 ;; *) return 0 ;; esac
 }
 
@@ -3640,7 +3759,7 @@ panel_watch() {
     pane_log_trim "$LOG_DIR" "${AGENT_PANE_LOG_MAX_KB:-5120}"
     PANE_STATE="$LOG_DIR/agent-pane.since"
     DEAD_STAMP="$LOG_DIR/agent-pane.told"
-    if tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
+    if tmux has-session -t "=$TMUX_SESSION" 2>/dev/null; then
         PANE_NOW=$(pane_cmd)
         CLIENTS=$(tmux list-clients -t "$TMUX_SESSION" 2>/dev/null | grep -c . || true)
         # Часы «агента нет с» заводятся ДО решения. Пока их заводила только ветка
@@ -3737,6 +3856,500 @@ panel_watch() {
     fi
 }
 
+# ══ Ротация с преемником (спека ротация-ждёт-помощников, раздел 14) ═══════════
+# Преемник поднимается сразу после передачи в новой tmux-сессии с прежним именем;
+# старая смена переименована в «<имя>-old-<epoch>», доводит помощников и закрывается
+# сама, когда они кончились. Ни один помощник не убивается (слово 02.11.2026).
+# Все команды tmux здесь — с точным именем «=имя»: голое «-t agent» при живой
+# «agent-old-…» без «agent» находит старую по префиксу (спека 14.3 п. 1).
+
+жив_tmux() { tmux has-session -t "=$1" 2>/dev/null; }
+
+# Слово причины из закрытого списка; всё иное (слова флага, поставленного прежним
+# кодом) — «контекст»: ждавшая ротация почти всегда была по окну.
+причина_слово() {  # $1 = поле «причина» флага
+    case "$1" in
+        контекст|компакт|обновление|needrestart|аккаунт|каталог|агент|владелец) printf '%s' "$1" ;;
+        *) printf 'контекст' ;;
+    esac
+}
+
+# Флаг роли: у сессии оркестратора прежний файл (его читают хуки копий), у прочих
+# ролей — со своим именем.
+флаг_роли_путь() {  # $1 = имя tmux-сессии роли
+    if [ "$1" = "$ROTATION_MAIN_SESSION" ]; then
+        printf '%s\n' "$ROTATION_STATE_DIR/rotation-waits-helpers.json"
+    else
+        printf '%s\n' "$ROTATION_STATE_DIR/rotation-waits-helpers.$1.json"
+    fi
+}
+
+# Закончила ли ход ЭТА сессия после поручения. Общая метка turn-end.stamp при двух
+# живых сменах не скажет, чья она; хук Stop пишет и turn-end.<sid>.stamp. Ход
+# завершён, если метка не старше поручения и не старше последней записи её
+# транскрипта (допуск 10 с: хук Stop пишется чуть позже записи). Метки нет — 0.
+ход_завершён_сессии() {  # $1=sid $2=поручено (epoch) $3=транскрипт → 1/0
+    local stamp ordered="${2:-0}" mtime
+    stamp=$(cat "$LOG_DIR/turn-end.$1.stamp" 2>/dev/null || echo 0)
+    [[ "$stamp" =~ ^[0-9]+$ ]] || stamp=0
+    [[ "$ordered" =~ ^[0-9]+$ ]] || ordered=0
+    mtime=$(stat -c '%Y' "$3" 2>/dev/null || echo 0)
+    if [ "$stamp" -gt 0 ] && [ "$stamp" -ge "$ordered" ] && [ "$stamp" -ge $(( mtime - 10 )) ]; then
+        printf '1'
+    else
+        printf '0'
+    fi
+}
+
+# Подмена конфига и носитель чужого входа живут одной командой, а не в окружении
+# сервера tmux (причины — в start_agent): сервер — демон, и осевшее в его окружении
+# наследует каждая будущая сессия.
+очистить_окружение_сервера() {
+    tmux set-environment -gu HARNESS_CONF 2>/dev/null || true
+    tmux set-environment -gu HARNESS_INSTALL_CONF 2>/dev/null || true
+    tmux set-environment -gu "$NOSITEL_CHUZHOGO_VHODA" 2>/dev/null || true
+}
+
+# Сессия — с оболочкой, а не командой: сессия, созданная командой, умирает вместе с
+# агентом и выбрасывает приаттаченного владельца (улика 13.08.2026, см. start-agent.sh).
+создать_сессию_агента() {
+    # tmux-боевой: запуск агента: сессия роли на боевом сервере и есть цель
+    tmux new-session -d -s "$TMUX_SESSION" -c "$PROJECT_DIR" 8>&-
+}
+
+# Ввод команды запуска в панель новой сессии и ожидание агента в ней. С довод «pid»
+# (pane_pid старой сессии) преемника судит смена_состоялась по tmux-сессии.
+ввести_запуск_агента() {  # [$1 = pane_pid прежней сессии роли]
+    local old_pid="${1:-}" waited=0 zapusk verdict now_pid
+    zapusk="$(komanda_agenta "$AGENT_START_CMD")"
+    pane_log_attach "$TMUX_SESSION" "$LOG_DIR"
+    pane_command keys "cd '$PROJECT_DIR' && $zapusk" Enter || return 1
+    agent_started_mark "$LOG_DIR"
+    full_restart_mark "$HEARTBEAT_DIR/.полный-перезапуск"
+    while [ "$waited" -lt "$AGENT_START_TIMEOUT_SEC" ]; do
+        sleep 2; waited=$((waited + 2))
+        if [ -n "$old_pid" ]; then
+            now_pid=$(tmux display-message -p -t "=$TMUX_SESSION:" '#{pane_pid}' 2>/dev/null || true)
+            verdict=$(смена_состоялась "$(жив_tmux "$TMUX_SESSION" && echo 1 || echo 0)" "$(pane_cmd)" "$now_pid" "$old_pid" pid)
+            [ "$verdict" != преемник ] || { say "преемник поднялся за ${waited}с (панель '$TMUX_SESSION')"; return 0; }
+        else
+            case "$(pane_cmd)" in claude|node) say "агент поднялся вместе с сессией за ${waited}с"; return 0 ;; esac
+        fi
+    done
+    say "сессия поднята, но агента в панели нет за ${AGENT_START_TIMEOUT_SEC}с (там: $(pane_cmd))"
+    return 1
+}
+
+# Одна функция — один подъём сессии с агентом: её зовёт и запасной путь start_agent.
+поднять_сессию_с_агентом() {
+    очистить_окружение_сервера
+    создать_сессию_агента || return 1
+    ввести_запуск_агента
+}
+
+# Под локом двери pane.lock (pane_lock_run): между переименованием и созданием
+# любой толчок в «agent» попал бы в старую смену. Внутри лока tmux зовётся только
+# через pane_tmux (он закрывает дескрипторы локов потомку); pane_command здесь нельзя —
+# он берёт тот же лок. Отказ создания возвращает имя старой сразу.
+переименовать_и_создать() {  # $1=имя роли $2=новое имя старой
+    pane_tmux rename-session -t "=$1" "$2" || return 1
+    if ! pane_tmux new-session -d -s "$1" -c "$PROJECT_DIR"; then
+        pane_tmux rename-session -t "=$2" "$1" || true
+        return 1
+    fi
+}
+
+# Подъём не удался уже ПОСЛЕ создания: пустую новую сессию гасим и возвращаем имя
+# старой (она продолжает как ни в чём не бывало).
+вернуть_старую_роль() {  # $1=имя роли $2=имя старой
+    pane_tmux kill-session -t "=$1" || true
+    pane_tmux rename-session -t "=$2" "$1"
+}
+
+# Транскрипт преемника рождается с его первым сообщением (пинок), а не при старте:
+# ждём новый cli-транскрипт, не принадлежащий старой смене, до AGENT_START_TIMEOUT_SEC.
+# Не появился — «?», его допишет следующий прогон (спека 14.3 п. 9).
+найти_преемника() {  # $1=sid старой $2=миг подъёма (epoch) → sid | «?»
+    local waited=0 tr
+    while :; do
+        tr=$(shift_transcript_in "$PROJECT_TRANSCRIPTS" "$1")
+        if [ -n "$tr" ] && [ "$(stat -c '%Y' "$tr" 2>/dev/null || echo 0)" -ge "$2" ]; then
+            basename "$tr" .jsonl; return 0
+        fi
+        [ "$waited" -lt "${AGENT_START_TIMEOUT_SEC:-60}" ] || break
+        sleep 3; waited=$((waited + 3))
+    done
+    printf '?\n'
+}
+
+# Поле во флаге с добавочными доводами CLI (--successor, --tmux, --ordered,
+# --finishing-since): массив виден только вложенному rotation_flag_put.
+rotation_flag_put_extra() {  # $1=этап $2=помощников $3=ждали_сек, дальше — доводы CLI
+    local -a FLAG_EXTRA=("${@:4}")
+    rotation_flag_put "$1" "$2" "$3"
+}
+
+# Число помощников для данных события: «?» (судья не знает) — не число.
+число_или_null() { [[ "${1:-}" =~ ^[0-9]+$ ]] && printf '%s' "$1" || printf 'null'; }
+
+# Мера успеха в числах (спека 14.14): одна строка rotation.jsonl с полем data.
+событие_доработки() {  # $1=событие $2=sid старой $3=роль $4=tmux роли $5=минут $6=помощников убито
+    jlog_data "$1" "$2" "дорабатывающая '${old_name:-?}': закрыта после $5 мин" \
+        "$(jq -cn --arg r "$3" --arg t "$4" --argjson m "$5" --argjson k "$6" \
+            '{"роль":$r, "tmux":$t, "доработка_мин":$m, "помощников_убито":$k}')"
+}
+
+# Лестница диалога выхода («Background work is running…») для сессии $1: ответы по
+# клавишам_подтверждения до выхода, не дольше ROTATE_EXIT_WAIT_SEC. 0 — сессия вышла
+# (оболочка, мёртвая панель или сессии нет), 1 — не вышла. Помощники здесь не держат:
+# «/exit» подаётся, только когда идущих у этой сессии нет, а зависших выход не ждёт.
+довести_выход() {  # $1=tmux-сессия $2=sid
+    local TMUX_SESSION="$1" sid="$2" waited=0 limit="${ROTATE_EXIT_WAIT_SEC:-180}"
+    local dialog_tries=0 dialog_rounds=0 dialog_capped=0 pane pane_text picked keys held sent screen pick_num k
+    while :; do
+        жив_tmux "$TMUX_SESSION" || return 0
+        pane=$(pane_cmd)
+        case "$pane" in bash|sh|zsh|dash|мертва) return 0 ;; esac
+        if [ "$dialog_capped" = 0 ]; then
+            pane_text=$(tmux capture-pane -p -t "=$TMUX_SESSION:" 2>/dev/null || true)
+            if диалог_выхода_жив "$pane_text" "$pane"; then
+                dialog_tries=$((dialog_tries + 1))
+                picked=$(подсвеченный_пункт_в "$pane_text")
+                keys=$(клавиши_подтверждения "$dialog_tries" 0)
+                if [ "${keys#ПУНКТ }" != "$keys" ]; then
+                    pick_num=$(номер_пункта_выхода "$pane_text")
+                    keys="${pick_num:-Enter} ${keys#ПУНКТ }"
+                    [ -n "$pick_num" ] || keys="Enter"
+                elif [ "${keys#ФОНОМ }" != "$keys" ]; then
+                    pick_num=$(номер_пункта_фоном "$pane_text")
+                    keys="${pick_num:-Enter} ${keys#ФОНОМ }"
+                    [ -n "$pick_num" ] || keys="Enter"
+                fi
+                say "«/exit» дорабатывающей '$TMUX_SESSION' перехвачен вопросом о фоновых задачах (попытка $dialog_tries, подсвечено «${picked:-не разобрал}») — шлю «$keys»"
+                held=$(printf '%s' "$pane_text" | grep -cE '^\s+(shell|bash|task) ·' || true)
+                sent=""
+                for k in $keys; do
+                    if ! диалог_выхода_жив "$(tmux capture-pane -p -t "=$TMUX_SESSION:" 2>/dev/null || true)" "$(pane_cmd)"; then
+                        sent="${sent:+$sent,}$k=не нужен"
+                        break
+                    fi
+                    if pane_command keys "$k"; then sent="${sent:+$sent,}$k=ок"; else sent="${sent:+$sent,}$k=ОТКАЗ"; say "клавиша «$k» в панель не ушла"; fi
+                    sleep "${PANE_ENTER_DELAY:-0.7}"
+                done
+                screen=$(printf '%s' "$pane_text" | grep -A 12 -F 'Background work is running' | tr '\n' '|' | cut -c1-400 || true)
+                jlog "rotate_exit_dialog" "$sid" "дорабатывающая: попытка $dialog_tries, подсвечено «${picked:-?}», клавиши «$keys» ($sent), задач в списке: $held, экран: $screen"
+                if [ "$keys" = Escape ]; then
+                    dialog_rounds=$((dialog_rounds + 1))
+                    say "диалог не поддался $dialog_tries раз (круг $dialog_rounds) — сбросил Escape и подаю «/exit» заново"
+                    agent_rotation_prompt "/exit" || say "«/exit» в панель не ушёл (в панели: $pane)"
+                    dialog_tries=0
+                fi
+                if [ "$dialog_rounds" -ge "${ROTATE_DIALOG_ROUNDS:-3}" ]; then
+                    say "диалог выхода дорабатывающей не поддался за ${dialog_rounds} круга — лестницу прекращаю"
+                    jlog "rotate_dialog_capped" "$sid" "лестница ответов исчерпана: ${dialog_rounds} круга; снимок: $(сохранить_снимок "диалог-выхода")"
+                    dialog_capped=1
+                else
+                    continue
+                fi
+            fi
+        fi
+        [ "$waited" -lt "$limit" ] || return 1
+        sleep 3; waited=$((waited + 3))
+    done
+}
+
+# Один шаг ветки доработки для флага ROTATION_FLAG («дорабатывает», спека 14.6).
+# Зовётся через доработка_шаг — в подоболочке: судья помощников здесь меряет ЕЁ
+# транскрипт, и это не должно подменить замер смены у вызывающего. Преемника ветка
+# не трогает никогда: все её команды tmux — с точным именем старой сессии.
+доработка_шаг_тело() {
+    local old_name old_sid ordered since role role_tmux now minutes tr pane helpers killed turn_done idle told successor successor_tr
+    old_name=$(rotation_flag_read tmux); old_sid=$(rotation_flag_read сессия)
+    ordered=$(rotation_flag_read поручено); since=$(rotation_flag_read с_доработки)
+    role=$(rotation_flag_read роль); role_tmux=$(rotation_flag_read tmux_роли)
+    [ -n "$role" ] || role=оркестратор
+    [ -n "$role_tmux" ] || role_tmux="$ROTATION_MAIN_SESSION"
+    local ROTATE_ROLE="$role" ROLE_TMUX="$role_tmux" FLAG_FOR_SESSION="$old_sid"
+    local -a FLAG_EXTRA=()
+    if [ -z "$old_name" ] || [ -z "$old_sid" ]; then
+        say "флаг «дорабатывает» без имени сессии или sid — снимаю"
+        rotation_flag_clear "флаг дорабатывающей без полей"
+        return 0
+    fi
+    now=$(date +%s)
+    [[ "$since" =~ ^[0-9]+$ ]] || since="$now"
+    minutes=$(( (now - since) / 60 ))
+    tr="$PROJECT_TRANSCRIPTS/$old_sid.jsonl"
+    SHIFT_TRANSCRIPT="$tr"; SESSION_ID="$old_sid"
+    judge_work
+    helpers="$JUDGE_HELPERS"
+    [ -f "$tr" ] || helpers="?"
+    killed=0
+    [[ "$helpers" =~ ^[0-9]+$ ]] && killed=$(( helpers + JUDGE_HUNG ))
+    if ! жив_tmux "$old_name"; then
+        say "дорабатывающей сессии '$old_name' нет — снимаю флаг"
+        событие_доработки finishing_gone "$old_sid" "$role" "$role_tmux" "$minutes" "$killed"
+        rotation_flag_clear "дорабатывающая ушла"
+        return 0
+    fi
+    local TMUX_SESSION="$old_name"
+    pane=$(pane_cmd)
+    case "$pane" in
+        bash|sh|zsh|dash|мертва)
+            say "дорабатывающая '$old_name': панель стала «$pane» — закрываю сессию"
+            tmux kill-session -t "=$old_name" 2>/dev/null || true
+            событие_доработки finishing_closed "$old_sid" "$role" "$role_tmux" "$minutes" "$killed"
+            rotation_flag_clear "дорабатывающая вышла"
+            return 0 ;;
+    esac
+    turn_done=$(ход_завершён_сессии "$old_sid" "$ordered" "$tr")
+    idle=$(простой_панели)
+    if [ "$helpers" = 0 ] && [ "$turn_done" = 1 ] && [ "$idle" -ge "${ROTATE_IDLE_SEC:-120}" ]; then
+        say "дорабатывающая '$old_name': помощников нет, ход закончен, панель молчит ${idle}с — ввожу «/exit»"
+        jlog "rotate_exit_sent" "$old_sid" "дорабатывающая: помощников 0 (зависших ${JUDGE_HUNG}), простой панели ${idle}с, доработка ${minutes} мин — «/exit» введён в панель"
+        PANE_REFUSAL=""
+        if ! agent_rotation_prompt "/exit"; then
+            say "«/exit» дорабатывающей не ушёл (${PANE_REFUSAL:-в панели: $pane}) — повторю на следующем прогоне"
+        elif довести_выход "$old_name" "$old_sid"; then
+            tmux kill-session -t "=$old_name" 2>/dev/null || true
+            событие_доработки finishing_done "$old_sid" "$role" "$role_tmux" "$minutes" "$killed"
+            say "дорабатывающая '$old_name' закрыта через ${minutes} мин"
+            rotation_flag_clear "дорабатывающая закрыта"
+            return 0
+        else
+            say "дорабатывающая '$old_name' не вышла за ${ROTATE_EXIT_WAIT_SEC:-180}с после «/exit» — повторю на следующем прогоне"
+        fi
+    fi
+    # Преемник, не названный при подъёме («?»), называется здесь: его транскрипт рождается
+    # с первым сообщением, а не при старте (спека 14.3 п. 9).
+    successor=$(rotation_flag_read преемник)
+    if [ -z "$successor" ] || [ "$successor" = "?" ]; then
+        successor_tr=$(shift_transcript_in "$PROJECT_TRANSCRIPTS" "$old_sid")
+        if [ -n "$successor_tr" ] && [ "$(stat -c '%Y' "$successor_tr" 2>/dev/null || echo 0)" -ge "${ordered:-0}" ]; then
+            FLAG_EXTRA=(--successor "$(basename "$successor_tr" .jsonl)")
+        fi
+    fi
+    # Флаг освежается каждым прогоном: протухший (сторож мёртв) хуки не исполняют.
+    rotation_flag_put дорабатывает "$helpers" 0
+    FLAG_EXTRA=()
+    if [ "$minutes" -ge "$ROTATE_FINISHING_MAX_MIN" ]; then
+        told=$(rotation_flag_read сказано)
+        if [ -z "$told" ] || [ $(( now - told )) -ge $(( ${ROTATE_REFUSED_TELL_GAP_MIN:-180} * 60 )) ]; then
+            if tg_send "Старая смена дорабатывает ${minutes} мин (помощников: $helpers; $(judge_helpers_text весть)). Никого не убиваю, новая смена работает." --не-досылать; then
+                rotation_flag_put дорабатывает "$helpers" 0 "" "$now"
+                jlog "finishing_long" "$old_sid" "дорабатывает ${minutes} мин (предел ${ROTATE_FINISHING_MAX_MIN}), помощников $helpers — владельцу сказано"
+            else
+                say "письмо о долгой доработке не ушло — повторю на следующем прогоне"
+            fi
+        fi
+    fi
+}
+
+доработка_шаг() { ( доработка_шаг_тело ) || say "ветка доработки: шаг прерван (код $?)"; }
+
+# Ветка доработки: каждый прогон сторожа и на паузе — по флагу КАЖДОЙ роли с этапом
+# «дорабатывает» (rotation-waits-helpers*.json).
+ветка_доработки() {
+    local f stage
+    for f in "$ROTATION_STATE_DIR"/rotation-waits-helpers*.json; do
+        [ -e "$f" ] || continue
+        stage=$(jq -r '.["этап"] // empty' "$f" 2>/dev/null || true)
+        [ "$stage" = дорабатывает ] || continue
+        (
+            ROTATION_FLAG="$f"
+            TMUX_SESSION=$(jq -r '.tmux_роли // empty' "$f" 2>/dev/null || true)
+            [ -n "$TMUX_SESSION" ] || TMUX_SESSION="$ROTATION_MAIN_SESSION"
+            доработка_шаг_тело
+        ) || say "ветка доработки: флаг $f — шаг прерван (код $?)"
+    done
+}
+
+# Приёмка передачи. БЕЗ MCP-серверов: telegram-плагин допускает одного
+# потребителя getUpdates на токен и отобрал бы канал у живого диспетчера
+# (улика devmap-selfheal.sh).
+# «ничего не меняй»: проверка приёма — ЗАМЕР, а не работа. Без этой оговорки
+# headless-агент видит устаревшую передачу и чинит её сам (улика приёмки
+# 11.08.2026: пробный прогон переписал SESSION-HANDOFF прямо в проверке).
+# Прибор, меняющий то, что измеряет, врёт дважды: правку никто не ревьюил,
+# а следующий замер уже зелёный по построению.
+# Модель — дешёвая (DEMON_MODEL): чтение трёх файлов не стоит opus-цены,
+# а переключатель модели агента на headless-вызовы не действует.
+# Код 79 — модель не запускалась: приём не проверен, но и не провален; сигнал о
+# сборке личности дал носитель, второй тревоги владельцу не шлём.
+# $1 — сессия для журнала. 0 — принята или пропущена (личность не собрана), 1 — провалена.
+приёмка_передачи() {
+    local answer rc=0 sid="$1"
+    answer=$(cd "$PROJECT_DIR" && timeout 300 bash "${CLAUDE_DEMON_SH:-$PROJECT_DIR/scripts/claude-demon.sh}" session-warden -p --model "$(model_dlya дежурный)" \
+        "прочитай CLAUDE.md, STATE.md и последний docs/handover/*; назови текущую задачу и следующий шаг. НИЧЕГО НЕ МЕНЯЙ: это проверка приёма, а не работа — файлы не правь, коммитов не делай" \
+        --mcp-config '{"mcpServers":{}}' --strict-mcp-config --output-format text 2>&1) || rc=$?
+    jlog "rotation_check" "$sid" "rc=$rc: $(printf '%s' "$answer" | head -c 2000)"
+    if [ "$rc" -eq 79 ]; then
+        say "пропуск: личность не собрана — проверка приёма не выполнена (сигнал дал носитель)"
+        return 0
+    fi
+    if [ "$rc" -ne 0 ] || [ -z "$(printf '%s' "$answer" | tr -d '[:space:]')" ]; then
+        say "проверка приёма ПРОВАЛЕНА (rc=$rc, ответ пуст или ошибка) — сигнал владельцу"
+        if весть_о_битой_передаче_нужна "$ACCOUNT_ROTATION" "${ACCOUNT_WHY:-}"; then
+            tg_send "Ротация выполнена, агент поднят, но проверка приёма провалена (rc=$rc): headless-сессия не назвала задачу и шаг. Передача, вероятно, битая." || say "и сигнал не ушёл"
+        fi
+        return 1
+    fi
+    say "приём подтверждён: новая сессия назвала задачу и шаг (ответ в rotation.jsonl)"
+    return 0
+}
+
+# Перезагрузка машины вместо подъёма преемника: окно ротации открыто и помощников нет
+# ни у одной смены (на этом пути смена одна). 0 — машина получила команду и не успела
+# погаснуть за REBOOT_WAIT_SEC (дальше — обычный подъём преемника), 1 — не перезагружаем.
+перезагрузка_вместо_подъёма() {
+    local rb_paused=0 rb_tasks=0 rb_helpers=0 rb_busy=0 rb_busy_out="" rb_busy_rc=0
+    local rb_need=0 rb_kernel="-" rb_hours="" rb_word="" rb_rc=0 rb_pause_rc=0
+    [ "$(reboot_would_fit)" = 1 ] || return 1
+    judge_work
+    if [[ "$JUDGE_HELPERS" =~ ^[0-9]+$ ]]; then rb_helpers=$(( JUDGE_HELPERS + ${JUDGE_HUNG:-0} )); else rb_helpers="?"; fi
+    работа_на_паузе || rb_pause_rc=$?
+    case "$rb_pause_rc" in 0) rb_paused=1 ;; 1) rb_paused=0 ;; *) rb_paused="?" ;; esac
+    фоновые_задачи_живы "${SHIFT_SESSION_ID:-$SESSION_ID}" && rb_tasks=1
+    rb_busy_out=$(python3 "$HARNESS_SCRIPTS/boot_check.py" --занято 2>/dev/null) || rb_busy_rc=$?
+    case "$rb_busy_rc" in 0) rb_busy=0 ;; 1) rb_busy="${rb_busy_out#занята: }" ;; *) rb_busy="?" ;; esac
+    read -r rb_need rb_kernel < <(reboot_needed)
+    rb_hours=$(awk '{print int($1 / 3600)}' /proc/uptime)
+    rb_word=$(reboot_window_verdict "$(reboot_switch)" "${STACK_NEIGHBOURS:-}" "$rb_paused" выход "$rb_tasks" "$rb_helpers" "$rb_busy" "$rb_need" "$rb_hours" "${REBOOT_MIN_GAP_HOURS:-24}" "$(reboot_last_failed "$rb_kernel")") || rb_rc=$?
+    say "перезагрузка при смене: $rb_word"
+    [ "$rb_rc" = 0 ] || return 1
+    reboot_for_rotation "$rb_kernel" "$REASON" || return 1
+    # Машина гаснет — сторож гибнет вместе с ней, это и есть смена.
+    sleep "${REBOOT_WAIT_SEC:-180}"
+    jlog "reboot_not_happened" "$SESSION_ID" "команда принята, но за ${REBOOT_WAIT_SEC:-180}с машина не погасла — обычная смена с преемником"
+    return 0
+}
+
+# Обновление контекста роли (спека 14.14, 14.15): ОДИН путь для всех входов ротации —
+# решение сторожа, --rotate-now, смена аккаунта, заявка. Роль — данные (tmux-сессия и
+# имя), оркестратор — её частный случай. Преемник — всегда новый процесс в новой
+# tmux-сессии с прежним именем; старая дорабатывает помощников и закрывается сама.
+# Возврат как у rotate_full: 0 — преемник поднят, 2 — дверь ротации отказала,
+# 1 — иначе. TMUX_SESSION и флаг подменяются на время вызова (локальные переменные
+# видны всем вызываемым функциям).
+обновить_роль() {  # $1=tmux-сессия роли $2=роль $3=причина (контекст|компакт|обновление|needrestart|аккаунт|каталог|агент|владелец)
+    local TMUX_SESSION="$1" ROLE_TMUX="$1" ROTATE_ROLE="$2" ROTATE_CAUSE="$3"
+    local ROTATION_FLAG ROLE_IDLE_FROM PROMPT="" ordered_at waited=0 idle turn_done act
+    local old_sid old_pid old_name="" spawned_at rc=0 successor old_helpers=0
+    ROTATION_FLAG=$(флаг_роли_путь "$TMUX_SESSION")
+    ROLE_IDLE_FROM=$(date +%s)
+    # С этой секунды роль не берёт новых задач (хук очереди кладёт запуски в очередь).
+    rotation_flag_put идёт "$JUDGE_HELPERS" "$ROTATION_WAITED_SEC" "$FORCE_ROTATE"
+    jlog "rotation_flag_set" "$SHIFT_SESSION_ID" "этап идёт: помощников $JUDGE_HELPERS, ждали ${ROTATION_WAITED_SEC}с; роль $ROTATE_ROLE, причина $ROTATE_CAUSE"
+    # Заявка исполнена: новый процесс подхватит всё, что она ждала.
+    python3 "$HARNESS_SCRIPTS/lib/rotation_flag.py" --request-clear >/dev/null 2>&1 || true
+    if ! жив_tmux "$TMUX_SESSION"; then
+        say "tmux-сессии '$TMUX_SESSION' нет — ротировать нечего; сигнал владельцу"
+        tg_send "Ротация нужна ($REASON), но tmux-сессии '$TMUX_SESSION' нет. Агент не запущен?" || say "и сигнал не ушёл"
+        return 1
+    fi
+    # Принудительный путь (--rotate-now) поручения не подаёт: агент передачу уже написал.
+    if [ "$FORCE_ROTATE" != 1 ]; then
+        PROMPT="[сторож сессий, автоматическая ротация — это не сообщение владельца] Пора менять сессию: $REASON. Заверши работу по регламенту: перезапиши STATE.md (что верно сейчас), допиши docs/handover/SESSION-HANDOFF-$(date +%Y-%m-%d).md, закоммить и отчитайся владельцу в канал. Помощников не запускай — коммить и пиши передачу сам. Выходить не нужно и НЕ вызывай session-warden.sh --rotate-now: как только панель замолчит, подниму преемника — он возьмёт канал и задачи; ты молча доведёшь своих помощников и закроешься по моему «/exit»."
+    fi
+    дверь_ротации 0 || return $?
+    ordered_at=$(date +%s)
+    if [ -n "$PROMPT" ]; then
+        PANE_REFUSAL=""
+        if ! agent_prompt "$PROMPT"; then
+            if [ -n "$PANE_REFUSAL" ]; then
+                tg_send "Ротация нужна ($REASON), но команда в панель '$TMUX_SESSION' не ушла: $PANE_REFUSAL." || say "и сигнал не ушёл"
+            else
+                tg_send "Ротация нужна ($REASON), но в tmux-панели '$TMUX_SESSION' не агент — команду не отправил (текст в оболочке исполнился бы). Проверьте сессию." || say "и сигнал не ушёл"
+            fi
+            return 1
+        fi
+        jlog "rotate_command" "$SESSION_ID" "режим full: $REASON — поручение передачи подано в tmux, преемник поднимется сразу после"
+        ordered_at=$(date +%s)
+        # Ждём конец хода: помощники не держат — преемник берёт канал, они доживают в старой.
+        while :; do
+            sleep 30; waited=$((waited + 30))
+            жив_tmux "$TMUX_SESSION" || break
+            idle=$(простой_панели)
+            turn_done=$(ход_завершён_после "$ordered_at")
+            act=$(выход_из_ротации "ждём" "$idle" 0 "$waited" "${ROTATE_FINISH_TIMEOUT_SEC:-900}" "$turn_done" 0 0)
+            case "$act" in
+                выход) say "агент закончил ход после поручения и панель молчит ${idle}с — передача готова, поднимаю преемника"; break ;;
+                принудительно) say "срок ${ROTATE_FINISH_TIMEOUT_SEC:-900}с вышел, а агент ещё в ходу (ход завершён: ${turn_done}, простой ${idle}с) — поднимаю преемника всё равно"; break ;;
+            esac
+        done
+        if жив_tmux "$TMUX_SESSION"; then
+            дверь_ротации "$ordered_at" || return $?
+            перезагрузка_вместо_подъёма || true
+        fi
+    fi
+
+    old_sid="${SHIFT_SESSION_ID:-$SESSION_ID}"
+    if жив_tmux "$TMUX_SESSION"; then
+        old_pid=$(tmux display-message -p -t "=$TMUX_SESSION:" '#{pane_pid}' 2>/dev/null || true)
+        old_name="$TMUX_SESSION-old-$(date +%s)"
+        очистить_окружение_сервера
+        # Флаг — ДО переименования: хуки старой смены уже знают, что канал не её.
+        FLAG_FOR_SESSION="$old_sid" rotation_flag_put_extra дорабатывает "$JUDGE_HELPERS" 0 \
+            --tmux "$old_name" --ordered "$ordered_at" --finishing-since "$(date +%s)"
+        spawned_at=$(date +%s)
+        pane_lock_run переименовать_и_создать "$TMUX_SESSION" "$old_name" || rc=$?
+        if [ "$rc" != 0 ]; then
+            say "преемника создать не вышло (код $rc, ${PANE_REFUSAL:-${PANE_OUT:-нет подробностей}}) — старая смена остаётся"
+            jlog "restart_failed" "$old_sid" "сессию преемника создать не вышло: ${PANE_REFUSAL:-${PANE_OUT:-?}}"
+            rotation_flag_clear "преемник не создан"
+            tg_send "Ротация нужна ($REASON), но создать сессию преемника не вышло (${PANE_REFUSAL:-${PANE_OUT:-нет подробностей}}). Старая смена продолжает работу." --несмотря-на-лимит || say "и сигнал не ушёл"
+            return 1
+        fi
+        if ! ввести_запуск_агента "$old_pid"; then
+            jlog "restart_failed" "$old_sid" "преемник не поднялся за ${AGENT_START_TIMEOUT_SEC}с — старая смена возвращена"
+            say "снимок панели: $(сохранить_снимок "агент-не-поднялся")"
+            pane_lock_run вернуть_старую_роль "$TMUX_SESSION" "$old_name" || say "имя старой сессии вернуть не вышло — '$old_name' остаётся"
+            rotation_flag_clear "преемник не поднялся"
+            tg_send "Ротация: преемник не поднялся за ${AGENT_START_TIMEOUT_SEC}с, старая смена возвращена на место (tmux '$TMUX_SESSION') и продолжает работу." --несмотря-на-лимит || say "и сигнал не ушёл"
+            return 1
+        fi
+    else
+        # Сессия закрылась сама, пока шла передача: подъём как обычно, дорабатывать некому.
+        say "сессия '$TMUX_SESSION' закрылась сама, пока шла передача — поднимаю преемника без переименования"
+        spawned_at=$(date +%s)
+        if ! поднять_сессию_с_агентом; then
+            jlog "restart_failed" "$old_sid" "агент не поднялся за ${AGENT_START_TIMEOUT_SEC}с после ротации"
+            say "снимок панели: $(сохранить_снимок "агент-не-поднялся")"
+            rotation_flag_clear "преемник не поднялся"
+            tg_send "Агент остановлен после ротации и не поднялся за ${AGENT_START_TIMEOUT_SEC}с (tmux '$TMUX_SESSION'). Нужны ваши руки: sudo -u $AGENT_USER -H systemctl restart harness-agent" --несмотря-на-лимит || say "и сигнал не ушёл"
+            return 1
+        fi
+    fi
+    rm -f "$LOG_DIR"/rotate-refused.*.told 2>/dev/null || true
+    jlog "agent_restarted" "$old_sid" "преемник поднят после ротации (причина $ROTATE_CAUSE)"
+    if [ -n "$old_name" ]; then
+        TMUX_SESSION="$old_name" agent_prompt "[сторож сессий] Преемник поднят в «$ROLE_TMUX»: канал, входящие и STATE.md теперь его. Ты дорабатываешь: доведи своих помощников, пиши журналы задач и handover, коммить. Новых задач и помощников не бери, владельцу не пиши. «/exit» подам сам." \
+            || say "весть дорабатывающей не дошла"
+    fi
+    # Пинок преемнику нужен безусловно: кулдаун гасит повтор для ТОЙ ЖЕ сессии, а эта новая.
+    rm -f "$KICK_STAMP"
+    подхватить_работу || tg_send "Агент поднят после ротации, но пинок «подхвати работу» не дошёл — сессия стоит у пустого приглашения. Напишите ей что угодно." || say "и сигнал не ушёл"
+    judge_work
+    old_helpers="$JUDGE_HELPERS"
+    if [ -n "$old_name" ]; then
+        successor=$(найти_преемника "$old_sid" "$spawned_at")
+        FLAG_FOR_SESSION="$old_sid" rotation_flag_put_extra дорабатывает "$old_helpers" 0 --successor "$successor"
+    else
+        rotation_flag_clear "старой смены нет — доработка не нужна"
+    fi
+    jlog_data role_refreshed "$old_sid" "роль $ROTATE_ROLE: преемник в '$ROLE_TMUX', старая '${old_name:-нет}'" \
+        "$(jq -cn --arg r "$ROTATE_ROLE" --arg t "$ROLE_TMUX" --arg c "$ROTATE_CAUSE" \
+            --argjson idle "$(( $(date +%s) - ROLE_IDLE_FROM ))" --argjson h "$(число_или_null "$old_helpers")" \
+            '{"роль":$r, "tmux":$t, "причина":$c, "простой_роли_с":$idle, "помощников_у_старой":$h}')"
+    # Помощников у старой может не быть вовсе: тогда она закрывается в этом же прогоне.
+    [ -z "$old_name" ] || доработка_шаг
+    приёмка_передачи "${SHIFT_SESSION_ID:-$SESSION_ID}" || return 1
+    if весть_о_ротации_нужна "$ACCOUNT_ROTATION"; then
+        tg_send "Ротация выполнена ($REASON): преемник поднят, приём передачи подтверждён; старая смена доводит помощников и закроется сама. Задачу и шаг новая смена назовёт сама." --несмотря-на-лимит \
+            || say "итоговое уведомление не ушло — ротация при этом состоялась, след в rotation.jsonl"
+    fi
+}
+
 # ── 1. Найти транскрипт текущей сессии ЭТОГО проекта ────────────────────────
 # Claude Code пишет JSONL-транскрипты в ~/.claude/projects/<кодир-путь>/<uuid>.jsonl,
 # где <кодир-путь> — PROJECT_DIR с заменой «/» на «-». Свежайший файл берём
@@ -3749,8 +4362,16 @@ PROJECT_TRANSCRIPTS=""
 for enc in "${PROJECT_DIR//\//-}" "$(printf '%s' "$PROJECT_DIR" | sed 's/[^a-zA-Z0-9]/-/g')"; do
     if [ -d "$PROJECTS_DIR/$enc" ]; then PROJECT_TRANSCRIPTS="$PROJECTS_DIR/$enc"; break; fi
 done
+# Ветка доработки идёт каждым прогоном и на паузе, ДО выбора транскрипта: у неё свой
+# транскрипт (по sid флага), а закрытая ею сессия меняет и сам выбор ниже.
+ветка_доработки
 TRANSCRIPT=""
+# Пока жива дорабатывающая, замер окна и смена — преемник: её журнал свежее, но окно,
+# компакты и помощники для ротации считаются у той, что берёт задачи (спека 14.3 п. 5).
+FINISHING_SID=""
+[ "$(rotation_flag_read этап)" != дорабатывает ] || FINISHING_SID=$(rotation_flag_read сессия)
 [ -z "$PROJECT_TRANSCRIPTS" ] || TRANSCRIPT=$(find "$PROJECT_TRANSCRIPTS" -mindepth 1 -maxdepth 1 -name '*.jsonl' -type f -printf '%T@ %p\n' 2>/dev/null \
+             | { if [ -n "$FINISHING_SID" ]; then grep -vF "/$FINISHING_SID.jsonl"; else cat; fi; } \
              | sort -nr | head -1 | cut -d' ' -f2- || true)
 if [ -z "$TRANSCRIPT" ]; then
     # «Нет транскриптов» — не повод молчать: на свежей установке при мёртвой
@@ -3767,7 +4388,7 @@ fi
 SESSION_ID=$(basename "$TRANSCRIPT" .jsonl)
 # Смена — не обязательно самый свежий файл: судья работы и принадлежность флага
 # ротации считаются по транскрипту СМЕНЫ; замер окна остаётся на свежайшем.
-SHIFT_TRANSCRIPT=$(shift_transcript_in "$PROJECT_TRANSCRIPTS")
+SHIFT_TRANSCRIPT=$(shift_transcript_in "$PROJECT_TRANSCRIPTS" "$FINISHING_SID")
 SHIFT_SESSION_ID=$(basename "${SHIFT_TRANSCRIPT:-$TRANSCRIPT}" .jsonl)
 
 # ── 2. Оценить заполнение окна ──────────────────────────────────────────────
@@ -3815,6 +4436,9 @@ fi
 # -ge, не -gt (Б-4г): обещано «больше одного компакта подряд запрещено» —
 # достигнутый потолок MAX_COMPACTS уже означает ротацию.
 NEED_ROTATE=0; REASON=""
+# Причина — слово из закрытого списка (контекст|компакт|обновление|needrestart|аккаунт|
+# каталог|агент|владелец), слова остаются в REASON (спека 14.15); роль — данные.
+ROTATE_CAUSE=""; REQ_TMUX=""; REQ_ROLE=""
 agent_cwd_wrong || true   # заполняет AGENT_CWD; он же ведёт ротацию на тяжёлый путь
 WRONG_CWD_MARK="$LOG_DIR/agent-wrong-cwd.rotated"
 CWD_ROTATION=0
@@ -3825,6 +4449,7 @@ if [ "$FORCE_ROTATE" = 1 ]; then
     # значило бы вернуть агента к единственному оставшемуся способу уйти —
     # выходу без смены (улика 11.08.2026, 22:51: вышел сам, преемника нет).
     NEED_ROTATE=1; REASON="ротацию запросил агент (--rotate-now)"
+    ROTATE_CAUSE=агент; [ "$ROTATE_OWNER_OVERRIDE" != 1 ] || ROTATE_CAUSE=владелец
 elif [ -n "$AGENT_CWD" ] && [ -e "$WRONG_CWD_MARK" ]; then
     # Ротация по этой причине уже была, а каталог прежний: вторая такая же
     # ничего не изменит и пойдёт по кругу. Говорим владельцу, не вращаем.
@@ -3833,13 +4458,13 @@ elif [ -n "$AGENT_CWD" ] && [ -e "$WRONG_CWD_MARK" ]; then
 elif [ -n "$AGENT_CWD" ]; then
     # Сессия без CLAUDE.md, памяти и скилов проекта: чинится только новой
     # сессией, запущенной из PROJECT_DIR (start_agent входит туда сам).
-    NEED_ROTATE=1; CWD_ROTATION=1; REASON="агент запущен не из $PROJECT_DIR, а из $AGENT_CWD"
+    NEED_ROTATE=1; CWD_ROTATION=1; REASON="агент запущен не из $PROJECT_DIR, а из $AGENT_CWD"; ROTATE_CAUSE=каталог
     : > "$WRONG_CWD_MARK"
     alarm_once agent-wrong-cwd "Агент запущен не из $PROJECT_DIR, а из $AGENT_CWD: CLAUDE.md, память и скилы проекта не загружены. Перезапускаю смену в верном каталоге." session-warden:wrong-cwd
 elif [ "$COMPACTS" -gt 0 ] && [ "$COMPACTS" -ge "$MAX_COMPACTS" ]; then
-    NEED_ROTATE=1; REASON="компактов $COMPACTS ≥ потолка $MAX_COMPACTS"
+    NEED_ROTATE=1; REASON="компактов $COMPACTS ≥ потолка $MAX_COMPACTS"; ROTATE_CAUSE=компакт
 elif [ "$FILL_PCT" -ge "$CTX_ROTATE_PCT" ]; then
-    NEED_ROTATE=1; REASON="окно ≈${FILL_PCT}% ≥ ${CTX_ROTATE_PCT}%"
+    NEED_ROTATE=1; REASON="окно ≈${FILL_PCT}% ≥ ${CTX_ROTATE_PCT}%"; ROTATE_CAUSE=контекст
 fi
 
 # Выбор аккаунта владельцем: дверь отвечает 0 + цель (ротировать), 3 (процесс уже на
@@ -3858,11 +4483,30 @@ case "$(выбор_по_ждёт "$ACCOUNT_WAIT_RC")" in
         # Причина автоперехода — слова самого перехода («<аккаунт> в лимите до …»): выбор владельца здесь ни при чём.
         ACCOUNT_WHY=$(python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import accounts; п = (accounts.состояние() or {}).get("переключение") or {}; print("автопереход: " + п.get("причина", "") if п.get("авто") else "")' \
             "$HARNESS_SCRIPTS/lib" 2>/dev/null) || ACCOUNT_WHY=""
-        [ "$NEED_ROTATE" = 1 ] || { NEED_ROTATE=1; REASON="${ACCOUNT_WHY:-владелец выбрал аккаунт $ACCOUNT_TARGET}"; } ;;
+        [ "$NEED_ROTATE" = 1 ] || { NEED_ROTATE=1; REASON="${ACCOUNT_WHY:-владелец выбрал аккаунт $ACCOUNT_TARGET}"; }
+        # Ключ входа читается только при старте процесса: причина — аккаунт, чем бы ни совпала ротация.
+        ROTATE_CAUSE=аккаунт ;;
     итог)
         say "выбор аккаунта: ротация не нужна (код $ACCOUNT_WAIT_RC) — подтверждаю итог без неё"
         python3 "$HARNESS_SCRIPTS/account-switch.py" --итог || say "итог смены аккаунта: код $?" ;;
 esac
+
+# Заявка ротации (спека 14.15): её ставят те, кто не ведёт ротацию сам — обновление
+# харнеса, признаки CLI и needrestart. Живая заявка — NEED_ROTATE с её причиной, ролью
+# и tmux; исполненная ротация снимает заявку (обновить_роль). Заявка — не этап флага:
+# блокера скорости не даёт и новых задач не останавливает до начала передачи.
+if [ "$ROTATE_SUCCESSOR" = 1 ] && [ "$NEED_ROTATE" != 1 ]; then
+    REQ_JSON=$(python3 "$HARNESS_SCRIPTS/lib/rotation_flag.py" --request-state 2>/dev/null) || REQ_JSON=""
+    if [ -n "$REQ_JSON" ]; then
+        ROTATE_CAUSE=$(jq -r '.["причина"] // empty' <<<"$REQ_JSON" 2>/dev/null || true)
+        REQ_TMUX=$(jq -r '.tmux // empty' <<<"$REQ_JSON" 2>/dev/null || true)
+        REQ_ROLE=$(jq -r '.["роль"] // empty' <<<"$REQ_JSON" 2>/dev/null || true)
+        REQ_DETAIL=$(jq -r '.["подробно"] // empty' <<<"$REQ_JSON" 2>/dev/null || true)
+        if [ -n "$ROTATE_CAUSE" ]; then
+            NEED_ROTATE=1; REASON="заявка ротации: $ROTATE_CAUSE${REQ_DETAIL:+ ($REQ_DETAIL)}"
+        fi
+    fi
+fi
 
 # Пауза владельца: «если пауза то пауза» (владелец, 20.10) — решение сторожа
 # о ротации на паузе не доходит до двери: её отказ ложился в журнал и в канал.
@@ -3914,10 +4558,14 @@ ROTATION_WAITED_AT=$(date +%s); ROTATION_WAITED_SEC=0; ROTATION_HELD=0
 [ "$ROTATE_OWNER_OVERRIDE" != 1 ] || jlog "rotate_owner_override" "$SESSION_ID" "слово владельца: ворота помощников не спрашиваются"
 if [ -e "$ROTATION_FLAG" ]; then
     FLAG_SESSION=$(rotation_flag_read сессия)
-    if [ -n "$FLAG_SESSION" ] && [ "$FLAG_SESSION" != "$SHIFT_SESSION_ID" ]; then
+    if [ "$(rotation_flag_read этап)" = дорабатывает ]; then
+        # Флаг дорабатывающей ведёт ветка доработки; сессия в нём — старая смена, и
+        # «чужая сессия» здесь норма, а не ушедшая смена (спека 14.3 п. 8).
+        :
+    elif [ -n "$FLAG_SESSION" ] && [ "$FLAG_SESSION" != "$SHIFT_SESSION_ID" ]; then
         rotation_flag_clear "флаг ушедшей смены $FLAG_SESSION"
     else
-        [ "$NEED_ROTATE" = 1 ] || { NEED_ROTATE=1; REASON="$(rotation_flag_read причина) (ротация ждала помощников)"; }
+        [ "$NEED_ROTATE" = 1 ] || { NEED_ROTATE=1; REASON="$(rotation_flag_read причина) (ротация ждала помощников)"; ROTATE_CAUSE=$(причина_слово "$(rotation_flag_read причина)"); }
         [ "$(rotation_flag_read принуждена)" != 1 ] || FORCE_ROTATE=1
         ROTATION_WAITED_SEC=$(rotation_waited_sec "$(rotation_flag_read ждали_сек)" \
             "$(rotation_flag_read проверено)" "$ROTATION_WAITED_AT" "$WORK_PAUSED")
@@ -3936,7 +4584,13 @@ fi
 # помощниках не начинается. Результат не глотается — отказ ворот гасит ротацию
 # (антиповтор и дверь передачи ниже спрашиваются только у разрешённой).
 judge_work
-if [ "$NEED_ROTATE" = 1 ]; then
+# Одна дорабатывающая за раз: новая ротация ждёт её закрытия (спека 14.5). Потолок
+# скорости это не трогает — этап «дорабатывает» не блокер.
+if [ "$NEED_ROTATE" = 1 ] && [ "$ROTATE_SUCCESSOR" = 1 ] && [ "$(rotation_flag_read этап)" = дорабатывает ]; then
+    say "ротация ТРЕБУЕТСЯ ($REASON), но ждёт закрытия дорабатывающей '$(rotation_flag_read tmux)'"
+    NEED_ROTATE=0; ROTATE_SUPPRESSED=1
+fi
+if [ "$NEED_ROTATE" = 1 ] && [ "$ROTATE_SUCCESSOR" != 1 ]; then
     if ! rotation_helpers_gate; then
         NEED_ROTATE=0; ROTATE_SUPPRESSED=1; ROTATION_HELD=1
         rotation_hold_effects
@@ -3966,7 +4620,8 @@ fi
 
 # Метка живости: хук считает флаг протухшим, если его не трогали
 # ROTATE_FLAG_STALE_MIN. Сторож переписывает его на каждом прогоне, и на паузе.
-if [ "$NEED_ROTATE" != 1 ] && [ "$ROTATION_HELD" != 1 ] && [ -e "$ROTATION_FLAG" ]; then
+if [ "$NEED_ROTATE" != 1 ] && [ "$ROTATION_HELD" != 1 ] && [ -e "$ROTATION_FLAG" ] \
+   && [ "$(rotation_flag_read этап)" != дорабатывает ]; then
     rotation_flag_put "$(rotation_flag_read этап)" "$JUDGE_HELPERS" "$ROTATION_WAITED_SEC"
 fi
 
@@ -4128,7 +4783,7 @@ ${HANDOVER_NOTE:+$HANDOVER_NOTE
 
 rotate_clear() {
     local ordered_at idle turn_done waited=0 was_id new_id was_tokens now_tokens
-    if ! tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
+    if ! tmux has-session -t "=$TMUX_SESSION" 2>/dev/null; then
         say "tmux-сессии '$TMUX_SESSION' нет — быстрый путь неприменим"
         return 1
     fi
@@ -4211,7 +4866,7 @@ rotate_clear() {
 }
 
 rotate_full() {
-    if ! tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
+    if ! tmux has-session -t "=$TMUX_SESSION" 2>/dev/null; then
         say "tmux-сессии '$TMUX_SESSION' нет — ротировать нечего; сигнал владельцу"
         tg_send "Ротация нужна ($REASON), но tmux-сессии '$TMUX_SESSION' нет. Агент не запущен?" || say "и сигнал не ушёл"
         return 1
@@ -4276,7 +4931,7 @@ rotate_full() {
     [ "$FORCE_ROTATE" = 1 ] && { exit_sent=1; deadline=${ROTATE_EXIT_WAIT_SEC:-180}; }
     while :; do
         sleep 30; waited=$((waited + 30))
-        alive=1; tmux has-session -t "$TMUX_SESSION" 2>/dev/null || alive=0
+        alive=1; tmux has-session -t "=$TMUX_SESSION" 2>/dev/null || alive=0
         pane=$(pane_cmd)
         verdict=$(смена_состоялась "$alive" "$pane" "$(свежий_id)" "$SESSION_ID")
         idle=$(простой_панели)
@@ -4485,35 +5140,7 @@ rotate_full() {
         tg_send "Отбой по прошлой тревоге: сессия закрылась сама на досмотре (${waited}с от начала смены), преемник поднят. Вмешиваться не нужно." || say "и отбой не ушёл"; }
     подхватить_работу || tg_send "Агент поднят после ротации, но пинок «подхвати работу» не дошёл — сессия стоит у пустого приглашения. Напишите ей что угодно." || say "и сигнал не ушёл"
 
-    # Приёмка передачи. БЕЗ MCP-серверов: telegram-плагин допускает одного
-    # потребителя getUpdates на токен и отобрал бы канал у живого диспетчера
-    # (улика devmap-selfheal.sh).
-    local answer rc=0
-    # «ничего не меняй»: проверка приёма — ЗАМЕР, а не работа. Без этой оговорки
-    # headless-агент видит устаревшую передачу и чинит её сам (улика приёмки
-    # 11.08.2026: пробный прогон переписал SESSION-HANDOFF прямо в проверке).
-    # Прибор, меняющий то, что измеряет, врёт дважды: правку никто не ревьюил,
-    # а следующий замер уже зелёный по построению.
-    # Модель — дешёвая (DEMON_MODEL): чтение трёх файлов не стоит opus-цены,
-    # а переключатель модели агента на headless-вызовы не действует.
-    answer=$(cd "$PROJECT_DIR" && timeout 300 bash "${CLAUDE_DEMON_SH:-$PROJECT_DIR/scripts/claude-demon.sh}" session-warden -p --model "$(model_dlya дежурный)" \
-        "прочитай CLAUDE.md, STATE.md и последний docs/handover/*; назови текущую задачу и следующий шаг. НИЧЕГО НЕ МЕНЯЙ: это проверка приёма, а не работа — файлы не правь, коммитов не делай" \
-        --mcp-config '{"mcpServers":{}}' --strict-mcp-config --output-format text 2>&1) || rc=$?
-    jlog "rotation_check" "$SESSION_ID" "rc=$rc: $(printf '%s' "$answer" | head -c 2000)"
-    if [ "$rc" -eq 79 ]; then
-        # Модель не запускалась: приём не проверен, но и не провален. Сигнал о
-        # сборке личности дал носитель, второй тревоги владельцу не шлём.
-        say "пропуск: личность не собрана — проверка приёма не выполнена (сигнал дал носитель)"
-        return 0
-    fi
-    if [ "$rc" -ne 0 ] || [ -z "$(printf '%s' "$answer" | tr -d '[:space:]')" ]; then
-        say "проверка приёма ПРОВАЛЕНА (rc=$rc, ответ пуст или ошибка) — сигнал владельцу"
-        if весть_о_битой_передаче_нужна "$ACCOUNT_ROTATION" "${ACCOUNT_WHY:-}"; then
-            tg_send "Ротация выполнена, агент поднят, но проверка приёма провалена (rc=$rc): headless-сессия не назвала задачу и шаг. Передача, вероятно, битая." || say "и сигнал не ушёл"
-        fi
-        return 1
-    fi
-    say "приём подтверждён: новая сессия назвала задачу и шаг (ответ в rotation.jsonl)"
+    приёмка_передачи "$SESSION_ID" || return 1
     # Ответ измерителя владельцу НЕ пересылается: задачу и шаг новая сессия
     # называет в канале сама, первым сообщением, а текст измерителя написан
     # под ЕГО запрет «ничего не меняй» и читается как отчёт рабочего агента,
@@ -4540,50 +5167,58 @@ if [ "$NEED_ROTATE" = 1 ]; then
         rotate_semi || WARDEN_RC=1
     else
         say "нужна ротация: $REASON — выполняю сам (ROTATE_NEEDS_OWNER=0)"
-        # С этой секунды хук кладёт новые запуски помощников в очередь: помощник,
-        # запущенный под коммит регламента, оборвался бы выходом так же.
-        rotation_flag_put идёт "$JUDGE_HELPERS" "$ROTATION_WAITED_SEC" "$FORCE_ROTATE"
-        jlog "rotation_flag_set" "$SHIFT_SESSION_ID" "этап идёт: помощников $JUDGE_HELPERS, ждали ${ROTATION_WAITED_SEC}с"
-        # Признаки для выбора пути собираются здесь, решение принимает чистая
-        # функция способ_ротации (её 8 путей проверяются самотестом без tmux).
-        HOOKS_CHANGED=0
-        for f in "$PROJECT_DIR/.claude/settings.json" "$PROJECT_DIR/scripts/hooks"/*; do
-            [ -e "$f" ] || continue
-            [ "$f" -nt "$TRANSCRIPT" ] && { HOOKS_CHANGED=1; break; }
-        done
-        VERSION_CHANGED=$(version_changed "$HEARTBEAT_DIR/.полный-перезапуск")
-        # Имя с точки: это метка СОБЫТИЯ (когда в последний раз перезапускали
-        # смену целиком), а не отметка живого демона. Обходы меток берут «*»
-        # и скрытые файлы пропускают — иначе она попадает в список сторожей и
-        # «устаревает», не имея никакого периода (владелец 13.09.2026 увидел
-        # её в панели среди протухших).
-        FULL_STAMP="$HEARTBEAT_DIR/.полный-перезапуск"
-        if [ -f "$FULL_STAMP" ]; then
-            HOURS_SINCE_FULL=$(( ( $(date +%s) - $(stat -c '%Y' "$FULL_STAMP") ) / 3600 ))
+        if [ "$ROTATE_SUCCESSOR" = 1 ]; then
+            # Преемник сразу: помощники ротацию не держат (спека 14.4, 14.15). Флаг «идёт»,
+            # заявка и весь путь — в обновить_роль; причина и роль — данные.
+            ROTATE_RC=0
+            обновить_роль "${REQ_TMUX:-$TMUX_SESSION}" "${REQ_ROLE:-оркестратор}" "${ROTATE_CAUSE:-контекст}" || ROTATE_RC=$?
+            [ "$ROTATE_RC" = 0 ] || [ "$ROTATE_RC" = 2 ] || WARDEN_RC=1
         else
-            # Метки нет — процесс живёт с раскладки или дольше суток: тяжёлый путь.
-            HOURS_SINCE_FULL=999
-        fi
-        # Каталог claude меняет только перезапуск процесса, не «/clear».
-        [ -z "$AGENT_CWD" ] || HOURS_SINCE_FULL=999
-        MODE=$(способ_ротации "$HOOKS_CHANGED" "$VERSION_CHANGED" "$HOURS_SINCE_FULL" \
-                                "${FULL_RESTART_MAX_HOURS:-24}" 0 "$FORCE_ROTATE" "$(reboot_would_fit)" "$ACCOUNT_ROTATION")
-        say "способ смены: $MODE (хуки=$HOOKS_CHANGED версия=$VERSION_CHANGED часов_с_полного=$HOURS_SINCE_FULL принудительно=$FORCE_ROTATE)"
-        if [ "$MODE" = clear ]; then
-            # Страховка: быстрый путь не удался — тяжёлый доводит смену до конца.
-            # Но код 2 — это НЕ неудача, а ЗАПРЕТ (передачи нет): подхватывать
-            # его тяжёлым путём значит разрушить контекст другой рукой.
-            ROTATE_RC=0; rotate_clear || ROTATE_RC=$?
-            if [ "$ROTATE_RC" = 2 ]; then
-                say "ротация запрещена дверью — тяжёлый путь тоже не идёт"
-            elif [ "$ROTATE_RC" != 0 ]; then
-                say "быстрый путь не удался — перехожу на полный перезапуск"
+            # С этой секунды хук кладёт новые запуски помощников в очередь: помощник,
+            # запущенный под коммит регламента, оборвался бы выходом так же.
+            rotation_flag_put идёт "$JUDGE_HELPERS" "$ROTATION_WAITED_SEC" "$FORCE_ROTATE"
+            jlog "rotation_flag_set" "$SHIFT_SESSION_ID" "этап идёт: помощников $JUDGE_HELPERS, ждали ${ROTATION_WAITED_SEC}с"
+            # Признаки для выбора пути собираются здесь, решение принимает чистая
+            # функция способ_ротации (её 8 путей проверяются самотестом без tmux).
+            HOOKS_CHANGED=0
+            for f in "$PROJECT_DIR/.claude/settings.json" "$PROJECT_DIR/scripts/hooks"/*; do
+                [ -e "$f" ] || continue
+                [ "$f" -nt "$TRANSCRIPT" ] && { HOOKS_CHANGED=1; break; }
+            done
+            VERSION_CHANGED=$(version_changed "$HEARTBEAT_DIR/.полный-перезапуск")
+            # Имя с точки: это метка СОБЫТИЯ (когда в последний раз перезапускали
+            # смену целиком), а не отметка живого демона. Обходы меток берут «*»
+            # и скрытые файлы пропускают — иначе она попадает в список сторожей и
+            # «устаревает», не имея никакого периода (владелец 13.09.2026 увидел
+            # её в панели среди протухших).
+            FULL_STAMP="$HEARTBEAT_DIR/.полный-перезапуск"
+            if [ -f "$FULL_STAMP" ]; then
+                HOURS_SINCE_FULL=$(( ( $(date +%s) - $(stat -c '%Y' "$FULL_STAMP") ) / 3600 ))
+            else
+                # Метки нет — процесс живёт с раскладки или дольше суток: тяжёлый путь.
+                HOURS_SINCE_FULL=999
+            fi
+            # Каталог claude меняет только перезапуск процесса, не «/clear».
+            [ -z "$AGENT_CWD" ] || HOURS_SINCE_FULL=999
+            MODE=$(способ_ротации "$HOOKS_CHANGED" "$VERSION_CHANGED" "$HOURS_SINCE_FULL" \
+                                    "${FULL_RESTART_MAX_HOURS:-24}" 0 "$FORCE_ROTATE" "$(reboot_would_fit)" "$ACCOUNT_ROTATION")
+            say "способ смены: $MODE (хуки=$HOOKS_CHANGED версия=$VERSION_CHANGED часов_с_полного=$HOURS_SINCE_FULL принудительно=$FORCE_ROTATE)"
+            if [ "$MODE" = clear ]; then
+                # Страховка: быстрый путь не удался — тяжёлый доводит смену до конца.
+                # Но код 2 — это НЕ неудача, а ЗАПРЕТ (передачи нет): подхватывать
+                # его тяжёлым путём значит разрушить контекст другой рукой.
+                ROTATE_RC=0; rotate_clear || ROTATE_RC=$?
+                if [ "$ROTATE_RC" = 2 ]; then
+                    say "ротация запрещена дверью — тяжёлый путь тоже не идёт"
+                elif [ "$ROTATE_RC" != 0 ]; then
+                    say "быстрый путь не удался — перехожу на полный перезапуск"
+                    ROTATE_RC=0; rotate_full || ROTATE_RC=$?
+                    [ "$ROTATE_RC" = 0 ] || [ "$ROTATE_RC" = 2 ] || WARDEN_RC=1
+                fi
+            else
                 ROTATE_RC=0; rotate_full || ROTATE_RC=$?
                 [ "$ROTATE_RC" = 0 ] || [ "$ROTATE_RC" = 2 ] || WARDEN_RC=1
             fi
-        else
-            ROTATE_RC=0; rotate_full || ROTATE_RC=$?
-            [ "$ROTATE_RC" = 0 ] || [ "$ROTATE_RC" = 2 ] || WARDEN_RC=1
         fi
         # Переход подтверждает только процесс на новом ключе: итог судит дверь.
         if [ "$ACCOUNT_ROTATION" = 1 ] && [ "$ROTATE_RC" = 0 ]; then
@@ -4596,7 +5231,8 @@ elif [ "$ROTATE_SUPPRESSED" != 1 ]; then
 fi
 # Ротация шла, а флаг остался: сессия не сменилась (отказ двери, неудача), и
 # держать запуски помощников незачем. Успешные пути сняли его сами.
-[ "$NEED_ROTATE" != 1 ] || rotation_flag_clear "ротация не состоялась, смена остаётся"
+# Флаг «дорабатывает» — не отказ: он принадлежит успешной ротации с преемником.
+[ "$NEED_ROTATE" != 1 ] || [ "$(rotation_flag_read этап)" = дорабатывает ] || rotation_flag_clear "ротация не состоялась, смена остаётся"
 rotation_queue_rescue
 [ "$NEED_ROTATE" != 1 ] || [ "${ROTATE_RC:-1}" != 0 ] || shift_leftover_sweep
 
@@ -4653,7 +5289,7 @@ elif [ -f "$DEVMAP" ]; then
             say "тишина ${IDLE_MIN} мин, $(limit_until_text) — молчу"
         elif [ "$IDLE_MIN" -gt "$SILENCE_MAX_MIN" ] && ! helpers_present; then
             say "тишина: очередь непуста, транскрипт молчит ${IDLE_MIN} мин (> ${SILENCE_MAX_MIN}) — пинок в tmux"
-            if tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
+            if tmux has-session -t "=$TMUX_SESSION" 2>/dev/null; then
                 # Пинок НАЗЫВАЕТ, что брать: владелец 26.09.2026 — «если у
                 # тебя блокер, но при этом есть любая другая работа, она должна
                 # исполняться, вплоть до следующего блокера». Смена трижды за
@@ -4772,7 +5408,7 @@ PULSE_MARK="$LOG_DIR/last_report"
 PULSE_MAX_MIN="${PULSE_MAX_MIN:-30}"
 # Через сколько минут молчания смены сказать САМОМУ ВЛАДЕЛЬЦУ (порог — данные).
 PULSE_OWNER_MIN="${PULSE_OWNER_MIN:-60}"
-if [ "$WORK_PAUSED" = 0 ] && tmux has-session -t "$TMUX_SESSION" 2>/dev/null \
+if [ "$WORK_PAUSED" = 0 ] && tmux has-session -t "=$TMUX_SESSION" 2>/dev/null \
    && [ -f "$TRANSCRIPT" ]; then
     WORK_AGE_MIN="${JUDGE_WORK_MIN:-0}"
     if [ -f "$PULSE_MARK" ]; then
@@ -4853,7 +5489,7 @@ LIMIT_STALL_MIN="${LIMIT_STALL_MIN:-20}"
 LIMIT_RETRY_MIN="${LIMIT_RETRY_MIN:-10}"
 # Предохранитель: при НЕИЗВЕСТНОМ сроке сброса дольше этого сторож не молчит.
 LIMIT_KICK_MAX_MIN="${LIMIT_KICK_MAX_MIN:-60}"
-if [ "$WORK_PAUSED" = 0 ] && tmux has-session -t "$TMUX_SESSION" 2>/dev/null \
+if [ "$WORK_PAUSED" = 0 ] && tmux has-session -t "=$TMUX_SESSION" 2>/dev/null \
    && [ -f "$TRANSCRIPT" ]; then
     # Немота = работа_мин судьи (главная ИЛИ живой помощник); судья не ответил —
     # judge_work уже свёл её к главной или к возрасту файла: хуже, чем судья, но
@@ -5180,7 +5816,7 @@ inbox_kick_step() {
     case "$reason" in
         пауза|ротация|лимит) inbox_say_refusal "$reason" ;;
         *)
-            if tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
+            if tmux has-session -t "=$TMUX_SESSION" 2>/dev/null; then
                 tg_send "У меня $INBOX_N ваших сообщений в inbox, но в tmux-панели не claude — агент выпал в оболочку. Поднимаю смену сейчас же, ответ будет от неё." --task session-warden:no-agent || say "и сигнал не ушёл"
             else
                 say "tmux-сессии нет — входящие некому отдать, сигнал владельцу"
@@ -5230,6 +5866,8 @@ speed_kick_step() {
     local last_kick=0 last_over=0 verdict rc=0 kind count take shown line1 work mode text
     if [ "${TMUX_KICKED:-0}" = 1 ]; then say "скорость: молчу — в этом проходе уже был пинок"; return 0; fi
     if [ "${OWNER_WAITING:-0}" = 1 ]; then say "скорость: молчу — во входящих слово владельца"; return 0; fi
+    # Пул тяжёлых прогонов при выпуске мест не даёт: «возьми ещё» плодило бы ждущих.
+    if release_mark_owner >/dev/null; then say "скорость: молчу — идёт выпуск"; return 0; fi
     [ -f "$kick" ] && last_kick=$(stat -c '%Y' "$kick")
     [ -f "$over" ] && last_over=$(stat -c '%Y' "$over")
     verdict=$(python3 "$judge" --сторожу --последний-пинок "$last_kick" --предложено "$(cat "$offered" 2>/dev/null)" --последнее-лишнее "$last_over" 2>&1) || rc=$?

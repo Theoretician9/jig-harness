@@ -328,6 +328,9 @@ ROTATE_REFUSED_TELL_GAP_MIN=180
 ROTATE_HELPERS_WAIT_MAX_MIN=60
 ROTATE_HELPERS_TIMEOUT_ACTION=сообщить
 ROTATE_FLAG_STALE_MIN=30
+# Стенды судят путь отката (ожидание помощников до ротации): ротация с преемником
+# (спека 14) — проба test_rotation_successor_warden.sh.
+ROTATE_SUCCESSOR=0
 HELPER_FRESH_MIN=20
 HELPER_HUNG_MIN=120
 SILENCE_MAX_MIN=30

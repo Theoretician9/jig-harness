@@ -60,6 +60,7 @@ def _аварийный_сторож(беда: Exception) -> int:
 try:
     import config as конф                                 # noqa: E402
     import owner_word as слово_вл                         # noqa: E402
+    import rotation_flag                                  # noqa: E402
     import door_subjects                                  # noqa: E402
 except Exception as _беда_импорта:
     sys.exit(_аварийный_сторож(_беда_импорта))
@@ -1007,7 +1008,7 @@ def _атомарная_запись(аргументы: list[str], катало
 def _разрушаемое(звено: dict) -> list[tuple[str, bool, str]]:
     """Что звено разрушает: [(путь, ещё_и_предки, глагол)].
 
-    «Предки» — цель-родитель защищённого пути (rm -rf sample-21) уносит его так же,
+    «Предки» — цель-родитель защищённого пути (rm -rf sample-22) уносит его так же,
     как сам путь. Только у источников: целью mv служит каталог, куда кладут.
     """
     argv, каталог = звено["argv"], звено["каталог"]
@@ -2060,7 +2061,9 @@ def _tmux_target(args: str) -> str | None:
     m = re.search(r"-t\s*=?\s*(\"[^\"]*\"|'[^']*'|\S+)", args)
     if not m:
         return None
-    return m.group(1).strip("\"'")
+    # `=` точного имени бывает и внутри кавычек (`-t "=agent:"`); `:` — уровень панели, имя сессии до него.
+    target = m.group(1).strip("\"'").lstrip("=")
+    return target if "$" in target else target.split(":", 1)[0]
 
 
 _TMUX_SOCKET = re.compile(r"-([LS])\s*=?\s*(\"[^\"]*\"|'[^']*'|\S+)")
@@ -2099,7 +2102,8 @@ def _hits_agent_session(args: str) -> bool:
     session = read_conf(os.environ.get("HARNESS_CONF") or HARNESS_CONF_PATH).get(
         "TMUX_SESSION", "agent"
     )
-    return target == session
+    # `<сессия>-old-<epoch>` — дорабатывающая смена после ротации с преемником: её гасит только сторож.
+    return target == session or target.startswith(f"{session}-old-")
 
 
 def session_suicide(cmd: str) -> str | None:
@@ -2161,6 +2165,37 @@ def restart_kind(command: str, args: str) -> str | None:
 OWNER_ROTATE = re.compile(r"session-warden\.sh\b[^;&|\n]*--rotate-now\s+--owner\b")
 
 
+# Ротация с преемником (спека ротация-ждёт-помощников, 14.7): старая смена «дорабатывает», канал, входящие
+# и STATE.md у преемника. Преемник и помощники старой не задеты: правило судит session_id главной сессии.
+_STATE_FILE = r"(?:[^\s;&|<>]*/)?STATE\.md(?![\w.-])"
+# Вызов tg_send.sh — в позиции команды, с кавычками: путь к нему часто стоит в кавычках, и в «видимом» он погашен.
+TG_SEND_CALL = re.compile(
+    _CMD_POS + _PRE + r"(?:(?:bash|sh|source|\.)\s+(?:-\S+\s+)*)?[\"']?(?:[^\s;&|<>\"']*/)?tg_send\.sh(?![\w.-])",
+    re.MULTILINE)
+# Входящие и запись STATE.md — по «видимому»: слово в кавычках рассказ, а не путь.
+INBOX_OR_STATE_WRITE = re.compile(
+    r"(?<![\w.-])inbox(?:/|(?![\w.-]))"
+    r"|>>?\s*" + _STATE_FILE +
+    r"|(?<![\w.-])tee\b[^;&|\n]*\s" + _STATE_FILE +
+    r"|(?<![\w.-])sed\b[^;&|\n]*\s-[A-Za-z]*i[^;&|\n]*\s" + _STATE_FILE +
+    r"|(?<![\w.-])(?:cp|mv)\b[^;&|\n]*\s" + _STATE_FILE + r"\s*(?=$|[;&|)])",
+    re.MULTILINE)
+FINISHING_TEXT = (
+    "Ты — дорабатывающая смена: канал и входящие у преемника (tmux `{tmux}`). "
+    "Пиши журнал задачи и handover, коммить; владельцу не пиши, входящие не трогай, STATE.md не правь: "
+    "пишет только преемник. Помощников доведи и остановись, «/exit» подаст сторож.")
+
+
+def finishing_channel_block(cmd: str, visible: str) -> str | None:
+    """Причина отказа главной сессии, которая дорабатывает после передачи преемнику, или None."""
+    if ПОМОЩНИК or not СЕССИЯ:
+        return None
+    flag = rotation_flag.finishing_flag(СЕССИЯ)
+    if flag is None or not (TG_SEND_CALL.search(heredoc_вырезан(cmd)) or INBOX_OR_STATE_WRITE.search(visible)):
+        return None
+    return FINISHING_TEXT.format(tmux=flag.get("tmux_роли") or rotation_flag.main_tmux())
+
+
 def restart_in_command(видимое: str, cmd: str) -> str | None:
     """Команда перезапуска/остановки, убивающая помощников. Аргументы берутся из
     строки с теми же смещениями, что у «видимого» (heredoc вырезан), но с
@@ -2175,16 +2210,11 @@ def restart_in_command(видимое: str, cmd: str) -> str | None:
     return None
 
 
-def probe_shift_helpers() -> dict | None:
-    """Помощники СМЕНЫ глазами прибора. None — транскрипта смены нет, судить нечего;
-    HelpersUnknown — прибор упал, завис или молчит (R-12)."""
-    here = pathlib.Path(__file__).resolve().parent
-    tool = next((p for p in (here.parent / "stall-in-log.py", here.parent / "scripts" / "stall-in-log.py")
-                 if p.is_file()), None)
-    if tool is None:
-        raise HelpersUnknown("прибора stall-in-log.py рядом нет")
+def _probe_transcript(tool: pathlib.Path, target: str) -> dict | None:
+    """Один вызов прибора: `target` — `--shift` (смена) или sid/путь транскрипта (`--работа <sid>`)."""
+    args = ["--работа", "--shift"] if target == "--shift" else ["--работа", target]
     try:
-        done = subprocess.run([sys.executable, str(tool), "--работа", "--shift"], capture_output=True,
+        done = subprocess.run([sys.executable, str(tool), *args], capture_output=True,
                               text=True, timeout=HELPERS_PROBE_TIMEOUT_SEC)
     except subprocess.TimeoutExpired:
         raise HelpersUnknown(f"прибор не ответил за {HELPERS_PROBE_TIMEOUT_SEC} с")
@@ -2198,6 +2228,28 @@ def probe_shift_helpers() -> dict | None:
         raise HelpersUnknown("ответ прибора не разобран: нет строк «помощников» и «зависших»")
     return {"running": int(counts["помощников"]), "hung": int(counts["зависших"]),
             "rows": [r for r in rows if len(r) >= 5 and r[0] in ("помощник", "зависший")]}
+
+
+def probe_shift_helpers() -> dict | None:
+    """Помощники СМЕНЫ и дорабатывающей смены (ротация с преемником) глазами прибора. None — транскриптов
+    нет, судить нечего; HelpersUnknown — прибор упал, завис или молчит (R-12).
+
+    Дорабатывающая смена живёт в своей tmux-сессии и держит своих помощников: перезапуск юнита или машины
+    оборвал бы и их, а «--shift» её транскрипт может не выбрать (свежайший — у преемника)."""
+    here = pathlib.Path(__file__).resolve().parent
+    tool = next((p for p in (here.parent / "stall-in-log.py", here.parent / "scripts" / "stall-in-log.py")
+                 if p.is_file()), None)
+    if tool is None:
+        raise HelpersUnknown("прибора stall-in-log.py рядом нет")
+    found = [_probe_transcript(tool, "--shift")]
+    found += [_probe_transcript(tool, sid) for sid in rotation_flag.finishing_sessions()]
+    found = [f for f in found if f is not None]
+    if len(found) <= 1:
+        return found[0] if found else None
+    # Свежайший транскрипт смены мог оказаться транскриптом дорабатывающей: тот же помощник — одна строка.
+    rows = [list(r) for r in dict.fromkeys(tuple(r) for f in found for r in f["rows"])]
+    return {"running": sum(r[0] == "помощник" for r in rows), "hung": sum(r[0] == "зависший" for r in rows),
+            "rows": rows}
 
 
 def helpers_block_reason() -> str | None:
@@ -2712,6 +2764,10 @@ def check(cmd: str, вложенная: bool = False, предел_снаруж�
     мимо_места = проба_мимо_места(cmd)
     if мимо_места:
         return deny(мимо_места)
+
+    finishing = finishing_channel_block(cmd, видимое)
+    if finishing:
+        return deny(finishing)
 
     if TELEGRAM_CHANNEL.search(cmd) or TELEGRAM_MCP.search(cmd):
         return deny(

@@ -255,7 +255,7 @@ def case_h1() -> None:
     Стенд: master (A, A2 с путём «ё»), ветка «страховка» с harness/ОПИСЬ.md = X (свои коммиты
     копии: update.py --сбросить-свои кладёт их в ветку server-*-local-*), коммит только под
     тегом, коммит только под refs/remotes/x/master.
-    Почему не --branches: 13.11.2026 копия bkb после сброса своих коммитов в ветку-страховку
+    Почему не --branches: 13.11.2026 копия сети после сброса своих коммитов в ветку-страховку
     получила от раскладки предложение снять 4 своих файла (cf-exchange-watch.sh …) как
     «пакетные, убранные» — затравка читала ветку-страховку как историю пакета.
     Зелен на поломке? `--all`/`--branches` — нет: X из ветки «страховка» обязан НЕ найтись;
@@ -1056,10 +1056,10 @@ def case_h16() -> None:
 def case_h17() -> None:
     """Своё копии не предлагается к снятию: затравка видит только историю публичного коммита.
     Стенд как у копии после `update.py --сбросить-свои`: master = P (публичный, под тегом),
-    до него P0 с harness/demons/old.sh (убран в P); ветка server-bkb-local-… от P со СВОИМ
+    до него P0 с harness/demons/old.sh (убран в P); ветка server-copy-a-local-… от P со СВОИМ
     коммитом копии, добавившим harness/demons/x.sh; HEAD = P. В проекте x.sh (его клала
     раскладка, пока свой коммит стоял на HEAD) и old.sh — оба вне описи.
-    Живой случай: копия bkb 13.11.2026, раскладка предложила снять cf-exchange-watch.sh и ещё 3.
+    Живой случай: копия сети 13.11.2026, раскладка предложила снять cf-exchange-watch.sh и ещё 3.
     Зелен на поломке? `--branches`/`--all` — нет: x.sh обязан НЕ попасть в would_remove;
     пустая история — нет: old.sh из публичной истории обязан попасть."""
     root = stand_root()
@@ -1070,7 +1070,7 @@ def case_h17() -> None:
         commit(repo, {"harness/demons/keep.sh": keep, "harness/demons/old.sh": old}, "P0")
         public = commit(repo, {"harness/demons/old.sh": None}, "P")
         git(repo, "tag", "v0.11.0")
-        git(repo, "checkout", "-q", "-b", "server-bkb-local-20261113-1200")
+        git(repo, "checkout", "-q", "-b", "server-copy-a-local-20261113-1200")
         commit(repo, {"harness/demons/x.sh": own}, "свой коммит копии")
         git(repo, "checkout", "-q", "master")
         PROBE.check("H17", "стенд: HEAD = публичный P", git(repo, "rev-parse", "HEAD") == public)

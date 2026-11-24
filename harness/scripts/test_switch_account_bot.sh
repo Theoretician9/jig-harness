@@ -263,7 +263,9 @@ PANE_TMUX_TIMEOUT="3"
 PANE_ENTER_DELAY="0.1"
 EOF
 start_dispatcher() {
-    env PROBA_DIR="$S" PATH="$T/bin:$PATH" HARNESS_PANEL_STATE="$S/panel" \
+    # PROJECT_DIR явно: у диспетчера окружение старше конфига, и PROJECT_DIR зовущего
+    # (стенд поезда выпуска) увёл бы дверь переключения мимо проекта стенда.
+    env PROBA_DIR="$S" PROJECT_DIR="$S/project" PATH="$T/bin:$PATH" HARNESS_PANEL_STATE="$S/panel" \
         HARNESS_INSTALL_CONF="$S/install.conf" HARNESS_CONF="$S/harness.conf" \
         HARNESS_ACCOUNT_DIR="$S/acc" SECRETS_DIR="$S/secrets" LOG_DIR="$S/log" \
         TG_API_BASE="http://127.0.0.1:$port" TG_TOKEN_FILE="$S/token" \
@@ -396,7 +398,7 @@ case_check "Б-7 кнопка первого меню после второго 
     "жива|Это старое меню — напиши «аккаунт» заново|0" \
     "$([ "$TTL_FRESH" = "Принято|1" ] && echo жива || echo мертва)|$(old_menu_press)"
 
-echo "── Б-10: канал-группа — chat.id группы, from.id владельца (улика bkb 19.11) ──"
+echo "── Б-10: канал-группа — chat.id группы, from.id владельца (улика копии сети 19.11) ──"
 group_press() {  # $1 = from.id, $2 = chat.id → «ответ|выборов в журнале»; канал — группа, владелец — $OWNER
     local d="$T/group-$1-$2"; mkdir -p "$d"
     HARNESS_ACCOUNT_DIR="$d" python3 -I - "$HERE/lib" "$d" "$OWNER" "$1" "$2" 2>"$d/err" <<'PY'
@@ -494,13 +496,17 @@ case_check "М-в весть_о_битой_передаче_нужна 1 «» (�
     "$(r=$(wfn весть_о_битой_передаче_нужна 1 ""); echo "${r##*|}")"
 case_check "М-в весть_о_битой_передаче_нужна 1 «автопереход: …» (лимит) → 1, молчит" 1 \
     "$(r=$(wfn весть_о_битой_передаче_нужна 1 "автопереход: alpha в лимите до 18:00"); echo "${r##*|}")"
-HANDOFF_GATE="$(wbody rotate_full | awk -v needle='но проверка приёма провалена' \
+# Весть шлёт одна приёмка_передачи; оба пути ротации — rotate_full (ROTATE_SUCCESSOR=0)
+# и преемник — зовут её, своей копии вести у них нет.
+handoff_gate() { wbody "$1" | awk -v needle='но проверка приёма провалена' \
     -v gate='весть_о_битой_передаче_нужна "$ACCOUNT_ROTATION" "${ACCOUNT_WHY:-}"' '
     index($0, gate) { g = NR }
     index($0, needle) { print (g && NR - g <= 3) ? "под-решением" : "без-решения"; found = 1; exit }
-    END { if (!found) print "вести-нет" }')"
-case_check "М-в rotate_full: весть «проверка приёма провалена» стоит под весть_о_битой_передаче_нужна \"\$ACCOUNT_ROTATION\" \"\${ACCOUNT_WHY:-}\"" \
-    под-решением "$HANDOFF_GATE"
+    END { if (!found) print "вести-нет" }'; }
+case_check "М-в rotate_full: приём судит приёмка_передачи, своей копии вести нет" \
+    "зовёт вести-нет" "$(wbody rotate_full | grep -qE '^[[:space:]]+приёмка_передачи ' && printf 'зовёт' || printf 'не-зовёт') $(handoff_gate rotate_full)"
+case_check "М-в приёмка_передачи: весть «проверка приёма провалена» стоит под весть_о_битой_передаче_нужна \"\$ACCOUNT_ROTATION\" \"\${ACCOUNT_WHY:-}\"" \
+    под-решением "$(handoff_gate приёмка_передачи)"
 
 # Суточная сверка меню бота: $1 = день из отметки (пусто — отметки нет), $2 = сегодня.
 # Каждый случай ловит поломку, которую пропустили бы два других: «сверять всегда»

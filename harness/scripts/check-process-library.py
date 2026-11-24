@@ -16,7 +16,8 @@
   check-process-library.py [--root R] [--crontab FILE] [--units FILE] [--project-dir P]
     R — корень проекта (умолчание — проект судьи); FILE — подставной crontab / список
     юнитов по одному имени в строке (без ключа — `crontab -l` и `systemctl list-unit-files`);
-    P — префикс своих путей в строках крона (умолчание R).
+    P — префикс своих путей в строках крона (умолчание R; в связанном git worktree —
+    то же место в основном дереве).
 Коды: 0 чисто · 1 нарушения · 2 кривой вызов (нет библиотеки под R) ·
 3 источник недоступен (crontab или systemctl нет / отдал ошибку).
 Последняя строка: `check-process-library: чисто, записей N` или `... нарушений N`.
@@ -60,6 +61,25 @@ def default_root() -> Path:
         if config_dir(folder):
             return folder
     return here.parent.parent
+
+
+def project_of(root: Path) -> Path:
+    """Проект внешних носителей (крон, .git/hooks): у связанного git worktree — основное
+    дерево. Очередь слияния судит код во временном .claude/worktrees/mq-*, а крон и хуки
+    машины ссылаются на основной проект: префикс по дереву делал каждую запись «мёртвой»."""
+    env = {k: v for k, v in os.environ.items() if k not in ("GIT_DIR", "GIT_WORK_TREE")}
+    try:   # без git (пакет у копии, урезанный PATH) дерево — само себе проект
+        done = subprocess.run(["git", "-C", str(root), "rev-parse", "--path-format=absolute", "--git-dir",
+                               "--git-common-dir", "--show-toplevel"],
+                              capture_output=True, text=True, env=env, stdin=subprocess.DEVNULL)
+    except OSError:
+        return root
+    if done.returncode != 0:
+        return root
+    git_dir, common, top = (Path(line) for line in done.stdout.splitlines()[:3])
+    if git_dir == common:
+        return root
+    return common.parent / root.relative_to(top)
 
 
 def read_lines(option, command):
@@ -142,7 +162,7 @@ def judge(root: Path, cron_lines: list, unit_lines: list, project_dir: str) -> t
     cfg = config_dir(root)
     package = json.loads((cfg / "process-library.json").read_text(encoding="utf-8"))
     # Свои процессы копии раскладка из файла пакета снимает; их место — слой установки
-    # (копия bkb 14.11.2026: без слоя своя строка крона краснела «без записи» после обновления).
+    # (копия сети 14.11.2026: без слоя своя строка крона краснела «без записи» после обновления).
     records = process_library.with_local_layer(package)["процессы"]
     package_ids = {r["id"] for r in package["процессы"]}
     schedule = (yaml.safe_load((cfg / "process-library.yaml").read_text(encoding="utf-8")) or {}).get("процессы") or {}
@@ -275,7 +295,7 @@ def main() -> int:
         for name in missing:
             print(f"check-process-library: источник недоступен: {name}")
         return 3
-    bad, total = judge(root, cron, units, args.project_dir or str(root))
+    bad, total = judge(root, cron, units, args.project_dir or str(project_of(root)))
     print("\n".join(bad))
     print(f"check-process-library: нарушений {len(bad)}" if bad else f"check-process-library: чисто, записей {total}")
     return 1 if bad else 0

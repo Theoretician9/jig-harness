@@ -149,6 +149,7 @@
   owner_testable:
     смысл: "true — результат щупает владелец; false — внутреннее, done без tested_at законен"
     тип: логическое
+    умолчание: true
     обязательно: нет
     пишет: [scripts/map-from-message.py (true), scripts/alert-task.py, scripts/evolution-net.py, harness/demons/project-revision.sh (false), сессия]
     карточек: { карта: 347, архив: 1239 }
@@ -191,6 +192,7 @@
   volume:
     смысл: "объём: оценка (estimated: true) или факт (estimated: false)"
     тип: словарь
+    умолчание: { loc: 100, complexity: 3, tokens_k: 50, estimated: true }
     обязательно: нет
     пишет: [заводящие писатели (оценка-константа), сессия]
     карточек: { карта: 329, архив: 1219 }
@@ -202,6 +204,7 @@
   when:
     смысл: "даты жизни: начата, сделана, проверена; estimated: false — по факту"
     тип: словарь
+    умолчание: { started: null, done: null, tested: null, estimated: true }
     обязательно: нет
     пишет: [заводящие писатели (пустые даты), сессия]
     карточек: { карта: 328, архив: 1005 }
@@ -313,6 +316,20 @@
     пишет: [сессия, scripts/import-product-trace.py]
     читает: [scripts/work-queue.py, scripts/build-board.py]
     карточек: { карта: 8, архив: 28 }
+  элемент:
+    смысл: "место задачи в архитектуре: id части или элемента реестра архитектуры (harness/config/architecture.yaml); часть — префикс до точки"
+    тип: строка
+    обязательно: нет
+    пишет: [scripts/map-from-message.py, scripts/alert-task.py, scripts/devmap-keeper.py, сессия]
+    читает: [scripts/check-architecture.py]
+    карточек: { карта: 0, архив: 0 }
+  новый_элемент:
+    смысл: "имя элемента, которого ещё нет в реестре; снимается тем коммитом, что заводит элемент и переводит карточку в wip или test"
+    тип: строка
+    обязательно: нет
+    пишет: [scripts/map-from-message.py, сессия]
+    читает: [scripts/check-architecture.py]
+    карточек: { карта: 0, архив: 0 }
   дубль_из:
     смысл: "эта карточка — дубль названной; работа идёт там"
     тип: строка

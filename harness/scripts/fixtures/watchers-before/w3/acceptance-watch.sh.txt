@@ -307,18 +307,42 @@ OTCHET="$OTCHET_DIR/$(date +%Y-%m-%d).md"
 # не может по логике чистить?» — может и должен: чистка это второй шаг того же
 # действия, а не чужая работа. Карта и архив пишутся вместе (И-1).
 UBRANO=0
+KARTA_GATE() {
+    bash "$PROJECT_DIR/scripts/pre-commit-gate.sh" --devmap-only "$PROJECT_DIR/dev-map.yaml" 2>&1
+}
 if [ "$REZHIM" = "--применить" ]; then
+    KOPII=$(mktemp -d)
+    cp -p "$PROJECT_DIR/dev-map.yaml" "$KOPII/dev-map.yaml" 2>/dev/null || true
+    cp -p "$PROJECT_DIR/docs/dev-map-archive.yaml" "$KOPII/dev-map-archive.yaml" 2>/dev/null || true
+    KARTA_DO_RC=0
+    KARTA_GATE >/dev/null || KARTA_DO_RC=$?
     UBRANO=$(cd "$PROJECT_DIR" && python3 scripts/archive-map.py --перенести 2>&1 \
              | sed -n 's/.*закрытых задач: \([0-9]*\).*/\1/p')
     UBRANO="${UBRANO:-0}"
-    if [ "$UBRANO" != "0" ] \
-       && ! bash "$PROJECT_DIR/scripts/pre-commit-gate.sh" --devmap-only "$PROJECT_DIR/dev-map.yaml" >/dev/null 2>&1; then
-        say "ТРЕВОГА: после переноса в архив карта не проходит валидатор"
-        bash "$PROJECT_DIR/scripts/tg_send.sh" \
-            "Приёмка убрала закрытые задачи в архив, и карта перестала проходить проверку. Работа остановлена — нужен разбор." \
-            >/dev/null 2>&1 || true
-        exit 1
+    if [ "$UBRANO" != "0" ]; then
+        KARTA_VYVOD=$(KARTA_GATE)
+        KARTA_PO_RC=$?
+        if [ "$KARTA_PO_RC" -ne 0 ]; then
+            say "ТРЕВОГА: после переноса в архив карта не проходит валидатор"
+            printf '%s\n' "$KARTA_VYVOD"
+            KARTA_HVOST=$(printf '%s\n' "$KARTA_VYVOD" | tail -8)
+            if [ "$KARTA_DO_RC" -eq 0 ]; then
+                [ -f "$KOPII/dev-map.yaml" ] && cp -p "$KOPII/dev-map.yaml" "$PROJECT_DIR/dev-map.yaml"
+                [ -f "$KOPII/dev-map-archive.yaml" ] && cp -p "$KOPII/dev-map-archive.yaml" "$PROJECT_DIR/docs/dev-map-archive.yaml"
+                say "перенос откачен: карта и архив возвращены из копий"
+                TEKST="Приёмка убрала закрытые задачи в архив, и карта перестала проходить проверку — перенос откачен, карта и архив как были. Работа остановлена — нужен разбор. Причина:
+$KARTA_HVOST"
+            else
+                TEKST="Карта красная до переноса (проверка не проходила и до приёмки), перенос не откатывался. Работа остановлена — нужен разбор. Ошибки проверки:
+$KARTA_HVOST"
+            fi
+            bash "$PROJECT_DIR/scripts/tg_send.sh" "$TEKST" \
+                >/dev/null 2>&1 || true
+            rm -rf "$KOPII"
+            exit 1
+        fi
     fi
+    rm -rf "$KOPII"
 fi
 
 say "$ITOG убрано-в-архив=$UBRANO · отчёт: $OTCHET"

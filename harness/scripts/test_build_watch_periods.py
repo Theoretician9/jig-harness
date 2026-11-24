@@ -589,7 +589,7 @@ rc_sw, out_sw = switch_stand("", period_in_conf=True)
                    rc_sw, out_sw, НЕТ_В_РЕЕСТРЕ, "probe-product")
 
 print("── свой механизм копии: паспорт в поле «механизмы» слоя установки ──")
-# Копия bkb 19.11.2026 (0.14.2): демон cf-exchange-watch — срок в её harness.conf,
+# Копия сети 19.11.2026 (0.14.2): демон cf-exchange-watch — срок в её harness.conf,
 # паспорт был в mechanisms.yaml пакета, обновление его затёрло: «в конфиге есть,
 # в реестре нет». Паспорт своего механизма живёт в слое установки (PROCESS_LIBRARY_LOCAL).
 def own_stand(with_passport: bool):

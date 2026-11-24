@@ -337,6 +337,37 @@ def case_precommit_live_prefix() -> None:
            [f"rc={rc}", f"хвост «{(out.splitlines() or [''])[-1][:200]}»"])
 
 
+def case_linked_worktree() -> None:
+    print("── 17а. связанный git worktree: внешние носители судятся по основному проекту ──")
+    # Очередь слияния гоняет ворота в .claude/worktrees/mq-*: крон и хуки git ссылаются
+    # на основной проект, а не на временное дерево — иначе каждая запись крона «мёртвая».
+    main = Stand("wt-main")
+    main.write()
+    git = ["git", "-c", "user.name=proba", "-c", "user.email=proba@localhost", "-C", str(main.root)]
+    for args in (["init", "-q"], ["add", "-A"], ["commit", "-q", "-m", "стенд"]):
+        rc, out = run(git + args)
+        if rc != 0:
+            report(False, "стенд worktree: git " + args[0], [f"rc={rc}", out[-200:]])
+            return
+    linked = TMP / "j-wt-linked"
+    rc, out = run(git + ["worktree", "add", "-q", "--detach", str(linked)])
+    if rc != 0:
+        report(False, "стенд worktree: git worktree add", [f"rc={rc}", out[-200:]])
+        return
+    rc, out = run([sys.executable, str(JUDGE), "--root", str(linked),
+                   "--crontab", str(main.crontab_file), "--units", str(main.units_file)])
+    found = [line for line in out.splitlines() if line.startswith("НАРУШЕНИЕ ")]
+    report(rc == 0 and not found, "судья в связанном worktree без --project-dir: крон основного проекта → чисто",
+           [f"rc={rc}", f"нарушений {len(found)}: {found[:3]}"])
+    del main.cron[0]
+    main.write()
+    rc, out = run([sys.executable, str(JUDGE), "--root", str(linked),
+                   "--crontab", str(main.crontab_file), "--units", str(main.units_file)])
+    report(rc == 1 and "НАРУШЕНИЕ мёртвая запись: alpha :: crontab" in out,
+           "там же строка крона убрана → «мёртвая запись: alpha :: crontab» (судья не ослеп)",
+           [f"rc={rc}", f"хвост «{(out.splitlines() or [''])[-1][:200]}»"])
+
+
 def case_cron_bypasses() -> None:
     print("── 18. обходы разбора строки крона: каждая форма даёт одно нарушение ──")
     forms = [
@@ -409,9 +440,9 @@ def case_cron_not_executable() -> None:
 
 def case_installation_layer() -> None:
     print("── 19в. свои процессы копии живут в слое установки — судья его читает ──")
-    # Находка копии bkb 14.11.2026: своя строка крона копии с записью в process-library.json
+    # Находка копии сети 14.11.2026: своя строка крона копии с записью в process-library.json
     # была зелёной; раскладка обновления сняла запись (в пакете её нет), а судья слоя
-    # PROCESS_LIBRARY_LOCAL не читал — «без записи: crontab :: bkb-backup», откат.
+    # PROCESS_LIBRARY_LOCAL не читал — «без записи: crontab :: copy-a-backup», откат.
     stand = Stand("layer")
     stand.touch("scripts/own.sh")
     stand.cron.append(f"0 4 * * * {stand.root}/scripts/run-background.sh own -- "
@@ -439,7 +470,7 @@ def case_installation_layer() -> None:
 
 def case_own_mechanism() -> None:
     print("── 19г. свой механизм копии — паспорт в поле «механизмы» слоя установки ──")
-    # Копия bkb 19.11.2026 (0.14.2): демон cf-exchange-watch записан в слой процессов,
+    # Копия сети 19.11.2026 (0.14.2): демон cf-exchange-watch записан в слой процессов,
     # а его паспорт — в mechanisms.yaml пакета; обновление паспорт затирает, судья
     # краснел «нет механизма». Место паспорта своего механизма — тот же слой.
     stand = Stand("own-mech")
@@ -660,7 +691,7 @@ def main() -> int:
     try:
         for fn in (case_clean, case_new_demon, case_record_without_source, case_cron_wrapped, case_cron_bare,
                    case_hook, case_ghost_mechanism, case_removed_demon, case_unit, case_schedule,
-                   case_empty_root, case_wiring, case_precommit_live_prefix, case_cron_bypasses,
+                   case_empty_root, case_wiring, case_precommit_live_prefix, case_linked_worktree, case_cron_bypasses,
                    case_dead_sources, case_gate_key_live_conf, case_cron_not_executable, case_installation_layer, case_own_mechanism,
                    case_sources_unavailable, case_live_machine_wording):
             try:

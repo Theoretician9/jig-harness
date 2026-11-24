@@ -86,7 +86,9 @@ YES, NO = "consent.yes", "consent.no"
 LOCK2 = "замок 2 · согласие владельца на публикацию есть"
 # Просьбы, которые стенд кладёт к своим нажатиям: счёт запросов судит только то, что положила дверь.
 STAND_ASK = "proba-stand"
-PAST_GATE = "PROBA-ЗА-ВОРОТАМИ"
+# Секреты deploy.sh судит ДО двери согласия (стоит раньше сборки и ворот), поэтому заглушка
+# check-secrets.sh пропускает молча, а «дверь открыта» — это строка «тег: deploy-…» сразу за воротами.
+PAST_GATE = "тег: deploy-"
 
 PATHS = 0
 FAILS: list[str] = []
@@ -291,7 +293,7 @@ class Stand:
                            "исключить: []\nзаменить_шаблоном:\n  harness/память/TONE.md: "
                            "harness/шаблоны-задач/ТОН-заготовка.md\nобезличить_ключи: [PROJECT_DIR]\n"
                            "оставить: [harness/CLAUDE.md]\n"),
-                          ("ЧТО-НОВОГО.md", "# Что нового\n\n## 2026-11-06 — Кнопки\n\n### Исправлено\n\n"
+                          ("ЧТО-НОВОГО.md", "# Что нового\n\n## Выпуск 0.2.1 — 2026-11-06 — Кнопки\n\n### Исправлено\n\n"
                            "- Сессия больше не обрывается.\n\n### Что изменилось для вас\n\n- Ничего.\n")):
             write(self.pkg / rel, text)
         git("init", "-q", "-b", "master", cwd=self.pkg)
@@ -312,7 +314,8 @@ class Stand:
         commit_all(self.build, "версия от 2026-09-12")
         git("tag", "-a", "v0.1.0", "-m", "релиз", cwd=self.build)
         final_tree(self.build)
-        commit_all(self.build, "версия от 2026-11-01")
+        # Тему «…, пакет <sha>» публикация читает как коммит пакета прошлого выпуска (door_subjects.released_package).
+        commit_all(self.build, f"версия от 2026-11-01, пакет {self.pkg_old}")
         git("tag", "-a", "v0.2.0", "-m", "релиз", cwd=self.build)
         git("remote", "add", "jig", self.url, cwd=self.build)
         git("push", "-q", "jig", "refs/heads/master", "refs/tags/*:refs/tags/*", cwd=self.build)
@@ -347,7 +350,7 @@ class Stand:
             write(scripts / "deploy_guard.py", gate_text)
         write(scripts / "gates.sh", f'#!/bin/sh\necho "gates $*" >> "{self.root}/gates-called"\nexit 0\n', 0o755)
         write(scripts / "tg_send.sh", f'#!/bin/sh\necho "$*" >> "{self.root}/tg-sent"\n', 0o755)
-        write(scripts / "check-secrets.sh", f'#!/bin/sh\necho "{PAST_GATE}"\nexit 1\n', 0o755)
+        write(scripts / "check-secrets.sh", '#!/bin/sh\nexit 0\n', 0o755)
         # Bash-двери — копии, а не ссылки: свой каталог и паспорт (АР-3) дверь берёт по
         # readlink -f; настоящий файл пошёл бы на паспорт машины и её tg_send.sh.
         for door in BASH_DOORS.values():

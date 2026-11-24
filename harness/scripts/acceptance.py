@@ -369,7 +369,8 @@ def судить(задача: dict, корень: Path) -> dict:
 
 
 # ── Мутации — шаг задачи до test (пульт pipeline.yaml, шаги; ключ «шаги_приёмки» — ручка) ──
-ИТОГ_ПРИБОРА = re.compile(r"покраснели как надо (\d+), дыр (\d+)")
+ИТОГ_ПРИБОРА = re.compile(r"покраснели как надо (\d+), дыр (\d+)(?:, из кэша (\d+))?")
+НЕДОГОН_ПРИБОРА = re.compile(r"НЕДОГНАНА: не прогнано (\d+) из")
 ТАБЛИЦЫ_МУТАЦИЙ = ("harness/config/probe-mutations.yaml", "harness/config/invariants.yaml")
 ПРИБОР_МУТАЦИЙ = ["bash", "scripts/mutation-probe.sh"]
 _ПАЙПЛАЙН = []
@@ -484,11 +485,17 @@ def mutation_table(корень: Path) -> tuple[set, dict]:
 
 def механизмы_задачи(ид: str, корень: Path) -> list[str] | None:
     """Механизмы с записями мутаций, которых коснулась задача: сами или их
-    файл-доказательство. None — история не прочитана."""
+    файл-доказательство. None — история не прочитана.
+
+    Файл судится, пока в нём живы строки задачи: старый коммит с трейлером, чьи
+    строки давно переписала другая задача, иначе тянул в шаг чужие механизмы на
+    часы (06.11: 6fb1a932 — session-warden.sh в шаге hr.prikaz-vykata-vopros-i-na-potom)."""
     файлы = файлы_задачи(ид, корень)
     if файлы is None:
         return None
     mechanisms, proofs = mutation_table(корень)
+    файлы = [ф for ф in файлы
+             if (ф in mechanisms or ф in proofs) and task_changed_lines(ид, корень, ф)]
     return sorted({ф for ф in файлы if ф in mechanisms}
                   | {м for ф in файлы if ф in proofs for м in proofs[ф]})
 
@@ -531,6 +538,42 @@ def stale_debts(ид: str, корень: Path, sha: str, mechanisms: list[str]) 
             for ф in dict.fromkeys(после) if ф in watched]
 
 
+def judged_entries(корень: Path, rev: str, mechanisms: list[str]) -> dict:
+    """Записи таблиц мутаций о механизмах в ревизии rev: по ним бумага выбирала мутации."""
+    import yaml
+    wanted = set(mechanisms)
+
+    def table(name: str, key: str):
+        return (yaml.safe_load("\n".join(_git_lines(корень, "show", f"{rev}:{name}") or [])) or {}).get(key)
+
+    probes, invariants = ТАБЛИЦЫ_МУТАЦИЙ
+    return {probes: {п: з for п, з in (table(probes, "пробы") or {}).items()
+                     if з and wanted & set(з["механизм"] if isinstance(з["механизм"], list)
+                                           else [з["механизм"]])},
+            invariants: [e for e in table(invariants, "инварианты") or [] if e.get("файл") in wanted]}
+
+
+def _same_blob(корень: Path, sha: str, путь: str) -> bool:
+    then = _git_lines(корень, "rev-parse", f"{sha}:{путь}")
+    return then is not None and then == _git_lines(корень, "rev-parse", f"HEAD:{путь}")
+
+
+def paper_code_debts(корень: Path, sha: str, mechanisms: list[str]) -> list[str]:
+    """Бумага вне истории HEAD годна, если судила тот же код: механизмы, их
+    доказательства и их записи мутаций в sha те же, что в HEAD. Очередь слияния
+    перебазирует ветку — sha меняются, содержимое нет; сверка содержимого
+    переживает и rebase, и squash, а сверка sha валила неизменный код (22.11)."""
+    if _git_lines(корень, "cat-file", "-e", f"{sha}^{{commit}}") is None:
+        return [f"мутации: коммит бумаги {sha[:9]} не найден в репозитории"]
+    _, proofs = mutation_table(корень)
+    files = list(mechanisms) + sorted(п for п, мм in proofs.items() if set(мм) & set(mechanisms))
+    debts = [f"мутации: бумага судила другой код: {ф} изменился после коммита бумаги {sha[:9]}"
+             for ф in files if not _same_blob(корень, sha, ф)]
+    then, now = (judged_entries(корень, rev, mechanisms) for rev in (sha, "HEAD"))
+    return debts + [f"мутации: бумага судила другие записи мутаций: {т} изменилась после "
+                    f"коммита бумаги {sha[:9]}" for т in ТАБЛИЦЫ_МУТАЦИЙ if then[т] != now[т]]
+
+
 def mutation_paper_debts(ид: str, корень: Path) -> list[str] | None:
     """Долги шага «мутации»: пусто — шаг пройден или не требуется; None — история
     не прочитана. Судит бумагу по коммиту, а не по времени файла."""
@@ -546,14 +589,16 @@ def mutation_paper_debts(ид: str, корень: Path) -> list[str] | None:
         return ["мутации: в шапке бумаги нет «коммит <sha>»"]
     sha = шапка.group(1)
     if _git_lines(корень, "merge-base", "--is-ancestor", sha, "HEAD") is None:
-        return [f"мутации: коммит бумаги {sha[:9]} не предок HEAD"]
+        since = paper_code_debts(корень, sha, mechanisms)
+    else:
+        since = stale_debts(ид, корень, sha, mechanisms)
     sections = paper_sections(текст, mechanisms)
     debts = []
     for м in mechanisms:
         беда = section_debt(sections[м]) if м in sections else "нет раздела в бумаге"
         if беда:
             debts.append(f"мутации: {м}: {беда}")
-    return debts + stale_debts(ид, корень, sha, mechanisms)
+    return debts + since
 
 
 def долг_мутаций(ид: str, корень: Path, отложенные) -> str | None:
@@ -802,8 +847,9 @@ def мутации_пачки(ids: list[str], корень: Path, прибор: 
     Бумага задачи пишется, КАК ТОЛЬКО догнаны её механизмы, а строка механизма с
     длительностью печатается сразу: обрыв захода по пределу юнита оставляет
     готовое и виден в журнале. После мягкого срока новый механизм не начинается;
-    задачи с недогнанными механизмами в ответ не входят — их добьёт следующий
-    заход, сделанные мутации отдаст кэш прибора."""
+    задачи с недогнанными механизмами в ответ не входят: о каждой печатается,
+    сколько мутаций заход прогнал по-новой, — по этому числу очередь решает, тратить
+    ли заявке попытку. Добьёт её следующий заход, сделанные мутации отдаст кэш прибора."""
     по_задаче = {ид: механизмы_задачи(ид, корень) for ид in ids}
     head = _git_lines(корень, "rev-parse", "HEAD")
     if not head:
@@ -816,6 +862,7 @@ def мутации_пачки(ids: list[str], корень: Path, прибор: 
           f"{sum(оценки.get(м, 0) for м in чьи) / 60:.0f} мин"
           + (f", срок {time.strftime('%H:%M', time.localtime(срок))}" if срок else ""), flush=True)
     прогоны = {}
+    новых: dict[str, int] = {}
     for файл, owners in чьи.items():
         if срок and time.time() >= срок:
             print(f"мутации: срок захода вышел — не начато механизмов {len(чьи) - len(прогоны)}",
@@ -842,10 +889,16 @@ def мутации_пачки(ids: list[str], корень: Path, прибор: 
                 print(line.strip(), flush=True)
         итог_прибора = ИТОГ_ПРИБОРА.findall(вывод)
         # Прибор без итога ничего не доказал — это дыра, а не тишина.
-        покраснели, дыр = (int(итог_прибора[-1][0]), int(итог_прибора[-1][1])) if итог_прибора else (0, 1)
+        покраснели, дыр, кэш = (tuple(int(x or 0) for x in итог_прибора[-1])
+                                if итог_прибора else (0, 1, 0))
+        недогон = НЕДОГОН_ПРИБОРА.findall(вывод)
         прогоны[файл] = (вывод, покраснели, дыр)
+        # Дыра «без итога» — не ход: засчитай её, и сломанный прибор крутил бы заявку
+        # в очереди без траты попыток.
+        новых[файл] = покраснели + дыр - кэш if итог_прибора else 0
         print(f"механизм {len(прогоны)}/{len(чьи)} {файл}: {секунд:.0f} с, покраснели {покраснели}, "
-              f"дыр {дыр} (задачи {','.join(owners)})", flush=True)
+              f"дыр {дыр}, из кэша {кэш}" + (f", не прогнано {недогон[-1]}" if недогон else "")
+              + f" (задачи {','.join(owners)})", flush=True)
         _record_mechanism(файл, секунд, покраснели, дыр)
         for ид in owners:
             mechanisms = по_задаче[ид]
@@ -853,6 +906,11 @@ def мутации_пачки(ids: list[str], корень: Path, прибор: 
                 итог[ид] = _write_paper(ид, корень, head[0], {м: прогоны[м] for м in mechanisms})
                 print(f"мутации задачи {ид}: дыр {итог[ид]}, бумага {журнал_мутаций(корень, ид)}",
                       flush=True)
+    for ид in ids:
+        if ид not in итог:
+            сдвиг = sum(новых[м] for м in по_задаче[ид] if м in новых)
+            print(f"мутации задачи {ид}: не догнана, новых мутаций {сдвиг} — срок захода вышел; "
+                  "подай её снова, готовые мутации отдаст кэш прибора", flush=True)
     return итог
 
 
@@ -930,9 +988,6 @@ def _task_mutations(ids: list[str]) -> int:
         if дыр is None:
             print(f"мутации задачи {ид}: механизмов с записями нет — шаг пуст", flush=True)
     short = [ид for ид in ids if ид not in итог]
-    for ид in short:
-        print(f"мутации задачи {ид}: не догнана — срок захода вышел; подай её снова, "
-              "готовые мутации отдаст кэш прибора", flush=True)
     return 2 if unread or short else 1 if any(итог.values()) else 0
 
 

@@ -4,7 +4,7 @@
 Контракт — `.tasks/hr.speed-modes/ч2/контракт.md`; критерии — spec.md 10.3 п. 1–6, 8а, 16.
 Судья решает, сколько задач карты вести одновременно: счёт задач в работе по журналу
 запусков, «ждёт владельца», лестница мощности с гистерезисом, авария, пауза, лимит по факту
-429 и по расходу, выкат без захвата лока, ответ сторожу. Ошибка любого из них — либо пинок
+429, выкат без захвата лока, ответ сторожу; расход лимита подписки скорость не снижает. Ошибка любого из них — либо пинок
 «возьми ещё» на перегруженном сервере, либо молчание при простое.
 
 Каждый случай строит свой стенд во временном каталоге: свои install.conf и harness.conf,
@@ -50,7 +50,6 @@ import ctypes
 import datetime as dt
 import fcntl
 import json
-import math
 import os
 import re
 import shutil
@@ -116,8 +115,6 @@ STAND_DATA = {
     "блокеры": {
         "пауза": {"потолок": 0, "держится_мин": 0, "отпускает_мин": 0, "говорить": "нет"},
         "лимит": {"потолок": 0, "держится_мин": 0, "отпускает_мин": 0, "говорить": "нет"},
-        "лимит_расход": {"потолок": "вычисляемый", "держится_мин": 0, "отпускает_мин": 0,
-                         "говорить": "да"},
         "выкат": {"потолок": "заморозка", "держится_мин": 0, "отпускает_мин": 0,
                   "говорить": "нет"},
         "ротация": {"потолок": "заморозка", "держится_мин": 0, "отпускает_мин": 0,
@@ -141,19 +138,6 @@ STAND_DATA = {
         "эскалация_не_чаще_мин": 720,
     },
     "сообщения": {"не_чаще_мин": 30},
-    "лимит_подписки": {
-        "адаптер": "claude",
-        "файл_claude": "",
-        "устарел_мин": 15,
-        "порог_прогноза_pct": {"пять_часов": 95, "неделя": 95},
-        "стоп_pct": 98,
-        "окно_расхода_мин": {"пять_часов": 60, "неделя": 360},
-        "мин_задача_часов": {"пять_часов": 0.5, "неделя": 3},
-        "скорость_без_данных_pct_ч_на_задачу": {"пять_часов": 8, "неделя": 0.5},
-        "подъём_не_чаще_мин": 20,
-        "запас_подъёма_pct": 3,
-        "сброс_падение_pct": 10,
-    },
 }
 REQUIRED_BLOCKERS = set(STAND_DATA["блокеры"])
 
@@ -242,7 +226,6 @@ class Stand:
             folder.mkdir(parents=True, exist_ok=True)
         self.limits_file = self.panel / "лимиты-подписки.json"
         self.data = copy.deepcopy(STAND_DATA)
-        self.data["лимит_подписки"]["файл_claude"] = str(self.limits_file)
         for path, value in (data_patch or {}).items():
             node = self.data
             *head, last = path.split(".")
@@ -561,9 +544,6 @@ def data_live():
           sorted(REQUIRED_BLOCKERS - set(found)))
     check("верхние ключи как в спеке 4.3", set(STAND_DATA) <= set(data),
           sorted(set(STAND_DATA) - set(data)))
-    check("ключи лимит_подписки как в спеке 4.3",
-          set(STAND_DATA["лимит_подписки"]) <= set(data.get("лимит_подписки") or {}),
-          sorted(set(STAND_DATA["лимит_подписки"]) - set(data.get("лимит_подписки") or {})))
     check("по умолчанию — medium (решение владельца 11.3)", data.get("по_умолчанию") == "medium",
           data.get("по_умолчанию"))
     acting = sorted(k for k, v in found.items() if (v or {}).get("действует", "да") != "нет")
@@ -903,6 +883,49 @@ def limit_fact_blocker():
         st = s.measure(BASE)
         check("лимит по факту — эффективный 0", st.get("эффективный") == 0, st.get("эффективный"))
         check("лимит в блокерах", "лимит" in blockers(st), blockers(st))
+
+
+def linear_points(now, n, p5_now, slope5, r5, pw_now, sloped, rw, span_min=350):
+    """Точки каждые 10 мин до now−10: процент растёт линейно, задач n."""
+    pts = []
+    for back in range(span_min, 0, -10):
+        t = now - back * MIN
+        pts.append((t, n, p5_now - slope5 * back / 60, r5, pw_now - sloped * back / 60, rw))
+    return pts
+
+
+# Ключи снижения по расходу лимита подписки, как они стояли в данных до 22.11: вернуть их
+# в данные не должно вернуть снижение — скорость снижают только пауза и 429 (владелец 21.11).
+LEGACY_LIMIT_PATCH = {
+    "блокеры.лимит_расход": {"потолок": "вычисляемый", "держится_мин": 0, "отпускает_мин": 0,
+                             "говорить": "да"},
+    "лимит_подписки": {
+        "адаптер": "claude", "файл_claude": "", "устарел_мин": 15,
+        "порог_прогноза_pct": {"пять_часов": 95, "неделя": 95}, "стоп_pct": 98,
+        "окно_расхода_мин": {"пять_часов": 60, "неделя": 360},
+        "мин_задача_часов": {"пять_часов": 0.5, "неделя": 3},
+        "скорость_без_данных_pct_ч_на_задачу": {"пять_часов": 8, "неделя": 0.5},
+        "подъём_не_чаще_мин": 20, "запас_подъёма_pct": 3, "сброс_падение_pct": 10},
+}
+
+
+@case
+def limit_spend_never_cuts():
+    """Владелец 21.11: расход лимита подписки скорость не снижает — ни у порога, ни за стопом."""
+    for label, patch in (("данные без ключей", {}), ("ключи вернули в данные", LEGACY_LIMIT_PATCH)):
+        with Stand("ultra", cards("w", 2, "wip") + cards("p", 10), data_patch=patch) as s:
+            if patch:
+                s.data["лимит_подписки"]["файл_claude"] = str(s.limits_file)
+                s.write_all()
+            now = BASE
+            r5, rw = now + 3 * HOUR, now + 48 * HOUR
+            s.seed_points(linear_points(now, 2, 99, 20.0, r5, 97, 5.0, rw))
+            s.limits(now, five=(99, r5), week=(97, rw))
+            st = s.measure(now)
+            check(f"{label}: эффективный 10 при 99 % лимита", st.get("эффективный") == 10,
+                  st.get("эффективный"))
+            named = blockers(st) | set(st.get("не_действуют") or {})
+            check(f"{label}: блокера по расходу нет", "лимит_расход" not in named, named)
 
 
 @case
@@ -1489,258 +1512,6 @@ def public_functions():
               s.call("ceiling_alive", BASE + 4 * MIN))
 
 
-# ═══════════════════════════ лимит по расходу (4.5, 4.6) ══════════════════════
-
-def linear_points(now, n, p5_now, slope5, r5, pw_now, sloped, rw, span_min=350):
-    """Точки каждые 10 мин до now−10: процент растёт линейно, задач n."""
-    pts = []
-    for back in range(span_min, 0, -10):
-        t = now - back * MIN
-        pts.append((t, n, p5_now - slope5 * back / 60, r5, pw_now - sloped * back / 60, rw))
-    return pts
-
-
-def expected_speed(points, now, p_now, window_min, key) -> tuple[float, float]:
-    """Независимый счёт спеки 4.5: интервалы строятся списками, а не накоплением в цикле."""
-    column = 2 if key == "пять_часов" else 4
-    inside = [row for row in points if row[0] >= now - window_min * MIN]
-    times = [row[0] for row in inside] + [now]
-    tasks = [row[1] for row in inside]
-    percents = [row[column] for row in inside] + [p_now]
-    steps = [(tasks[i], percents[i + 1] - percents[i], (times[i + 1] - times[i]) / HOUR)
-             for i in range(len(inside))]
-    useful = [(n, rise, hours) for n, rise, hours in steps if n >= 1 and rise >= 0]
-    task_hours = sum(n * hours for n, _, hours in useful)
-    return (sum(rise for _, rise, _ in useful) / task_hours if task_hours else 0.0), task_hours
-
-
-def limit_stand(mode="ultra") -> Stand:
-    return Stand(mode, cards("w", 2, "wip") + cards("p", 10))
-
-
-def window_field(st, window, field):
-    return ((st.get("лимит") or {}).get(window) or {}).get(field)
-
-
-@case
-def limit_read_exact():
-    """16а, 16б: файл подменён — проценты и «точно»; скорость сходится; неделя хуже — k = 4."""
-    with limit_stand() as s:
-        now = BASE
-        r5, rw = now + 3 * HOUR, now + 48 * HOUR
-        pts = linear_points(now, 2, 20, 2.0, r5, 60, 0.3, rw)
-        s.seed_points(pts)
-        s.limits(now, five=(20, r5), week=(60, rw))
-        st = s.measure(now)
-        lim = st.get("лимит") or {}
-        check("точность «точно»", lim.get("точность") == "точно", lim.get("точность"))
-        check("5 часов: 20 %", window_field(st, "пять_часов", "процент") == 20,
-              window_field(st, "пять_часов", "процент"))
-        check("неделя: 60 %", window_field(st, "неделя", "процент") == 60,
-              window_field(st, "неделя", "процент"))
-        for window, p_now, minutes in (("пять_часов", 20, 60), ("неделя", 60, 360)):
-            want, _ = expected_speed(pts, now, p_now, minutes, window)
-            got = window_field(st, window, "скорость_на_задачу")
-            check(f"скорость {window} сходится с независимым счётом ({want:.4f})",
-                  isinstance(got, (int, float)) and abs(got - want) < 1e-6, got)
-        k_week = math.floor((95 - 60) / (0.15 * 48))
-        check(f"неделя хуже: эффективный {k_week}", st.get("эффективный") == k_week == 4,
-              st.get("эффективный"))
-        check("лимит.потолок 4", lim.get("потолок") == 4, lim.get("потолок"))
-        fields, _ = s.show(now)
-        line = fields.get("лимит", "")
-        check("--показать: лимит 20 % и 60 %, «точно»",
-              "20 %" in line and "60 %" in line and "точно" in line, line)
-        got = s.call("read_limit", "неделя", now)
-        check("read_limit(неделя) — 60, сброс, точно",
-              isinstance(got, dict) and got.get("процент") == 60 and got.get("сброс") == rw
-              and got.get("точность") == "точно", got)
-
-
-@case
-def limit_text_explains():
-    """Находка bkb 11.11: текст лимита — прогноз при выбранном режиме, порог и прогноз при новом потолке."""
-    with limit_stand() as s:
-        now = BASE
-        r5, rw = now + 3 * HOUR, now + 48 * HOUR
-        s.seed_points(linear_points(now, 2, 20, 2.0, r5, 60, 0.3, rw))
-        s.limits(now, five=(20, r5), week=(60, rw))
-        st = s.measure(now)
-        lim = st.get("лимит") or {}
-        tasks, eff = lim.get("выбранный_задач"), st.get("эффективный")
-        speed = window_field(st, "неделя", "скорость_на_задачу") or 0
-        chosen = window_field(st, "неделя", "прогноз_выбранный")
-        want = round(60 + speed * tasks * 48, 1) if isinstance(tasks, int) else None
-        check(f"неделя: прогноз при выбранных {tasks} — {want} %", chosen == want, chosen)
-        check("порог прогноза недели в состоянии лимита — 95",
-              window_field(st, "неделя", "порог") == 95, window_field(st, "неделя", "порог"))
-        text = s.call("limit_text", eff, tasks, lim, now)
-        at_ceiling = round(window_field(st, "неделя", "прогноз") or 0)
-        check("в тексте: прогноз при выбранном режиме и что он выше порога 95 %",
-              f"по {tasks} задач" in text and f"{round(want or 0)} %" in text and "порога 95 %" in text, text)
-        check(f"в тексте: прогноз при новом потолке {eff} — {at_ceiling} %",
-              f"по {eff} задачи — {at_ceiling} %" in text, text)
-        check("в тексте сказано, что прогноз — при работе без перерыва", "без перерыва" in text, text)
-        check("прогноз выбранного назван раньше прогноза потолка",
-              text.find(f"{round(want or 0)} %") < text.find(f"{at_ceiling} %"), text)
-
-
-@case
-def limit_worse_five_hours():
-    """16б: 5 часов хуже недели — берётся меньшее."""
-    with limit_stand() as s:
-        now = BASE
-        r5, rw = now + 3 * HOUR, now + 10 * HOUR
-        s.seed_points(linear_points(now, 2, 79.5, 2.0, r5, 60, 0.3, rw))
-        s.limits(now, five=(79.5, r5), week=(60, rw))
-        st = s.measure(now)
-        check("5 часов: k = floor(15,5/3) = 5", st.get("эффективный") == 5, st.get("эффективный"))
-
-
-@case
-def limit_few_data():
-    """16б: мало данных — консервативная скорость и «оценка»."""
-    with limit_stand() as s:
-        now = BASE
-        s.limits(now, five=(0, now + HOUR), week=(10, now + 10 * HOUR))
-        st = s.measure(now)
-        check("точность «оценка»", (st.get("лимит") or {}).get("точность") == "оценка",
-              (st.get("лимит") or {}).get("точность"))
-        check("скорость 5 часов — консервативная 8",
-              window_field(st, "пять_часов", "скорость_на_задачу") == 8,
-              window_field(st, "пять_часов", "скорость_на_задачу"))
-        check("скорость недели — консервативная 0,5",
-              window_field(st, "неделя", "скорость_на_задачу") == 0.5,
-              window_field(st, "неделя", "скорость_на_задачу"))
-        check("эффективный 10 (k5 = 11, kнед = 17, зажаты в N)", st.get("эффективный") == 10,
-              st.get("эффективный"))
-
-
-@case
-def limit_stop():
-    """16б: использовано ≥ стоп_pct — 0."""
-    with limit_stand() as s:
-        now = BASE
-        s.limits(now, five=(98.5, now + HOUR), week=(10, now + 10 * HOUR))
-        st = s.measure(now)
-        check("эффективный 0", st.get("эффективный") == 0, st.get("эффективный"))
-        out = s.warden(0, now)
-        check("--сторожу молчит", out.startswith("молчу"), out)
-
-
-def drop_stand(r5_after_min=150, p5=79):
-    """Стенд 16в: s5 = 1,5 %/ч на задачу (2 задачи, 3 %/ч), неделя не ограничивает."""
-    s = limit_stand()
-    now = BASE
-    r5, rw = now + r5_after_min * MIN, now + 100 * HOUR
-    s.seed_points(linear_points(now, 2, p5, 3.0, r5, 0, 0.0, rw))
-    s.limits(now, five=(p5, r5), week=(0, rw))
-    return s, r5, rw
-
-
-@case
-def limit_rise_interval():
-    """16в: без сброса при росте k — за 18 мин 0 подъёмов, на 20-й один."""
-    s, r5, rw = drop_stand()
-    with s:
-        st = s.measure(BASE)
-        check("снижение до 4", (st.get("лимит") or {}).get("потолок") == 4,
-              (st.get("лимит") or {}).get("потолок"))
-        ceilings = []
-        for minute in range(2, 21, 2):
-            at = BASE + minute * MIN
-            s.limits(at, five=(79, r5), week=(0, rw))
-            ceilings.append(((s.measure(at).get("лимит") or {}).get("потолок")))
-        check("2…18 мин — потолок 4", ceilings[:-1] == [4] * 9, ceilings)
-        check("20 мин — один подъём выше 4",
-              isinstance(ceilings[-1], int) and ceilings[-1] > 4, ceilings[-1])
-        rises = sum(1 for a, b in zip([4] + ceilings, ceilings) if b is not None and a is not None
-                    and b > a)
-        check("подъёмов ровно 1", rises == 1, ceilings)
-
-
-@case
-def limit_reset_by_drop():
-    """16в: сброс падением: наклон старого окна отброшен, проход считает по догадке 8 %/ч."""
-    s, r5, rw = drop_stand()
-    with s:
-        st = s.measure(BASE)
-        check("снижение до 4", st.get("эффективный") == 4, st.get("эффективный"))
-        at = BASE + 2 * MIN
-        s.limits(at, five=(5, at + 5 * HOUR), week=(0, rw))
-        st = s.measure(at)
-        # Скорость по догадке не режет ниже выбранного (владелец 11.11 и 19.11): 10.
-        check("сброс — эффективный 10 по догадке", st.get("эффективный") == 10, st.get("эффективный"))
-
-
-@case
-def limit_reset_by_time():
-    """16в: resets_at прошёл — потолок окна снят сразу, без интервала подъёма."""
-    s, r5, rw = drop_stand(r5_after_min=10, p5=93.4)
-    with s:
-        st = s.measure(BASE)
-        check("снижение (k = floor(1,6/0,25) = 6)", st.get("эффективный") == 6,
-              st.get("эффективный"))
-        at = BASE + 12 * MIN
-        s.limits(at, five=(93.4, r5), week=(0, rw))
-        st = s.measure(at)
-        check("сброс прошёл 2 мин назад — эффективный 10", st.get("эффективный") == 10,
-              st.get("эффективный"))
-
-
-@case
-def limit_refusal():
-    """16г: протух / нет / битый / без rate_limits / адаптер api — блокер не действует."""
-    variants = (
-        ("файл старше устарел_мин", lambda s: s.limits(BASE, five=(98.5, BASE + HOUR),
-                                                       week=(98.5, BASE + HOUR), age_s=16 * MIN)),
-        ("файла нет", lambda s: None),
-        ("битый JSON", lambda s: s.limits(BASE, raw="{битый")),
-        ("нет rate_limits", lambda s: s.limits(BASE, raw=json.dumps({"ts": BASE}))),
-    )
-    for name, prepare in variants:
-        with limit_stand() as s:
-            prepare(s)
-            st = s.measure(BASE)
-            check(f"{name}: точность «отказ»", (st.get("лимит") or {}).get("точность") == "отказ",
-                  (st.get("лимит") or {}).get("точность"))
-            check(f"{name}: эффективный не снижен (10)", st.get("эффективный") == 10,
-                  st.get("эффективный"))
-            got = s.call("read_limit", "пять_часов", BASE)
-            check(f"{name}: read_limit — отказ",
-                  isinstance(got, dict) and got.get("точность") == "отказ", got)
-            _, text = s.show(BASE)
-            check(f"{name}: --показать «данных нет … 429»",
-                  "данных нет" in text and "429" in text, text[-300:])
-    with Stand("ultra", cards("w", 2, "wip") + cards("p", 10),
-               data_patch={"лимит_подписки.адаптер": "api"}) as s:
-        s.limits(BASE, five=(98.5, BASE + HOUR), week=(98.5, BASE + HOUR))
-        st = s.measure(BASE)
-        check("адаптер api: отказ, эффективный 10",
-              (st.get("лимит") or {}).get("точность") == "отказ" and st.get("эффективный") == 10,
-              ((st.get("лимит") or {}).get("точность"), st.get("эффективный")))
-    with limit_stand() as s:
-        s.limit_fact()
-        st = s.measure(BASE)
-        check("отказ + факт 429 — 0", st.get("эффективный") == 0, st.get("эффективный"))
-
-
-@case
-def limit_keeps_started():
-    """16д: снижение по лимиту ничего не останавливает — начатые в работе, сторож «лишнее»."""
-    with Stand("ultra", cards("w", 5, "wip") + cards("p", 7)) as s:
-        now = BASE
-        r5, rw = now + 3 * HOUR, now + 48 * HOUR
-        s.seed_points(linear_points(now, 2, 20, 2.0, r5, 60, 0.3, rw))
-        s.limits(now, five=(20, r5), week=(60, rw))
-        st = s.measure(now)
-        check("эффективный 4", st.get("эффективный") == 4, st.get("эффективный"))
-        check("в работе все 5", sorted(st.get("в_работе") or []) == [f"w{i}" for i in range(1, 6)],
-              st.get("в_работе"))
-        out = s.warden(0, now)
-        check("--сторожу: лишнее\\t1", out == "лишнее\t1", out)
-
-
 # ═══════════════════════════ находки ревью Ч2 ═════════════════════════════════
 
 def attempt(s: Stand, fn: str, *args) -> tuple:
@@ -1835,38 +1606,6 @@ def files_ceiling_fixed():
 
 
 @case
-def limit_file_garbage():
-    """4.6: NaN в процентах и сбросе, resets_at в миллисекундах — код 0, окно «оценка», сброса нет."""
-    r5, rw = BASE + 3 * HOUR, BASE + 48 * HOUR
-    week = {"used_percentage": 10, "resets_at": int(rw)}
-    variants = (
-        ("NaN в used_percentage", {"used_percentage": math.nan, "resets_at": int(r5)}, "процент"),
-        ("NaN в resets_at", {"used_percentage": 20, "resets_at": math.nan}, "сброс"),
-        ("resets_at в миллисекундах", {"used_percentage": 20, "resets_at": int(r5) * 1000}, "сброс"),
-    )
-    for name, five, empty in variants:
-        with limit_stand() as s:
-            s.limits(BASE, raw=json.dumps({"ts": BASE, "rate_limits": {"five_hour": five,
-                                                                        "seven_day": week}}))
-            s.tick()
-            done = s.run("--замер", at=BASE)
-            check(f"{name}: код 0 без трейсбека",
-                  done.returncode == 0 and "Traceback" not in done.stderr, cli_verdict(done))
-            if done.returncode != 0:
-                continue
-            st = s.state()
-            check(f"{name}: точность «оценка»", (st.get("лимит") or {}).get("точность") == "оценка",
-                  (st.get("лимит") or {}).get("точность"))
-            check(f"{name}: у окна 5 часов нет поля «{empty}»",
-                  window_field(st, "пять_часов", empty) is None, window_field(st, "пять_часов", empty))
-            if empty == "сброс":
-                got, err = attempt(s, "read_limit", "пять_часов", BASE)
-                check(f"{name}: read_limit — сброса нет, «оценка»",
-                      not err and got.get("сброс") is None and got.get("точность") == "оценка",
-                      err or got)
-
-
-@case
 def unexpected_error():
     """4.1.6: исключение вне MeasureError (decide подменён) — error в журнале, код 2, состояние не переписано."""
     with Stand("medium", cards("p", 5)) as s:
@@ -1885,88 +1624,8 @@ def unexpected_error():
 
 
 @case
-def limit_stop_edges():
-    """4.5: p ≥ стоп при прошедшем сбросе — окно новое, потолок N; стоп ровно 98 — 0, 97,9 по догадке — N."""
-    with limit_stand() as s:
-        s.limits(BASE, five=(98.5, BASE - 10 * MIN), week=(10, BASE + 10 * HOUR))
-        st = s.measure(BASE)
-        check("98,5 % и сброс 10 мин назад — эффективный 10", st.get("эффективный") == 10,
-              st.get("эффективный"))
-    # Стоп ровно 98 — 0; на 97,9 при скорости по догадке потолок — выбранные 10 (догадка не режет).
-    for percent, want in ((98, 0), (97.9, 10)):
-        with Stand("ultra", cards("p", 10)) as s:
-            s.limits(BASE, five=(percent, BASE + HOUR), week=(10, BASE + 10 * HOUR))
-            st = s.measure(BASE)
-            check(f"{percent} % до сброса — эффективный {want}", st.get("эффективный") == want,
-                  st.get("эффективный"))
-
-
-@case
-def limit_estimate_floor():
-    """4.5: мало данных — не ниже выбранного; без resets_at — T = 168 ч, по замеру режет."""
-    with Stand("ultra", cards("w", 5, "wip") + cards("p", 10)) as s:
-        s.limits(BASE, five=(0, BASE + HOUR), week=(0, BASE + 167 * HOUR))
-        st = s.measure(BASE)
-        check("точек нет — «оценка»", (st.get("лимит") or {}).get("точность") == "оценка",
-              (st.get("лимит") or {}).get("точность"))
-        check("неделя 0 %, сброс через 167 ч, 5 в работе — эффективный 10, не 1",
-              st.get("эффективный") == 10, st.get("эффективный"))
-    with Stand("ultra", cards("w", 5, "wip") + cards("p", 10)) as s:
-        now = BASE
-        r5 = now + 3 * HOUR
-        s.seed_points(linear_points(now, 2, 20, 2.0, r5, 10, 0.3, now + 48 * HOUR))
-        s.limits(now, five=(20, r5), week=(10, None))
-        st = s.measure(now)
-        want = math.floor((95 - 10) / (0.15 * 168))
-        check("неделя без resets_at — «оценка», сброса нет",
-              (st.get("лимит") or {}).get("точность") == "оценка"
-              and window_field(st, "неделя", "сброс") is None,
-              ((st.get("лимит") or {}).get("точность"), window_field(st, "неделя", "сброс")))
-        check(f"без resets_at T = 168 ч, данных достаточно — эффективный {want}, границы нет",
-              st.get("эффективный") == want == 3, st.get("эффективный"))
-
-
-@case
-def limit_rise_per_window():
-    """4.5: метка смены потолка у каждого окна своя — снижение недели не откладывает подъём 5 часов."""
-    s, r5, rw = drop_stand()
-    with s:
-        st = s.measure(BASE)
-        check("5 часов снижены до 4", window_field(st, "пять_часов", "потолок") == 4,
-              window_field(st, "пять_часов", "потолок"))
-        for minute in range(2, 21, 2):
-            at = BASE + minute * MIN
-            s.limits(at, five=(79, r5), week=(0, rw) if minute < 12 else (50, rw))
-            st = s.measure(at)
-            if minute == 12:
-                check("12 мин: неделя снизила свой потолок",
-                      (window_field(st, "неделя", "потолок") or 10) < 4,
-                      window_field(st, "неделя", "потолок"))
-                check("12 мин: сменён_ts 5 часов — её снижение (0 мин)",
-                      epoch(window_field(st, "пять_часов", "сменён_ts")) == BASE,
-                      window_field(st, "пять_часов", "сменён_ts"))
-                check("12 мин: сменён_ts недели — 12 мин",
-                      epoch(window_field(st, "неделя", "сменён_ts")) == at,
-                      window_field(st, "неделя", "сменён_ts"))
-            if minute == 18:
-                check("18 мин — 5 часов ещё 4", window_field(st, "пять_часов", "потолок") == 4,
-                      window_field(st, "пять_часов", "потолок"))
-        got = window_field(st, "пять_часов", "потолок")
-        check("20 мин — потолок 5 часов поднят, смена недели на 12-й его не держит",
-              isinstance(got, int) and got > 4, got)
-
-
-@case
 def future_stamps():
-    """4.1.6, 4.6: ts в будущем — файл лимитов «отказ»; состояние сверх допуска 5 с — не свежее."""
-    with limit_stand() as s:
-        s.limits(BASE, five=(98.5, BASE + HOUR), week=(98.5, BASE + HOUR), age_s=-10 * MIN)
-        st = s.measure(BASE)
-        check("файл лимитов на 10 мин из будущего — «отказ»",
-              (st.get("лимит") or {}).get("точность") == "отказ", (st.get("лимит") or {}).get("точность"))
-        check("эффективный не снижен (10)", st.get("эффективный") == 10, st.get("эффективный"))
-        got, err = attempt(s, "read_limit", "пять_часов", BASE)
-        check("read_limit — «отказ»", not err and got.get("точность") == "отказ", err or got)
+    """4.1.6: состояние сверх допуска 5 с в будущем — не свежее."""
     with kick_stand() as s:
         s.measure(BASE)
         at = BASE - MIN
@@ -2145,141 +1804,6 @@ def kick_value_garbage():
                   done.stdout)
 
 
-@case
-def limit_speed_window():
-    """4.5: точка на границе окна входит, излом за границей — нет; интервал с n = 0 не считается."""
-    with limit_stand() as s:
-        now = BASE
-        r5, rw = now + 3 * HOUR, now + 100 * HOUR
-        # (минут назад, задач, процент 5 часов): крутой наклон за границей окна 60 мин,
-        # интервал 30→20 при n = 0 (рост 7 не в счёт). Считаются 60→30 (5 пунктов) и 20→0
-        # (2 пункта): 7 пунктов за 5 интервалов по 10 мин при n = 2, то есть за 5/3 задача-часа.
-        shape = ((120, 2, 2), (110, 2, 4), (100, 2, 6), (90, 2, 8), (80, 2, 10), (70, 2, 12),
-                 (60, 2, 30), (50, 2, 33), (40, 2, 34), (30, 0, 35), (20, 2, 42), (10, 2, 43))
-        pts = [(now - back * MIN, n, p5, r5, 5, rw) for back, n, p5 in shape]
-        s.seed_points(pts)
-        s.limits(now, five=(44, r5), week=(5, rw))
-        st = s.measure(now)
-        want, _ = expected_speed(pts, now, 44, 60, "пять_часов")
-        check("независимый счёт: 7 пунктов за 5/3 задача-часа = 4,2", abs(want - 4.2) < 1e-9, want)
-        # Проценты целые: судья вычитает шаг округления, 6 пунктов за 5/3 задача-часа = 3,6.
-        got = window_field(st, "пять_часов", "скорость_на_задачу")
-        check("скорость 5 часов сходится с независимым счётом минус пункт округления (3,6)",
-              isinstance(got, (int, float)) and abs(got - (want - 1 / (5 / 3))) < 1e-4, got)
-
-
-@case
-def limit_inputs_misc():
-    """4.6: процент > 100, resets_at ISO-строкой, одно окно из двух, сдвиг resets_at и падение — разрыв."""
-    with limit_stand() as s:
-        s.limits(BASE, five=(105, BASE + HOUR), week=(10, BASE + 10 * HOUR))
-        st = s.measure(BASE)
-        check("105 % — эффективный 0", st.get("эффективный") == 0, st.get("эффективный"))
-    with limit_stand() as s:
-        now = BASE
-        r5, rw = now + 3 * HOUR, now + 48 * HOUR
-        s.seed_points(linear_points(now, 2, 20, 2.0, r5, 60, 0.3, rw))
-        s.limits(now, five=(20, iso(r5)), week=(60, iso(rw)))
-        st = s.measure(now)
-        check("resets_at ISO — «точно», эффективный 4",
-              (st.get("лимит") or {}).get("точность") == "точно" and st.get("эффективный") == 4,
-              ((st.get("лимит") or {}).get("точность"), st.get("эффективный")))
-        got, err = attempt(s, "read_limit", "неделя", now)
-        check("read_limit: сброс ISO → epoch", not err and got.get("сброс") == rw, err or got)
-    with limit_stand() as s:
-        now = BASE
-        r5 = now + 3 * HOUR
-        # Неделя в точках 0 %: окна нет в свежем файле — это 0 % (4.6), история не спорит с ним.
-        s.seed_points(linear_points(now, 2, 20, 2.0, r5, 0, 0.0, now + 48 * HOUR))
-        s.limits(now, five=(20, r5))
-        st = s.measure(now)
-        check("одно окно из двух — «оценка», эффективный 10",
-              (st.get("лимит") or {}).get("точность") == "оценка" and st.get("эффективный") == 10,
-              ((st.get("лимит") or {}).get("точность"), st.get("эффективный")))
-    # Догадка 8 %/ч при 75 % дала бы floor(20 / (8 · T)) = 1 и при T = 150 мин (сдвиг вперёд), и
-    # при T = 148 мин (сдвига нет); догадка не режет ниже выбранного — потолок 10.
-    for shift in (2 * MIN, 0):
-        s, r5, rw = drop_stand()
-        with s:
-            s.measure(BASE)
-            at = BASE + 2 * MIN
-            s.limits(at, five=(75, r5 + shift), week=(0, rw))
-            st = s.measure(at)
-            label = "сдвинут вперёд на 2 мин" if shift else "не сдвинут, падение 4"
-            check(f"resets_at {label} — разрыв, догадка, потолок 10",
-                  window_field(st, "пять_часов", "потолок") == 10,
-                  window_field(st, "пять_часов", "потолок"))
-
-
-GONE = {"процент": 0, "сброс": None, "точность": "оценка"}
-REFUSED = {"процент": None, "сброс": None, "точность": "отказ"}
-
-
-@case
-def limit_window_gone():
-    """4.6: свежий файл без окна — окно сброшено: 0 %, «оценка»; пустой, старый или мусорный — «отказ»."""
-    r5, rw = BASE + 3 * HOUR, BASE + 48 * HOUR
-    for gone, kept, five, week, want in (
-            ("пять_часов", "неделя", None, (60, rw), {"процент": 60, "сброс": rw, "точность": "точно"}),
-            ("неделя", "пять_часов", (20, r5), None, {"процент": 20, "сброс": r5, "точность": "точно"})):
-        with limit_stand() as s:
-            s.limits(BASE, five=five, week=week)
-            got, err = attempt(s, "read_limit", gone, BASE)
-            check(f"нет {gone}: read_limit — 0 %, сброса нет, «оценка»", not err and got == GONE,
-                  err or got)
-            got, err = attempt(s, "read_limit", kept, BASE)
-            check(f"нет {gone}: {kept} как пришло", not err and got == want, err or got)
-            st = s.measure(BASE)
-            check(f"нет {gone}: в состоянии {gone} 0 %, точность «оценка»",
-                  window_field(st, gone, "процент") == 0
-                  and (st.get("лимит") or {}).get("точность") == "оценка",
-                  (window_field(st, gone, "процент"), (st.get("лимит") or {}).get("точность")))
-    # Окно названо, но не разобрать — это не сброс, а мусор: «отказ» только этому окну.
-    week = {"used_percentage": 60, "resets_at": int(rw)}
-    for name, cell in (("five_hour: null", None), ("five_hour без used_percentage", {"resets_at": int(r5)}),
-                       ("used_percentage строкой", {"used_percentage": "20", "resets_at": int(r5)})):
-        with limit_stand() as s:
-            s.limits(BASE, raw=json.dumps({"ts": BASE, "rate_limits": {"five_hour": cell,
-                                                                        "seven_day": week}}))
-            got, err = attempt(s, "read_limit", "пять_часов", BASE)
-            check(f"{name}: пять_часов «отказ», не 0 %", not err and got == REFUSED, err or got)
-    # Пустой rate_limits схема Claude Code не даёт, Ч9 его не пишет — странному файлу не верим.
-    stale = json.dumps({"ts": BASE - 16 * MIN, "rate_limits": {"seven_day": week}})
-    for name, raw in (("rate_limits {}", json.dumps({"ts": BASE, "rate_limits": {}})),
-                      ("rate_limits null", json.dumps({"ts": BASE, "rate_limits": None})),
-                      ("старше устарел_мин, окна нет", stale)):
-        with limit_stand() as s:
-            s.limits(BASE, raw=raw)
-            for window in ("пять_часов", "неделя"):
-                got, err = attempt(s, "read_limit", window, BASE)
-                check(f"{name}: {window} «отказ»", not err and got == REFUSED, err or got)
-            st = s.measure(BASE)
-            check(f"{name}: точность «отказ», эффективный 10",
-                  (st.get("лимит") or {}).get("точность") == "отказ" and st.get("эффективный") == 10,
-                  ((st.get("лимит") or {}).get("точность"), st.get("эффективный")))
-
-
-@case
-def limit_window_gone_after_reset():
-    """4.5, 4.6: 5 часов снижены, сброс прошёл и окно пропало из файла — 0 %, потолок по догадке."""
-    s, r5, rw = drop_stand(r5_after_min=10, p5=93.4)
-    with s:
-        st = s.measure(BASE)
-        check("снижение до 6", st.get("эффективный") == 6, st.get("эффективный"))
-        at = BASE + 12 * MIN
-        s.limits(at, week=(0, rw))
-        st = s.measure(at)
-        # Сброса нет, T = полное окно 5 ч: по догадке 8 %/ч было бы 2; догадка не режет — 10.
-        check("окна нет — эффективный 10 по догадке", st.get("эффективный") == 10,
-              st.get("эффективный"))
-        check("пять_часов в состоянии: 0 %, сброса нет",
-              window_field(st, "пять_часов", "процент") == 0
-              and window_field(st, "пять_часов", "сброс") is None,
-              (st.get("лимит") or {}).get("пять_часов"))
-        check("точность «оценка»", (st.get("лимит") or {}).get("точность") == "оценка",
-              (st.get("лимит") or {}).get("точность"))
-
-
 # ═══════════════════════════════════════════════════════════════════════════════
 
 # ═══════════════════════════ сообщения владельцу (Ч8, 10.3.10) ═══════════════════════
@@ -2291,7 +1815,6 @@ python3 -c 'import json, sys; print(json.dumps(sys.argv[1:], ensure_ascii=False)
 [ -e "$here/send-fails" ] && exit 1
 exit 0
 '''
-OVER_LIMIT = "--несмотря-на-лимит"
 
 
 class MsgStand(Stand):
@@ -2347,7 +1870,6 @@ def msg_window():
               "работаю по 2 задачи вместо 10" in last and "менялся 2 раза" in last, last)
         check("первое — про 3 задачи и почему", sent and "работаю по 3 задачи вместо 10" in sent[0][-1]
               and "готово только 3" in sent[0][-1], sent[:1])
-        check("не про лимит — флага --несмотря-на-лимит нет", all(OVER_LIMIT not in c for c in sent), sent)
         told = [r for r in s.events("owner.told")]
         check("owner.told — две строки ok", [r.get("outcome") for r in told] == ["ok", "ok"],
               [r.get("outcome") for r in told])
@@ -2394,7 +1916,7 @@ def msg_quiet_blocker():
 # Владелец 19.11: «Убери нахуй эту хуйню заебал он тормощить» про «работаю по 1 задаче вместо 10 —
 # сервер загружен». Правило 11.11 «включай режим средний и не снижай»: режут только пауза и 429.
 # Выключатель один для любого блокера: признак считается, потолок не режет, владельцу не пишет.
-MUTED = ("мощность", "авария", "мало_задач", "файлы", "лимит_расход")
+MUTED = ("мощность", "авария", "мало_задач", "файлы")
 
 
 def muted_patch(names=MUTED) -> dict:
@@ -2403,21 +1925,19 @@ def muted_patch(names=MUTED) -> dict:
 
 @case
 def muted_blockers_keep_mode():
-    """19.11: занято 96 %, нагрузка 4,5/ядро, мало задач, заявки на файлы, лимит 99 % — ultra держит 10."""
+    """19.11: занято 96 %, нагрузка 4,5/ядро, мало задач, заявки на файлы — ultra держит 10."""
     with Stand("ultra", cards("w", 2, "wip") + cards("p", 1), data_patch=muted_patch()) as s:
         s.busy_pct = 96
         s.set_load(4.5)
         warn_files(s, BASE)
         effs = []
         for minute in (0, 2, 4, 12, 14, 24, 40):
-            s.limits(BASE + minute * MIN, five=(99, BASE + HOUR), week=(10, BASE + 10 * HOUR))
             st = s.measure(BASE + minute * MIN)
             effs.append(st.get("эффективный"))
         check("условие создано: занято ≈ 96", near(gauge(st, "занято_pct"), 96), gauge(st, "занято_pct"))
-        check("условие создано: признаки посчитаны (лимит 0, авария и мощность видны)",
-              (st.get("лимит") or {}).get("потолок") == 0
-              and {"мощность", "авария"} <= set(st.get("не_действуют") or {}),
-              ((st.get("лимит") or {}).get("потолок"), sorted(st.get("не_действуют") or {})))
+        check("условие создано: признаки посчитаны (авария и мощность видны)",
+              {"мощность", "авария"} <= set(st.get("не_действуют") or {}),
+              sorted(st.get("не_действуют") or {}))
         check("ГЛАВНОЕ: ultra при 96 % — эффективный 10 на всех проходах", effs == [10] * 7, effs)
         check("в действующих блокерах ни одного выключенного", not blockers(st) & set(MUTED),
               blockers(st))
@@ -2427,12 +1947,12 @@ def muted_blockers_keep_mode():
         check("добор — весь недобор по готовым (1), не ноль из-за занятости", st.get("добор") == 1,
               (st.get("добор"), st.get("добор_почему")))
     with Stand("ultra", cards("w", 10, "wip") + cards("p", 2),
-               data_patch=muted_patch(("мощность", "авария", "мало_задач", "файлы"))) as s:
-        s.limits(BASE, five=(99, BASE + HOUR), week=(10, BASE + 10 * HOUR))
+               data_patch=muted_patch()) as s:
+        s.limit_fact()
         st = s.measure(BASE)
-        check("пауза и лимит не выключены: лимит 99 % — эффективный 0", st.get("эффективный") == 0,
-              (st.get("эффективный"), blockers(st)))
-        s.limits(BASE + 2 * MIN, five=(1, BASE + HOUR), week=(1, BASE + 10 * HOUR))
+        check("пауза и лимит не выключены: факт 429 — эффективный 0", st.get("эффективный") == 0
+              and "лимит" in blockers(st), (st.get("эффективный"), blockers(st)))
+        (s.log / "лимит-подписки.состояние").unlink()
         s.pause()
         st = s.measure(BASE + 2 * MIN)
         check("пауза режет при выключенных остальных", st.get("эффективный") == 0
@@ -2471,47 +1991,6 @@ def muted_blocker_releases_now():
         check("и дальше 10 при 97 %", later == [10, 10, 10], later)
         check("ни одной вести о смене из-за выключенного", len(s.calls()) == 1, s.calls())
         check("mode.change 5→10 — «сказано: нет»", s.said()[-1:] == ["нет"], s.said())
-
-
-def limit_pass_at(s: Stand, at: float, percent: float, reset: float) -> dict:
-    s.limits(at, five=(percent, reset), week=(10, BASE + 10 * HOUR))
-    return s.measure(at)
-
-
-@case
-def msg_limit_once():
-    """Ч8: лимит — одно сообщение со временем обновления и флагом, дальше тишина до обновления."""
-    with MsgStand("ultra", cards("p", 12)) as s:
-        r5 = BASE + 4 * HOUR
-        t1, t2, t3, t4 = BASE + 2 * MIN, BASE + 33 * MIN, BASE + 64 * MIN, BASE + 95 * MIN
-        effs = [eff_pass(s, BASE)]
-        st = limit_pass_at(s, t1, 98.5, r5)
-        effs.append(st.get("эффективный"))
-        sent = s.calls()
-        check("стоп по лимиту: одно сообщение", len(sent) == 1, sent)
-        first = sent[0] if sent else []
-        check("оно с флагом --несмотря-на-лимит", OVER_LIMIT in first, first)
-        check("в нём «стою» и время обновления", bool(first) and "стою" in first[-1]
-              and "лимит обновится" in first[-1], first)
-        # Под лимитом режет только замер, не догадка: 2 задачи, 80,9 → 90 % за 29 мин — ~9,4 %/ч
-        # на задачу, до сброса 3,5 ч: потолок 1. Проценты дробные — шаг округления не вычитается.
-        s.seed_points([(t1 + k * 2 * MIN, 2, 80.25 + k * 0.65, r5, 10, BASE + 10 * HOUR)
-                       for k in range(1, 15)])
-        st = limit_pass_at(s, t2, 90, r5)
-        effs.append(st.get("эффективный"))
-        check("условие создано: под лимитом эффективный сменился и держит его лимит",
-              effs[-1] not in (None, 0) and (blockers(st) == {"лимит_расход"}), (effs, blockers(st)))
-        st = limit_pass_at(s, t3, 98.5, r5)
-        effs.append(st.get("эффективный"))
-        check("условие создано: 10→0→k→0", effs[:2] == [10, 0] and effs[-1] == 0, effs)
-        check("ГЛАВНОЕ: две смены под лимитом через окно — тишина, сообщение по-прежнему одно",
-              len(s.calls()) == 1, s.calls())
-        st = limit_pass_at(s, t4, 0, t4 + HOUR)
-        effs.append(st.get("эффективный"))
-        sent = s.calls()
-        check("условие создано: лимит обновился — эффективный 10", effs[-1] == 10, effs)
-        check("обновление — второе сообщение, с флагом", len(sent) == 2 and OVER_LIMIT in sent[-1], sent)
-        check("в нём «лимит обновился»", len(sent) == 2 and "лимит обновился" in sent[-1][-1], sent[-1:])
 
 
 @case
@@ -2739,451 +2218,6 @@ def signals_launch_plan():
 
 
 # ───────────────────────── расход только текущего окна ─────────────────────────
-
-# Окно, которое в случае не судится, держим ровным: 5 часов на 10 %, неделя на 20 %.
-WINDOWS = ("пять_часов", "неделя")
-QUIET_PCT = {"пять_часов": 10, "неделя": 20}
-QUIET_RESET = {"пять_часов": BASE + 3 * HOUR, "неделя": BASE + 100 * HOUR}
-WINDOW_SPAN_MIN = {"пять_часов": 60, "неделя": 360}
-OLD_WEEK_RESET = 10 * HOUR
-WEEK_MOVE = 168 * HOUR
-FEW_DATA_SPEED = {"пять_часов": 8, "неделя": 0.5}
-
-
-def ramp(now, window, back_from, back_to, tasks, p_from, p_to, reset, step=10):
-    """Строки seed_points: процент окна window линейно от p_from до p_to, второе окно ровное."""
-    rows = []
-    for back in range(back_from, back_to - 1, -step):
-        cells = {name: (QUIET_PCT[name], QUIET_RESET[name]) for name in WINDOWS}
-        cells[window] = (p_from + (p_to - p_from) * (back_from - back) / max(back_from - back_to, 1),
-                         reset)
-        rows.append((now - back * MIN, tasks, *cells["пять_часов"], *cells["неделя"]))
-    return rows
-
-
-def old_week(now, reset):
-    """Неделя до смены: 2 задачи 280 мин, наклон 1,35 %/ч на задачу, как было вживую."""
-    return ramp(now, "неделя", 300, 20, 2, 81.4, 94, reset)
-
-
-def seed_rows_any_reset(stand, rows, window, drop_key=False):
-    """Как seed_points, но у окна window сброса нет: null либо, при drop_key, нет и ключа."""
-    for t, tasks, p5, r5, pw, rw in rows:
-        cells = {name: {"процент": percent, "сброс": None if name == window else iso(reset)}
-                 for name, percent, reset in (("пять_часов", p5, r5), ("неделя", pw, rw))}
-        if drop_key:
-            del cells[window]["сброс"]
-        stand.append(JOURNAL, {
-            "v": 1, "ts": iso(t), "src": JUDGE_SRC, "event": "mode.decision", "outcome": "ok",
-            "task": None, "task_from": "none", "session": None,
-            "data": {"лимит": {"ts": iso(t), "задач": tasks, **cells}}})
-
-
-def read_window(stand, now, window, percent, reset):
-    """Файл лимитов: окно window как задано (None — окна в файле нет), второе ровное."""
-    cells = {name: (QUIET_PCT[name], QUIET_RESET[name]) for name in WINDOWS}
-    cells[window] = None if percent is None else (percent, reset)
-    stand.limits(now, five=cells["пять_часов"], week=cells["неделя"])
-
-
-def work_stand(in_work=2):
-    """Режим «средний», выбрано 3, как у владельца; готовых хватает, мало_задач не вмешивается."""
-    return Stand("medium", cards("w", in_work, "wip") + cards("p", 10))
-
-
-def measured_ceiling(percent, speed, hours_left, tasks=3):
-    return max(1, math.floor(min(tasks, (95 - percent) / (speed * hours_left))))
-
-
-def few_data_ceiling(percent, window, hours_left, in_work, tasks=3):
-    """Спека 4.5 при скорости по догадке: ниже выбранного не режет (владелец 11.11 и 19.11:
-    скорость режут только пауза и 429); стоп 98 — отдельно."""
-    return tasks
-
-
-def close_to(got, want) -> bool:
-    # Судья пишет скорость с точностью до 4 знаков.
-    return isinstance(got, (int, float)) and abs(got - want) <= 1e-4
-
-
-def check_few_data(label, st, window, percent, hours_left, in_work=2):
-    """Окно началось заново: расход только по догадке, потолок по ней же."""
-    got = window_field(st, window, "скорость_на_задачу")
-    check(f"{label}: скорость {window} — консервативная {FEW_DATA_SPEED[window]}",
-          got == FEW_DATA_SPEED[window], got)
-    want = few_data_ceiling(percent, window, hours_left, in_work)
-    got = window_field(st, window, "потолок")
-    check(f"{label}: потолок {window} {want}", got == want, got)
-    check(f"{label}: точность «оценка»", (st.get("лимит") or {}).get("точность") == "оценка",
-          (st.get("лимит") or {}).get("точность"))
-
-
-def check_measured(label, st, window, rows, p_now, now, hours_left):
-    """Скорость равна независимому счёту по rows, потолок — по этой скорости, не по догадке."""
-    want, task_hours = expected_speed(rows, now, p_now, WINDOW_SPAN_MIN[window], window)
-    check(f"{label}: стенд — задача-часов {task_hours:.2f} хватает на замер", task_hours >= 3,
-          task_hours)
-    got = window_field(st, window, "скорость_на_задачу")
-    check(f"{label}: скорость {window} сходится с независимым счётом ({want:.4f})",
-          close_to(got, want), got)
-    ceiling = measured_ceiling(p_now, want, hours_left)
-    got = window_field(st, window, "потолок")
-    check(f"{label}: потолок {window} {ceiling}", got == ceiling, got)
-
-
-@case
-def limit_cut_account_change():
-    """A: смена аккаунта, неделя 94 → 1: старый наклон 1,35 не входит ни со сдвигом сброса, ни без."""
-    now = BASE
-    old_reset = now + OLD_WEEK_RESET
-    for label, new_reset in (("сброс на 7 дней позже", old_reset + WEEK_MOVE),
-                             ("сброс тот же", old_reset)):
-        with work_stand() as s:
-            old = old_week(now, old_reset)
-            old_speed, task_hours = expected_speed(old, old[-1][0], 94, 360, "неделя")
-            check(f"{label}: стенд — живой наклон 1,35 за ≥ 5 задача-часов",
-                  abs(old_speed - 1.35) < 0.01 and task_hours >= 5, (old_speed, task_hours))
-            s.seed_points(old + ramp(now, "неделя", 10, 2, 2, 1, 1, new_reset, step=4))
-            read_window(s, now, "неделя", 1, new_reset)
-            st = s.measure(now)
-            check_few_data(label, st, "неделя", 1, (new_reset - now) / HOUR)
-            got = window_field(st, "неделя", "скорость_на_задачу")
-            check(f"{label}: скорость не выше старой", isinstance(got, (int, float))
-                  and got < old_speed, got)
-
-
-@case
-def limit_cut_current_read():
-    """B: падение только между последней точкой и чтением файла — первый проход после смены."""
-    now = BASE
-    before = now - 2 * MIN
-    old_reset = now + OLD_WEEK_RESET
-    for label, new_reset in (("сброс на 7 дней позже", old_reset + WEEK_MOVE),
-                             ("сброс тот же", old_reset)):
-        with work_stand() as s:
-            s.seed_points(old_week(now, old_reset))
-            read_window(s, before, "неделя", 94, old_reset)
-            s.measure(before)
-            read_window(s, now, "неделя", 1, new_reset)
-            check_few_data(label, s.measure(now), "неделя", 1, (new_reset - now) / HOUR)
-
-
-@case
-def limit_cut_reset_moved():
-    """C: сброс сдвинут без падения процента: в журнале и только в чтении, вперёд и назад."""
-    now = BASE
-    old_reset = now + 100 * HOUR
-    for label, new_reset in (("сброс на час позже", old_reset + HOUR),
-                             ("сброс на сутки раньше", old_reset - 24 * HOUR)):
-        for place, fresh_rows in (("в журнале", 1), ("только в чтении", 0)):
-            with work_stand() as s:
-                rows = ramp(now, "неделя", 300, 20, 2, 60, 70, old_reset)
-                if fresh_rows:
-                    rows += ramp(now, "неделя", 10, 2, 2, 70, 70, new_reset, step=4)
-                s.seed_points(rows)
-                read_window(s, now, "неделя", 70, new_reset)
-                check_few_data(f"{label}, {place}", s.measure(now), "неделя", 70,
-                               (new_reset - now) / HOUR)
-
-
-@case
-def limit_cut_control_growth():
-    """D: контроль: рост внутри окна при том же сбросе режет как раньше."""
-    with work_stand() as s:
-        now = BASE
-        r5, rw = now + 3 * HOUR, now + 48 * HOUR
-        rows = linear_points(now, 2, 20, 2.0, r5, 70, 0.6, rw)
-        s.seed_points(rows)
-        s.limits(now, five=(20, r5), week=(70, rw))
-        st = s.measure(now)
-        check_measured("рост", st, "неделя", rows, 70, now, 48)
-        check("эффективный 1 меньше выбранных 3", st.get("эффективный") == 1,
-              st.get("эффективный"))
-        check("точность «точно»", (st.get("лимит") or {}).get("точность") == "точно",
-              (st.get("лимит") or {}).get("точность"))
-
-
-@case
-def limit_cut_control_reset_noise():
-    """E: контроль: дребезг сброса на 20 с и точки без сброса окно не делят."""
-    now = BASE
-    r5, rw = now + 3 * HOUR, now + 48 * HOUR
-    rows = linear_points(now, 2, 20, 2.0, r5, 70, 0.6, rw)
-    with work_stand() as s:
-        s.seed_points([row[:5] + (rw + 20 * (index % 2),) for index, row in enumerate(rows)])
-        s.limits(now, five=(20, r5), week=(70, rw + 20))
-        check_measured("дребезг 20 с", s.measure(now), "неделя", rows, 70, now, 48 + 20 / HOUR)
-    for label, drop_key in (("сброс null", False), ("ключа сброса нет", True)):
-        with work_stand() as s:
-            for index, row in enumerate(rows):
-                if index % 3:
-                    s.seed_points([row])
-                else:
-                    seed_rows_any_reset(s, [row], "неделя", drop_key)
-            s.limits(now, five=(20, r5), week=(70, rw))
-            check_measured(f"{label} между точками", s.measure(now), "неделя", rows, 70, now, 48)
-    with work_stand() as s:
-        seed_rows_any_reset(s, rows, "неделя")
-        s.limits(now, five=(20, r5), week=(70, rw))
-        check_measured("все точки без сброса, в чтении сброс есть", s.measure(now), "неделя",
-                       rows, 70, now, 48)
-
-
-@case
-def limit_cut_counts_new_points():
-    """F: считаются только точки после последнего разрыва, интервал через разрыв не входит."""
-    now = BASE
-    first, second, third = now + OLD_WEEK_RESET, now + 34 * HOUR, now + 58 * HOUR
-    new = ramp(now, "неделя", 190, 10, 2, 1, 10, third)
-    with work_stand() as s:
-        s.seed_points(ramp(now, "неделя", 350, 200, 2, 60, 94, first) + new)
-        read_window(s, now, "неделя", 10.5, third)
-        check_measured("падение, потом рост", s.measure(now), "неделя", new, 10.5, now, 58)
-    jumped = ramp(now, "неделя", 190, 10, 2, 75, 84, third)
-    with work_stand() as s:
-        s.seed_points(ramp(now, "неделя", 350, 200, 2, 60, 70, first) + jumped)
-        read_window(s, now, "неделя", 84.5, third)
-        check_measured("смена сброса с ростом через разрыв", s.measure(now), "неделя", jumped,
-                       84.5, now, 58)
-    last = ramp(now, "неделя", 120, 10, 2, 1, 7, second)
-    with work_stand() as s:
-        s.seed_points(ramp(now, "неделя", 350, 260, 2, 60, 94, first)
-                      + ramp(now, "неделя", 250, 130, 2, 2, 50, second) + last)
-        read_window(s, now, "неделя", 7.3, second)
-        check_measured("два разрыва, берётся последний", s.measure(now), "неделя", last, 7.3,
-                       now, 34)
-
-
-@case
-def limit_cut_equal_ts():
-    """H: две точки с равным ts, задач 2 затем 1, процент 40 затем 50: порядок журнала, не разрыв."""
-    now = BASE
-    reset = now + 100 * HOUR
-    rows = ramp(now, "неделя", 300, 20, 2, 30, 40, reset)
-    rows += ramp(now, "неделя", 10, 10, 2, 40, 40, reset) + ramp(now, "неделя", 10, 10, 1, 50, 50, reset)
-    with work_stand() as s:
-        s.seed_points(rows)
-        read_window(s, now, "неделя", 50.5, reset)
-        check_measured("равный ts", s.measure(now), "неделя", rows, 50.5, now, 100)
-
-
-@case
-def limit_cut_regular_reset():
-    """G: обычный сброс окна: тот же разрыв, в том числе чтение и точка без окна в файле."""
-    now = BASE
-    spans = {"пять_часов": (58, 18, 40, 80, 5 * HOUR), "неделя": (300, 20, 81.4, 94, WEEK_MOVE)}
-    for window, (back_from, back_to, p_from, p_to, period) in spans.items():
-        old_reset = now - MIN
-        new_reset = old_reset + period
-        old = ramp(now, window, back_from, back_to, 2, p_from, p_to, old_reset)
-        hours_left = (new_reset - now) / HOUR
-        with work_stand() as s:
-            s.seed_points(old + ramp(now, window, 2, 2, 2, 1, 1, new_reset))
-            read_window(s, now, window, 1, new_reset)
-            check_few_data(f"{window}: новое окно в журнале", s.measure(now), window, 1, hours_left)
-        with work_stand() as s:
-            s.seed_points(old)
-            read_window(s, now, window, 1, new_reset)
-            check_few_data(f"{window}: новое окно в чтении", s.measure(now), window, 1, hours_left)
-        with work_stand() as s:
-            s.seed_points(old)
-            read_window(s, now, window, None, None)
-            check_few_data(f"{window}: окна нет в файле", s.measure(now), window, 0,
-                           period / HOUR)
-        with work_stand() as s:
-            s.seed_points(old)
-            seed_rows_any_reset(s, ramp(now, window, 8, 8, 2, 0, 0, None), window)
-            read_window(s, now, window, 0, new_reset)
-            check_few_data(f"{window}: 0 % без сброса, затем новый сброс", s.measure(now), window,
-                           0, hours_left)
-
-
-# Живые числа: неделя 2 %, до сброса 157 ч, выбрано 3; по догадке 93 / (0,5 · 157) = 1,18 —
-# но догадка не режет ниже выбранного: потолок 3 при любом числе начатых.
-FEW_DATA_TABLE = {0: (3, 3), 1: (3, 3), 2: (3, 3), 3: (3, 3)}
-
-
-def check_few_data_table(label, seed):
-    now = BASE
-    new_reset = now + 157 * HOUR
-    for in_work, (ceiling, effective_now) in FEW_DATA_TABLE.items():
-        with work_stand(in_work) as s:
-            seed(s, now, new_reset)
-            read_window(s, now, "неделя", 2, new_reset)
-            st = s.measure(now)
-            got = (window_field(st, "неделя", "потолок"), st.get("эффективный"),
-                   window_field(st, "неделя", "скорость_на_задачу"))
-            print(f"  {label}: в работе {in_work}: потолок недели, эффективный, скорость = {got}",
-                  flush=True)
-            check(f"{label}, в работе {in_work}: потолок {ceiling}, эффективный {effective_now}, "
-                  f"скорость 0,5", got == (ceiling, effective_now, 0.5), got)
-
-
-@case
-def limit_cut_few_data_table():
-    """H: контроль: живые числа без старых точек: по догадке потолок — выбранные 3."""
-    check_few_data_table("без точек", lambda s, now, new_reset: None)
-
-
-@case
-def limit_cut_few_data_after_change():
-    """H: та же таблица с журналом старого окна до смены: старый наклон её не меняет."""
-    def seed(s, now, new_reset):
-        s.seed_points(old_week(now, now + 103 * HOUR)
-                      + ramp(now, "неделя", 10, 2, 2, 2, 2, new_reset, step=4))
-    check_few_data_table("после смены", seed)
-
-
-def fresh_window_stand():
-    """Выбрано 3, в работе 1 (начатое не поднимает потолок), 12 %/ч на задачу, час до сброса.
-
-    Потолок floor(20 / 12) = 1; после разрыва догадка 8 %/ч позволяет больше, и только
-    признак нового окна разрешает подъём раньше интервала."""
-    s = work_stand(1)
-    r5, rw = BASE + HOUR, BASE + 100 * HOUR
-    s.seed_points(linear_points(BASE, 1, 75, 12.0, r5, 0, 0.0, rw))
-    s.limits(BASE, five=(75, r5), week=(0, rw))
-    return s, r5, rw
-
-
-@case
-def limit_cut_shift_boundary():
-    """I: граница допуска: сдвиг сброса ровно 60 с окно не делит, на секунду больше — делит."""
-    now = BASE
-    reset = now + 100 * HOUR
-    rows = ramp(now, "неделя", 300, 20, 2, 60, 70, reset)
-    with work_stand() as s:
-        s.seed_points(rows)
-        read_window(s, now, "неделя", 70.5, reset + 60)
-        check_measured("сдвиг ровно 60 с", s.measure(now), "неделя", rows, 70.5, now,
-                       (reset + 60 - now) / HOUR)
-    with work_stand() as s:
-        s.seed_points(rows)
-        read_window(s, now, "неделя", 70.5, reset + 61)
-        check_few_data("сдвиг 61 с", s.measure(now), "неделя", 70.5, (reset + 61 - now) / HOUR)
-
-
-@case
-def limit_cut_shift_across_null():
-    """J: точка без сброса не стирает память о нём: сдвиг через null остаётся разрывом."""
-    now = BASE
-    old_reset, new_reset = now + 100 * HOUR, now + 101 * HOUR
-    for label, fresh_rows in (("новый сброс в журнале", 1), ("новый сброс только в чтении", 0)):
-        with work_stand() as s:
-            s.seed_points(ramp(now, "неделя", 300, 20, 2, 60, 70, old_reset))
-            seed_rows_any_reset(s, ramp(now, "неделя", 16, 16, 2, 70, 70, None), "неделя")
-            if fresh_rows:
-                s.seed_points(ramp(now, "неделя", 10, 2, 2, 70, 70, new_reset, step=4))
-            read_window(s, now, "неделя", 70, new_reset)
-            check_few_data(label, s.measure(now), "неделя", 70, (new_reset - now) / HOUR)
-
-
-@case
-def limit_cut_first_interval():
-    """K: разрыв между самой первой точкой ряда и следующей: первая точка тоже задаёт сброс."""
-    now = BASE
-    old_reset, new_reset = now + 100 * HOUR, now + 101 * HOUR
-    old = ramp(now, "неделя", 20, 20, 2, 60, 60, old_reset)
-    with work_stand() as s:
-        s.seed_points(old)
-        read_window(s, now, "неделя", 80, new_reset)
-        check_few_data("одна точка и чтение", s.measure(now), "неделя", 80,
-                       (new_reset - now) / HOUR)
-    with work_stand() as s:
-        s.seed_points(old + ramp(now, "неделя", 10, 2, 2, 80, 80, new_reset, step=4))
-        read_window(s, now, "неделя", 80, new_reset)
-        check_few_data("разрыв после первой точки", s.measure(now), "неделя", 80,
-                       (new_reset - now) / HOUR)
-
-
-def whole_percent_stand(week_to: int):
-    """Находка bkb 18.11: смена аккаунта, ultra, в работе 8; строка состояния отдаёт целый процент.
-    После смены 80 мин точек: 5 часов 0 → 2, неделя 0 → week_to (рост за последние 30 мин)."""
-    now = BASE
-    r5, rw = now + round(3.8 * HOUR), now + round(166.3 * HOUR)
-    old = [(now - back * MIN, 8, 99, now + 20 * MIN, 93, now + 30 * HOUR)
-           for back in range(120, 81, -4)]
-    fresh = [(now - back * MIN, 8, 2 * (80 - back) // 80,  r5,
-              0 if back > 30 else week_to * (30 - back) // 28, rw)
-             for back in range(80, 1, -2)]
-    s = Stand("ultra", cards("w", 8, "wip") + cards("p", 10))
-    s.seed_points(old + fresh)
-    s.limits(now, five=(2, r5), week=(week_to, rw))
-    return s, now
-
-
-@case
-def limit_whole_percent_step():
-    """Находка bkb 18.11 и Content-Factory 18.11: рост на пункт целого процента — шум округления,
-    а не расход; при почти нетронутом лимите выбранный ultra не режется, настоящий рост режет."""
-    s, now = whole_percent_stand(1)
-    with s:
-        st = s.measure(now)
-        check("неделя 0 → 1: скорость недели 0 (пункт — шаг округления)",
-              window_field(st, "неделя", "скорость_на_задачу") == 0,
-              window_field(st, "неделя", "скорость_на_задачу"))
-        check("неделя 0 → 1, 5 часов 0 → 2: эффективный 10 из выбранных 10",
-              st.get("эффективный") == 10, (st.get("эффективный"), st.get("лимит")))
-    s, now = whole_percent_stand(9)
-    with s:
-        st = s.measure(now)
-        # 8 задач × 80 мин = 10,67 задача-часа; (9 − 1) / 10,67 = 0,75 %/ч — 94 / (0,75·166,3) < 1.
-        got = window_field(st, "неделя", "скорость_на_задачу")
-        check("контроль: неделя 0 → 9 — скорость (9 − 1) / 10,67 задача-часа",
-              close_to(got, 8 / (8 * 80 / 60)), got)
-        check("контроль: настоящий рост режет до 1", st.get("эффективный") == 1,
-              st.get("эффективный"))
-
-
-@case
-def limit_threshold_per_window():
-    """Находка Content-Factory 18.11, решение владельца 19.11: порог прогноза по окнам данными —
-    5 часов до 100 % (упор — пауза до сброса), неделя 95 %."""
-    live = (yaml.safe_load(LIVE_DATA.read_text(encoding="utf-8")) or {}).get("лимит_подписки") or {}
-    check("данные: порог_прогноза_pct — 5 часов 100, неделя 95",
-          live.get("порог_прогноза_pct") == {"пять_часов": 100, "неделя": 95},
-          live.get("порог_прогноза_pct"))
-    patch = {"лимит_подписки.порог_прогноза_pct": {"пять_часов": 100, "неделя": 95}}
-    with Stand("ultra", cards("w", 2, "wip") + cards("p", 10), data_patch=patch) as s:
-        now = BASE
-        r5, rw = now + HOUR, now + 100 * HOUR
-        # 5 часов: 7,8 %/ч на задачу (15,6 %/ч при 2 задачах), час до сброса, 20 %: прогноз при 10 —
-        # 98 %, floor(80 / 7,8) = 10; с порогом 95 было бы floor(75 / 7,8) = 9. Неделя ровная.
-        s.seed_points(linear_points(now, 2, 20, 15.6, r5, 10, 0.0, rw))
-        s.limits(now, five=(20, r5), week=(10, rw))
-        st = s.measure(now)
-        check("5 часов: скорость 7,8 %/ч на задачу", close_to(window_field(st, "пять_часов",
-              "скорость_на_задачу"), 7.8), (st.get("лимит") or {}).get("пять_часов"))
-        check("порог окна в состоянии: 5 часов 100, неделя 95",
-              (window_field(st, "пять_часов", "порог"), window_field(st, "неделя", "порог"))
-              == (100, 95), st.get("лимит"))
-        check("прогноз 5 часов 98 % не выше порога 100: эффективный 10",
-              st.get("эффективный") == 10, (st.get("эффективный"), st.get("лимит")))
-
-
-@case
-def limit_fresh_window():
-    """4.5: новое окно поднимает потолок в тот же проход, падение меньше порога ждёт интервала."""
-    at = BASE + 2 * MIN
-    # После разрыва скорость по догадке 8 %/ч: ниже выбранных 3 она не режет, будь окно новым
-    # (падение 10, сброс вперёд) или нет (падение 9) — без неё потолок остался бы прежней единицей.
-    for label, percent, shift, want in (("падение 10", 65, 0, 3),
-                                        ("падение 9 — не новое окно", 66, 0, 3),
-                                        ("сброс вперёд на 2 мин", 75, 2 * MIN, 3)):
-        s, r5, rw = fresh_window_stand()
-        with s:
-            st = s.measure(BASE)
-            check(f"{label}: стенд — потолок 1 по замеру",
-                  window_field(st, "пять_часов", "потолок") == 1
-                  and window_field(st, "пять_часов", "скорость_на_задачу") > 8,
-                  (st.get("лимит") or {}).get("пять_часов"))
-            s.limits(at, five=(percent, r5 + shift), week=(0, rw))
-            st = s.measure(at)
-            check(f"{label}: скорость по догадке 8",
-                  window_field(st, "пять_часов", "скорость_на_задачу") == 8,
-                  window_field(st, "пять_часов", "скорость_на_задачу"))
-            check(f"{label}: потолок {want}", window_field(st, "пять_часов", "потолок") == want,
-                  window_field(st, "пять_часов", "потолок"))
 
 
 def main(argv: list[str]) -> int:

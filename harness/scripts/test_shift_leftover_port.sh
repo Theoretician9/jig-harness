@@ -313,7 +313,7 @@ def _case_10():
     check(not has(report(proc)[0], f"pid {pid}") and sweep(proc)[2] == [],
           f"петля 127.0.0.1 — не мусор, не цель (pid {pid})")
     pid = P["foreign"]
-    proc = single("foreign", pid, 47005, uid=OTHER_UID, command="python3 sample-21/bot.py")
+    proc = single("foreign", pid, 47005, uid=OTHER_UID, command="python3 sample-22/bot.py")
     bad, foreign, _ = report(proc)
     check(not has(bad, "47005") and has(foreign, "47005", "чужой процесс") and sweep(proc)[2] == [],
           f"чужой uid (старый сирота) — «чужой процесс», не цель (pid {pid})")

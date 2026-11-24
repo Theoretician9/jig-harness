@@ -618,7 +618,7 @@ for f in work-queue.py limit_mark.py limit-in-log.py stall-in-log.py pause.py; d
 done
 [ -f "$BOOT_CHECK" ] && cp "$BOOT_CHECK" "$T/project/scripts/boot_check.py"
 cp "$HERE"/lib/*.py "$HERE/lib/config.sh" "$HERE/lib/pane.sh" "$HERE/lib/events.sh" "$HERE/lib/agent_pane_log.sh" \
-    "$T/project/scripts/lib/"
+    "$HERE/lib/release_mark.sh" "$T/project/scripts/lib/"
 # Сторож вычисляет каталог скриптов от СВОЕГО пути: запущенный с места он судил
 # бы живые pause.py/stack_freshness.py, а не заглушки стенда. Копия — в раскладке
 # стенда, с двери мутаций.
@@ -723,6 +723,9 @@ ROTATE_FINISH_TIMEOUT_SEC=600
 ROTATE_HELPERS_WAIT_MAX_MIN=60
 ROTATE_HELPERS_TIMEOUT_ACTION=сообщить
 ROTATE_FLAG_STALE_MIN=30
+# Стенды судят путь «/exit» (rotate_full); ротация с преемником (спека 14) — проба
+# test_rotation_successor_warden.sh.
+ROTATE_SUCCESSOR=0
 HELPER_FRESH_MIN=20
 HELPER_HUNG_MIN=120
 SILENCE_MAX_MIN=30

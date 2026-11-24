@@ -180,6 +180,8 @@ fi
 # ── конфиги ─────────────────────────────────────────────────────────────────
 # shellcheck disable=SC1091
 source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../../scripts/lib/config.sh"
+# shellcheck disable=SC1091
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../../scripts/lib/channel_send.sh"
 INSTALL_CONF="${HARNESS_INSTALL_CONF:-${INSTALL_CONF:-$(konf_koren)/install.conf}}"
 HARNESS_CONF="${HARNESS_CONF:-$(konf_koren)/harness.conf}"
 [ -r "$INSTALL_CONF" ] || { echo "product-health: нет $INSTALL_CONF — установка не завершена (01-SPEC §0)"; exit 1; }
@@ -278,7 +280,15 @@ elif [ -f "$PROJECT_DIR/scripts/alert-task.py" ]; then
     python3 "$PROJECT_DIR/scripts/alert-task.py" --resolve product-health:trouble </dev/null >/dev/null 2>&1 || true
 fi
 
-if [ -x "$PROJECT_DIR/scripts/tg_send.sh" ] && "$PROJECT_DIR/scripts/tg_send.sh" "$MESSAGE" "${DOOR_ARGS[@]}"; then
+# Перечень красных проверок пишет продукт, и его длину сторож не знает: не
+# пропущенный правилами канала текстом, он уходит вложением.
+SEND_RC=1
+if [ -x "$PROJECT_DIR/scripts/tg_send.sh" ]; then
+    SEND_RC=0
+    channel_send_doc harness/demons/product-health.sh "$LOG_DIR/product-health-весть.md" \
+        "Служба продукта: весть о состоянии во вложении" "$MESSAGE" "${DOOR_ARGS[@]}" || SEND_RC=$?
+fi
+if [ "$SEND_RC" = 0 ]; then
     say "сообщение доставлено"
     # Состояние запоминается ТОЛЬКО после удачной отправки: иначе первая же
     # недоставка съедает сигнал навсегда — следующий опрос увидит «состояние то
@@ -288,5 +298,11 @@ if [ -x "$PROJECT_DIR/scripts/tg_send.sh" ] && "$PROJECT_DIR/scripts/tg_send.sh"
     exit 0
 fi
 
+if [ "$SEND_RC" = "$CHANNEL_RULES_REFUSED" ]; then
+    # Тот же текст через пять минут получил бы тот же отказ: состояние помнится.
+    say "сообщение отвергнуто правилами канала и вложением — прогон ПРОВАЛЕН, состояние запоминаю, отказ записан событием"
+    printf '%s' "$NOW_STATE" > "$STATE_FILE"
+    exit 1
+fi
 say "сообщение НЕ доставлено — считаю прогон ПРОВАЛЕННЫМ, состояние не запоминаю"
 exit 1

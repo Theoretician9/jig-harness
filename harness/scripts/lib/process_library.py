@@ -118,7 +118,7 @@ def with_local_layer(library: dict) -> dict:
 
 def local_mechanisms() -> list:
     """Паспорта своих механизмов копии — поле «механизмы» слоя установки, вид записи тот
-    же, что в mechanisms.yaml. Паспорт в файле пакета затирает обновление (копия bkb,
+    же, что в mechanisms.yaml. Паспорт в файле пакета затирает обновление (копия сети,
     19.11.2026), а слой раскладка не трогает. Файла нет — пусто; битый — строка в stderr."""
     import json
     путь = local_layer_path()
@@ -143,7 +143,7 @@ MEASURE_NAME = "process-library-measure.json"
 
 def measure_path(logs=None) -> Path:
     # Замер — данные машины: учтённый файл пакета, переписанный демоном, держал дерево
-    # копии грязным неделями (копия bkb 16.11.2026). Файл пакета несёт только описание.
+    # копии грязным неделями (копия сети 16.11.2026). Файл пакета несёт только описание.
     путь = os.environ.get("HARNESS_PROCESS_MEASURE")
     return Path(путь) if путь else Path(logs or _config().log_dir()) / MEASURE_NAME
 

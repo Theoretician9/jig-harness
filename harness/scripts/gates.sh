@@ -93,7 +93,7 @@ if [ "${1:-}" = "--selftest" ]; then
         || { echo "САМОТЕСТ ПРОВАЛЕН: находка жёлтой не показана"; cat "$TRACE"; exit 1; }
 
     # Проверка разработки харнеса без HARNESS_DEV_GATES=1 не идёт, не краснит и названа
-    # в итоге; с ключом 1 идёт как любая (копия bkb 14.11.2026: такие откатывали обновление).
+    # в итоге; с ключом 1 идёт как любая (копия сети 14.11.2026: такие откатывали обновление).
     HARNESS_DEV_GATES=0 проверка "разработки" bash -c 'echo "шла"; exit 1' > "$TRACE" 2>&1
     [ "$RED" = 1 ] && ! grep -q 'шла' "$TRACE" \
         || { echo "САМОТЕСТ ПРОВАЛЕН: проверка разработки шла без ключа"; cat "$TRACE"; exit 1; }
@@ -157,6 +157,16 @@ if [ "${1:-}" = "--только" ]; then
     shift 2
     echo "--- выборка: $ONLY_CHECKS ---"
 fi
+
+# Незнакомый довод — справка и отказ ДО запуска проверок: иначе «--help» или
+# опечатка («всё» без дефисов тоже) молча запускала бы полный прогон на полчаса.
+case "${1:-}" in
+    ""|--всё|--хакатон) ;;
+    *)
+        echo "gates.sh: неизвестный ключ «$1»" >&2
+        echo "ключи: --только '<имя>[|<имя>…]' (выборка проверок), --всё (полный прогон с самотестами), --хакатон (быстрый прогон), --selftest (самотест ворот)" >&2
+        exit 2 ;;
+esac
 
 # Второй прогон того же состояния дерева присоединяется к первому и выходит здесь.
 # Общий предел прогона: у --всё свой, он дольше обычного.
@@ -261,6 +271,7 @@ done
 проверка "id сессии демона без uuidgen" bash scripts/test_claude_demon_session_id.sh
 # Голый mktemp проб обязан попадать в каталог harness-run-, который уборка /tmp опознаёт.
 проверка "каталог проб ворот" python3 scripts/test_gates_run_temp_dir.py
+проверка "ворота: незнакомый ключ" python3 scripts/test_gates_unknown_flag.py
 проверка "границы задачи" python3 scripts/lib/cards.py --selftest
 # Четыре пробы, которые не звал НИКТО: их нашёл гейт «кто зовёт» 14.09.2026 —
 # ровно тот случай, ради которого он написан (проверка есть, вызова нет).
@@ -308,10 +319,12 @@ done
 проверка "личность: раскладка собирает карточки" python3 scripts/test_layout_builds_cards.py
 проверка "личность: подсказки запуска через носитель" python3 scripts/test_agent_start_hints.py
 проверка "личность: отказ печати при обновлении — сигнал" python3 scripts/test_update_self_seal.py
+проверка "обновление: группа без TG_OWNER_ID — отказ" python3 scripts/test_update_owner_id.py
 проверка "зов модели: сторож"         python3 scripts/test_check_model_call.py
 проверка "зов модели: приборы"        python3 scripts/test_instrument_carrier.py
 проверка "зов модели: код 79 у фоновых служб" bash scripts/test_carrier_exit79.sh
 проверка "зов модели: код 79 у входа" python3 scripts/test_login_expiry_exit79.py
+проверка "вход: тот же аккаунт после старта" python3 scripts/test_login_after_start_same_account.py
 проверка "вход: организация без прямого запроса" python3 scripts/test_login_organization_without_api.py
 проверка "аккаунт: лимит из потока CLI" python3 scripts/test_limit_from_stream.py
 проверка "кто зовёт"      python3 scripts/check-who-calls.py
@@ -406,6 +419,7 @@ done
 # 11.09). Уровень задачи — из замера индекса, а не из заявленного объёма.
 проверка "пайплайн-гейт"  python3 scripts/check-pipeline.py
 проверка "пайплайн по трейлеру" python3 scripts/test_pipeline_trailer_card.py
+проверка "пайплайн: бумаги из дерева коммита" python3 scripts/test_check_pipeline_work_tree.py
 # Дубль той же проверки ПО ИСТОРИИ задачи: pre-commit обходится одним
 # `--no-verify`, и у пайплайна, в отличие от секретов, дубля не было вовсе
 # (ревью спеки 23.09.2026). Здесь работа судится целиком по трейлерам
@@ -454,6 +468,12 @@ done
 проверка "тон-самотест"   python3 scripts/check-panel-tone.py --selftest
 проверка "переключатели"  python3 scripts/check-switches.py
 проверка "переключатели-самотест" python3 scripts/check-switches.py --selftest
+проверка "выкат: сторож и выключатель" python3 scripts/test_deploy_guard_enabled.py
+проверка "шаги пайплайна: зависимости" python3 scripts/test_pipeline_step_dependencies.py
+проверка "шаги пайплайна: читатели" python3 scripts/test_step_readers.py
+проверка "выключатели: выкат и фоновые" python3 scripts/test_switches_deploy_background.py
+проверка "тесты-сначала: шаг выключен" python3 scripts/test_tests_first_step_off.py
+проверка "запись уровней шагов" python3 scripts/test_write_step_levels.py
 # Механика записи с панели (копия, права, хозяин, подъём через sudo, атомарная
 # подмена) — общая у трёх писателей; её больные случаи живут здесь.
 проверка "писатель панели" python3 scripts/lib/panel_writer.py --selftest
@@ -480,17 +500,22 @@ done
 # Описание устройства стареет быстрее всего: механизмы заводятся каждую смену.
 # Сверка двусторонняя — механизм без описания и описание без механизма красные.
 проверка "обновление"     python3 scripts/test_update.py
+проверка "обновление: пара файлов" python3 scripts/test_update_kept_file_pair.py
 проверка "неполная история" python3 scripts/test_update_shallow_history.py
 проверка "обновление новой версией" python3 scripts/test_update_relaunch.py
+проверка "разбор обновлений сервера" python3 scripts/test_update_impact.py
+проверка "откат: harness.conf" python3 scripts/test_update_rollback_conf.py
 проверка "опись и своё копии" python3 scripts/test_layout_keeps_copy_own.py
 проверка "доустановка"    python3 scripts/test_install_new.py
 проверка "исход одним судьёй" python3 scripts/test_map_from_message_outcome.py
 проверка "«не работает» — работа" python3 scripts/test_map_from_message_not_work.py
+проверка "разбор сообщений" python3 scripts/test_map_from_message_intake.py
 # Тревоги сторожей: писатель карточек, его форма в приёмке, гейт писателей карты,
 # донос в sentinel и общий писатель lib/cards.py.
 проверка "писатель тревог"  python3 scripts/test_alert_task.py
 проверка "форма --is-green" python3 scripts/test_acceptance_is_green.py
 проверка "приёмка одной карточки" python3 scripts/test_acceptance_one_task.py
+проверка "приёмка: перенос в архив" python3 scripts/test_acceptance_watch_transfer.py
 проверка "мутации до принятия" python3 scripts/test_mutations_before_accept.py
 проверка "писатели карты в библиотеке" python3 scripts/test_map_writers_library.py
 проверка "снятие из карты"  python3 scripts/test_archive_map.py
@@ -513,6 +538,10 @@ done
 # запускает по расписанию.
 проверка "ревизия-самотест" bash harness/demons/project-revision.sh --selftest
 проверка "устройство"     python3 scripts/check-registry.py
+# Место механизма и карточки в реестре частей судит свой сторож (значение поля
+# `элемент`); присутствие поля — «устройство» по паспорту.
+проверка "архитектура" python3 scripts/check-architecture.py
+проверка "архитектура-самотест" python3 scripts/check-architecture.py --selftest
 # Файл кода вне всех областей ревизии не читает ни один круг — молча. Замер
 # 28.09.2026: таких было 6 из 199, среди них сборщик скилов.
 проверка "области ревизии" python3 scripts/check-revision-coverage.py
@@ -556,6 +585,9 @@ done
 проверка "манифест-в-сборке" python3 scripts/test_build_public_self_manifest.py
 проверка "чистота-самотест" python3 scripts/check-public-clean.py --selftest
 проверка "карточки в сборке" python3 scripts/test_public_clean_map_ids.py
+проверка "замок: имена копий сети" python3 scripts/test_public_clean_copy_names.py
+проверка "журнал выпусков без имён копий" python3 scripts/test_version_changelog_copy_names.py
+проверка "сборщик: имя копии целым словом" python3 scripts/test_build_public_copy_names_word.py
 проверка "карточки в коммите" python3 scripts/test_commit_map_ids.py
 проверка "каталог следов из данных" python3 scripts/test_live_check_trace_dir.py
 # Пробы, которых не звал никто: «население кода» 14.11.2026 — 8 без вызывающего
@@ -642,6 +674,8 @@ done
 # Приём канала не должен вставать от зависшего tmux и сторож обязан это видеть.
 проверка "приём-зависание" bash scripts/test_dispatcher_hang.sh
 проверка "сторож приёма"   bash scripts/test_dispatcher_stall_watch.sh
+# Код 4 канала (отказ правил) у демонов с повтором — одно событие, не залп одного текста.
+проверка "код 4 канала — не повтор"   bash scripts/test_channel_callers_code4.sh
 # Ручка «слать сразу» (PANE_SEND_NOW): аккорд только после успешного толчка и
 # только при ключе 1, прочитанном в момент толчка; в панели она видна и пишется.
 проверка "толчок-сразу"    bash scripts/test_pane_send_now.sh
@@ -738,12 +772,12 @@ done
 проверка "хакатон: меню" bash scripts/test_hackathon_menu.sh
 проверка "маска секретов" bash scripts/test_check_secrets_mask.sh
 проверка "секреты под маской" python3 scripts/test_security_secrets_masked.py
-# Пачка «чистота и секреты» (опыт копии Content-Factory): режим --range как
+# Пачка «чистота и секреты» (опыт копии сети): режим --range как
 # инструмент, гейт чистоты по прозвищам продукта, прозвище от установщика.
 проверка "секреты по диапазону" bash scripts/test_check_secrets_range.sh
 проверка "харнес чист: прозвища продукта" python3 scripts/test_harness_clean_aliases.py
 проверка "установщик: прозвища продукта" bash scripts/test_installer_product_aliases.sh
-# Пачка evo-deploy-door (находка копии bkb): заготовка STACK_* из compose продукта.
+# Пачка evo-deploy-door (находка копии сети): заготовка STACK_* из compose продукта.
 проверка "заготовка STACK_* из compose" python3 scripts/test_stack_template.py
 проверка "отчёт о неэффективных задачах" python3 scripts/test_task_efficiency.py
 проверка "скорость: судья" python3 scripts/test_speed_mode.py
@@ -841,6 +875,7 @@ if [ "${1:-}" = "--всё" ]; then
     # Третье состояние гейта (жёлтый, код 77) — механизм обкатки: без него
     # новый гейт обязан молчать, а краснящий зря — отключают.
     проверка "жёлтый в pre-commit" bash scripts/pre-commit-gate.sh --selftest-yellow
+    проверка "жёлтый в pre-commit: боевой журнал цел" bash scripts/test_precommit_yellow_live_log.sh
     проверка "жёлтый в воротах"    bash scripts/gates.sh --selftest
     # Секунды каждой проверки пишутся в gates-timing.jsonl: долгую видно
     # числом, а не догадкой. Проба гоняет ворота на стенде — за --всё.
@@ -868,7 +903,7 @@ if [ "${1:-}" = "--всё" ]; then
     # Этапы D/I: скан образа до ворот, политика critical-fixable | warn, «скан не прочитан» не зелёное.
     проверка "скан образа при выкате" bash scripts/test_deploy_scan.sh
     проверка "разбор вывода сканера" python3 scripts/test_scan_verdict_lib.py
-    # Дампы всех баз перед выкатом и права копий (опыт копии Content-Factory):
+    # Дампы всех баз перед выкатом и права копий (опыт копии сети):
     # backup.sh --базы-в, umask 077, ротация перед-выкатом; проба восстановления
     # заливает в psql только дамп PostgreSQL.
     проверка "дампы баз и права копий" bash scripts/test_backup_dumps_into.sh
@@ -916,6 +951,17 @@ if [ "${1:-}" = "--всё" ]; then
     проверка "рестарт при помощниках" python3 scripts/hooks/test_guard_bash_restart_helpers.py
     проверка "окно перезагрузки" bash scripts/test_server_restart_window.sh
     проверка "ротация ждёт помощников" bash scripts/test_warden_rotation_waits_helpers.sh
+    # Ротация с преемником, виджет статуса v2 и ведение карты: в реестре «в воротах»,
+    # а строки здесь не было — «кто зовёт» краснел.
+    проверка "преемник: сторож" bash scripts/test_rotation_successor_warden.sh
+    проверка "преемник: доводка" bash scripts/test_rotation_successor_finishing.sh
+    проверка "преемник: стоп юнита" bash scripts/test_rotation_successor_unit_stop.sh
+    проверка "преемник: guard_bash" python3 scripts/test_rotation_successor_guard_bash.py
+    проверка "преемник: очередь" python3 scripts/test_rotation_successor_queue.py
+    проверка "преемник: скорость" python3 scripts/test_rotation_successor_speed.py
+    проверка "преемник: обновление" python3 scripts/test_rotation_successor_update.py
+    проверка "виджет статуса" python3 scripts/test_status_widget.py
+    проверка "ведение карты" python3 scripts/test_devmap_keeper.py
     проверка "принудительный выход отвечает на диалог" bash scripts/test_warden_forced_exit_confirm.sh
     проверка "сервер поднялся"  python3 scripts/test_boot_check.py
     проверка "страж после перезагрузки" python3 scripts/test_sentinel_after_restart.py
@@ -945,6 +991,7 @@ if [ "${1:-}" = "--всё" ]; then
     проверка "след вне репозитория" python3 scripts/test_live_check_trace_outside_repo.py
     проверка "карта: три исхода" python3 scripts/test_map_from_message_three_outcomes.py
     проверка "карта: запасной путь" python3 scripts/test_map_from_message_fallback.py
+    проверка "карта: место задачи" python3 scripts/test_map_from_message_element.py
     проверка "потолок разбора сообщений" python3 scripts/test_owner_message_ceiling.py
     проверка "типовая копия-проба" python3 scripts/test_typical_copy.py
     проверка "свои записи при закрытом слое" python3 scripts/test_layout_carry_own_refusal.py

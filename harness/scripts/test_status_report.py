@@ -738,7 +738,7 @@ def builder_calls(stand: Path) -> int:
 
 
 def builder_argv(stand: Path) -> list:
-    """Аргументы каждого вызова подставного MARK_STUB; [] — сборка без аргументов."""
+    """Аргументы каждого вызова подставного MARK_STUB; ["--json"] — сборка для tg_send."""
     path = stand / "log" / "builder.log"
     if not path.is_file():
         return []
@@ -832,7 +832,7 @@ def case_door_builds(stand: Path) -> None:
     (tree / "scripts" / "status-report.py").write_text(MARK_STUB, encoding="utf-8")
     rc, calls, last, out = send(stand, tree, "--статус", extra=extra)
     argv = builder_argv(stand)
-    PROBE.check("--статус без текста собрал отчёт ровно раз", argv.count([]) == 1, argv)
+    PROBE.check("--статус без текста собрал отчёт ровно раз (--json)", argv.count(["--json"]) == 1, argv)
     PROBE.check("--статус без текста: собранный текст ушёл (код 0, curl 1, текст = сборщик)",
                 rc == 0 and calls == 1 and last == status,
                 f"код {rc}, curl {calls}, совпал {last == status}: {out[-400:]}")
@@ -930,7 +930,7 @@ def case_collapsed_signed(stand: Path) -> None:
 # ── сделано без повторов ────────────────────────────────────────────────────
 MARK_NAME = "status-report.last"
 NOTHING_NEW = "нового нет; последний помощник кончил"
-# Находка bkb 12.11: «нового нет» при живых помощниках читалось как «стоим».
+# Находка копии сети 12.11: «нового нет» при живых помощниках читалось как «стоим».
 STILL_WORKING = "ничего не сдано, работа идёт"
 CONTINUED = "оборван, работу продолжили"
 QUEUE_EMPTY = "очередь пуста"
@@ -1148,11 +1148,11 @@ def case_mark_race(stand: Path) -> None:
     PROBE.check("после каждого раунда метка — целиком одно из его ISO", not bad, bad[:3])
 
 
-# Подставной сборщик стенда: без аргументов — сборка с аргументами стенда, с
-# аргументами (вызов tg_send после доставки: --отметить …) — настоящий сборщик как есть.
+# Подставной сборщик стенда: сборка (без аргументов или --json) — с аргументами стенда впереди,
+# --отметить … (вызов tg_send после доставки) — настоящий сборщик как есть.
 MARK_STUB = """#!/usr/bin/env python3
 import json, os, subprocess, sys
-args = sys.argv[1:] or json.loads(os.environ["STAND_REPORT_ARGS"])
+args = sys.argv[1:] if "--отметить" in sys.argv else [*json.loads(os.environ["STAND_REPORT_ARGS"]), *sys.argv[1:]]
 with open(os.environ["STAND_BUILDER_LOG"], "a", encoding="utf-8") as log:
     log.write(json.dumps(sys.argv[1:], ensure_ascii=False) + "\\n")
 sys.exit(subprocess.run([sys.executable, os.environ["STAND_REAL_REPORT"], *args],
@@ -2470,7 +2470,7 @@ def transcript(stand: Path, call: str, minutes_ago: float) -> Path:
 
 
 def case_lost_transcript_alive(stand: Path) -> None:
-    # Находка bkb 12.11 (7): долгий регресс молчит в журнале вызовов дольше порога, но помощник жив.
+    # Находка копии сети 12.11 (7): долгий регресс молчит в журнале вызовов дольше порога, но помощник жив.
     rows = [launch("c-R", "Код", "harness-worker", "sonnet", ts=at(200), part="Часть: hr.demo-young#1")]
     transcript(stand, "c-R", 1)
     out, got = lost_report(stand, rows)
@@ -2484,7 +2484,7 @@ def case_lost_transcript_alive(stand: Path) -> None:
 
 
 def case_lost_work_continued(stand: Path) -> None:
-    # Находка bkb 12.11 (3): оборванного ротацией доделал другой помощник той же задачи.
+    # Находка копии сети 12.11 (3): оборванного ротацией доделал другой помощник той же задачи.
     cut = [launch("c-A", "Код", "harness-worker", "sonnet", ts=at(200), part="Часть: hr.demo-young#1")]
     out, got = lost_report(stand, cut)
     PROBE.check("условие: один оборванный — в ⚠", bool(line_with(got.get(LOST_HEADER, []),
@@ -2968,12 +2968,12 @@ def work_steps_stand(stand: Path, mark: str) -> tuple:
     """Шаги машины: до метки — старый выпуск, слияние и письмо; после — новые и шум (отказы, входящее)."""
     before, after = at(300), at(30)
     release_stand(stand / "сборка", [("v9.9.1", before), ("v9.9.2", after)])
-    mail_stand(stand / "сеть", [("почта/bkb/старое.md", OWN_COPY, before),
-                                ("почта/bkb/выпуск.md", OWN_COPY, after),
-                                ("почта/sample-26/выпуск.md", OWN_COPY, at(25)),
-                                (f"почта/{OWN_COPY}/входящее.md", "bkb", at(20)),
-                                ("почта/sample-26/от-bkb.md", "bkb", at(18)),
-                                ("находки/bkb/своя.md", OWN_COPY, at(15))])
+    mail_stand(stand / "сеть", [("почта/copy-a/старое.md", OWN_COPY, before),
+                                ("почта/copy-a/выпуск.md", OWN_COPY, after),
+                                ("почта/copy-b/выпуск.md", OWN_COPY, at(25)),
+                                (f"почта/{OWN_COPY}/входящее.md", "copy-a", at(20)),
+                                ("почта/copy-b/от-copy-a.md", "copy-a", at(18)),
+                                ("находки/copy-a/своя.md", OWN_COPY, at(15))])
     with (stand / "log" / "merge-queue.jsonl").open("w", encoding="utf-8") as out:
         for event, moment in (("mq.слито", before), ("mq.слито", at(50)), ("mq.ворота", at(45)),
                               ("mq.слито", at(40)), ("mq.конфликт", at(35))):
@@ -3003,8 +3003,8 @@ def case_done_work_steps(stand: Path) -> None:
     PROBE.check("БОЛЬНОЙ: слияния после метки — числом 2 (не до метки, не отказы)",
                 bool(re.search(r"\b2\b", merged)), done or out)
     mail = line_with(done, "письм")
-    PROBE.check("БОЛЬНОЙ: письма копиям после метки — числом 2 и кому: bkb, sample-26",
-                bool(re.search(r"\b2\b", mail)) and "bkb" in mail and "sample-26" in mail, done or out)
+    PROBE.check("БОЛЬНОЙ: письма копиям после метки — числом 2 и кому: copy-a, copy-b",
+                bool(re.search(r"\b2\b", mail)) and "copy-a" in mail and "copy-b" in mail, done or out)
     PROBE.check("входящее и находки письмами не считаются", "3" not in mail and OWN_COPY not in mail, mail)
     PROBE.check("шаги — по строке, каждая ≤ 80 знаков",
                 all(len(l) <= 80 for l in done) and all((release, merged, mail)), done)
@@ -3053,6 +3053,120 @@ def case_tone_ceiling(stand: Path) -> None:
     out = run_report(stand, journal, "harness-wide.conf")
     PROBE.check(f"БОЛЬНОЙ: мягкий потолок TONE.md 700 — отчёт {len(out)} ≤ 700", 0 < len(out) <= 700, len(out))
     PROBE.check("в 700 все три блока на месте", list(blocks(out)) == list(HEADERS), out[:300])
+
+
+# ── человеческий отчёт (владелец 19.11: «давай отчеты сделаем нормальные») ──
+# Разбор причин — журнал задачи «отчёт статуса человеческим языком». Что уже починено (выпуск и слияния в СДЕЛАНО,
+# ДАЛЬШЕ при начатых карточках, продолженный запуск не в ⚠) — случаи 96–99. Здесь — ещё живое:
+#   H1. «сейчас никто не работает», когда работает оркестратор: отчёт видит только помощников журнала
+#       вызовов, а сливает, выпускает и зовёт помощников сам оркестратор. Признак его жизни — свежий
+#       транскрипт сессии ($CLAUDE_PROJECTS_DIR/<проект>/<сессия>.jsonl, та же раскладка, что у
+#       транскриптов помощников); сессия — из записей журнала вызовов.
+#   H2. Карточку, которую никто не начинал, делает «работой окна» служебный коммит записи карты
+#       («Карта: <id> — запись evolution-net.py», правит только dev-map.yaml) — и в ДЕЛАЕТСЯ висит
+#       «сейчас никто не работает» под задачей, которой ещё нет.
+#   H3. Заголовок «дела» без метки — описание запуска без латиницы: «Пачка session-warden» → «Пачка»,
+#       «RFC в спеках» → «В спеках». Обрубок не название задачи.
+#   H4. Заголовок карточки сети копий сырой: «? от copy-a: updater-first-request», «задача от ?: …».
+ORCHESTRATOR = "оркестратор"
+# Описания запусков 19.11 без метки (вызовы-агентов.jsonl) и что из них сделал отчёт.
+STUB_LAUNCHES = (("Пачка session-warden", "Пачка"), ("Починить devmap-selfheal", "Починить"),
+                 ("PANE_SEND_NOW=1 в образце", "В образце"), ("RFC в спеках", "В спеках"),
+                 ("test_heavy_slot в ворота", "В ворота"), ("release_mark по плану (sonnet)", "По плану"))
+WHOLE_RUSSIAN = "Сторож скорости и потолок"
+EVO_CARDS = {
+    "hr.evo-copy-a-stand-finding": {"status": "plan", "title": "? от copy-a: updater-first-request",
+                                         "завёл": "scripts/evolution-net.py"},
+    "hr.evo-q-server-rollout-door": {"status": "wip", "title": "задача от ?: server-rollout-door",
+                                     "завёл": "scripts/evolution-net.py"},
+}
+EVO_SLUGS = ("updater-first-request", "server-rollout-door")
+LONE_QUESTION = re.compile(r"(?<!\S)\?(?=[\s:,]|$)")
+
+
+def orchestrator_transcript(stand: Path, minutes_ago: float) -> Path:
+    """Транскрипт сессии оркестратора, как его кладёт Claude Code: <проект>/<сессия>.jsonl; время — mtime."""
+    folder = stand / "projects" / str(stand / "project").replace("/", "-")
+    folder.mkdir(parents=True, exist_ok=True)
+    body = folder / f"{SESSION}.jsonl"
+    body.write_text("{}\n", encoding="utf-8")
+    moment = time.time() - minutes_ago * 60
+    os.utime(body, (moment, moment))
+    return body
+
+
+def case_human_orchestrator_alive(stand: Path) -> None:
+    cards = {"hr.lie-wip": {"status": "wip", "title": "Сеть серверов делится находками"}}
+    rows = [launch("c-W1", "Код сети", "harness-worker", "sonnet", ts=at(100), part=part("hr.lie-wip")),
+            finish("c-W1", ts=at(90))]
+    out, _ = lies_report(stand, cards, rows)
+    PROBE.check(f"условие (отчёт 19.11 01:50): помощники кончили, транскрипта нет — «{NOBODY}»",
+                NOBODY in out, out)
+    orchestrator_transcript(stand, 1)
+    out, _ = lies_report(stand, cards, rows)
+    PROBE.check(f"БОЛЬНОЙ: оркестратор писал минуту назад — нет «{NOBODY}»", NOBODY not in out, out)
+    PROBE.check("БОЛЬНОЙ: отчёт называет, что работает оркестратор", ORCHESTRATOR in out.lower(), out)
+    orchestrator_transcript(stand, 200)
+    out, _ = lies_report(stand, cards, rows)
+    PROBE.check(f"транскрипт старше порога потери — оркестратор не жив, снова «{NOBODY}»",
+                NOBODY in out and ORCHESTRATOR not in out.lower(), out)
+    # Режим метки: сдано ничего, но оркестратор жив — «нового нет; последний помощник кончил» лжёт о простое.
+    conf = mode_conf(stand, "1")
+    journal = write_journal(stand, [launch("c-Y", "Код", "harness-worker", "sonnet", ts=at(100),
+                                           part="Часть: hr.demo-young#1"), finish("c-Y", ts=at(90))])
+    set_mark(stand, at(5))
+    orchestrator_transcript(stand, 1)
+    _, done, _ = report_since(stand, journal, conf)
+    PROBE.check("БОЛЬНОЙ: режим метки, оркестратор жив — СДЕЛАНО не «нового нет»",
+                bool(done) and not any("нового нет" in l for l in done), done)
+
+
+def case_human_map_record_not_work(stand: Path) -> None:
+    cards = {"hr.lie-evo": {"status": "plan", "title": "Прогноз скорости для копий"},
+             "hr.lie-real": {"status": "wip", "title": "Сеть серверов делится находками"}}
+    root = git_stand(stand / "project", [("Начало стенда", at(400))])
+    (root / "dev-map.yaml").write_text("lines: []\n", encoding="utf-8")
+    stand_git(root, "add", "--", "dev-map.yaml")
+    stand_git(root, "commit", "-q", "-m", "Карта: hr.lie-evo — запись evolution-net.py\n\nDev-Map: hr.lie-evo",
+              moment=at(30))
+    stand_git(root, "commit", "-q", "--allow-empty", "-m", "Сеть: код\n\nDev-Map: hr.lie-real", moment=at(20))
+    out, got = lies_report(stand, cards, [])
+    PROBE.check("условие: настоящий коммит задачи делает её работой окна — она в ДЕЛАЕТСЯ",
+                cards["hr.lie-real"]["title"] in titles_in(got, HEADERS[1]), out)
+    PROBE.check("БОЛЬНОЙ: коммит записи карты — не работа, карточки без запусков в отчёте нет",
+                cards["hr.lie-evo"]["title"] not in out, out)
+
+
+def case_human_stub_titles(stand: Path) -> None:
+    rows = []
+    for n, (desc, _) in enumerate(STUB_LAUNCHES + ((WHOLE_RUSSIAN, ""),)):
+        rows += [launch(f"c-S{n}", desc, "harness-worker", "opus", ts=at(60 - n)), finish(f"c-S{n}", ts=at(40 - n))]
+    out, got = lies_report(stand, {}, rows)
+    titles = [t.removesuffix("…").strip().lower() for t in titles_in(got, HEADERS[0])]
+    PROBE.check("условие: целиком русское описание — своя задача с этим названием",
+                WHOLE_RUSSIAN.lower() in titles, out)
+    for desc, stub in STUB_LAUNCHES:
+        PROBE.check(f"БОЛЬНОЙ: «{desc}» — не задача-обрубок «{stub}»", stub.lower() not in titles, out)
+    # Обрубок без своего ключа уходит в «прочее»; с ключом он стал бы задачей с именем по умолчанию.
+    PROBE.check("БОЛЬНОЙ: обрубки — в «прочее», не задачами «Работа»", "работа" not in titles, out)
+    counted = len(titles) + (other_count(got.get(HEADERS[0], [])) or 0)
+    PROBE.check(f"работа не теряется: задач и «прочее» вместе {counted} ≥ {len(rows) // 2}",
+                counted >= len(rows) // 2, out)
+
+
+def case_human_evolution_titles(stand: Path) -> None:
+    rows = [launch("c-E1", "Код", "harness-worker", "sonnet", ts=at(200),
+                   part=part("hr.evo-copy-a-stand-finding")),
+            launch("c-E2", "Код", "harness-worker", "opus", ts=at(30), part=part("hr.evo-q-server-rollout-door"))]
+    out, got = lies_report(stand, EVO_CARDS, rows)
+    lost = "\n".join(got.get(LOST_HEADER, []))
+    PROBE.check("условие: оборванный запуск карточки сети — в ⚠ с именем копии copy-a", "copy-a" in lost, out)
+    PROBE.check("условие: идущая карточка сети — задачей в ДЕЛАЕТСЯ", len(titles_in(got, HEADERS[1])) == 1, out)
+    shown = lost + "\n" + "\n".join(t for _, t in task_lines(got))
+    PROBE.check("БОЛЬНОЙ (отчёт 01:4x «? от copy-a»): в названиях нет одинокого «?»",
+                not LONE_QUESTION.search(shown), shown)
+    PROBE.check("БОЛЬНОЙ: в названиях нет латинского ярлыка находки",
+                not any(slug in shown for slug in EVO_SLUGS), shown)
 
 
 CASES = (
@@ -3170,6 +3284,10 @@ CASES = (
     ("(98) шаги до метки не повторяются; без настроек сети и сборки — не падает", case_done_work_steps_quiet),
     ("(99) БОЛЬНОЙ: очередь кончилась — ДАЛЬШЕ первая пачка, не «очередь пуста»", case_next_batch),
     ("(100) БОЛЬНОЙ: отчёт в мягком потолке TONE.md", case_tone_ceiling),
+    ("(101 H1) БОЛЬНОЙ: оркестратор жив — не «сейчас никто не работает»", case_human_orchestrator_alive),
+    ("(102 H2) БОЛЬНОЙ: коммит записи карты — не работа задачи", case_human_map_record_not_work),
+    ("(103 H3) БОЛЬНОЙ: описание без латиницы — не задача-обрубок «Пачка»", case_human_stub_titles),
+    ("(104 H4) БОЛЬНОЙ: карточка сети копий — без «? от copy-a» и латинского ярлыка", case_human_evolution_titles),
 )
 
 

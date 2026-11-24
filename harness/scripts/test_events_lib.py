@@ -253,8 +253,10 @@ SAMPLES = [
     ("log", 'tokens-2026-08.jsonl', {"ts": "2026-08-31T11:23:10.490Z", "session": "s-sample"}, '2026-08-31T11:23:10+00:00'),
     ("log", 'tokens-2026-09.jsonl', {"ts": "2026-09-30T18:09:42.075Z", "session": "s-sample"}, '2026-09-30T18:09:42+00:00'),
     ("log", 'tokens-2026-10.jsonl', {"ts": "2026-10-27T09:09:34.617Z", "session": "s-sample"}, '2026-10-27T09:09:34+00:00'),
+    ("log", 'tokens-2026-11.jsonl', {"ts": "2026-11-02T02:07:02.474Z", "session": "s-sample"}, '2026-11-02T02:07:02+00:00'),
     ("log", 'внимание.jsonl', {"id": "1793085816.170080706", "когда": "2026-10-27T12:23:36+05:00"}, '2026-10-27T07:23:36+00:00'),
     ("log", 'вложенность.jsonl', {"v": 1, "ts": "2026-11-04T09:22:31+05:00", "src": "scripts/hooks/launch_plan_guard.py", "event": "nesting.decision", "outcome": "skipped", "task": "hr.sample", "task_from": "map", "session": "s-sample"}, '2026-11-04T04:22:31+00:00'),
+    ("log", 'канал-отказы-правил.jsonl', {"v": 1, "ts": "2026-11-23T05:37:35+05:00", "src": "harness/demons/dispatcher-stall-watch.sh", "event": "channel.rules_refused", "outcome": "error", "task": "hr.sample", "task_from": "map", "session": "s-sample", "data": {"reason": "длина 5000 больше потолка 1400"}}, '2026-11-23T00:37:35+00:00'),
     ("log", 'ответы-в-канал.jsonl', {"v": 1, "ts": "2026-11-04T00:14:53+05:00", "src": "scripts/hooks/channel_reply_guard.py", "event": "channel_reply.block", "outcome": "refused", "task": "hr.sample", "task_from": "map", "session": "s-sample"}, '2026-11-03T19:14:53+00:00'),
     ("log", 'роли-помощников.jsonl', {"v": 1, "ts": "2026-11-04T09:26:18+05:00", "src": "scripts/hooks/lead_role_guard.py", "event": "role.decision", "outcome": "ok", "task": "hr.sample", "task_from": "map", "session": "s-sample"}, '2026-11-04T04:26:18+00:00'),
     ("log", 'merge-queue.jsonl', {"v": 1, "ts": "2026-11-13T04:04:22+05:00", "src": "scripts/merge-queue.py", "event": "mq.слито", "outcome": "ok", "task": "hr.sample", "task_from": "arg", "session": None}, '2026-11-12T23:04:22+00:00'),
@@ -301,8 +303,16 @@ SAMPLES = [
     # events.run (формат v1): строки боевых журналов 16.11 и 13.11.
     ("log", 'claude-mem-fix.jsonl', {"v": 1, "ts": "2026-11-16T04:37:27+05:00", "src": "scripts/claude-mem-fix.py", "event": "run.start", "outcome": "ok", "task": "hr.sample", "task_from": "history", "session": "s-sample", "data": {"имя": "claude-mem-fix"}}, '2026-11-15T23:37:27+00:00'),
     ("log", 'evolution-net.jsonl', {"v": 1, "ts": "2026-11-13T19:50:45+05:00", "src": "scripts/evolution-net.py", "event": "run.start", "outcome": "ok", "task": "hr.sample", "task_from": "map", "session": "s-sample", "data": {"имя": "evolution-net-reader"}}, '2026-11-13T14:50:45+00:00'),
+    # evolution-net.py deliver_letter → events.emit (формат v1): конверт emit и data письма, как пишет копия на стенде test_evolution_net.py --section mail.
+    ("log", 'письма-копий.jsonl', {"v": 1, "ts": "2026-11-23T17:30:00+05:00", "src": "scripts/evolution-net.py", "event": "mail.delivered", "outcome": "ok", "task": None, "task_from": "none", "session": None, "data": {"text": "письмо от HarnessX", "вид": "письмо", "от": "HarnessX", "sha": "0123456789abcdef0123456789abcdef01234567"}}, '2026-11-23T12:30:00+00:00'),
     # scripts/heavy-slot.sh → harness_event (формат v1): строка боевого журнала 19.11, значения data — строки.
     ("log", 'heavy-slots.jsonl', {"v": 1, "ts": "2026-11-19T11:12:41+05:00", "src": "scripts/heavy-slot.sh", "event": "heavy.slot-overflow", "outcome": "skipped", "task": "hr.sample", "task_from": "history", "session": "s-sample", "data": {"секунд": "120", "команда": "bash scripts/pre-commit-gate.sh ", "мест": "4"}}, '2026-11-19T06:12:41+00:00'),
+    # scripts/map-from-message.py record_outcome → events.emit (формат v1): строка снята с вызова писателя в стенде 21.11.
+    ("log", 'разбор-сообщений.jsonl', {"v": 1, "ts": "2026-11-21T22:09:33+05:00", "src": "scripts/map-from-message.py", "event": "message.triaged", "outcome": "ok", "task": "hr.sample", "task_from": "arg", "session": "s-sample", "data": {"сообщение": "m-sample", "исход": "вопрос", "карточка": "hr.sample"}}, '2026-11-21T17:09:33+00:00'),
+    # scripts/lib/widget_buttons.py journal → events.emit (формат v1): нажатие кнопки виджета статуса.
+    ("log", 'widget-buttons.jsonl', {"v": 1, "ts": "2026-11-22T18:40:12+05:00", "src": "scripts/lib/widget_buttons.py", "event": "widget.press", "outcome": "ok", "task": "hr.sample", "task_from": "map", "session": None, "data": {"action": "w:refresh", "verdict": "accepted", "why": ""}}, '2026-11-22T13:40:12+00:00'),
+    # scripts/devmap-keeper.py → events.run (формат v1): начало прогона ведения карты.
+    ("log", 'devmap-keeper.jsonl', {"v": 1, "ts": "2026-11-22T03:15:04+05:00", "src": "scripts/devmap-keeper.py", "event": "run.start", "outcome": "ok", "task": "hr.sample", "task_from": "history", "session": None, "data": {"имя": "devmap-keeper"}}, '2026-11-21T22:15:04+00:00'),
 ]
 
 
@@ -522,7 +532,7 @@ def case_secrets(base: Path) -> None:
     rc, res, err = run_child(emit_body(src=SRC, event="probe.secret", outcome="ok", journal="sec",
                                        data={"note": f"ключ {secret} в речи", "sha256": sha, "other": sha,
                                              "head": f"x {secret}", "file": key_path, "copy": keep_path,
-                                             "цель": f"bkb {finger}", "почему": f"bkb {finger}"}),
+                                             "цель": f"copy-a {finger}", "почему": f"copy-a {finger}"}),
                              st.env())
     raw = "\n".join(st.lines("sec"))
     check("секрет: emit вернул True (событие пишется)", True, res)
@@ -534,8 +544,8 @@ def case_secrets(base: Path) -> None:
     check("digest-ключ, но значение не хэш целиком — судится формой", False, secret in str(d.get("head")))
     check("путь под PANEL_STATE_DIR — <путь-ключ>", "<путь-ключ>", d.get("file"))
     # краснеет, если маска ест отпечаток ключа в предмете кнопки: «Да» на «ключ-сети» не сойдётся с судьёй (15.11)
-    check("отпечаток ssh-ключа в «цели» остался как есть", f"bkb {finger}", d.get("цель"))
-    check("тот же отпечаток в ключе вне «цели» — <СКРЫТО>", "bkb <СКРЫТО>", d.get("почему"))
+    check("отпечаток ssh-ключа в «цели» остался как есть", f"copy-a {finger}", d.get("цель"))
+    check("тот же отпечаток в ключе вне «цели» — <СКРЫТО>", "copy-a <СКРЫТО>", d.get("почему"))
     check("путь под SECRETS_DIR остался (журнал удалений без пути бесполезен, И-1)", keep_path, d.get("copy"))
     check("каждая замена посчитана как mangled", True,
           sum(1 for x in st.lost() if x.get("kind") == "mangled") >= 1)

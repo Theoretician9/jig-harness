@@ -202,9 +202,21 @@ def envelope(path):
 def kicks_total(path):
     return str(len(of(path, "kick_sent")))
 
+def settled(path):
+    """«да», когда у каждого принятого сообщения есть исход толчка. Отказ «очередь
+    нажатий занята» исходом не считается: сообщение покроет следующий толчок."""
+    done = {str(data(r).get("ts")) for r in of(path, "no_kick")}
+    for event in ("kick_sent", "kick_refused", "kick_stuck", "kick_stale"):
+        for r in of(path, event):
+            if not str(data(r).get("почему") or "").startswith("очередь"):
+                done.update(ts_list(r))
+    got = {str(data(r).get("ts")) for r in of(path, "received")}
+    return "да" if got <= done else "нет"
+
 cmd, args = sys.argv[1], sys.argv[2:]
 print({"count": count, "field": field, "covered": covered, "cover_field": cover_field,
-       "order": order, "lag": lag, "envelope": envelope, "kicks": kicks_total}[cmd](*args))
+       "order": order, "lag": lag, "envelope": envelope, "kicks": kicks_total,
+       "settled": settled}[cmd](*args))
 PYEOF
 mk() { python3 "$T/marks.py" "$@"; }
 cnt() { local n; n=$(grep -c -- "$1" "$2" 2>/dev/null); echo "${n:-0}"; }  # $1 = образец, $2 = файл
@@ -256,6 +268,7 @@ while not os.path.exists(sys.argv[1]):
     time.sleep(0.05)
 PYEOF
     offset_is() { [ "$(cat "$1/log/tg_offset" 2>/dev/null)" = "$2" ]; }
+    settled() { [ "$(mk settled "$1")" = да ]; }
     D_STAND_BAD=0
     d_bad() { D_STAND_BAD=$((D_STAND_BAD + 1)); echo "  СТЕНД: $1"; }
     d_reached() { case_check "СТЕНД ($1): диспетчер разобрал все сообщения" "0" "$D_STAND_BAD"; }
@@ -329,14 +342,19 @@ EOF
         # другим pid. Свой pid диспетчер пишет первой строкой лок-файла.
         wait_for 10 grep -qE '^[0-9]+$' "$lockdir/tg-dispatcher.lock" \
             && PIDS_KILL+=("$(head -1 "$lockdir/tg-dispatcher.lock")")
+        # Предел — не бюджет скорости: под load 16 разбор шёл ~6 с на сообщение,
+        # и десять сообщений склейки не укладывались в 40 с.
         if [ "$last" -gt 0 ]; then
-            wait_for 40 offset_is "$S" $((last + 1)) \
-                || { d_bad "диспетчер не разобрал update $last за 40 с"; tail -5 "$S/log/tg-dispatcher.log" 2>/dev/null | sed 's/^/    /'; }
+            wait_for 120 offset_is "$S" $((last + 1)) \
+                || { d_bad "диспетчер не разобрал update $last за 120 с"; tail -5 "$S/log/tg-dispatcher.log" 2>/dev/null | sed 's/^/    /'; }
         fi
         [ -n "$hold" ] && { sleep 0.5; : > "$S/release"; }
         # Заявку комментария выдаёт круг приёма, offset её не отмечает: под нагрузкой
         # машины круг шёл дольше паузы ниже, и случай (д) судил пустоту.
         [ -n "$comment" ] && wait_for 30 grep -qF 'Комментарий владельца' "$S/tmux-calls"
+        # Тишина журналов исхода не значит: под нагрузкой судьи ворот толчка молчали
+        # дольше её окна, и группу гасили до метки kick_sent.
+        wait_for 60 settled "$S/log/доставка.jsonl" || true
         sleep 3
         wait_quiet "$S/tmux-calls" 3 30
         # Метки фоном: дать им лечь до разбора.

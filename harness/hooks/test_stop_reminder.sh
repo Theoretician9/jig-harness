@@ -85,8 +85,9 @@ touch_file() { printf 'правка\n' >> "$T/repo/$1"; }
 # Направление закреплено за линией карты стенда (h): хук зовёт work-queue.py, а тот
 # под чужим HARNESS_ACTIVE_LINE («продукт») искал бы задачи вне стенда и молчал.
 run_hook() {
-    local rc=0 out
-    out=$(cd "$T" && printf '{}' | env -u HANDOVER_MAX_AGE_MIN -u DEVMAP_TRACE_FRESH_MIN \
+    local rc=0 out in="${PAYLOAD:-}"
+    [ -n "$in" ] || in='{}'
+    out=$(cd "$T" && printf '%s' "$in" | env -u HANDOVER_MAX_AGE_MIN -u DEVMAP_TRACE_FRESH_MIN \
             HARNESS_ACTIVE_LINE=h HARNESS_DOOR_STAND_HOME="$T" \
             HARNESS_INSTALL_CONF="$T/install.conf" HARNESS_CONF="$T/harness.conf" \
             PROJECT_DIR="$T/repo" LOG_DIR="$T/log" \
@@ -412,6 +413,46 @@ push_stand 0
 out=$(run_hook)
 verdict "$(printf '%s' "$out" | grep -qF '1 коммит(ов) — git push (сторож выката: можно)' && echo 1 || echo 0)" \
     "пуш: ворота открыты — «git push (сторож выката: можно)»" "хук сказал: ${out:-ничего}"
+
+# ── БОЛЬНОЙ СЛУЧАЙ 19.11 18:30: ротация в ходу — хук хода не держит ─────────
+# «/clear» ждёт тишины панели; хвосты хука (здесь — правка без коммита) держали бы
+# ход открытым и звали к следующей работе поперёк поручения ротации.
+rotation_line() {  # $1 = событие, $2 = секунд назад
+    printf '{"ts":"%s","event":"%s","session":"s1","detail":"стенд"}\n' \
+        "$(date -Is -d "@$(( $(date +%s) - $2 ))")" "$1" >> "$T/log/rotation.jsonl"
+}
+new_stand "$KEY"
+touch_file "scripts/work.sh"
+rotation_line rotate_command 60
+out=$(run_hook)
+verdict "$([ "$(cat "$T/rc")" = 0 ] && echo 1 || echo 0)" \
+    "БОЛЬНОЙ 19.11: ротация в ходу — хук хода не держит (код 0)" "код $(cat "$T/rc"), хук сказал: ${out:-ничего}"
+verdict "$([ -s "$T/log/turn-end.stamp" ] && echo 1 || echo 0)" \
+    "БОЛЬНОЙ 19.11: ротация в ходу — метка конца хода для сторожа стоит" "метки $T/log/turn-end.stamp нет"
+# Сосед: ротация отменена дверью — хвосты снова держат ход.
+new_stand "$KEY"
+touch_file "scripts/work.sh"
+rotation_line rotate_command 300
+rotation_line rotate_refused 60
+out=$(run_hook)
+verdict "$([ "$(cat "$T/rc")" = 2 ] && printf '%s' "$out" | grep -q "$DIRTY_WORDS" && echo 1 || echo 0)" \
+    "ротация отменена дверью — хвосты держат ход, как без ротации (код 2)" "код $(cat "$T/rc"), хук сказал: ${out:-ничего}"
+
+# ── Метка конца хода по сессии (спека 14): две смены — две метки ──────────
+# Сторож судит дорабатывающую по turn-end.<sid>.stamp: общая метка одной смены
+# подтвердила бы конец хода другой. Имя файла не берётся из ввода как есть.
+new_stand "$KEY"
+out=$(PAYLOAD='{"session_id":"5e55-abc_1"}' run_hook)
+verdict "$([ "$(cat "$T/rc")" = 0 ] && [ -s "$T/log/turn-end.5e55-abc_1.stamp" ] && echo 1 || echo 0)" \
+    "метка конца хода пишется по сессии (turn-end.<sid>.stamp)" "код $(cat "$T/rc"), в log: $(ls "$T/log" | tr '\n' ' ')"
+verdict "$([ -s "$T/log/turn-end.stamp" ] && echo 1 || echo 0)" \
+    "общая метка конца хода остаётся рядом с меткой сессии" "метки $T/log/turn-end.stamp нет"
+new_stand "$KEY"
+out=$(PAYLOAD='{"session_id":"../../x"}' run_hook)
+verdict "$(find "$T" -name '*x.stamp' -o -name 'x' -o -name 'turn-end.*.*.stamp' | grep -q . && echo 0 || echo 1)" \
+    "session_id «../../x» в имя метки не попадает" "найдено: $(find "$T" -name '*x.stamp' -o -name 'x' | tr '\n' ' ')"
+verdict "$([ "$(ls "$T/log" | grep -c '^turn-end\.')" = 1 ] && [ -s "$T/log/turn-end.stamp" ] && echo 1 || echo 0)" \
+    "негодный session_id — только общая метка" "в log: $(ls "$T/log" | tr '\n' ' ')"
 
 echo
 echo "всего путей: $total, неудач: $bad"

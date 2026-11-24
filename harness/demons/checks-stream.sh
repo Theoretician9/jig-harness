@@ -55,12 +55,15 @@ load_per_core() {  # печатает «load5 ядер»; load5 — второе
 
 # Владельцу — не больше одной строки за календарные сутки: поток идёт круглые
 # сутки, и без этой границы каждая неудача становилась бы шумом.
+# Отказ правил канала (4) тоже закрывает сутки: тот же текст следующим проходом
+# получил бы тот же отказ.
 tell_owner_once() {  # $1 = текст
-    local today; today=$(date +%F)
+    local today rc=0; today=$(date +%F)
     [ "$(cat "$LOG_DIR/checks-stream.сказано" 2>/dev/null)" = "$today" ] && return 0
-    if bash "$PROJECT_DIR/scripts/tg_send.sh" "$1" >/dev/null 2>&1; then
-        printf '%s\n' "$today" > "$LOG_DIR/checks-stream.сказано"
-    fi
+    channel_send harness/demons/checks-stream.sh "$1" || rc=$?
+    case "$rc" in
+        0|"$CHANNEL_RULES_REFUSED") printf '%s\n' "$today" > "$LOG_DIR/checks-stream.сказано" ;;
+    esac
     return 0
 }
 
@@ -81,7 +84,8 @@ if [ "$MODE" = selftest ]; then
         cp "$SRC_DIR/scripts/lib/models.sh" "$d/scripts/lib/" 2>/dev/null || true
         printf '#!/usr/bin/env bash\necho sonnet\n' > "$d/scripts/model-for.sh"
         printf '#!/usr/bin/env bash\nexit 0\n' > "$d/scripts/pre-commit-gate.sh"
-        printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> "%s/tg.log"\n' "$d" > "$d/scripts/tg_send.sh"
+        printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> "%s/tg.log"\nexit "$(cat "%s/tg.rc" 2>/dev/null || echo 0)"\n' \
+            "$d" "$d" > "$d/scripts/tg_send.sh"
         cat > "$d/scripts/work-queue.py" <<PY
 #!/usr/bin/env python3
 print(open("$d/queue.txt").read(), end="")
@@ -165,6 +169,19 @@ SH
     run_stand "$d"
     check "лимит 77: повтор в те же сутки молчит" test "$(tgs "$d")" = 1
 
+    # 4а. Правила канала отвергли текст (4): одна попытка за сутки и одно событие;
+    # сбой канала (1) повторяется следующим проходом.
+    d=$(stand refused4); printf 'проверок: 1\nhr.a k:a\n' > "$d/queue.txt"; echo 77 > "$d/agent.rc"
+    echo 4 > "$d/tg.rc"
+    run_stand "$d"; run_stand "$d"
+    check "отказ правил: одна попытка за сутки" test "$(tgs "$d")" = 1
+    check "отказ правил: одно событие channel.rules_refused" \
+        test "$(grep -c '"channel.rules_refused"' "$d/лог/канал-отказы-правил.jsonl" 2>/dev/null)" = 1
+    d=$(stand failed1); printf 'проверок: 1\nhr.a k:a\n' > "$d/queue.txt"; echo 77 > "$d/agent.rc"
+    echo 1 > "$d/tg.rc"
+    run_stand "$d"; run_stand "$d"
+    check "сбой канала: следующий проход повторяет" test "$(tgs "$d")" = 2
+
     # 5. Первое взятие не зелёное: молчим (сторож ещё не перепроверил), ключ на отдыхе.
     d=$(stand first); printf 'проверок: 1\nhr.a k:a\n' > "$d/queue.txt"
     run_stand "$d"
@@ -236,6 +253,8 @@ fi
 
 # shellcheck disable=SC1091
 source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../../scripts/lib/config.sh"
+# shellcheck disable=SC1091
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../../scripts/lib/channel_send.sh"
 INSTALL_CONF="${HARNESS_INSTALL_CONF:-$(konf_koren)/install.conf}"
 HARNESS_CONF="${HARNESS_CONF:-$(konf_koren)/harness.conf}"
 # Окружение старше конфига: общий загрузчик вместо голого source.

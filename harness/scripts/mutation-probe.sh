@@ -59,12 +59,16 @@ konf_zagruzit
 MECH_STARTER="${MECH_STARTER:-$(python3 -I -c 'import sys; sys.path.insert(0, sys.argv[1]); import config; print(config.katalog_paketa())' \
     "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/lib" 2>/dev/null || true)}"
 export MECH_STARTER
+# Паспорт машины: от него прибор строит пробе свой паспорт с каталогом журналов (см. `прогнать`).
+PASSPORT_INSTALL_CONF="${HARNESS_INSTALL_CONF:-${INSTALL_CONF:-$(konf_koren)/install.conf}}"
 # Значения по умолчанию — ПОСЛЕ загрузчика, иначе они глушат файл конфига.
 # Предел одного запуска: зависшая проба иначе съедает всю ночь.
 MUTATION_RUN_TIMEOUT_S="${MUTATION_RUN_TIMEOUT_S:-180}"
 # Ранний стоп мутанта на первой строке «ПЛОХО» и пробы, которым он запрещён.
 MUT_BAIL="${MUT_BAIL:-0}"
 MUT_BAIL_SKIP="${MUT_BAIL_SKIP:-}"
+# Частично непокрытая правка — дыра только при 1: включение красит шаг у десятков старых задач, решение оркестратора.
+MUT_PARTIAL_EDIT_HOLES="${MUT_PARTIAL_EDIT_HOLES:-0}"
 # Крайний срок мягкой остановки (эпоха) ставит демон: прибор сам кончает за
 # запас до жёсткого предела, чтобы итог напечатался, а не был убит на полпути.
 # Пусто — без срока (ручной запуск).
@@ -102,16 +106,22 @@ declare -A CACHE_WHEN=() CACHE_HOLE=()
     # (боевой /var/log/harness), и следы испорченного кода ложились в боевые журналы;
     # общий каталог чистого и испорченного прогонов отдавал бы мутанту метки чистого.
     local logs; logs=$(mktemp -d "$TMP/журналы-XXXXXX")
+    # Каталог журналов — паспортом, а не переменной: загрузчик ставит окружение старше
+    # файла, и стенд, назвавший LOG_DIR в своём harness.conf, писал бы в каталог прибора.
+    { grep -v '^[[:space:]]*LOG_DIR=' "$PASSPORT_INSTALL_CONF" 2>/dev/null
+      printf 'LOG_DIR="%s"\n' "$logs"; } > "$logs.install.conf"
     # PYTHONDONTWRITEBYTECODE: свежий .pyc, написанный ЧИСТЫМ прогоном, гасит
     # мутацию той же байтовой длины (см. `корень_в_копию`). PYTHONUNBUFFERED: в файл
     # питон пишет блоками, и строка «ПЛОХО» лежала бы в буфере до конца пробы.
-    local -a vars=(PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 LOG_DIR="$logs" HARNESS_MUTPROBE_DEPTH=$((MUTPROBE_DEPTH+1)))
+    # HEAVY_SLOT_HELD: прибор уже держит место пула, как разработчик под heavy-slot.sh.
+    local -a vars=(PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 HARNESS_INSTALL_CONF="$logs.install.conf"
+                   HEAVY_SLOT_HELD=1 HARNESS_MUTPROBE_DEPTH=$((MUTPROBE_DEPTH+1)))
     [ -n "$subst" ] && vars+=("$subst=$3")
     # Своя сессия и группа (setsid снаружи timeout): стоп снимает пробу вместе с
     # детьми, а не одного лидера. Вывод — в файл, а не в канал: ребёнок пробы,
     # держащий stdout, не даёт каналу конца, а файл читается и при живом ребёнке.
     local out="$logs.вывод" rc
-    setsid timeout -k 10 "$MUTATION_RUN_TIMEOUT_S" env -u MUT_ONLY_LINES "${vars[@]}" "${words[@]}" \
+    setsid timeout -k 10 "$MUTATION_RUN_TIMEOUT_S" env -u MUT_ONLY_LINES -u LOG_DIR "${vars[@]}" "${words[@]}" \
         > "$out" 2>&1 < /dev/null &
     local pid=$!
     if [ "${4:-0}" = 1 ] && wait_for_bad_line "$pid" "$out"; then
@@ -120,7 +130,7 @@ declare -A CACHE_WHEN=() CACHE_HOLE=()
         wait "$pid"; rc=$?
     fi
     PROBE_SAID_BAD=0; grep -qE "$BAD_LINE" "$out" && PROBE_SAID_BAD=1
-    rm -rf "$logs" "$out"
+    rm -rf "$logs" "$out" "$logs.install.conf"
     return "$rc"
 }
 
@@ -270,7 +280,10 @@ cache_put() { # $1=ключ $2=имя случая $3=причина дыры (�
 # Шаг задачи сужает набор: MUT_ONLY_LINES — номера строк механизма, изменённых
 # задачей (через запятую). Мутация, чьё выражение не трогает ни одной из них,
 # в прогон не входит; мутация, не меняющая файл, входит (она сама дыра).
+# COVERED — строки правок, которые задела хоть одна мутация: диапазон правок
+# без них — дыра, даже если соседний диапазон покрыт.
 SCOPED=0
+COVERED=","
 line_ranges() { # $1=номера через запятую; печатает «10–12,40–40»
     tr ',' '\n' <<< "$1" | sort -n -u | awk '
         NR == 1 { a = b = $1; next }
@@ -285,10 +298,23 @@ outside_task_edits() { # $1=файл $2=выражение
     changed=$(diff --unchanged-line-format= --old-line-format='%dn'$'\n' --new-line-format= \
         "$1" <(sed --sandbox "$2" "$1" 2>/dev/null)) || true
     [ -n "$changed" ] || return 1
+    local outside=0
     for line in $changed; do
-        case ",$MUT_ONLY_LINES," in *",$line,"*) return 1 ;; esac
+        case ",$MUT_ONLY_LINES," in *",$line,"*) COVERED+="$line,"; outside=1 ;; esac
     done
-    return 0
+    return "$outside"
+}
+
+uncovered_edits() { # диапазоны MUT_ONLY_LINES, которых не задела ни одна мутация: «10–10,…»
+    [ "$MUT_PARTIAL_EDIT_HOLES" = 1 ] || [ "$COVERED" = "," ] || return 0
+    local range n out=""
+    for range in $(line_ranges "$MUT_ONLY_LINES" | tr ',' ' '); do
+        for ((n = ${range%–*}; n <= ${range#*–}; n++)); do
+            case "$COVERED" in *",$n,"*) continue 2 ;; esac
+        done
+        out+="${out:+,}$range"
+    done
+    printf '%s' "$out"
 }
 
 tree_hash() { # $1=файл $2=его копия; хеш содержимого того, что увидит чистый прогон
@@ -1433,12 +1459,14 @@ if [ "$((OK + BAD + SKIPPED + DROPPED + SCOPED))" -eq 0 ]; then
     echo "$ITOG"; printf '%s\n' "$ITOG" >> "$MUT_LOG" 2>/dev/null || true
     exit 1
 fi
-# Сужение не смеет превратить «нечем проверить» в «всё поймано»: правка механизма,
-# которую не задевает ни одна мутация, — дыра. Реестры harness/config/ — данные, а не
-# механизмы: их ключи проверяют пробы читающих механизмов.
-if [ -n "${MUT_ONLY_LINES:-}" ] && [ "$SCOPED" -gt 0 ] && [ "$((OK + BAD + SKIPPED + DROPPED))" -eq 0 ] \
-   && [ "${MECH_FILTER:-}" = "${MECH_FILTER#harness/config/}" ]; then
-    printf '  ПЛОХО правка без мутаций: %s строки %s\n' "${MECH_FILTER:-?}" "$(line_ranges "$MUT_ONLY_LINES")"
+# Сужение не смеет превратить «нечем проверить» в «всё поймано»: каждый диапазон
+# правок механизма, которого не задевает ни одна мутация, — дыра, даже если
+# соседний покрыт. Реестры harness/config/ — данные, а не механизмы: их ключи
+# проверяют пробы читающих механизмов.
+UNCOVERED=""
+[ -n "${MUT_ONLY_LINES:-}" ] && UNCOVERED=$(uncovered_edits)
+if [ -n "$UNCOVERED" ] && [ "${MECH_FILTER:-}" = "${MECH_FILTER#harness/config/}" ]; then
+    printf '  ПЛОХО правка без мутаций: %s строки %s\n' "${MECH_FILTER:-?}" "$UNCOVERED"
     BAD=$((BAD+1))
 fi
 ITOG="$(date '+%Y-%m-%d %H:%M:%S')  === мутационная проба: покраснели как надо $OK, дыр $BAD, из кэша $CACHE_HITS ==="

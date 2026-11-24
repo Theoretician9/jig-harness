@@ -1200,7 +1200,7 @@ EOF
   # --only-binary=av: под Python 3.12 у новейшей av<15 (14.4.0) колеса нет, pip собирал её из
   # исходников и падал; с флагом берётся готовое колесо (14.2.0).
   # Модель small качается здесь, вне предела памяти: иначе её качает первая
-  # расшифровка под ulimit -v обработчика и падает (находка bkb 10.11.2026).
+  # расшифровка под ulimit -v обработчика и падает (находка sample-33 10.11.2026).
   # Голосовые — не основа: отказ pip идёт в итог громко, без отметки шага (повтор
   # доставит venv), но установку не обрывает. Всё от имени агента: диспетчер и
   # расшифровка живут им, venv от root агенту не прочесть и не обновить.
@@ -1276,7 +1276,7 @@ Environment=CLAUDE_CODE_AUTO_COMPACT_WINDOW=800000
 Environment=DISABLE_AUTOUPDATER=1
 WorkingDirectory=$PROJECT_DIR
 ExecStart=$PROJECT_DIR/scripts/start-agent.sh
-ExecStop=/usr/bin/tmux kill-session -t agent
+ExecStop=$PROJECT_DIR/scripts/start-agent.sh --stop
 Restart=always
 RestartSec=10
 
@@ -1479,7 +1479,7 @@ EOF
     "ls -la /etc/harness /etc/harness/agent"
   [[ -z "$PRODUCT_PATH" ]] || делай "sed -i --follow-symlinks 's|^PRODUCT_PATH=\"\"\$|PRODUCT_PATH=\"$PRODUCT_PATH\"|' /etc/harness/harness.conf"
   # Заготовка STACK_* из compose продукта — закомментированная: первый выкат не
-  # начинается с пустой секции, а включает её тот, кто сверил (находка копии bkb).
+  # начинается с пустой секции, а включает её тот, кто сверил (находка копии sample-33).
   [[ -z "$PRODUCT_PATH" ]] || делай "python3 -I '$pkg_dst/harness/scripts/stack-template.py' '$PRODUCT_PATH' --в /etc/harness/harness.conf || true"
   # Раскладчик идёт от agent, и в /etc/logrotate.d и /etc/sysctl.d ему не
   # писать: эти две строки владелец первой установки 13.10.2026 получил отдельным
@@ -1766,7 +1766,7 @@ EOF
   local -a LIGHT_RUN=("nightly-gates=NIGHTLY_GATES_PROBE_ONLY=1" "nightly-mutations=NIGHTLY_MUTATIONS_PROBE_ONLY=1" "project-revision=REVIZIA_ENABLED=0")
   local d rc light pair
   # Демоны здесь идут до входа владельца, и их rc≠0 в рабочем журнале запусков
-  # сторож меток принял бы за падение (ложные карточки на копии bkb 10.11.2026).
+  # сторож меток принял бы за падение (ложные карточки на копии sample-33 10.11.2026).
   local runs_dir="$LOG_DIR/install-demon-probe-runs"
   делай "install -d -o $AGENT_USER -g $AGENT_USER '$runs_dir'"
   журнал_агента "$LOG_DIR/install-demon-probe.log"
@@ -1809,7 +1809,10 @@ EOF
 
 шаг_9б() { # служба потока проверок: срез с потолком, пары service+timer, таймеры включены (спека hr.process-dispatcher §Г.1)
   local step="шаг 9б — служба потока проверок"; CURRENT_STEP="$step"
-  уже_сделан шаг_9б && { скажи "[$step] пропуск (--resume)"; return 0; }
+  # Без пропуска по штампу, как шаги 1б и 12: юниты — порождение данных (потолки
+  # harness.conf, расписание process-library.yaml), и --resume — единственная дверь,
+  # которой новый потолок или расписание доезжает до поставленной машины.
+  # Перезапись теми же байтами, daemon-reload и включение таймеров повторимы.
   заголовок "$step"
   # Потолки — ключи harness.conf: живой конфиг, если в нём они уже есть, иначе образец пакета
   # (живой, поставленный до этого шага, ключей не имеет, и его мы не переписываем).

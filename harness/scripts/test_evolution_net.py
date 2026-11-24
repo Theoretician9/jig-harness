@@ -20,7 +20,7 @@ HARNESS_DEVMAP / DEVMAP_ARCHIVE / EVOLUTION_STATE. Боевой клон и бо
 проба не печатает — только счётчики, коды и булевы ответы.
 
     python3 scripts/test_evolution_net.py                    # все секции
-    python3 scripts/test_evolution_net.py --section judge     # keys|root|judge|read|forge|write|door|boot|state|threat|status|answer|sign|patch|key|addition|copy
+    python3 scripts/test_evolution_net.py --section judge     # keys|root|judge|read|forge|write|door|boot|state|threat|status|answer|sign|patch|key|addition|copy|mail
 
 Дверь мутаций: HARNESS_EVOLUTION_NET — путь evolution-net.py под пробой.
 Последняя строка: `evolution-net --пробы: случаев N, падений F`.
@@ -446,7 +446,7 @@ def section_keys(base: Path, keys: Keys) -> None:
         ("K1b нет строки EVOLUTION_REMOTE_URL", st.write_conf(drop=("EVOLUTION_REMOTE_URL",)), "EVOLUTION_REMOTE_URL"),
         ("K2 нет EVOLUTION_DIR", st.write_conf(drop=("EVOLUTION_DIR",)), "EVOLUTION_DIR"),
         ("K3 нет EVOLUTION_KEY", st.write_conf(drop=("EVOLUTION_KEY",)), "EVOLUTION_KEY"),
-        ("K4 роль copy: --читать только у хозяина", st.write_conf(EVOLUTION_ROLE="copy"), "только у хозяина"),
+        ("K4 роль guest: --читать только у хозяина и копии", st.write_conf(EVOLUTION_ROLE="guest"), "только у хозяина"),
         ("K5 нет EVOLUTION_STATE_SUBDIR", st.write_conf(drop=("EVOLUTION_STATE_SUBDIR",)), "EVOLUTION_STATE_SUBDIR"),
     ]:
         before = sha1(st.map)
@@ -1240,6 +1240,21 @@ def section_write(base: Path, keys: Keys) -> None:
     # W9 — краснеет, если правки не прошли судью чистоты check-public-clean.py: след установки уходит всем
     check("W9 след установки (PROJECT_DIR) в правке → код 2, sha нет", (2, True, ""),
           (r.rc, r.clean, printed_sha(r)))
+    letter = {"почта/HarnessX/2026-11-20-otvet.md":
+              ('---\nот: хозяин\nкому: HarnessX\nвид: ответ\n'
+               'ответ: "находки/HarnessX/2026-11-20-a.md@917f8c3"\n---\nОтвет копии HarnessX.\n').encode()}
+    r = st.run("--якорь", "--правки", str(write_edits(st.root / "правки-письмо", letter)))
+    # W9b — краснеет, если судья следов судит письмо сети образцом «имя копии сети»:
+    # сеть называет копии по именам (серверы/HarnessX.md), и любое письмо отказывалось
+    check("W9b письмо почта/HarnessX с именем копии сети → код 0, sha напечатан", (0, True),
+          (r.rc, bool(printed_sha(r))))
+    build = write_edits(st.root / "сборка-с-письмом", {**letter, ".публичная-сборка": b"\n"})
+    judge = subprocess.run([sys.executable, str(HERE / "check-public-clean.py"), str(build),
+                            "--свежесть-не-судить", "--пакет", str(st.package), "--проект", str(st.project)],
+                           env=st.env(), capture_output=True, text=True, timeout=300)
+    # W9c — краснеет, если ключ писем снял образцы имени копии и для публичной сборки
+    check("W9c то же письмо в публичной сборке → судья ловит имя копии HarnessX", (1, True),
+          (judge.returncode, "имя копии сети HarnessX" in judge.stdout + judge.stderr))
     for name, files in (("W11 .gitattributes в правках", {".gitattributes": b"* filter=evil\n"}),
                         ("W11b правка больше потолка", {"рассылка/2026-11-12-big.md": b"x" * 20000})):
         r = st.run("--якорь", "--правки", str(write_edits(st.root / f"правки-{secrets.token_hex(3)}", files)))
@@ -2252,7 +2267,7 @@ def sign_own_name_guards(base: Path, keys: Keys) -> None:
 
 def sign_peer_name(base: Path, keys: Keys) -> None:
     """Письмо хозяина копии сети: «кому: <имя из серверы/>» — формат записи, не след
-    установки, даже если имя стоит в PUBLIC_FORBIDDEN_WORDS (живой случай: почта/sample-26/)."""
+    установки, даже если имя стоит в PUBLIC_FORBIDDEN_WORDS (живой случай: почта/copy-b/)."""
     peer = next(p.split("/")[1][:-3] for p in base_tree(keys) if p.startswith("серверы/") and p.endswith(".md"))
     stranger = f"Copy{secrets.token_hex(3)}"
     st = Stand(base / "peer", keys, PUBLIC_FORBIDDEN_WORDS=f"{peer} {stranger}")
@@ -2273,8 +2288,36 @@ def sign_peer_name(base: Path, keys: Keys) -> None:
               (r.rc, r.clean, printed_sha(r), r.says("check-public-clean")))
 
 
+def sign_peer_key(base: Path, keys: Keys) -> None:
+    """Строка ключа копии сети «<имя> namespaces=…» в allowed_signers — формат списка,
+    не след установки (живой случай 20.11: «Да» на ключ sample-27, судья отказал по слову
+    sample-27 из PUBLIC_FORBIDDEN_WORDS, и ключ не занёсся)."""
+    peer = next(p.split("/")[1][:-3] for p in base_tree(keys) if p.startswith("серверы/") and p.endswith(".md"))
+    stranger = f"Copy{secrets.token_hex(3)}"
+    st = Stand(base / "peer-key", keys, PUBLIC_FORBIDDEN_WORDS=f"{peer} {stranger}")
+    st.tick()
+    old = remote_file(st, SIGNERS).rstrip("\n") + "\n"
+    key_line = f'{peer} namespaces="git" {keys.pub(keys.y)}\n'
+    r = anchor_own(st, {SIGNERS: (old + key_line).encode()})
+    # N4 — краснеет, пока судья судит имя признанной копии в начале строки ключа
+    # как след установки: «Да» владельца на ключ копии не заносится
+    check("N4 строка ключа «<копия из серверы/> namespaces=…», имя — запретное слово → --якорь 0, sha",
+          (0, True, True), (r.rc, r.clean, bool(printed_sha(r))))
+    mail = f"почта/{peer}/2026-11-20-{NAME}-key.md"
+    for name, edits in (
+            ("N4b имя копии в комментарии списка", {SIGNERS: (old + f"# ключ {peer}\n" + key_line).encode()}),
+            ("N4c строка ключа копии не из серверы/",
+             {SIGNERS: (old + f'{stranger} namespaces="git" {keys.pub(keys.y)}\n').encode()}),
+            ("N4d строка вида ключа в теле письма", {mail: entry(NAME, "вопрос", to=peer, body=key_line)})):
+        r = anchor_own(st, edits)
+        # N4b–N4d — сторожа: краснеют, если послабление шире строки ключа признанной копии
+        # в самом списке — снят весь список, любое имя или такая же строка в любом файле
+        check(f"{name} → код 2, sha нет, отказал судья чистоты", (2, True, "", True),
+              (r.rc, r.clean, printed_sha(r), r.says("check-public-clean")))
+
+
 def section_sign(base: Path, keys: Keys) -> None:
-    for probe in (sign_own_name, sign_own_name_guards, sign_peer_name):
+    for probe in (sign_own_name, sign_own_name_guards, sign_peer_name, sign_peer_key):
         try:
             probe(base, keys)
         except Exception as error:  # одна упавшая проба не глушит остальные
@@ -2509,7 +2552,7 @@ def section_key(base: Path, keys: Keys) -> None:
 
 # ── addition: дописка в находку, у которой уже есть карточка ────────────────
 #
-# 16.11 02:55 копия bkb дописала в старую находку «четвёртый откат»; тик принял
+# 16.11 02:55 копия сети дописала в старую находку «четвёртый откат»; тик принял
 # коммит («карточек 0») — и смена узнала о нём через 40 минут толчком владельца.
 # Принятая дописка известной находки — событие для смены: строка в журнале
 # карточки, карточка снова в работе, толчок в панель.
@@ -2556,7 +2599,7 @@ def section_addition(base: Path, keys: Keys) -> None:
     r = st.tick()
     card, text = card_of(st, OWN), journal(st, own)
     # A1 — краснеет, если дописка известной находки не оставила строки в журнале карточки:
-    # дата, sha коммита и первые строки добавленного (живой случай bkb 16.11)
+    # дата, sha коммита и первые строки добавленного (живой случай копии сети 16.11)
     check("A1 дописка → строка в журнале карточки: дата, sha, добавленный текст", (True, True, True),
           (datetime_today() in text, c1 in text, ADDED in text))
     # A2 — краснеет, если карточка в test не вернулась в работу полем провал_проверки
@@ -2877,9 +2920,10 @@ def copy_refusals(base: Path, keys: Keys) -> None:
     # письмо суд копии разрешает, а дверь — только находки
     refused("CS6 x правит серверы/HarnessX.md → отказ", {"серверы/HarnessX.md": b"# HarnessX\n"},
             keys.x, f"находки/{COPY_NAME}/")
-    refused("CS6b x пишет письмо почта/HarnessY/ → отказ",
-            {"почта/HarnessY/2026-11-19-HarnessX-hi.md": entry(COPY_NAME, "вопрос", to="HarnessY")},
-            keys.x, f"находки/{COPY_NAME}/")
+    # свежее письмо в чужой ящик дверь пропускает (секция mail); письмо в свой — нет
+    refused("CS6b x пишет письмо в свой ящик почта/HarnessX/ → отказ",
+            {"почта/HarnessX/2026-11-19-HarnessX-hi.md": entry(COPY_NAME, "вопрос", to="HarnessX")},
+            keys.x, f"почта/{COPY_NAME}/")
     refused("CS6c своя находка + README → отказ целиком", {own: entry(COPY_NAME), "README.md": b"# x\n"},
             keys.x, f"находки/{COPY_NAME}/")
     refused("CS6d удаление своей находки → отказ", {f"находки/{COPY_NAME}/2026-11-12-own.md": None},
@@ -2905,10 +2949,10 @@ def copy_refusals(base: Path, keys: Keys) -> None:
     r = st.run("--находка", str(good))
     check("CS11 --находка у хозяина → код 4 (у хозяина дверь --якорь)", (4, True, "", True, False),
           (r.rc, r.clean, printed_sha(r), r.says("только у копии"), r.says("--находка <файл> → sha")))
-    for mode in (("--читать",), ("--перечитать", "0" * 40)):
-        r = st.run(*mode, conf=conf)
-        check(f"CS12 копия {mode[0]} → код 4, только у хозяина", (4, True, True),
-              (r.rc, r.clean, r.says("только у хозяина")))
+    # --читать копии открыт (секция mail): у хозяина остаётся только --перечитать
+    r = st.run("--перечитать", "0" * 40, conf=conf)
+    check("CS12 копия --перечитать → код 4, только у хозяина", (4, True, True),
+          (r.rc, r.clean, r.says("только у хозяина")))
 
 
 def section_copy(base: Path, keys: Keys) -> None:
@@ -2920,12 +2964,351 @@ def section_copy(base: Path, keys: Keys) -> None:
     copy_unknown(base, keys)
 
 
+# ── mail: почта копий (фаза А) ─────────────────────────────────────────────
+#
+# Контракт. Копия A пишет копии B письмом, а не через владельцев:
+#   --письмо <адресат> <файл> (роль copy): адресат — DIR_FORM и не сама копия; имя
+#     файла — <ГГГГ-ММ-ДД>-<суть>.md; в коммите один путь
+#     почта/<адресат>/<ГГГГ-ММ-ДД>-<A>-<суть>.md со статусом A (путь уже есть на
+#     origin/main — отказ 2); подпись ключом A, родитель — свежий origin/main; печатает
+#     sha и не отправляет. Файл читается как находка (не симлинк, одна ссылка,
+#     потолок), судья следов применяется.
+#   --отправить <sha> у копии пропускает свежее письмо в чужой ящик с именем
+#     <дата>-<эта копия>-<суть>.md; письмо в свой ящик, с чужим <от>, M и D — отказ 2.
+#   --читать у копии: fetch, суд новых коммитов тем же judge (корень доверия —
+#     evolution-host.pub, копии — принятый allowed_signers), своё состояние
+#     (EVOLUTION_STATE). Каждое ПРИНЯТОЕ новое письмо (A) в почта/<эта копия>/ и
+#     каждый новый файл в рассылка/ → один файл $LOG_DIR/inbox/<epoch>.txt, начало
+#     «письмо от <principal подписи>», и строка events.emit в MAIL_JOURNAL. Отвергнутое судом во
+#     входящие не идёт; повторный --читать без новых коммитов — ноль файлов. Карточек
+#     копия не заводит, пульс-метку ставит. Код 0.
+# Строка журнала — конверт v1 events.emit (ts, event mail.delivered) и в data поля
+# text, вид, от, sha — БЕЗ message_id и chat_id:
+# машинный журнал владельца $LOG_DIR/inbox.jsonl по message_id считает строку словом
+# владельца (scripts/lib/owner_word.py), и письмо копии открыло бы двери согласий.
+
+MAIL_A, MAIL_B = "HarnessX", "HarnessY"           # ключи x и w — оба в allowed_signers стенда
+MAIL_DAY = "2026-11-23"
+MAIL_BODY = "Тело письма стенда."
+MAIL_JOURNAL = "письма-копий.jsonl"               # под LOG_DIR копии; журнал реестра journals.yaml
+
+
+class MailCopy:
+    """Установка-копия на стенде хозяина: свой клон, паспорт, журналы, состояние,
+    пульс и карта. Проект (корень доверия, якорь) общий с хозяином стенда."""
+
+    def __init__(self, st: Stand, name: str, key: Path) -> None:
+        self.st, self.name, self.key = st, name, key
+        root = st.root / f"copy-{name}"
+        self.clone, self.log, self.heartbeat = root / "clone", root / "log", root / "heartbeat"
+        self.state_dir, self.state = root / "state", root / "evo-state" / "state.json"
+        self.map, self.install = root / "dev-map.yaml", root / "install.conf"
+        for path in (self.log, self.state_dir, self.state.parent):
+            path.mkdir(parents=True)
+        git(st.root, "clone", "-q", st.url, str(self.clone))
+        self.map.write_text(SAMPLE_MAP, encoding="utf-8")
+        self.install.write_text("".join(f'{k}="{v}"\n' for k, v in {
+            "PROJECT_NAME": name, "PROJECT_DIR": st.project, "AGENT_USER": os.environ.get("USER", "agent"),
+            "LOG_DIR": self.log, "STATE_DIR": self.state_dir, "HEARTBEAT_DIR": self.heartbeat,
+            "OWNER_TZ": ""}.items()), encoding="utf-8")
+        self.conf = st.write_conf(EVOLUTION_ROLE="copy", EVOLUTION_KEY=str(key), EVOLUTION_DIR=str(self.clone))
+
+    def run(self, *args: str) -> Result:
+        return self.st.run(*args, conf=self.conf, HARNESS_INSTALL_CONF=str(self.install),
+                           EVOLUTION_STATE=str(self.state), LOG_DIR=str(self.log),
+                           STATE_DIR=str(self.state_dir), HARNESS_DEVMAP=str(self.map))
+
+    def letter(self, to: str, gist: str, body: str = MAIL_BODY) -> Path:
+        path = self.install.parent / f"out-{secrets.token_hex(3)}" / f"{MAIL_DAY}-{gist}.md"
+        path.parent.mkdir()
+        path.write_bytes(entry(self.name, "вопрос", to=to, body=body))
+        return path
+
+    def signed(self, sha: str) -> list:
+        """%G?, principal и родитель коммита в клоне копии — по одному её ключу."""
+        signers = self.install.parent / "own-signers"
+        signers.write_text(f'{self.name} namespaces="git" {Keys.pub(self.key)}\n', encoding="utf-8")
+        show = subprocess.run(["git", "-C", str(self.clone), "-c", f"gpg.ssh.allowedSignersFile={signers}",
+                               "log", "-1", "--format=%G?%x00%GS%x00%P", sha], env=GIT_ENV,
+                              capture_output=True, text=True)
+        return show.stdout.strip().split("\0") if show.returncode == 0 and sha else ["нет коммита", "", ""]
+
+    def read_state(self) -> dict:
+        try:
+            return json.loads(self.state.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+
+    def inbox(self) -> list:
+        return sorted((self.log / "inbox").glob("*.txt"))
+
+    def heads(self) -> list:
+        """Первые строки входящих файлов, отсортированные."""
+        return sorted(path.read_text(encoding="utf-8", errors="replace").split("\n", 1)[0].strip()
+                      for path in self.inbox())
+
+    def journal_lines(self) -> list:
+        path = self.log / MAIL_JOURNAL
+        lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+        return [line for line in lines if line.strip()]
+
+    def journal(self) -> list:
+        return [json.loads(line) for line in self.journal_lines()]
+
+    def owner_words(self) -> list:
+        """Строки машинного журнала владельца с message_id — то, что двери считают словом."""
+        path = self.log / "inbox.jsonl"
+        lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+        return [line for line in lines if '"message_id"' in line]
+
+
+def mail_stand(base: Path, keys: Keys, name: str) -> tuple:
+    """Стенд: хозяин заносит страницу HarnessY (обе копии известны сети), копии A и B."""
+    st = Stand(base / name, keys)
+    st.add({f"серверы/{MAIL_B}.md": f"# {MAIL_B}\nстенд\n".encode()}, keys.host)
+    return st, MailCopy(st, MAIL_A, keys.x), MailCopy(st, MAIL_B, keys.w)
+
+
+def mail_path(frm: str, to: str, gist: str) -> str:
+    return f"почта/{to}/{MAIL_DAY}-{frm}-{gist}.md"
+
+
+def mail_write(base: Path, keys: Keys) -> None:
+    st, a, _b = mail_stand(base, keys, "mail-write")
+    tip = st.remote_main()
+    r = a.run("--письмо", MAIL_B, str(a.letter(MAIL_B, "hi")))
+    sha = printed_sha(r)
+    # ML1 — краснеет, если у копии нет шага «собрать письмо» или он сразу толкает
+    check("ML1 --письмо HarnessY → код 0, sha, remote main прежний", (0, True, True, tip),
+          (r.rc, r.clean, bool(sha), st.remote_main()))
+    # ML1b — краснеет, если письмо подписано не ключом копии или стоит не на свежем origin/main
+    check("ML1b коммит письма подписан ключом A, родитель = origin/main", ["G", MAIL_A, tip], a.signed(sha))
+    # ML1c — краснеет, если путь берёт имя файла как есть (без <от>), кладёт в чужой
+    # каталог или коммит несёт больше одного файла
+    check("ML1c коммит: один путь почта/HarnessY/<дата>-HarnessX-hi.md, статус A",
+          [f"A {mail_path(MAIL_A, MAIL_B, 'hi')}"], changed_paths(a.clone, sha) if sha else [])
+    check("ML1d тело письма в вывод не идёт", False, MAIL_BODY in r.out + r.err)
+    r = a.run("--отправить", sha or "0" * 40)
+    # ML2 — краснеет, пока дверь копии пускает только находки
+    check("ML2 --отправить письма → код 0, remote main = sha", (0, sha), (r.rc, st.remote_main()))
+    tip = st.remote_main()
+
+    def letter_refused(name: str, to: str, file: Path, word: str, code: int = 2) -> None:
+        r = a.run("--письмо", to, str(file))
+        check(name, (code, True, "", tip, True), (r.rc, r.clean, printed_sha(r), st.remote_main(), r.says(word)))
+
+    # ML3 — краснеет, если путь, уже лежащий на origin/main, перезаписывается (подмена
+    # отправленного письма — правка M, которую суд хозяина отвергнет)
+    letter_refused("ML3 письмо с тем же именем повторно → код 2", MAIL_B, a.letter(MAIL_B, "hi"), f"почта/{MAIL_B}/")
+    # ML4 — краснеет, если копия пишет в свой ящик: туда пишут только ей
+    letter_refused("ML4 адресат — сама копия → код 2", MAIL_A, a.letter(MAIL_A, "self"), MAIL_A)
+    # ML5 — краснеет, если адресат не судится формой имени каталога: «..» уводит путь из почты
+    letter_refused("ML5 адресат «../находки» → код 2", "../находки", a.letter(MAIL_B, "dots"), "находки")
+    letter_refused("ML5b адресат с «/» → код 2", f"{MAIL_B}/sub", a.letter(MAIL_B, "slash"), "sub")
+    bad = a.letter(MAIL_B, "x").with_name("bad-name.md")
+    bad.write_bytes(entry(MAIL_A, "вопрос", to=MAIL_B))
+    # ML6 — краснеет, если имя файла не судится формой <ГГГГ-ММ-ДД>-<суть>.md
+    letter_refused("ML6 имя файла не по форме → код 2", MAIL_B, bad, "bad-name")
+    real = a.letter(MAIL_B, "real")
+    link = real.with_name(f"{MAIL_DAY}-link.md")
+    link.symlink_to(real)
+    # ML7 — краснеет, если файл письма читается не как находка (симлинк, жёсткая ссылка
+    # и потолок уносят в сеть любой читаемый файл: ключ, секрет)
+    letter_refused("ML7 симлинк → код 2", MAIL_B, link, "обычный файл")
+    secret = real.with_name("secret-like")
+    secret.write_bytes(entry(MAIL_A, "вопрос", to=MAIL_B))
+    hard = real.with_name(f"{MAIL_DAY}-hard.md")
+    os.link(secret, hard)
+    letter_refused("ML7b жёсткая ссылка → код 2", MAIL_B, hard, "одной ссылкой")
+    letter_refused("ML7c больше потолка → код 2", MAIL_B, a.letter(MAIL_B, "big", body="x" * 20000), "потолка")
+    # ML8 — краснеет, если --письмо не зовёт судью следов установки
+    letter_refused("ML8 путь проекта в теле → код 2, отказал судья", MAIL_B,
+                   a.letter(MAIL_B, "trace", body=f"Упало в {st.project}/scripts/x.py."), "check-public-clean")
+    r = st.run("--письмо", MAIL_B, str(a.letter(MAIL_B, "host")))
+    # ML9 — краснеет, если хозяин шлёт письма мимо --якорь (его дверь — якорь и суд дерева)
+    check("ML9 --письмо у хозяина → код 4, sha нет", (4, True, ""), (r.rc, r.clean, printed_sha(r)))
+
+
+def mail_door(base: Path, keys: Keys) -> None:
+    """Дверь копии на ручных коммитах: пропускает только свежее письмо в чужой ящик от себя."""
+    st, a, _b = mail_stand(base, keys, "mail-door")
+    tip = st.remote_main()
+
+    def refused(name: str, changes: dict, word: str) -> None:
+        commit = st.build(a.clone, [tip], changes, keys.x)
+        r = a.run("--отправить", commit)
+        check(name, (2, True, tip, True), (r.rc, r.clean, st.remote_main(), r.says(word)))
+
+    letter = entry(MAIL_A, "вопрос", to=MAIL_B)
+    # MD1 — краснеет, если дверь пускает письмо в свой ящик (A там только у чужих)
+    refused("MD1 письмо в свой ящик → код 2", {mail_path(MAIL_A, MAIL_A, "self"): letter}, f"почта/{MAIL_A}/")
+    # MD2 — краснеет, если <от> в имени не сверяется с этой копией: письмо от имени соседа
+    refused("MD2 письмо в чужой ящик с <от> HarnessY → код 2",
+            {mail_path(MAIL_B, MAIL_B, "fake"): letter}, f"почта/{MAIL_B}/")
+    refused("MD2b письмо в чужой ящик с <от> HarnessZ → код 2",
+            {mail_path("HarnessZ", MAIL_B, "fake"): letter}, f"почта/{MAIL_B}/")
+    old = f"почта/{MAIL_B}/2026-11-12-HarnessX-old.md"
+    # MD3 — краснеет, если дверь пускает M и D уже отправленного письма
+    refused("MD3 правка своего отправленного письма (M) → код 2", {old: entry(MAIL_A, "вопрос", body="Иначе.")},
+            f"почта/{MAIL_B}/")
+    refused("MD3b удаление своего отправленного письма (D) → код 2", {old: None}, f"почта/{MAIL_B}/")
+    refused("MD4 письмо без даты в имени → код 2", {f"почта/{MAIL_B}/HarnessX-hi.md": letter}, f"почта/{MAIL_B}/")
+    # MD5 — краснеет, если судья следов стоит только в --письмо: ручной коммит проходит
+    refused("MD5 ручное письмо со следом установки → код 2",
+            {mail_path(MAIL_A, MAIL_B, "trace"): entry(MAIL_A, "вопрос", to=MAIL_B, body=f"Упало в {st.project}.")},
+            "check-public-clean")
+    sha = st.build(a.clone, [tip], {mail_path(MAIL_A, MAIL_B, "hand"): letter}, keys.x)
+    r = a.run("--отправить", sha)
+    # MD6 — краснеет, если дверь копии по-прежнему пускает только находки
+    check("MD6 ручное свежее письмо в чужой ящик от себя → код 0", (0, sha), (r.rc, st.remote_main()))
+
+
+def mail_read(base: Path, keys: Keys) -> None:
+    st, a, b = mail_stand(base, keys, "mail-read")
+    map_before = b.map.read_bytes()
+    st.add({mail_path("HarnessQ", MAIL_B, "u"): entry("HarnessQ", "вопрос", to=MAIL_B)}, keys.y)
+    st.add({mail_path("HarnessZ", MAIL_B, "fake"): entry("HarnessZ", "вопрос", to=MAIL_B)}, keys.x)
+    st.add({mail_path(MAIL_A, MAIL_B, "nosign"): entry(MAIL_A, "вопрос", to=MAIL_B)}, None)
+    st.add({f"почта/{MAIL_B}/2026-11-12-HarnessX-old.md": entry(MAIL_A, "вопрос", to=MAIL_B, body="Подмена.")},
+           keys.x)
+    st.add({mail_path(MAIL_A, MAIL_B, "good"): entry(MAIL_A, "вопрос", to=MAIL_B, body=MAIL_BODY)}, keys.x)
+    st.add({mail_path(MAIL_B, MAIL_A, "back"): entry(MAIL_B, "ответ", to=MAIL_A)}, keys.w)
+    st.add({f"рассылка/{MAIL_DAY}-{MAIL_A}-news.md": entry("хозяин", "задача", to="все")}, keys.host)
+    r = b.run("--читать")
+    texts = [path.read_text(encoding="utf-8", errors="replace") for path in b.inbox()]
+    # MR1 — краснеет, пока --читать закрыт копии (код 4)
+    check("MR1 копия --читать → код 0", (0, True), (r.rc, r.clean))
+    # MR2 — краснеет, если во входящие идёт отвергнутое судом (неизвестный ключ, чужой
+    # <от>, без подписи, подмена тела), письмо чужого ящика или письма дерева якоря
+    check("MR2 во входящих B ровно два файла: письмо A и рассылка", 2, len(texts))
+    # MR3 — краснеет, если отправитель берётся из имени файла, а не из подписи коммита:
+    # рассылку с «HarnessX» в имени подписал хозяин
+    check("MR3 начала файлов: «письмо от HarnessX» и «письмо от host@…»",
+          [f"письмо от {MAIL_A}", f"письмо от {HOST_PRINCIPAL}"], b.heads())
+    # MR3b — краснеет, если во входящий файл ложится только строка «письмо от …»: тело
+    # «good» (MAIL_BODY) — данные для сессии, остальные письма стенда его не несут
+    check("MR3b тело письма — во входящем файле (данные для сессии)", True, any(MAIL_BODY in t for t in texts))
+    journal = b.journal()
+    data = [line.get("data") or {} for line in journal]
+    # MR4 — краснеет, если строки журнала нет, она мимо events.emit (нет конверта v1)
+    # или в data нет вида, текста «письмо от <подписант>» и sha коммита
+    check("MR4 журнал входящих: две строки v1 mail.delivered, вид «письмо», ts, text, от, sha",
+          (2, {(1, "mail.delivered")}, {"письмо"}, True),
+          (len(journal), {(line.get("v"), line.get("event")) for line in journal}, {d.get("вид") for d in data},
+           all(line.get("ts") and d.get("text") == f"письмо от {d.get('от')}" and len(str(d.get("sha"))) == 40
+               for line, d in zip(journal, data))))
+    # MR5 — краснеет, если строка письма похожа на слово владельца (message_id, chat_id)
+    # или пишется в его машинный журнал: двери согласий открылись бы письмом копии
+    check("MR5 у строк письма нет message_id и chat_id, журнал владельца без слов",
+          ([], []), ([line for line in b.journal_lines() if "message_id" in line or "chat_id" in line],
+                     b.owner_words()))
+    state = b.read_state()
+    # MR6 — краснеет, если копия судит не своим состоянием (пишет состояние хозяина)
+    # или пропускает суд: четыре отвергнутых коммита должны лечь в её состояние
+    check("MR6 своё состояние: last_seen = main, отвергнутых 4, состояние хозяина не создано",
+          (st.remote_main(), 4, False),
+          (state.get("last_seen"), len(state.get("rejected") or []), st.state.exists()))
+    # MR7 — краснеет, если копия заводит карточки или не ставит пульс-метку
+    check("MR7 карта копии не тронута, пульс-метка стоит", (True, True),
+          (b.map.read_bytes() == map_before, (b.heartbeat / "evolution-net").exists()))
+    r = b.run("--читать")
+    # MR8 — краснеет, если повторный тик доставляет уже доставленное
+    check("MR8 повторный --читать → код 0, входящих 2, строк журнала 2", (0, 2, 2),
+          (r.rc, len(b.inbox()), len(b.journal())))
+    r = a.run("--читать")
+    # MR9 — краснеет, если ящик не сверяется с именем читающей копии: A получил бы
+    # письма B; ответ B в почта/HarnessX/ — его
+    check("MR9 A --читать: «письмо от HarnessY» и рассылка",
+          (0, [f"письмо от {MAIL_B}", f"письмо от {HOST_PRINCIPAL}"]), (r.rc, a.heads()))
+
+
+def mail_judge(base: Path, keys: Keys) -> None:
+    """Суд хозяина над почтой — уже в коде (фиксация, зелёные до правки)."""
+    st, _a, _b = mail_stand(base, keys, "mail-judge")
+    st.tick()
+    old = f"почта/{MAIL_B}/2026-11-12-HarnessX-old.md"
+    known = st.add({mail_path(MAIL_A, MAIL_B, "known"): entry(MAIL_A, "вопрос", to=MAIL_B)}, keys.x)
+    unknown = st.add({mail_path("HarnessQ", MAIL_B, "u"): entry("HarnessQ", "вопрос", to=MAIL_B)}, keys.y)
+    # ответ раньше подмены: суд письма сверяет старый блоб с принятым, и отвергнутая
+    # подмена в дереве origin/main отвергла бы и ответ поверх неё
+    answer = st.add({old: entry(MAIL_A, "вопрос", to=MAIL_B, status="прочитано", answer='"да"')}, keys.w)
+    body = st.add({old: entry(MAIL_A, "вопрос", to=MAIL_B, status="прочитано", answer='"да"',
+                              body="Переписано адресатом.")}, keys.w)
+    forged = st.add({mail_path("HarnessZ", MAIL_B, "fake"): entry("HarnessZ", "вопрос", to=MAIL_B)}, keys.x)
+    # письмо A чужим ключом отвергнуто, но лежит в дереве origin/main: подписанная A
+    # правка (M) поверх него — не свежее письмо, а попытка узаконить отвергнутое
+    late = mail_path(MAIL_A, MAIL_B, "late")
+    st.add({late: entry(MAIL_A, "вопрос", to=MAIL_B)}, keys.y)
+    over = st.add({late: entry(MAIL_A, "вопрос", to=MAIL_B, body="Поверх отвергнутого.")}, keys.x)
+    r = st.tick()
+    refused = st.rejected()
+    # MJ1–MJ5 — краснеют, если с суда снято правило почты (подпись, свой ящик, <от>)
+    check("MJ1 письмо A→B от известного A принято", (0, False), (r.rc, known in refused))
+    check("MJ2 письмо от неизвестного ключа отвергнуто", True, unknown in refused)
+    check("MJ3 правка тела письма адресатом отвергнута", True, body in refused)
+    check("MJ4 правка только статус/ответ адресатом принята", False, answer in refused)
+    check("MJ5 письмо в чужой ящик с <от> ≠ подписант отвергнуто", True, forged in refused)
+    # MJ6 — краснеет, если суд чужого ящика берёт не только A: M поверх отвергнутого
+    check("MJ6 правка (M) письма поверх отвергнутого в чужом ящике отвергнута", True, over in refused)
+
+
+def mail_live(base: Path, keys: Keys) -> None:
+    """Сквозь: A пишет → дверь → B читает → хозяин принял."""
+    st, a, b = mail_stand(base, keys, "mail-live")
+    st.tick()
+    sha = printed_sha(a.run("--письмо", MAIL_B, str(a.letter(MAIL_B, "live"))))
+    sent = a.run("--отправить", sha or "0" * 40)
+    first = b.run("--читать")
+    # ME1 — краснеет, если хоть одно звено цепочки письма не работает
+    check("ME1 A --письмо → --отправить → B --читать: один файл «письмо от HarnessX»",
+          (0, 0, [f"письмо от {MAIL_A}"]), (sent.rc, first.rc, b.heads()))
+    again = b.run("--читать")
+    check("ME2 второй --читать B → ноль новых", (0, 1), (again.rc, len(b.inbox())))
+    host = st.tick()
+    # ME3 — краснеет, если дверь копии пропустила письмо, которое суд хозяина отвергнет
+    check("ME3 хозяин --читать: письмо принято", (0, True, False), (host.rc, bool(sha), sha in st.rejected()))
+
+
+def mail_wake(base: Path, keys: Keys) -> None:
+    """Толчок смене о письме: панель стенда — поддельный tmux, tmux-down — отказ двери."""
+    st, _a, b = mail_stand(base, keys, "mail-wake")
+    st.tmux_down.touch()
+    st.add({mail_path(MAIL_A, MAIL_B, "wake"): entry(MAIL_A, "вопрос", to=MAIL_B, body=MAIL_BODY)}, keys.x)
+    r = b.run("--читать")
+    # MW1 — краснеет, если отказ панели роняет тик или доставку: письмо лежит, толчка нет
+    check("MW1 панели нет → код 0, входящий файл есть, толчков 0", (0, 1, []), (r.rc, len(b.inbox()), st.kicks()))
+    st.tmux_down.unlink()
+    r = b.run("--читать")
+    kicks, files = st.kicks(), b.inbox()
+    # MW2 — краснеет, если неотданный толчок теряется (не ждёт в состоянии) или дробится
+    check("MW2 панель вернулась → ровно один толчок следующим тиком", (0, 1), (r.rc, len(kicks)))
+    # MW3 — краснеет, если толчок не называет отправителя по подписи и путь входящего файла
+    check("MW3 толчок: «письмо от HarnessX» и путь входящего файла", (True, True),
+          (f"письмо от {MAIL_A}" in "".join(kicks), bool(files) and str(files[0]) in "".join(kicks)))
+    # MW4 — краснеет, если тело письма уходит в панель: там оно стало бы приказом смене
+    check("MW4 тела письма в панели нет", False,
+          MAIL_BODY in (st.tmux_log.read_text(encoding="utf-8") if st.tmux_log.exists() else ""))
+    r = b.run("--читать")
+    # MW5 — краснеет, если отданный толчок или доставка повторяются следующим тиком
+    check("MW5 третий тик: толчков 1, входящих 1", (0, 1, 1), (r.rc, len(st.kicks()), len(b.inbox())))
+
+
+def section_mail(base: Path, keys: Keys) -> None:
+    mail_write(base, keys)
+    mail_door(base, keys)
+    mail_read(base, keys)
+    mail_judge(base, keys)
+    mail_live(base, keys)
+    mail_wake(base, keys)
+
+
 SECTIONS = {"keys": section_keys, "root": section_root, "judge": section_judge,
             "read": section_read_all, "forge": section_forge, "write": section_write,
             "door": section_door, "boot": section_boot, "state": section_state, "threat": section_threat,
             "status": section_status, "patch": section_patch,
             "answer": section_answer, "sign": section_sign, "key": section_key,
-            "addition": section_addition, "copy": section_copy}
+            "addition": section_addition, "copy": section_copy,
+            "mail": section_mail}
 
 
 def main(argv: list[str]) -> int:

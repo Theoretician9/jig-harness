@@ -483,7 +483,7 @@ kesh_sluchaj "кэш: прежняя строка «чистая копия уж
 # свой LOG_DIR — боевой /var/log/harness, — и следы испорченного кода ложились
 # в боевые журналы. Каждый зов пробы получает СВОЙ пустой каталог журналов:
 # не боевой и не общий с чистым прогоном той же мутации.
-YARD=$(kesh_dvor 'printf "%s\n" "${LOG_DIR:-}" >> "$(dirname "$0")/logdirs.txt"; if [ -n "${LOG_DIR:-}" ] && [ -d "$LOG_DIR" ]; then [ -e "$LOG_DIR/sled" ] && exit 3; : > "$LOG_DIR/sled"; fi; grep -q "^PRIZNAK=1" "$1"')
+YARD=$(kesh_dvor 'LOG_DIR=$(bash -c ". scripts/lib/config.sh; konf_zagruzit; printf %s \"\$LOG_DIR\""); printf "%s\n" "${LOG_DIR:-}" >> "$(dirname "$0")/logdirs.txt"; if [ -n "${LOG_DIR:-}" ] && [ -d "$LOG_DIR" ]; then [ -e "$LOG_DIR/sled" ] && exit 3; : > "$LOG_DIR/sled"; fi; grep -q "^PRIZNAK=1" "$1"')
 kesh_progon "$YARD" 0
 LOGDIRS=$(cat "$YARD/logdirs.txt" 2>/dev/null)
 DIR_A=$(printf '%s\n' "$LOGDIRS" | sed -n 1p); DIR_B=$(printf '%s\n' "$LOGDIRS" | sed -n 2p)
@@ -494,6 +494,38 @@ if [ "$RC" = 0 ] && printf '%s' "$OUT" | grep -q "покраснели как н
 else
     sluchaj "БОЛЬНОЙ СЛУЧАЙ: проба под мутацией пишет в свой LOG_DIR, а не в журнал прибора" 1 \
         "код $RC, след в журнале прибора: $([ -e "$YARD/sled" ] && echo есть || echo нет), LOG_DIR зовов «$DIR_A» «$DIR_B» (прибора $YARD), вывод: $(printf '%s' "$OUT" | tr '\n' '|' | cut -c1-200)"
+fi
+
+# ── БОЛЬНОЙ СЛУЧАЙ 22.11.2026: чистая копия красна от окружения прибора ──
+# Свой каталог журналов прибор отдавал пробе переменной LOG_DIR, а загрузчик
+# конфига ставит окружение СТАРШЕ файла: стенд, назвавший LOG_DIR своим
+# harness.conf (сторож и его пробы), писал в каталог прибора и не находил своих
+# журналов — 93 ложные дыры «чистая копия уже красная» у пробы сторожа. Каталог
+# прибора обязан стоять на месте паспорта машины, ниже файла стенда.
+YARD=$(kesh_dvor 'printf "LOG_DIR=\"%s\"\n" "$(dirname "$0")/стенд-журнал" > "$(dirname "$0")/stand.conf"; got=$(HARNESS_CONF="$(dirname "$0")/stand.conf" bash -c ". scripts/lib/config.sh; konf_zagruzit; printf %s \"\$LOG_DIR\""); [ "$got" = "$(dirname "$0")/стенд-журнал" ] || exit 4; grep -q "^PRIZNAK=1" "$1"')
+kesh_progon "$YARD" 0
+if [ "$RC" = 0 ] && printf '%s' "$OUT" | grep -q "покраснели как надо 1, дыр 0"; then
+    sluchaj "БОЛЬНОЙ СЛУЧАЙ: LOG_DIR из конфига стенда пробы старше каталога прибора" 0 ""
+else
+    sluchaj "БОЛЬНОЙ СЛУЧАЙ: LOG_DIR из конфига стенда пробы старше каталога прибора" 1 \
+        "код $RC, вывод: $(printf '%s' "$OUT" | tr '\n' '|' | cut -c1-300)"
+fi
+
+# Прибор в срезе держит место пула тяжёлых прогонов, но метку HEAVY_SLOT_HELD
+# дверь среза не передаёт; разработчик гоняет ту же пробу через heavy-slot.sh, и
+# метка у него есть. Проба, зовущая вложенный тяжёлый путь (шаг мутаций задачи),
+# под прибором уходила в heavy-slot.sh стенда, которого нет, — 127 и «чистая копия
+# уже красная» (acceptance.py, 6 и 10 ложных дыр).
+YARD=$(kesh_dvor '[ -n "${HEAVY_SLOT_HELD:-}" ] || exit 5; grep -q "^PRIZNAK=1" "$1"')
+env -u MECH_FILTER -u HEAVY_SLOT_HELD LOG_DIR="$YARD" MUT_CACHE_DAYS=0 \
+    HARNESS_INVARIANTS="$YARD/invariants.yaml" HARNESS_PROBE_MUTATIONS="$YARD/probe-mutations.yaml" \
+    timeout 120 bash "$TOOL" > "$YARD/vyvod.txt" 2>&1
+RC=$?; OUT=$(cat "$YARD/vyvod.txt")
+if [ "$RC" = 0 ] && printf '%s' "$OUT" | grep -q "покраснели как надо 1, дыр 0"; then
+    sluchaj "БОЛЬНОЙ СЛУЧАЙ: проба под прибором держит место пула (HEAVY_SLOT_HELD), как у разработчика" 0 ""
+else
+    sluchaj "БОЛЬНОЙ СЛУЧАЙ: проба под прибором держит место пула (HEAVY_SLOT_HELD), как у разработчика" 1 \
+        "код $RC, вывод: $(printf '%s' "$OUT" | tr '\n' '|' | cut -c1-300)"
 fi
 
 # ── Механизм списком: проба судит несколько файлов ────────────────────────

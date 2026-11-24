@@ -283,14 +283,17 @@ def probe_answer_not_retried(tmp: Path) -> None:
     (код 1) трижды даёт history-unread, и задача с устаревшей бумагой уходит в «потеряна»."""
     s = Stand(tmp / "не-предок")
     s.paper("hr.a")
+    s.commit("hr.a", MECHANISM)
     code, calls = in_process(s, "acc_mb", merge_base_no, history_mode(s))
     check("4 merge-base --is-ancestor дал 1 → ответ, без повтора (1 вызов), --история код 0",
           (1, 0), (sum(1 for c in calls if "merge-base" in c), code))
     check("4 события history-unread нет", False, "mutations.history-unread" in s.events())
     debts, calls = in_process(s, "acc_mb_read", any_call,
                               lambda acc: acc.mutation_paper_debts("hr.a", s.root), slice_file=s.history)
-    check("4 в срезе из файла: бумага «не предок HEAD» — устарела, перегнать; git не зван",
-          (True, []), (isinstance(debts, list) and any("не предок" in d for d in debts), calls))
+    # Вне истории HEAD бумагу судит сверка кода: её вызовы git тоже записаны в файл.
+    check("4 в срезе из файла: бумага вне истории HEAD судила другой код — перегнать; git не зван",
+          (True, []), (isinstance(debts, list) and any("другой код" in d and MECHANISM in d
+                                                       for d in debts), calls))
 
 
 def probe_slice_reads_file(tmp: Path) -> None:

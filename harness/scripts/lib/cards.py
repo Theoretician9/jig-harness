@@ -284,6 +284,157 @@ def commit_from_head(map_path: Path, edit, ids: list, what: str) -> None:
         print(f"карта записана, коммит не лёг (код {done.returncode}): {tail}", file=sys.stderr)
 
 
+# ── ведение карты: умолчания по схеме и факт `when` из истории git ──────────
+# Процесс scripts/devmap-keeper.py; контракт — docs/specs/2026-11-20-devmap-keeper.md.
+
+WORK_STATUSES = ("wip", "test", "принято", "done")
+TESTED_STATUSES = ("принято", "done")
+CARD_STATUS_LINE = re.compile(r"^([+-])\s+status: (\S+)")
+CARD_ID_LINE = re.compile(r"^([ +-])\s+- id: (\S+)")
+
+
+def schema_defaults(schema: dict) -> dict:
+    """{поле: умолчание} по ключу «умолчание» полей схемы; поля без него не входят."""
+    return {name: spec["умолчание"] for name, spec in (schema.get("поля") or {}).items()
+            if isinstance(spec, dict) and "умолчание" in spec}
+
+
+def _flow(value) -> str:
+    """Значение однострочным flow-YAML: словарь, null, true/false, число, строка в кавычках."""
+    if isinstance(value, dict):
+        return "{ " + ", ".join(f"{k}: {_flow(v)}" for k, v in value.items()) + " }"
+    if value is None or isinstance(value, bool):
+        return "null" if value is None else str(value).lower()
+    return json.dumps(value, ensure_ascii=False)
+
+
+def _field_indent(lines: list) -> str:
+    first = next((i for i, s in enumerate(lines) if "- id:" in s), 0)
+    after = lines[first + 1] if first + 1 < len(lines) else "        x"
+    return after[:len(after) - len(after.lstrip())]
+
+
+def _insert_field(lines: list, indent: str, text: str) -> None:
+    """Строка поля встаёт перед `checklist:` уровня полей, иначе в конец блока: после
+    `status:` нельзя — соседняя строка правки статуса в ветке дала бы конфликт слияния."""
+    at = next((i for i, s in enumerate(lines) if s.startswith(f"{indent}checklist:")), None)
+    if at is None:
+        at = len(lines)
+        while at > 1 and not lines[at - 1].strip():
+            at -= 1
+    lines.insert(at, f"{indent}{text}\n")
+
+
+def fill_defaults(block: str, defaults: dict) -> str:
+    """Блок с дописанными НЕДОСТАЮЩИМИ полями; стоящее поле (даже `when: null`) не трогается."""
+    lines = block.splitlines(keepends=True)
+    indent = _field_indent(lines)
+    for name, value in defaults.items():
+        if not any(s.startswith(f"{indent}{name}:") for s in lines):
+            _insert_field(lines, indent, f"{name}: {_flow(value)}")
+    return "".join(lines)
+
+
+def status_transitions(repo: Path, map_rel: str) -> dict:
+    """{id: [(время коммита, старый статус|None, новый)]} по возрастанию времени.
+
+    Коммит судится целиком: перенос карточки между линиями — удаление в одном куске
+    и вставка в другом, статус тот же, перехода нет; уезд в архив (нового статуса нет)
+    тоже не переход. --no-merges: коммиты веток видны и после слияния."""
+    proc = subprocess.Popen(
+        ["git", "-C", str(repo), "log", "--no-merges", "-p", "-U3", "--format=%x1e%at", "--", map_rel],
+        stdout=subprocess.PIPE, text=True, encoding="utf-8", errors="replace")
+    found: dict = {}
+    when, changes = 0, {}
+
+    def settle() -> None:
+        for task_id, (old, new) in changes.items():
+            if new is not None and old != new:
+                found.setdefault(task_id, []).append((when, old, new))
+
+    old_id = new_id = None
+    for raw in proc.stdout:
+        line = raw.rstrip("\n")
+        if line.startswith("\x1e"):
+            settle()
+            when, changes = int(line[1:]), {}
+        elif line.startswith("@@"):
+            old_id = new_id = None
+        elif (match := CARD_ID_LINE.match(line)):
+            side, task_id = match.groups()
+            old_id = task_id if side in " -" else old_id
+            new_id = task_id if side in " +" else new_id
+        elif (match := CARD_STATUS_LINE.match(line)):
+            side, status = match.groups()
+            task_id = old_id if side == "-" else new_id
+            if task_id:
+                pair = changes.setdefault(task_id, [None, None])
+                slot = 0 if side == "-" else 1
+                pair[slot] = pair[slot] or status
+    settle()
+    proc.wait()
+    return {task_id: rows[::-1] for task_id, rows in found.items()}   # git log идёт от нового к старому
+
+
+def when_fact(transitions: list) -> dict:
+    """Даты жизни по переходам: started — первый вход в работу, done — последний вход в
+    закрытое из незакрытого, tested — последний вход в принято/done. Дата локальная."""
+    def date(at: int) -> str:
+        return time.strftime("%Y-%m-%d", time.localtime(at))
+
+    def entered(group: tuple, last: bool):
+        hits = [at for at, old, new in transitions if new in group and old not in group]
+        return date(hits[-1 if last else 0]) if hits else None
+
+    return {"started": entered(WORK_STATUSES, False),
+            "done": entered(("test",) + TESTED_STATUSES, True),
+            "tested": entered(TESTED_STATUSES, True)}
+
+
+def set_when(block: str, fact: dict) -> str:
+    """Поле `when` одной строкой с фактом и `estimated: false`; без факта блок не меняется."""
+    if not any(fact.values()):
+        return block
+    lines = block.splitlines(keepends=True)
+    indent = _field_indent(lines)
+    text = "when: " + _flow({**fact, "estimated": False})
+    at = next((i for i, s in enumerate(lines) if s.startswith(f"{indent}when:")), None)
+    if at is None:
+        _insert_field(lines, indent, text)
+        return "".join(lines)
+    end = at + 1
+    while end < len(lines) and lines[end].strip() and len(lines[end]) - len(lines[end].lstrip()) > len(indent):
+        end += 1                                  # подполя блочного `when:`
+    lines[at:end] = [f"{indent}{text}\n"]
+    return "".join(lines)
+
+
+def keep_map(text: str, transitions: dict, defaults: dict) -> tuple[str, list]:
+    """(новый текст карты, id изменённых карточек): умолчания, затем факт `when`.
+    Сверка как у insert_cards: id и их число прежние, вне {умолчания, when} ключи равны."""
+    before = yaml.safe_load(text) or {}
+    live = task_ids(before)
+    result, changed = text, []
+    for task_id, block_text, start, end in reversed(блоки(text)):
+        if task_id not in live:
+            continue                              # блоки() отдаёт и линии
+        new_block = set_when(fill_defaults(block_text, defaults), when_fact(transitions.get(task_id, [])))
+        if new_block != block_text:
+            result = result[:start] + new_block + result[end:]
+            changed.append(task_id)
+    after = yaml.safe_load(result) or {}
+    if task_ids(after) != live:
+        raise MapRefused("ОТКАЗ: правка изменила состав задач карты")
+    skip = set(defaults) | {"when"}
+    old = {t["id"]: t for ln in before.get("lines") or [] for t in ln.get("tasks") or []}
+    new = {t["id"]: t for ln in after.get("lines") or [] for t in ln.get("tasks") or []}
+    for task_id in changed:
+        if {k: v for k, v in old[task_id].items() if k not in skip} != \
+                {k: v for k, v in new[task_id].items() if k not in skip}:
+            raise MapRefused(f"ОТКАЗ: правка задела чужие поля карточки {task_id}")
+    return result, sorted(changed)
+
+
 def open_card_by_source(map_text: str, source: str) -> dict | None:
     """Открытая (не done/принято) карточка с этим источником либо None. Статус
     беклог — тоже открытая: решать за владельца, что с ней делать, нельзя."""

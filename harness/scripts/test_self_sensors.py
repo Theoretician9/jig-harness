@@ -153,12 +153,13 @@ def map_text(tasks: str = "") -> str:
 
 def archive_text(tasks: str = "") -> str:
     # Принятая задача далеко за окнами: нижняя граница прошлого окна её отсекает.
+    # Дата — when.done: приёмка владельцем задачу не датирует (случай 16).
     return ("version: 1\n"
             "lines:\n"
             "  - id: harness\n"
             "    name: \"Харнес\"\n"
             "    tasks:\n"
-            + task_block("hr.stand-ancient", "принято", accepted="2026-01-10") + tasks)
+            + task_block("hr.stand-ancient", "принято", done="2026-01-10", accepted="2026-01-10") + tasks)
 
 
 # Подменный alert-task стенда: зов — строкой в журнал зовов, код — из файла стенда.
@@ -400,7 +401,8 @@ def case_closed(tmp: Path) -> None:
                           accepted=day_of(IN_CURRENT))
              + task_block("hr.closed-nodate", "test")
              + task_block("hr.wip-dated", "wip", done=day_of(IN_CURRENT)))
-    archived = task_block("hr.arch-accepted", "принято", accepted=day_of(IN_CURRENT))
+    archived = task_block("hr.arch-accepted", "принято", done=day_of(IN_CURRENT),
+                          accepted=day_of(IN_CURRENT))
     st = Stand(tmp, tasks=tasks, archived=archived)
     rc, data, why = st.show()
     check(f"--show код 0 ({why[:80]})" if rc else "--show код 0", 0, rc)
@@ -619,10 +621,32 @@ def case_whole_days(tmp: Path) -> None:
           counts(data, "autonomy", "прошлое").get("закрыто"))
 
 
+def case_accepted_not_dated(tmp: Path) -> None:
+    print("── 16. приёмка владельцем не датирует закрытие: принято_когда не дата окна ──")
+    # 19.11: 10 задач, закрытых агентом до 04.11 и принятых владельцем в окне
+    # 04–10.11, засчитаны в него — знаменатель эффективности 114 вместо 104.
+    st = Stand(tmp)
+    subprocess.run(["git", "init", "-q", str(st.project)], check=True, capture_output=True)
+    accepted = day_of(IN_CURRENT)
+    def tasks(early: str, flip: str) -> str:
+        return (task_block("hr.accept-early", early, accepted=accepted if early == "принято" else None)
+                + task_block("hr.accept-flip", flip, accepted=accepted if flip == "принято" else None))
+    commit_map(st, tasks("plan", "plan"), END - 40 * DAY)
+    commit_map(st, tasks("test", "plan"), END - 30 * DAY)
+    commit_map(st, tasks("test", "test"), IN_PAST)
+    commit_map(st, tasks("принято", "принято"), IN_CURRENT)
+    rc, data, why = st.show()
+    check(f"--show код 0 ({why[:80]})" if rc else "--show код 0", 0, rc)
+    check("закрыта до окон, принята в текущем окне: в текущее не засчитана — закрыто 0", 0,
+          counts(data, "efficiency", "сейчас").get("закрыто"))
+    check("закрыта коммитом в прошлом окне, принята в текущем: засчитана в прошлое — закрыто 1", 1,
+          counts(data, "efficiency", "прошлое").get("закрыто"))
+
+
 CASES = (case_classifier, case_quote, case_windows, case_closed, case_minimum,
          case_record_once, case_worse, case_resolve, case_empty, case_token_window,
          case_own_alerts, case_alert_refused, case_closed_window, case_closed_by_history,
-         case_whole_days)
+         case_whole_days, case_accepted_not_dated)
 
 
 # ── стенд не протёк ────────────────────────────────────────────────────────
@@ -647,7 +671,7 @@ def main() -> int:
     if not (SENSORS.is_file() and CONFIG_SOURCE.is_file()):
         missing = "нет scripts/self-sensors.py" if not SENSORS.is_file() else "нет self-sensors.yaml"
         print(f"self-sensors проба: случаев {cases.paths}, падений {cases.failures} — "
-              f"{missing}, случаи 1–14 не прогнаны")
+              f"{missing}, случаи 1–16 не прогнаны")
         return 1
     before = live_state()
     with tempfile.TemporaryDirectory(prefix="self-sensors-probe-") as tmp:

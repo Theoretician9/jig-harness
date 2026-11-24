@@ -547,8 +547,14 @@ def door_insert(stand: P12Stand, hit: dict) -> tuple[bool, str]:
 # Дверь мутаций: файл двери (bash-дверь, deploy_guard.py, писатель просьбы) вместо одноимённого настоящего.
 DOOR_PATH = os.environ.get("DOOR_UNDER_TEST")
 GATE_REACHED = "согласи"   # настоящие ворота говорят о согласии всегда; заглушка — никогда
+# Ворота проекта в копии scripts/ — заглушка «красные»: до них дверь доходит, только когда настоящие
+# ворота согласия её пустили (уровень «полный» на машине пускает молча, без слова «согласие»).
+STAND_GATES_RED = "ворота стенда: красные"
 PLAIN_VAR = re.compile(r"\$\{?([A-Za-z_]\w*)\}?(/[^$\"]*)?")
 REAL_LOCATION = re.compile(r'readlink -f "?\$(\{BASH_SOURCE\[0\]\}|0)"?')
+# Библиотека, подключённая дверью от места скрипта: source "$(dirname "$(readlink -f …)")/lib/<имя>".
+DOOR_LIBS = re.compile(r'^source "\$\(dirname "\$\(readlink -f "\$\{BASH_SOURCE\[0\]\}"\)"\)/lib/([\w.-]+\.sh)"',
+                       re.M)
 # Двери, которые проба не запускает, и почему: путь их ворот судит только статический случай.
 NOT_LAUNCHED = {"deploy.sh": "выкат запускает только оркестратор (И-2)"}
 STAND_BASH_DB = "proba_nrp_stand_bash"
@@ -649,6 +655,10 @@ class BashGateStand:
             shutil.copytree(HOOKS, self.real / "hooks", ignore=shutil.ignore_patterns("__pycache__"))
         shutil.copyfile(JUDGE_PATH, self.real / "lib" / "owner_word.py")
         (self.real / "ask-consent.py").write_text(REQUEST_STUB, encoding="utf-8")
+        # Ручки согласия судья берёт у машины: при AUTOMATION_LEVEL=full ворота пускают publish.sh
+        # без кнопки, и копия гнала бы полные ворота проекта (десятки минут, сиротами после таймаута).
+        # Красные ворота стенда — отказ замком 1 после настоящих ворот согласия при любом уровне машины.
+        (self.real / "gates.sh").write_text(f"#!/bin/sh\necho '{STAND_GATES_RED}'\nexit 1\n", encoding="utf-8")
         if DOOR_PATH:
             same = [p for p in self.real.rglob(Path(DOOR_PATH).name) if "__pycache__" not in p.parts]
             if len(same) != 1:
@@ -726,13 +736,14 @@ class BashGateStand:
 
 
 def gate_verdict(stand: BashGateStand, code: int, out: str, lost: str) -> tuple[bool, str]:
-    """Отказ двери засчитан, если заглушка не звана, предмет цел и отказали настоящие ворота."""
+    """Отказ двери засчитан, если заглушка не звана, предмет цел и отказали настоящие ворота —
+    или пустили, и дверь отказала дальше, на красных воротах стенда (уровень «полный» на машине)."""
     called = stand.stub_called()
     if called:
         return False, f"дверь позвала ЗАГЛУШКУ ворот из PROJECT_DIR {called[0]} (код {code}); {lost}: {tail(out, 200)}"
     if lost:
         return False, f"{lost} (код {code}): {tail(out, 200)}"
-    if GATE_REACHED not in out:
+    if GATE_REACHED not in out and STAND_GATES_RED not in out:
         return False, f"до ворот дверь не дошла — отказ не их (код {code}): {tail(out, 200)}"
     return "Traceback" not in out, f"код {code}: {tail(out)}"
 
@@ -899,7 +910,13 @@ class PublishPathStand:
         scripts = self.real / "scripts"
         (scripts / "lib").mkdir(parents=True)
         shutil.copyfile(door, scripts / "publish.sh")
-        shutil.copyfile(LIB / "config.sh", scripts / "lib" / "config.sh")
+        # Библиотеки, которые дверь подключает в начале, — разбором её текста: список руками отставал
+        # от двери (release_mark.sh, events.sh), и каждый прогон стенда падал на первой строке.
+        sourced = DOOR_LIBS.findall(door.read_text(encoding="utf-8"))
+        if "config.sh" not in sourced:
+            raise RuntimeError(f"разбор publish.sh: подключённых lib/*.sh не найдено ({sourced})")
+        for name in sourced:
+            shutil.copyfile(LIB / name, scripts / "lib" / name)
         # Быстрая дверь замка 1 (пропуск ворот) идёт до build-public.py, только если скан
         # секретов в составе быстрых ворот раскладки; без него зов сборщика там не судится.
         fast_gates = self.real / "harness" / "config" / "gates-hackathon.yaml"
@@ -990,6 +1007,16 @@ class PublishPathStand:
             {"слово": "без прогона полного", "id_входящего": "553", "причина": "стенд",
              "выдана": now - 60, "до": now + 3600}, ensure_ascii=False), encoding="utf-8")
 
+    def reusable_gates_summary(self) -> None:
+        """Зелёный полный итог ворот на предке HEAD паспортного проекта, пропуска нет: замок 1
+        зовёт судью служебных отметок (service-only-diff.py), а не сами ворота."""
+        (self.log / "publish-gates-waiver.json").unlink(missing_ok=True)
+        sha = git("rev-parse", "HEAD", cwd=self.fake)
+        git("commit", "-q", "--allow-empty", "-m", "служебная отметка стенда", cwd=self.fake)
+        (self.log / "ворота-итог.jsonl").write_text(json.dumps(
+            {"режим": "обычный", "sha": sha, "код": 0, "новых": 0, "чисто": True, "ts": "стенд"},
+            ensure_ascii=False) + "\n", encoding="utf-8")
+
     def close(self) -> None:
         shutil.rmtree(self.root, ignore_errors=True)
 
@@ -1025,6 +1052,8 @@ def case_publish_exec_paths() -> None:
         runs.append(("по слову", *stand.run(["--по-слову"])))
         stand.waiver()
         runs.append(("пропуск ворот", *stand.run([])))
+        stand.reusable_gates_summary()
+        runs.append(("итог ворот", *stand.run([])))
         # Самотест двери сам называет паспорт своих дворов — паспорт судится по зовам до него.
         door_calls = stand.calls()
         runs.append(("самотест", *stand.run(["--selftest"])))

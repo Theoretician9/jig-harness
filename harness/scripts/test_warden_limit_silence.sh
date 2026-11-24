@@ -230,6 +230,9 @@ CONF
 stand() {  # $1 = файл экрана ("" — пустой экран): свежий LOG_DIR, карта с работой, панель
     rm -rf "$T/log" "$T/state" "$A_DIR"
     mkdir -p "$T/log/inbox/обработано" "$T/state/panel-state" "$A_DIR"
+    # Суточная сверка меню бота сегодня уже прошла: без отметки стенд без bot-commands.py и
+    # Telegram слал бы владельцу весть об отказе меню, и счёт вестей о лимите сбивался.
+    date +%F > "$T/log/меню-бота.день"
     : > "$T/channel.txt"; : > "$T/pane.txt"; : > "$T/channel-flags.txt"
     printf '%s\n' '{"queue": [], "lines": [{"id": "hr", "tasks": [{"id": "hr.b", "status": "wip"}]}]}' \
         > "$T/project/dev-map.yaml"

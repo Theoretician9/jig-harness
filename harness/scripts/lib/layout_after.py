@@ -4,7 +4,7 @@
 Дверь (layout-door.py) пишет в journal.tsv только файлы своего плана. Остальное
 обновление пишет мимо неё: слияние живых настроек (pipeline.yaml) — до двери,
 импорты в CLAUDE.md, карточки помощников, производные документы — после.
-Находка копии bkb 14.11.2026: откат по журналу вернул 225 путей, а дубль строки
+Находка копии сети 14.11.2026: откат по журналу вернул 225 путей, а дубль строки
 CLAUDE.md, новый ключ pipeline.yaml и новая карточка harness-explorer.md остались.
 
 Поэтому разница «до раскладки → сейчас» по всему дереву проекта дописывается в
@@ -76,7 +76,7 @@ def snap(project: str, out: str) -> int:
         return 0
     files = [rel for rel in tree_paths(project) if regular(project, rel)]
     # Один нечитаемый файл (журнал демона, заведённый root) валил hash-object всего списка,
-    # и откат терял все шаги после двери (Content-Factory 15.11.2026, 0.12.2). Его
+    # и откат терял все шаги после двери (копии сети 15.11.2026, 0.12.2). Его
     # раскладка не пишет: в снимок не идёт, но назван.
     paths = [rel for rel in files if os.access(os.path.join(project, rel), os.R_OK)]
     unreadable = sorted(set(files) - set(paths))
@@ -158,7 +158,7 @@ def drift(project: str, before: dict, left: dict) -> list:
             continue        # ссылку и каталог журнал не выражает
         own, own_mode = before.get(rel, (None, 0))
         if disk == own and rel not in left and own is not None and disk_mode(project, rel) != own_mode:
-            # Тот же blob, другой режим (Content-Factory 15.11.2026: test_deploy_ci.sh
+            # Тот же blob, другой режим (копии сети 15.11.2026: test_deploy_ci.sh
             # остался 100755 после отката): копия в архиве несёт режим снимка.
             changes.append(("перекрыт", own, own, rel))
             continue

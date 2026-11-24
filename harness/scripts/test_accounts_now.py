@@ -203,6 +203,33 @@ def main() -> int:
         case("status-report.py без профилей: строки нет",
              отчёт.returncode == 0 and "аккаунт:" not in отчёт.stdout, (отчёт.returncode, отчёт.stdout[-300:]))
 
+        # Потолок на стыке: отчёт с длинной строкой ДАЛЬШЕ влезает, только если место под «аккаунт: …»
+        # вычтено до сборки. Первый прогон без потолка меряет длину, второй — с потолком на знак меньше.
+        тесно = корень / "s5"
+        тесно.mkdir()
+        (тесно / "dev-map.yaml").write_text(
+            "lines:\n- id: harness\n  tasks:\n  - id: hr.demo-next\n    status: plan\n"
+            f"    title: {'длинное название следующей задачи ' * 4}\n", encoding="utf-8")
+        (тесно / "queue.txt").write_text("работа: 1\n  1. hr.demo-next · 20 · в очереди\n", encoding="utf-8")
+        (тесно / "j.jsonl").write_text("", encoding="utf-8")
+
+        def отчёт_с_потолком(потолок):
+            (тесно / "harness.conf").write_text(
+                f'TMUX_SESSION="net-takoj-sessii-proba"\nSTATUS_STRUCT_MAX_CHARS="{потолок}"\n', encoding="utf-8")
+            return subprocess.run(
+                [sys.executable, str(REPORT), "--журнал-вызовов", str(тесно / "j.jsonl"),
+                 "--карта", str(тесно / "dev-map.yaml"), "--очередь", str(тесно / "queue.txt")],
+                env={**env, "PROJECT_DIR": str(тесно), "HARNESS_CONF": str(тесно / "harness.conf")},
+                capture_output=True, text=True, timeout=120, cwd=str(тесно))
+
+        потолок = len(отчёт_с_потолком(100000).stdout.rstrip("\n")) - 1
+        отчёт = отчёт_с_потолком(потолок)
+        вывод = отчёт.stdout.rstrip("\n")
+        case("status-report.py: со строкой «аккаунт: …» статус не длиннее потолка",
+             отчёт.returncode == 0 and вывод.splitlines()[-1:] == [s for s in вывод.splitlines()
+                                                                   if s.startswith("аккаунт: ")]
+             and len(вывод) <= потолок, (потолок, len(вывод), отчёт.stdout[-400:], отчёт.stderr[-300:]))
+
         # Старт смены: проект стенда — каталог со ссылкой scripts на настоящие скрипты.
         проект = корень / "s3" / "proj"
         проект.mkdir()

@@ -30,6 +30,8 @@ import config  # noqa: E402
 from stack_freshness import PRESENCE, SOURCES  # noqa: E402 — одно место, где названы источники
 
 REQUIRED = ("имя", "чьё", "критичность", "свежая", "безопасность", "задевает", "риск", "установка")
+# Затронутость нашего кода (§3.3) судится только у частей харнеса: у чужих частей «использования» нет, требовать его нельзя.
+REQUIRED_BY_OWNER = {"харнес": ("использование",)}
 CRITICALITY = ("высокая", "обычная")
 INSTALLER_FILES = ("USTANOVIT.sh", "harness/scripts/install-docker.sh")
 PACKAGE_TOKEN = re.compile(r"[a-z0-9][a-z0-9.+-]*")
@@ -98,7 +100,7 @@ def part_names_for_installer(part):
 def check_part_shape(part):
     problems = []
     name = part.get("имя", "?")
-    for key in REQUIRED:
+    for key in REQUIRED + REQUIRED_BY_OWNER.get(part.get("чьё"), ()):
         if key not in part:
             problems.append(f"часть {name}: нет обязательного поля «{key}»")
     fresh = part.get("свежая")

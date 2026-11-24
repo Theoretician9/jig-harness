@@ -5,20 +5,17 @@
 Claude Code зовёт скрипт на каждом обновлении интерфейса и кладёт в stdin JSON сессии;
 в нём `rate_limits.five_hour` и `rate_limits.seven_day` ({used_percentage 0–100, resets_at
 unix-секунды}) — только у подписчиков, только после первого ответа API, окно пропадает
-после своего сброса. Скрипт печатает одну короткую строку и атомарно пишет файл лимитов,
-который читает адаптер `claude` судьи скорости (`read_limit_file` в
-harness/demons/speed_mode.py). Ошибка скрипта — сломанная строка интерфейса либо
-файл, по которому судья снизит режим на чужом или испорченном проценте.
+после своего сброса. Скрипт печатает одну короткую строку и атомарно пишет файл лимитов.
+Ошибка скрипта — сломанная строка интерфейса либо испорченный снимок.
 
-Формат файла — тот, что читает адаптер: `{"ts": …, "rate_limits": {"five_hour": {…},
-"seven_day": {…}}}`; пропавшее окно — ключа нет или null.
+Формат файла: `{"ts": …, "rate_limits": {"five_hour": {…}, "seven_day": {…}}}`; пропавшее
+окно — ключа нет или null.
 
 Каждый случай строит свой стенд во временном каталоге: свой каталог состояния панели
 (HARNESS_PANEL_STATE, группа и setgid как у живого), свой файл лимитов. Живой файл лимитов
-(`лимит_подписки.файл_claude`) только сверяется: изменился за прогон — красный.
+(лимиты-подписки.json в живом каталоге панели) только сверяется: изменился за прогон — красный.
 
-Двери: STATUSLINE_LIMITS_BIN — скрипт (копия под мутацией), SPEED_MODE_BIN — судья
-с адаптером.
+Дверь: STATUSLINE_LIMITS_BIN — скрипт (копия под мутацией).
 
 Прогон (в фоне, по правилам проекта):
     python3 scripts/test_statusline_limits.py [--случай имя]
@@ -39,22 +36,8 @@ import threading
 import time
 from pathlib import Path
 
-import yaml
-
 HERE = Path(__file__).resolve().parent
-
-
-def tree_file(*parts: str) -> Path:
-    # Проект: scripts/ рядом с harness/; пакет: harness/scripts/ рядом с demons/ и config/.
-    for candidate in (HERE.parent / "harness" / Path(*parts), HERE.parent / Path(*parts)):
-        if candidate.is_file():
-            return candidate
-    return HERE.parent / "harness" / Path(*parts)
-
-
 SCRIPT = Path(os.environ.get("STATUSLINE_LIMITS_BIN") or HERE / "statusline_limits.py")
-ADAPTER = Path(os.environ.get("SPEED_MODE_BIN") or tree_file("demons", "speed_mode.py"))
-SPEED_DATA = tree_file("config", "speed-modes.yaml")
 FILE_NAME = "лимиты-подписки.json"
 PANEL_GROUP = "harness-panel"
 TIMEOUT = 10
@@ -69,15 +52,6 @@ OWN_MEDIAN_MAX_MS = 150
 P95_FACTOR = 3
 SINGLE_MAX_MS = 2000
 ATOMIC_WRITES = 40
-
-DRIVER = r'''
-import importlib.util, json, sys
-spec = importlib.util.spec_from_file_location("speed_mode", sys.argv[1])
-mod = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(mod)
-print(json.dumps(mod.read_limit_file(json.loads(sys.argv[2]), float(sys.argv[3])), ensure_ascii=False))
-'''
-
 
 class ProbeError(Exception):
     """Стенд не смог прогнать скрипт — случай красный с этой причиной."""
@@ -452,32 +426,6 @@ def case_int_and_float(case: Case, stand: Stand) -> None:
         case.check(mentions(line, five) and mentions(line, seven), f"{label}: в строке нет {five} и {seven}: {line!r}")
 
 
-def adapter_read(stand: Stand, now: float) -> dict:
-    data = {"лимит_подписки": {"адаптер": "claude", "файл_claude": str(stand.file), "устарел_мин": 15}}
-    done = subprocess.run([sys.executable, "-c", DRIVER, str(ADAPTER), json.dumps(data, ensure_ascii=False),
-                           str(now)], capture_output=True, text=True, env=stand.env(), timeout=30,
-                          cwd=stand.root)
-    if done.returncode != 0:
-        raise ProbeError(f"адаптер упал: {done.stderr.strip()[-300:]}")
-    return json.loads(done.stdout)
-
-
-def case_adapter_reads(case: Case, stand: Stand) -> None:
-    now = int(time.time())
-    five, seven = window(37.5, now + 3600), window(12, now + 3 * 86400)
-    ui_safe(case, stand.run(session({"five_hour": five, "seven_day": seven})), "адаптер, оба окна")
-    got = adapter_read(stand, time.time())
-    for name, cell in (("пять_часов", five), ("неделя", seven)):
-        found = got.get(name) or {}
-        case.check(found.get("точность") == "точно" and found.get("процент") == cell["used_percentage"]
-                   and found.get("сброс") == cell["resets_at"],
-                   f"адаптер: окно {name} прочитано как {found!r}, ждём точно {cell!r}")
-    ui_safe(case, stand.run(session({"five_hour": five})), "адаптер, только 5ч")
-    found = adapter_read(stand, time.time()).get("пять_часов") or {}
-    case.check(found.get("точность") == "точно" and found.get("процент") == five["used_percentage"],
-               f"адаптер, только 5ч: окно пять_часов {found!r}")
-
-
 CASES = {
     "оба_окна": case_both_windows,
     "только_5ч": case_five_hour_only,
@@ -488,16 +436,14 @@ CASES = {
     "атомарность": case_atomic,
     "скорость": case_timing,
     "целое_и_дробное": case_int_and_float,
-    "адаптер_читает": case_adapter_reads,
 }
 
 
 def live_file() -> Path | None:
-    try:
-        path = yaml.safe_load(SPEED_DATA.read_text(encoding="utf-8"))["лимит_подписки"]["файл_claude"]
-    except (OSError, KeyError, TypeError, yaml.YAMLError):
-        return None
-    return Path(path) if path else None
+    sys.path.insert(0, str(HERE / "lib"))
+    import config
+    folder = config.panel_state_dir()
+    return Path(folder) / FILE_NAME if folder else None
 
 
 def live_mark(path: Path | None):
@@ -536,7 +482,7 @@ def main(argv: list[str]) -> int:
     mark = live_mark(live)
     cases = [run_case(name) for name in CASES if not only or name == only]
     guard = Case("живой_файл")
-    guard.check(live is not None, f"не найден ключ лимит_подписки.файл_claude в {SPEED_DATA}")
+    guard.check(live is not None, "не найден живой каталог панели (config.panel_state_dir)")
     guard.check(live_mark(live) == mark, f"живой файл лимитов {live} изменён за прогон — стенд протёк")
     for case in [*cases, guard]:
         print(f"{'ок' if not case.failures else 'КРАСНЫЙ'} {case.name} ({case.checks} проверок)")

@@ -21,6 +21,8 @@ set -uo pipefail
 
 # shellcheck disable=SC1091
 source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../../scripts/lib/config.sh"
+# shellcheck disable=SC1091
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../../scripts/lib/channel_send.sh"
 INSTALL_CONF="${HARNESS_INSTALL_CONF:-$(konf_koren)/install.conf}"
 HARNESS_CONF="${HARNESS_CONF:-$(konf_koren)/harness.conf}"
 # Окружение старше конфига: общий загрузчик вместо голого source (улика
@@ -355,18 +357,46 @@ OTCHET="$OTCHET_DIR/$(date +%Y-%m-%d).md"
 # не может по логике чистить?» — может и должен: чистка это второй шаг того же
 # действия, а не чужая работа. Карта и архив пишутся вместе (И-1).
 UBRANO=0
+KARTA_GATE() {
+    bash "$PROJECT_DIR/scripts/pre-commit-gate.sh" --devmap-only "$PROJECT_DIR/dev-map.yaml" 2>&1
+}
 if [ "$REZHIM" = "--применить" ]; then
+    # Копии карты и архива и вердикт валидатора берутся ДО переноса: после него
+    # «карта красная» без этого не отличить от «перенос сломал здоровую карту»
+    # (20.11.2026, копия сети: вывод валидатора ушёл в /dev/null, карта и
+    # архив остались записанными, причину не восстановить).
+    KOPII=$(mktemp -d)
+    cp -p "$PROJECT_DIR/dev-map.yaml" "$KOPII/dev-map.yaml" 2>/dev/null || true
+    cp -p "$PROJECT_DIR/docs/dev-map-archive.yaml" "$KOPII/dev-map-archive.yaml" 2>/dev/null || true
+    KARTA_DO_RC=0
+    KARTA_GATE >/dev/null || KARTA_DO_RC=$?
     UBRANO=$(cd "$PROJECT_DIR" && python3 scripts/archive-map.py --перенести 2>&1 \
              | sed -n 's/.*закрытых задач: \([0-9]*\).*/\1/p')
     UBRANO="${UBRANO:-0}"
-    if [ "$UBRANO" != "0" ] \
-       && ! bash "$PROJECT_DIR/scripts/pre-commit-gate.sh" --devmap-only "$PROJECT_DIR/dev-map.yaml" >/dev/null 2>&1; then
-        say "ТРЕВОГА: после переноса в архив карта не проходит валидатор"
-        bash "$PROJECT_DIR/scripts/tg_send.sh" \
-            "Приёмка убрала закрытые задачи в архив, и карта перестала проходить проверку. Работа остановлена — нужен разбор." \
-            --task acceptance-watch:crash >/dev/null 2>&1 || true
-        exit 1
+    if [ "$UBRANO" != "0" ]; then
+        KARTA_VYVOD=$(KARTA_GATE)
+        KARTA_PO_RC=$?
+        if [ "$KARTA_PO_RC" -ne 0 ]; then
+            say "ТРЕВОГА: после переноса в архив карта не проходит валидатор"
+            printf '%s\n' "$KARTA_VYVOD"
+            KARTA_HVOST=$(printf '%s\n' "$KARTA_VYVOD" | tail -8)
+            if [ "$KARTA_DO_RC" -eq 0 ]; then
+                [ -f "$KOPII/dev-map.yaml" ] && cp -p "$KOPII/dev-map.yaml" "$PROJECT_DIR/dev-map.yaml"
+                [ -f "$KOPII/dev-map-archive.yaml" ] && cp -p "$KOPII/dev-map-archive.yaml" "$PROJECT_DIR/docs/dev-map-archive.yaml"
+                say "перенос откачен: карта и архив возвращены из копий"
+                TEKST="Приёмка убрала закрытые задачи в архив, и карта перестала проходить проверку — перенос откачен, карта и архив как были. Работа остановлена — нужен разбор. Причина:
+$KARTA_HVOST"
+            else
+                TEKST="Карта красная до переноса (проверка не проходила и до приёмки), перенос не откатывался. Работа остановлена — нужен разбор. Ошибки проверки:
+$KARTA_HVOST"
+            fi
+            bash "$PROJECT_DIR/scripts/tg_send.sh" "$TEKST" \
+                --task acceptance-watch:crash >/dev/null 2>&1 || true
+            rm -rf "$KOPII"
+            exit 1
+        fi
     fi
+    rm -rf "$KOPII"
 fi
 
 say "$ITOG убрано-в-архив=$UBRANO · отчёт: $OTCHET"
@@ -415,12 +445,17 @@ if [ "$DVIZHENIE" = 1 ] || [ "$OCHERED_NOVA" = 1 ]; then
     # безусловно, и один отказ канала (429, отказ сторожа канала, нет сети)
     # означал молчание навсегда — тот самый класс, который этот механизм и
     # чинит ([[api-failures-counted-as-work]], находка G-02 ревью 27.09.2026).
-    if bash "$PROJECT_DIR/scripts/tg_send.sh" \
-           "Приёмка: $ITOG. $HVOST Отчёт в docs/приёмка/." >/dev/null 2>&1; then
-        printf '%s' "$SOSTAV" > "$SLED"
-    else
-        say "ОТКАЗ канала: состав очереди не запоминаю, скажу в следующий прогон"
-    fi
+    # Отказ правил канала (4) — дефект текста: тот же состав следующим прогоном
+    # получил бы тот же отказ, поэтому он запоминается, как и доставка.
+    SEND_RC=0
+    channel_send harness/demons/acceptance-watch.sh "Приёмка: $ITOG. $HVOST Отчёт в docs/приёмка/." || SEND_RC=$?
+    case "$SEND_RC" in
+        0) printf '%s' "$SOSTAV" > "$SLED" ;;
+        "$CHANNEL_RULES_REFUSED")
+           printf '%s' "$SOSTAV" > "$SLED"
+           say "ОТКАЗ правил канала: текст не годится, состав запомнен, отказ записан событием" ;;
+        *) say "ОТКАЗ канала: состав очереди не запоминаю, скажу в следующий прогон" ;;
+    esac
     # Число мало: владелец 27.09.2026 — «Мне нужен конкретный список с
     # пояснениями что мне нужно проверит и как». Список уходит ФАЙЛОМ, потому
     # что семь задач с шагами не влезают в потолок сообщения, а путь в тексте

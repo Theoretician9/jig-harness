@@ -607,7 +607,8 @@ def src_literals(files: list[tuple[Path, str]], root: Path) -> list[tuple[str, i
         else:
             for n, line in enumerate(text.split("\n"), 1):
                 m = SH_EVENT.search(line)
-                if m and not line.lstrip().startswith("#") and not m.group(2).startswith("$"):
+                # src из переменной ("$src" общей двери) судит паспорт звонящего, не литерал.
+                if m and not line.lstrip().startswith("#") and not m.group(2).lstrip('"').startswith("$"):
                     found.append((rel, n, m.group(2)))
     return found
 

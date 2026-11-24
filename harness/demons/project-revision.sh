@@ -312,7 +312,9 @@ CONF
             printf '%s\n' "$para" >> "$T/h.tmp"
             mv "$T/h.tmp" "$T/harness.proba.conf"
         done
-        env HARNESS_INSTALL_CONF="$T/install.conf" HARNESS_CONF="$T/harness.proba.conf" \
+        # PROJECT_DIR явно: окружение старше конфига, и PROJECT_DIR зовущего (стенд поезда
+        # выпуска) увёл бы ревизию стенда в чужое дерево.
+        env PROJECT_DIR="$T/proekt" HARNESS_INSTALL_CONF="$T/install.conf" HARNESS_CONF="$T/harness.proba.conf" \
             PATH="$T/bin:$PATH" PROBA_DEJSTVIE="$dejstvie" PROBA_PROEKT="$T/proekt" \
             PROBA_DOK="docs/ревизии/$(date +%F).md" CLAUDE_CALLS="$T/claude.calls" \
             TG_LOG="$T/tg.log" REVIZIA_CONF="${PROBA_CONF:-$T/proekt/harness/config/audit.yaml}" \

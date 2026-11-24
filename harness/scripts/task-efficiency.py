@@ -28,19 +28,19 @@ import argparse
 import json
 import math
 import os
-import re
 import statistics
 import subprocess
 import sys
 import time
 from pathlib import Path
 
+sys.path.insert(0, os.environ.get("HARNESS_CARDS_LIB") or str(Path(__file__).resolve().parent / "lib"))
+import cards  # noqa: E402
+
 HOUR = 3600
 WEEK_HOURS = 168
 CLOSED = ("test", "принято", "done")
 REWORK = ("wip", "plan")
-ID_LINE = re.compile(r"^([ +-])\s+- id: (\S+)")
-STATUS_LINE = re.compile(r"^([+-])\s+status: (\S+)")
 
 
 def map_tasks(map_path: Path, archive_path: Path) -> dict:
@@ -85,50 +85,14 @@ def trailer_commits(repo: Path, records: set) -> list[dict]:
 
 def status_history(repo: Path, map_rel: str) -> tuple[dict, dict]:
     """Возвраты и последний переход в закрытый статус по истории карты."""
-    proc = subprocess.Popen(
-        ["git", "-C", str(repo), "log", "--no-merges", "-p", "-U3", "--format=%x1e%at",
-         "--", map_rel], stdout=subprocess.PIPE, text=True, encoding="utf-8", errors="replace")
     returns: dict = {}
     closed_at: dict = {}
-    when, changes = 0, {}
-
-    def settle() -> None:
-        # Судим по коммиту целиком: перенос карточки между линиями — удаление
-        # в одном куске и вставка в другом, статус тот же, возврата нет.
-        for task_id, (old, new) in changes.items():
+    for task_id, rows in cards.status_transitions(repo, map_rel).items():
+        for at, old, new in rows:
             if old in CLOSED and new in REWORK:
                 returns[task_id] = returns.get(task_id, 0) + 1
             if new in CLOSED and old not in CLOSED:
-                closed_at[task_id] = max(closed_at.get(task_id, 0), when)
-
-    old_id = new_id = None
-    for raw in proc.stdout:
-        line = raw.rstrip("\n")
-        if line.startswith("\x1e"):
-            settle()
-            when, changes = int(line[1:]), {}
-            continue
-        if line.startswith("@@"):
-            old_id = new_id = None
-            continue
-        found = ID_LINE.match(line)
-        if found:
-            side, task_id = found.groups()
-            if side in " -":
-                old_id = task_id
-            if side in " +":
-                new_id = task_id
-            continue
-        found = STATUS_LINE.match(line)
-        if found:
-            side, status = found.groups()
-            task_id = old_id if side == "-" else new_id
-            if task_id:
-                pair = changes.setdefault(task_id, [None, None])
-                slot = 0 if side == "-" else 1
-                pair[slot] = pair[slot] or status
-    settle()
-    proc.wait()
+                closed_at[task_id] = max(closed_at.get(task_id, 0), at)
     return returns, closed_at
 
 

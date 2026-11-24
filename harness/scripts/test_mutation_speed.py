@@ -308,6 +308,27 @@ def g01(tmp: Path) -> None:
           [any("scripts/mech2.sh" in l for l in names), any("scripts/mech.sh" in l for l in names)])
 
 
+def g01_partial(tmp: Path) -> None:
+    """G-01 частичная: правка строк 10 и 90, мутация есть только у 90 — строка 10
+    тоже дыра; иначе шаг зелёный, а половина правки не проверена (R2-01).
+    Правило включает ключ MUT_PARTIAL_EDIT_HOLES=1; при 0 дыра — только когда
+    не задета ни одна правка (живой счёт 22.11: +137 дыр у 41 задачи)."""
+    s = TaskStand(tmp / "1", "hr.g01-part", M3, {"scripts/mech3.sh": lines_file("N", 95, zero=(10, 90))},
+                  {"scripts/mech3.sh": lines_file("N", 95)})
+    rc, out, paper = s.accept(MUT_PARTIAL_EDIT_HOLES="1")
+    names = uncovered(out + paper)
+    check("G-01 частичная больной: правка 10 без мутаций при мутации у 90 — код ≠ 0, дыра «строки 10–10»,"
+          " 90 в дыре не названа, мутация n90 поймана",
+          [True, True, False, True],
+          [rc != 0, any("scripts/mech3.sh" in l and re.search(r"10[–-]10", l) for l in names),
+           any(re.search(r"90[–-]90", l) for l in names), "m3: n90" in paper])
+    s = TaskStand(tmp / "0", "hr.g01-part0", M3, {"scripts/mech3.sh": lines_file("N", 95, zero=(10, 90))},
+                  {"scripts/mech3.sh": lines_file("N", 95)})
+    rc, out, paper = s.accept(MUT_PARTIAL_EDIT_HOLES="0")
+    check("G-01 частичная, старое правило (ключ 0): мутация у 90 задела правку — код 0, без «правка без мутаций»",
+          [0, []], [rc, uncovered(out + paper)])
+
+
 def g02(tmp: Path) -> None:
     """G-02/G-10: память чистой копии не переживает правку исходника, пробы, соседа."""
     for label, hook, line in (("исходник", "scripts/mech.sh", "# чужая правка"),
@@ -467,6 +488,7 @@ def main() -> int:
                             ("(б)", lambda: probe_task_lines(Stand(tmp / "b"))),
                             ("(в)", lambda: probe_lock(Stand(tmp / "c"))),
                             ("G-01", lambda: g01(tmp / "g01")),
+                            ("G-01 частичная", lambda: g01_partial(tmp / "g01p")),
                             ("G-02", lambda: g02(tmp / "g02")),
                             ("G-04", lambda: g04_acceptance(tmp / "g04")),
                             ("G-08", lambda: g08(tmp / "g08")),

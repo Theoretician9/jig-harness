@@ -26,6 +26,9 @@
 # Имена переменных ЛАТИНИЦЕЙ (память: cyrillic-in-bash-names).
 set -uo pipefail
 export LC_ALL=C.UTF-8
+# Проект и пакет стенда — из его конфига: у механизмов окружение старше конфига, и
+# PROJECT_DIR/HARNESS_STARTER зовущего (стенд поезда выпуска) увели бы их в чужое дерево.
+unset PROJECT_DIR HARNESS_STARTER
 
 KOREN="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
 DISPATCHER="$KOREN/scripts/tg-dispatcher.sh"
@@ -136,16 +139,18 @@ def kick_delay(path, uid):
         return "нет"
     return f"{min(kicks) - rec:.2f}"
 
-def kick_before(path, uid, ends):
-    """Толчок раньше, чем кончилось первое обращение «принял» к Bot API стенда
-    (ответ или обрыв по таймауту curl): моменты концов — строки файла ends."""
+def kick_before(path, uid):
+    """Толчок раньше, чем кончилась первая квитанция «принял» — вся серия попыток,
+    до метки delivery.ack. Синхронный «принял» толкает только после неё. Конец
+    первого обращения (обрыв curl через 10 с) мерил машину: под нагрузкой судьи
+    ворот толчка шли дольше 10 с, и здоровый толчок второго выходил «после»."""
     ts = rec_ts(path, uid)
     kicks = [float(d["когда"]) for d in rows(path, "kick_sent")
              if ts in str(d.get("ts_список") or "").split(",")]
-    try:
-        ended = min(float(x) for x in open(ends, encoding="utf-8").read().split())
-    except (OSError, ValueError):
-        return "нет (обращение «принял» не кончилось)"
+    ends = [float(d["sent_at"]) for d in rows(path, "ack") if d.get("sent_at")]
+    if not ends:
+        return "нет (квитанция «принял» не кончилась)"
+    ended = min(ends)
     if not kicks:
         return "нет (толчка нет)"
     lag = min(kicks) - ended
@@ -154,9 +159,23 @@ def kick_before(path, uid, ends):
 def kicks(path):
     return str(len(rows(path, "kick_sent")))
 
+def acks(path):
+    return str(len(rows(path, "ack")))
+
+def settled(path):
+    """«да», когда у каждого принятого сообщения есть исход толчка. Тишина журнала
+    этого не значит: под нагрузкой судьи ворот толчка молчат дольше её окна."""
+    done = {str(d.get("ts")) for d in rows(path, "no_kick")}
+    for ev in ("kick_sent", "kick_refused", "kick_stuck", "kick_stale"):
+        for d in rows(path, ev):
+            done.update(str(d.get("ts_список") or "").split(","))
+    got = {str(d.get("ts")) for d in rows(path, "received")}
+    return "да" if got and got <= done else "нет"
+
 cmd, args = sys.argv[1], sys.argv[2:]
 print({"rec_when": rec_when, "rec_ts": rec_ts, "kick_delay": kick_delay,
-       "kick_before": kick_before, "kicks": kicks}[cmd](*args))
+       "kick_before": kick_before, "kicks": kicks, "acks": acks,
+       "settled": settled}[cmd](*args))
 PYEOF
 mk() { python3 "$T/marks.py" "$@"; }
 
@@ -165,8 +184,7 @@ if want диспетчер; then
     PATHS_JUDGED=$((PATHS_JUDGED + 1))
     echo "═══ путь 1: tg-dispatcher.sh целым циклом — «принял» фоном"
     # sendMessage: «sleep» — ответ через заданные секунды, «hold» — ответ, когда проба
-    # положит файл release рядом с acks (конец обращения — ответ или уход клиента —
-    # пишется в acks-end), «drop» — связь рвётся без
+    # положит файл release рядом с acks или клиент уйдёт по таймауту, «drop» — связь рвётся без
     # ответа (curl падает, как при лежащей сети). Каждое обращение пишется С МОМЕНТОМ
     # ПРИХОДА: так судится, что «принял» ушло ≤ 30 с, а не только что дошло.
     # Сервер многопоточный: висящий sendMessage не держит getUpdates.
@@ -201,8 +219,6 @@ class H(BaseHTTPRequestHandler):
                 ready_, _, _ = select.select([self.connection], [], [], 0.05)
                 if ready_ and not self.connection.recv(1, socket.MSG_PEEK):
                     break  # curl ушёл по своему таймауту
-            with open(os.path.join(os.path.dirname(acks), "acks-end"), "a") as fh:
-                fh.write(f"{time.time():.3f}\n")
         time.sleep(delay)
         self.reply({"ok": True, "result": {"message_id": 1}})
     do_GET = do_POST
@@ -216,6 +232,8 @@ PYEOF
     d_bad() { D_STAND_BAD=$((D_STAND_BAD + 1)); echo "  СТЕНД: $1"; }
     offset_is() { [ "$(cat "$1/log/tg_offset" 2>/dev/null)" = "$2" ]; }
     kicks_are() { [ "$(mk kicks "$1")" -ge "$2" ] 2>/dev/null; }
+    acks_are() { [ "$(mk acks "$1")" -ge "$2" ] 2>/dev/null; }
+    settled() { [ "$(mk settled "$1")" = да ]; }
     lock_free() { flock -n "$1" true 2>/dev/null; }
 
     # $1 = имя, $2 = «id:текст;…», $3 = sleep|hold|drop, $4 = задержка sendMessage, $5 = pause|"".
@@ -273,6 +291,7 @@ EOF
     d_finish() {  # $1 = предел ожидания offset, с
         wait_for "$1" offset_is "$DS" $((D_LAST + 1)) \
             || { d_bad "диспетчер не разобрал update $D_LAST за $1 с"; tail -5 "$DS/log/tg-dispatcher.log" 2>/dev/null | sed 's/^/    /'; }
+        wait_for "$1" settled "$DJ" || d_bad "у сообщений нет исхода толчка за $1 с"
         sleep 2
         wait_quiet "$DS/tmux-calls" 2 20
         wait_quiet "$DJ" 2 15
@@ -282,19 +301,22 @@ EOF
 
     # (а) БОЛЬНОЙ: Bot API не отвечает на «принял», пока проба не увидит оба толчка
     # (предел 40 с), — толчок каждого из двух сообщений раньше конца первого «принял».
-    # Синхронный «принял» толкает только после конца: ответа или своего таймаута
-    # curl. Судится порядок, а не секунды от received
+    # Синхронный «принял» толкает только после конца: ответа или последнего обрыва
+    # по таймауту curl. Судится порядок, а не секунды от received
     # (спека К-1: максимум 4 с): под нагрузкой машины здоровый толчок второго шёл
     # 8 с — бюджет мерил машину, а не код.
     echo "— (а) sendMessage не отвечает до толчков, два текста одним пакетом"
     d_start slow "901:первое сообщение пробы про карту;902:второе сообщение пробы про панель" hold 0
     wait_for 40 kicks_are "$DJ" 2 || true
     : > "$DS/release"
+    # Квитанции — фоном в группе диспетчера: погасить её раньше меток delivery.ack
+    # значило бы судить порядок без конца «принял».
+    wait_for 40 acks_are "$DJ" 2 || d_bad "меток delivery.ack нет за 40 с"
     d_finish 40; d_reached "медленный «принял»"
     case_check "БОЛЬНОЙ (а): толчок первого отдан, пока «принял» ждёт ответа" "да" \
-        "$(mk kick_before "$DJ" 901 "$DS/acks-end")"
+        "$(mk kick_before "$DJ" 901)"
     case_check "БОЛЬНОЙ (а): толчок второго отдан, пока «принял» ждёт ответа" "да" \
-        "$(mk kick_before "$DJ" 902 "$DS/acks-end")"
+        "$(mk kick_before "$DJ" 902)"
     # (б) «принял» всё равно уходит, и не позже 30 с от приёма (правило канала 1).
     for pair in "901:первое сообщение пробы" "902:второе сообщение пробы"; do
         uid="${pair%%:*}"; words="${pair#*:}"
@@ -315,7 +337,10 @@ PYEOF
 )
         case_check "(б) «принял: …» на $uid дошло до Bot API ≤ 30 с от received" "да" "$got"
     done
-    case_check "(б) «принял» по одному на сообщение (всего 2)" "2" \
+    # Лишнее обращение законно только как повтор после обрыва curl по таймауту, и
+    # каждый такой повтор диспетчер называет в журнале: дубль без строки — дефект.
+    RETRIES=$(grep -c 'сеть не ответила .*повтор' "$DS/log/tg-dispatcher.log" 2>/dev/null)
+    case_check "(б) «принял» по одному на сообщение (2 и повторы, названные в журнале)" "$((2 + ${RETRIES:-0}))" \
         "$(grep -c ' принял: ' "$DS/acks" 2>/dev/null || echo 0)"
 
     # (в) фоновый «принял» не держит лок диспетчера: диспетчер убит (только он, не

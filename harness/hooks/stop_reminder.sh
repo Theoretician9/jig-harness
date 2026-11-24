@@ -39,9 +39,24 @@ fi
 # Пишем ТОЛЬКО там, где ход действительно заканчивается (выход с кодом 0). При
 # exit 2 хук блокирует завершение и агент продолжает работу — метка там солгала
 # бы ровно тем же, чем лгало молчание панели.
+#
+# Две метки: общая (turn-end.stamp — её читают прежние судьи) и по сессии
+# (turn-end.<session_id>.stamp). При ротации с преемником живут две смены, и общая
+# метка одной подтвердила бы конец хода другой; сторож судит дорабатывающую по её
+# собственной. session_id — из JSON хука; нет его или он не похож на идентификатор —
+# только общая метка (имя файла не берётся из чужого ввода как есть).
 отметить_конец_хода() {
   [ -n "${LOG_DIR:-}" ] || return 0
-  date +%s > "$LOG_DIR/turn-end.stamp" 2>/dev/null || true
+  local now sid
+  now=$(date +%s)
+  printf '%s\n' "$now" > "$LOG_DIR/turn-end.stamp" 2>/dev/null || true
+  sid=$(printf '%s' "${payload:-}" | python3 -I -c 'import json,re,sys
+try:
+    s = json.load(sys.stdin).get("session_id", "")
+except Exception:
+    s = ""
+print(s if isinstance(s, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,80}", s) else "")' 2>/dev/null || true)
+  [ -z "$sid" ] || printf '%s\n' "$now" > "$LOG_DIR/turn-end.$sid.stamp" 2>/dev/null || true
 }
 
 # stop_hook_active=true в JSON на stdin — модель УЖЕ продолжила работу после
@@ -64,6 +79,15 @@ fi
 # не слушать». На паузе хвостов не показываем: ход закончен, и это верно.
 if [ -n "$project_dir" ] \
    && python3 -I "$project_dir/scripts/pause.py" --идёт-ли >/dev/null 2>&1; then
+  отметить_конец_хода
+  exit 0
+fi
+
+# Во время ротации новой работы не просим: смена уходит, ход закончен.
+rotation_now() {
+  ( source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/pane.sh" >/dev/null 2>&1 || exit 1; rotation_in_progress )
+}
+if rotation_now; then
   отметить_конец_хода
   exit 0
 fi

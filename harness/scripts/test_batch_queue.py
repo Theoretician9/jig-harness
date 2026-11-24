@@ -514,6 +514,37 @@ def heavy_own_results(tmp: Path) -> None:
               ((s.pending("за") or {}).get("попыток"), s.result("за")))
 
 
+SHORT_TAIL = " — срок захода вышел; подай её снова, готовые мутации отдаст кэш прибора"
+
+
+def heavy_short_progress(tmp: Path) -> None:
+    """Недогнанная заявка с ходом (19.11: 14 → 18 → 33 мутаций, а заявку убил предел
+    попыток). Поломки: «не догнана, новых мутаций K>0» тратит попытку; K не
+    разбирается (5 и 0 — одно); K=0 тоже не тратит попытку — вечный круг без хода."""
+    for rc in (1, 2):
+        s = Heavy(tmp / f"ход{rc}")
+        s.set(rc=rc, lines={"hr.a": "не догнана, новых мутаций 5" + SHORT_TAIL})
+        s.seed(s.request("за", ["hr.a"], попыток=2))
+        s.serve()
+        check(f"А(е2) код {rc}, «не догнана, новых мутаций 5», попыток было 2 → в очереди, "
+              "попыток 2, итога нет", (2, None),
+              ((s.pending("за") or {}).get("попыток"), s.result("за")))
+        s.set(rc=0)
+        s.edit("за", не_раньше=0)
+        s.serve()
+        check(f"А(е2) код {rc}: следующий заход её не теряет — прогнана, итог 0, heavy.lost нет",
+              (2, 0, False), (len(s.runs()), (s.result("за") or {}).get("код"), "heavy.lost" in s.events()))
+    s = Heavy(tmp / "ход0")
+    s.set(rc=2, lines={"hr.a": "не догнана, новых мутаций 0" + SHORT_TAIL})
+    s.seed(s.request("за", ["hr.a"], попыток=2))
+    s.serve()
+    s.edit("за", не_раньше=0)
+    s.serve()
+    check("А(е3) «не догнана, новых мутаций 0», попыток было 2 → третья попытка, «потеряна», "
+          "heavy.lost, команда звана один раз", (True, True, 1),
+          (lost(s.result("за")), "heavy.lost" in s.events(), len(s.runs())))
+
+
 def heavy_age(tmp: Path) -> None:
     """А(ж). Поломка: занятый срез держит заявку вечно — без предела возраста нет ни итога, ни тревоги."""
     s = Heavy(tmp / "ж")
@@ -719,7 +750,8 @@ def heavy_switch_off(tmp: Path) -> None:
 
 
 HEAVY_PROBES = (("А 75", heavy_busy_returns), ("А смерть", heavy_runner_death),
-                ("А итог по id", heavy_own_results), ("А возраст", heavy_age),
+                ("А итог по id", heavy_own_results), ("А недогнана с ходом", heavy_short_progress),
+                ("А возраст", heavy_age),
                 ("А заявитель ушёл", heavy_requester_gone), ("А дерево помощника", heavy_helper_tree),
                 ("А замок и срез", heavy_lock_and_slice), ("А среда", heavy_env),
                 ("А смерть заявителя", heavy_requester_killed), ("А дубль", heavy_duplicate),

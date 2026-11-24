@@ -224,7 +224,7 @@ def _oneshot(p: dict) -> bool:
 def _has_session() -> bool:
     session = os.environ.get("TMUX_SESSION") or "agent"
     try:
-        return subprocess.run(["tmux", "has-session", "-t", session],
+        return subprocess.run(["tmux", "has-session", "-t", "=" + session],
                               capture_output=True, timeout=10).returncode == 0
     except (OSError, subprocess.SubprocessError):
         return False

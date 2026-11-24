@@ -42,7 +42,7 @@ SSH_FINGERPRINT = re.compile(r"SHA256:[A-Za-z0-9+/]{43}")
 # Срезы поезда и прошлый выпуск — коммиты проекта и пакета: по ним дверь согласия и выбор ворот
 # находят ход, маска их стёрла бы.
 DIGEST_KEYS = frozenset({"sha256", "head", "commit", "ino_from", "sha", "checks_file_sha",
-                         "срез_проекта", "срез_пакета", "прошлый_sha_проекта"})
+                         "срез_проекта", "срез_пакета", "прошлый_sha_проекта", "дерево"})
 # Предмет согласия (sha выката, пакета, спеки) — строка кода, а не речь: хэш в нём не секрет.
 SUBJECT_KEY = "цель"
 
@@ -188,11 +188,14 @@ def _append_line(path: str, mode: int, payload: bytes) -> str | None:
             os.close(fd)
 
 
-def _mask_secrets(text: str) -> str:
+def mask_secrets(text: str) -> str:
     import patterns
     for secret in patterns.секреты_в_речи(text):
         text = text.replace(secret, "<СКРЫТО>")
     return text
+
+
+_mask_secrets = mask_secrets
 
 
 def _record_lost(journal: str, src: str, reason: str, kind: str = "lost") -> None:

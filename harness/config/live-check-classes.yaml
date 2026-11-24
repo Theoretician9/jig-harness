@@ -841,6 +841,8 @@
     класс: D
   "scripts/test_stack_watch.py":
     класс: D
+  "scripts/test_update_impact.py":
+    класс: D
   "scripts/check-security.py":
     класс: C1
   "scripts/hooks/artifact_seal.py":

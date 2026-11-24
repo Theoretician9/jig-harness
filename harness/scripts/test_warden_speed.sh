@@ -17,7 +17,7 @@
 # доказывает сама — один проход под strace (случай «стенд»).
 #
 # Двери копий для мутаций: WARDEN_SPEED_DAEMON — путь сторожа, WARDEN_SPEED_PANE —
-# путь pane.sh.
+# путь pane.sh, WARDEN_SPEED_RELEASE — путь release_mark.sh.
 #
 #   bash scripts/test_warden_speed.sh
 # Код возврата: 0 — зелёная, 1 — красная.
@@ -33,7 +33,9 @@ source "$HERE/lib/selftest_cases.sh"
 DAEMON="${WARDEN_SPEED_DAEMON:-$HERE/../harness/demons/session-warden.sh}"
 [ -f "$DAEMON" ] || DAEMON="$HERE/../demons/session-warden.sh"
 PANE_LIB="${WARDEN_SPEED_PANE:-$HERE/lib/pane.sh}"
-for f in "$DAEMON" "$PANE_LIB"; do
+# Метка выпуска — НАСТОЯЩАЯ библиотека пула: сторож судит её же словом release_mark_owner.
+RELEASE_LIB="${WARDEN_SPEED_RELEASE:-$HERE/lib/release_mark.sh}"
+for f in "$DAEMON" "$PANE_LIB" "$RELEASE_LIB"; do
     [ -s "$f" ] || { echo "ПЛОХО: нет файла по пути раскладки: $f — проверять нечего"; exit 1; }
 done
 
@@ -127,6 +129,7 @@ cat > "$T/pass.sh" <<'EOF'
 set -uo pipefail
 source "$PANE_LIB"
 source "$STAND/funcs.sh"
+source "$RELEASE_LIB"
 TMUX_KICKED=0
 case "${1:-}" in
     owner) pane_kick_owner_locked() { return 0; }
@@ -138,6 +141,7 @@ speed_kick_step
 EOF
 unset TMUX TMUX_PANE
 STAND_ENV=(env PATH="$T/bin:$PATH" STAND="$T" PANE_LIB="$PANE_LIB" PROJECT_DIR="$PROJ"
+    RELEASE_LIB="$RELEASE_LIB" HARNESS_RELEASE_MARK="$T/release.mark"
     LOG_DIR="$T/log" HARNESS_LOG_DIR="$T/log" ROTATION_LOG="$T/log/rotation.jsonl"
     HARNESS_PANEL_STATE="$T/panel" HARNESS_CONF="$T/harness.conf" HARNESS_INSTALL_CONF="$T/harness.conf"
     TMUX_SESSION=warden-speed-stand SESSION_ID=stand-session PANE_ENTER_DELAY=0)
@@ -162,7 +166,8 @@ last_arg() {  # значение довода в последнем вызове
 import json, sys
 calls = [json.loads(l) for l in open(sys.argv[1], encoding="utf-8")]
 calls = [c for c in calls if "--сторожу" in c]
-print(calls[-1][calls[-1].index(sys.argv[2]) + 1] if calls else "нет вызова")
+print("нет вызова" if not calls else "нет довода" if sys.argv[2] not in calls[-1]
+      else calls[-1][calls[-1].index(sys.argv[2]) + 1])
 PY
 }
 age() { touch -d "-$2 min" "$T/log/$1"; }   # состарить метку на N минут
@@ -255,6 +260,30 @@ echo 2 > "$T/log/speed.unanswered"
 pass
 case_check "7: «ровно» — счёт неотвеченных снят" "нет" "$([ -f "$T/log/speed.unanswered" ] && echo да || echo нет)"
 
+# ── 7а. память предложенного: судья знает, что уже предлагалось ────────────
+echo "── 7а. память предложенного ──"
+offered() { [ -f "$T/log/speed.offered" ] && sort -u "$T/log/speed.offered" | tr '\n' ' ' | sed 's/ $//' || echo нет; }
+fresh; judge 'недобор\t2\thr.x hr.y' 'Режим «быстрый»: 5 задач одновременно. Сейчас могу 5.\nВ работе 3, могу взять ещё 2.\n'
+pass
+case_check "7а: первый пинок — судье передана пустая память" "" "$(last_arg --предложено)"
+case_check "7а: после пинка в памяти предложенные id" "hr.x hr.y" "$(offered)"
+age speed.kick 21; judge 'недобор\t2\thr.z hr.x' 'Режим «быстрый»: 5 задач одновременно. Сейчас могу 5.\nВ работе 3, могу взять ещё 2.\n'
+pass
+case_check "7а: второй пинок — судье передана память первого" "hr.x hr.y" "$(last_arg --предложено | tr ' ' '\n' | sort -u | tr '\n' ' ' | sed 's/ $//')"
+case_check "7а: без прибавки память копится" "hr.x hr.y hr.z" "$(offered)"
+age speed.kick 21; judge 'недобор\t1\thr.w' 'Режим «быстрый»: 5 задач одновременно. Сейчас могу 5.\nВ работе 4, могу взять ещё 1.\n'
+pass
+case_check "7а: прибавка в работе — память начата заново" "hr.w" "$(offered)"
+judge 'лишнее\t1' 'Режим «быстрый»: 5 задач одновременно. Сейчас могу 5.\nВ работе 6, лишних 1.\n'
+pass
+case_check "7а: «лишнее» — память снята" "нет" "$(offered)"
+judge 'недобор\t1\thr.v' "$SHOWN_MED"; age speed.kick 21
+pass
+case_check "7а: после «лишнего» пинок снова помнит" "hr.v" "$(offered)"
+judge 'ровно' 'Режим «быстрый»: 5 задач одновременно. Сейчас могу 5.\nВ работе 5, недобора нет.\n'
+pass
+case_check "7а: «ровно» — память снята" "нет" "$(offered)"
+
 # ── 8. судья упал ───────────────────────────────────────────────────────────
 echo "── 8. судья упал → молчание и строка в журнале ──"
 fresh; judge 'недобор\t2\thr.x hr.y' "$SHOWN_MED"; echo 2 > "$PROJ/judge/rc.сторожу"
@@ -284,6 +313,44 @@ if command -v strace >/dev/null 2>&1; then
 else
     case_check "9: strace есть" "да" "нет"
 fi
+
+# ── 10. идёт выпуск: о недоборе молчать ────────────────────────────────────
+# Пул тяжёлых прогонов при живой метке выпуска мест не даёт: пинок «возьми ещё»
+# плодил бы ждущих. Мёртвый или подменённый pid метки — выпуска нет (release_mark.sh).
+echo "── 10. метка выпуска ──"
+source "$RELEASE_LIB"
+sleep 300 & RELEASE_SLEEPER=$!
+trap 'kill "$RELEASE_SLEEPER" 2>/dev/null; rm -rf "$T"' EXIT
+RELEASE_START=$(release_pid_start "$RELEASE_SLEEPER")
+fresh; judge 'недобор\t2\thr.x hr.y' "$SHOWN_MED"
+printf '%s %s\n' "$RELEASE_SLEEPER" "$RELEASE_START" > "$T/release.mark"
+pass
+case_check "10: живая метка — текста скорости нет" "0" "$(speed_texts)"
+case_check "10: живая метка — строка про выпуск" "да" "$(said 'выпуск')"
+case_check "10: живая метка — метки пинка нет" "нет" "$([ -f "$T/log/speed.kick" ] && echo да || echo нет)"
+fresh; judge 'недобор\t2\thr.x hr.y' "$SHOWN_MED"
+printf '%s %s\n' "$RELEASE_SLEEPER" "1" > "$T/release.mark"
+pass
+case_check "10: подменённый pid (чужое время старта) — пинок есть" "1" "$(speed_texts)"
+kill "$RELEASE_SLEEPER" 2>/dev/null; wait "$RELEASE_SLEEPER" 2>/dev/null
+fresh; judge 'недобор\t2\thr.x hr.y' "$SHOWN_MED"
+printf '%s %s\n' "$RELEASE_SLEEPER" "$RELEASE_START" > "$T/release.mark"
+pass
+case_check "10: мёртвый pid метки — пинок есть" "1" "$(speed_texts)"
+rm -f "$T/release.mark"
+
+# ── 11. сторож сам подключает метку выпуска ─────────────────────────────────
+# Стенд выше подключает библиотеку сам, и строка подключения в стороже им не
+# судится: без неё release_mark_owner — «command not found» в условии, сторож
+# молча пинает и при выпуске. Строка берётся из сторожа и идёт под set -eu с
+# PROJECT_DIR без scripts/lib: путь обязан идти от самого сторожа, иначе у
+# стенда и копии без библиотеки обход падает целиком.
+echo "── 11. подключение метки в стороже ──"
+SOURCE_LINE=$(grep -E '^(source|\.) .*lib/release_mark\.sh' "$DAEMON" || true)
+case_check "11: строка подключения release_mark.sh в стороже есть" "1" "$(printf '%s' "$SOURCE_LINE" | grep -c .)"
+case_check "11: подключение даёт release_mark_owner под set -eu" "function" \
+    "$(HARNESS_SCRIPTS="$(dirname "$(dirname "$RELEASE_LIB")")" PROJECT_DIR="$PROJ" SOURCE_LINE="$SOURCE_LINE" \
+        bash -c 'set -euo pipefail; eval "$SOURCE_LINE"; type -t release_mark_owner' 2>/dev/null)"
 
 passed=$((CASES_PATHS - CASES_FAILED))
 if [ "$CASES_FAILED" -eq 0 ]; then

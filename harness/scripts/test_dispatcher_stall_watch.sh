@@ -17,6 +17,9 @@
 #   bash scripts/test_dispatcher_stall_watch.sh [--сторож <путь>]
 set -uo pipefail
 export LC_ALL=C.UTF-8
+# Проект и пакет стенда — из его конфига: у механизмов окружение старше конфига, и
+# PROJECT_DIR/HARNESS_STARTER зовущего (стенд поезда выпуска) увели бы их в чужое дерево.
+unset PROJECT_DIR HARNESS_STARTER
 # Журнал стенда задаёт паспорт стенда, а загрузчик конфига ставит окружение
 # выше файла: унаследованный LOG_DIR уводил сторожа в чужой каталог, и проба
 # краснела на чистом коде (прибор мутаций с LOG_DIR=… — 17 случаев из 17).
@@ -413,6 +416,13 @@ or_stand; msg done 360 >/dev/null; echo 1 > "$OR/send-rc"; run_or
 case_check "О10: дверь отказала (код 1) — метки эпизода нет" нет-метки "$(decision)"
 run_or
 case_check "О10: после кода 1 следующий прогон — ровно один новый вызов" 2 "$(sent)"
+# Код 4 — правила канала отвергли текст: тот же текст через минуту отвергнут снова.
+or_stand; msg done 360 >/dev/null; echo 4 > "$OR/send-rc"; run_or
+case_check "О10а: отказ правил (код 4) — решение silent:отказ-правил" "silent:отказ-правил" "$(decision)"
+run_or; run_or
+case_check "О10а: после кода 4 следующие прогоны дверь не зовут" 1 "$(sent)"
+case_check "О10а: отказ записан одним событием channel.rules_refused" 1 \
+    "$(grep -c '"channel.rules_refused"' "$OR/log/канал-отказы-правил.jsonl" 2>/dev/null || echo 0)"
 
 or_stand; msg done 1000 >/dev/null; run_or
 case_check "О11: первый эпизод — весть" 1 "$(sent)"

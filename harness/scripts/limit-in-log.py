@@ -462,7 +462,7 @@ def действует(путь: str, экран: str = "", сейчас: float 
     return (None, None, "отказ" in новые) if новые else None
 
 
-# Отказ ДОСТУПА — не лимит. Находка копии bkb 11.11.2026: два часа все сессии
+# Отказ ДОСТУПА — не лимит. Находка копии сети 11.11.2026: два часа все сессии
 # получали API 403 `oauth_org_not_allowed` («can't use your Claude subscription,
 # usually because a payment is past due»), а сторож пинал мёртвую смену словами
 # «признака лимита нет». Лимит кончается сам, отказ доступа — нет: нужен человек,
@@ -648,7 +648,7 @@ def _пробы_после_и_стоит(проба) -> None:
 
 
 def _пробы_отказа_доступа(проба) -> None:
-    """Отказ доступа 403 (находка bkb 11.11.2026): запись снята с живого транскрипта."""
+    """Отказ доступа 403 (находка копии сети 11.11.2026): запись снята с живого транскрипта."""
     import tempfile
     отказ = {"type": "assistant", "isApiErrorMessage": True, "apiErrorStatus": 403,
              "error": "oauth_org_not_allowed", "apiErrorCode": "oauth_not_allowed_for_organization",

@@ -489,7 +489,7 @@ def view_mode(args) -> int:
 
 def to_library(args) -> int:
     """Недельный замер → данные установки (process_library.measure_path), не файл пакета:
-    учтённый файл, переписанный демоном, держал дерево копии грязным (копия bkb 16.11.2026)."""
+    учтённый файл, переписанный демоном, держал дерево копии грязным (копия сети 16.11.2026)."""
     path = process_library.measure_path(args.logs)
     lock = locked(Path(args.logs) / "locks" / "process-library.lock")
     if lock is None:

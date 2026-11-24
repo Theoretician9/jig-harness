@@ -321,6 +321,8 @@ def _шаги(шаги: dict, csrf: str) -> str:
         строки = []
         for шаг in шаги["все шаги"]:
             включён = шаг in включённые
+            снят_опорой = включён and шаг not in шаги["действующие"][уровень]
+            опоры = ", ".join(шаги["опоры"].get(шаг, []))
             действие = "выключить" if включён else "включить"
             строки.append(
                 f'<form method="post" action="/shag">'
@@ -330,8 +332,9 @@ def _шаги(шаги: dict, csrf: str) -> str:
                 f'<input type="hidden" name="действие" value="{действие}">'
                 f'<button class="{"выбрано" if включён else ""}" '
                 f'title="{html.escape(шаги["поясняет"].get(шаг, ""))}">'
-                f'{html.escape(шаг.replace("_", " "))}</button></form>')
-        куски.append(f'<div class="карта"><h2>{подписи[уровень]}</h2>'
+                f'{html.escape(шаг.replace("_", " "))}'
+                f'{f" (выключен опорой: {html.escape(опоры)})" if снят_опорой else ""}</button></form>')
+        куски.append(f'<div class="карта"><h2>{html.escape(подписи.get(уровень, уровень))}</h2>'
                      f'<div class="кнопки">{"".join(строки)}</div>'
                      f'<div class="подсказка">подсвеченные — обязательны; '
                      f'нажатие включает или выключает</div></div>')

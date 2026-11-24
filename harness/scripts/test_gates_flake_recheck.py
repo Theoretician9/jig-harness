@@ -64,8 +64,9 @@ def case(name: str, ok: bool, detail: str = "") -> None:
     print(f"  {'ок' if ok else 'ПЛОХО'} · {name}" + ("" if ok else f" — {detail}"))
 
 
-def run_stand(log_dir: Path, recheck: str = "1", jobs: str = "1") -> str:
+def run_stand(log_dir: Path, recheck: str = "1", jobs: str = "1", **extra: str) -> str:
     env = {k: v for k, v in os.environ.items() if not k.startswith(("HARNESS_LOG_DIR", "GATES_"))}
+    env.update(extra)
     proc = subprocess.run(["bash", "-c", STAND, "stand", str(log_dir), LIB, recheck, jobs],
                           capture_output=True, text=True, timeout=120, env=env)
     return proc.stdout + proc.stderr
@@ -143,6 +144,16 @@ def main() -> int:
         case("без GATES_RECHECK красная считается сразу, перепрогона нет",
              "СЧЁТ 1 2" in out and runs(log_dir, "флейк") == 1 and not flake_rows(log_dir),
              f"запусков флейка {runs(log_dir, 'флейк')}\n{out[-600:]}")
+
+    # Очередь слияния знает, что проверка красна на самом master (М4 тяжёлых прогонов): её
+    # красная ветки соло не повторяется — флейк ветки дал бы ту же красную, что master.
+    # Поломка: GATES_NO_RECHECK не читается (красная гонится дважды); снимает соло всем (флейк красный).
+    with tempfile.TemporaryDirectory(prefix="gates-flake-norecheck-") as tmp:
+        log_dir = Path(tmp)
+        out = run_stand(log_dir, GATES_NO_RECHECK="другая|красная")
+        case("GATES_NO_RECHECK: названная красная — без соло, флейк — с соло",
+             (runs(log_dir, "красная"), runs(log_dir, "флейк"), "СЧЁТ 1 1 1" in out) == (1, 2, True),
+             f"запусков красной {runs(log_dir, 'красная')}, флейка {runs(log_dir, 'флейк')}\n{out[-600:]}")
 
     gates = Path(GATES_SH).read_text(encoding="utf-8")
     finals = [m.start() for m in re.finditer(r'echo "=== итог', gates)]

@@ -103,6 +103,12 @@ journals:
     time_field: ts
     time_kind: tz
     event_from: "field:event"
+  widget-buttons:
+    file: widget-buttons.jsonl
+    writers: [scripts/lib/widget_buttons.py]
+    time_field: ts
+    time_kind: tz
+    event_from: "field:event"
   account-switch:
     file: account-switch.jsonl
     writers: [scripts/account-switch.py]
@@ -293,6 +299,15 @@ journals:
     time_kind: Z
     event_from: tokens.spent
     session_field: session
+  tokens-2026-11:
+    file: tokens-2026-11.jsonl
+    task_infer: session
+    n_fields: [in, out, cache_w]
+    writers: [harness/demons/tokens-collector.sh]
+    time_field: ts
+    time_kind: Z
+    event_from: tokens.spent
+    session_field: session
   "внимание":
     file: "внимание.jsonl"
     writers: [scripts/tg-dispatcher.sh]
@@ -324,6 +339,12 @@ journals:
     time_kind: tz
     event_from: agent.called
     min_daily: 1
+  "разбор-сообщений":
+    file: "разбор-сообщений.jsonl"
+    writers: [scripts/map-from-message.py]
+    time_field: ts
+    time_kind: tz
+    event_from: "field:event"
   "вложенность":
     file: "вложенность.jsonl"
     writers: [scripts/hooks/launch_plan_guard.py, scripts/launch-plan.py, scripts/map-from-message.py]
@@ -414,6 +435,12 @@ journals:
     time_kind: tz
     event_from: "field:событие"
     reason_field: "почему"
+  devmap-keeper:
+    file: devmap-keeper.jsonl
+    writers: [scripts/devmap-keeper.py]
+    time_field: ts
+    time_kind: tz
+    event_from: "field:event"
   claude-mem-fix:
     file: claude-mem-fix.jsonl
     writers: [scripts/claude-mem-fix.py]
@@ -422,6 +449,14 @@ journals:
     event_from: "field:event"
   evolution-net:
     file: evolution-net.jsonl
+    writers: [scripts/evolution-net.py]
+    time_field: ts
+    time_kind: tz
+    event_from: "field:event"
+  # Входящие копии сети эволюции: строка на письмо, доставленное в $LOG_DIR/inbox/
+  # (mail.delivered, data: text, вид, от, sha). Не журнал слов владельца — без message_id.
+  "письма-копий":
+    file: "письма-копий.jsonl"
     writers: [scripts/evolution-net.py]
     time_field: ts
     time_kind: tz
@@ -490,6 +525,12 @@ journals:
   "ответы-в-канал":
     file: "ответы-в-канал.jsonl"
     writers: [scripts/hooks/channel_reply_guard.py, harness/demons/dispatcher-stall-watch.sh]
+    time_field: ts
+    time_kind: tz
+    event_from: "field:event"
+  "канал-отказы-правил":
+    file: "канал-отказы-правил.jsonl"
+    writers: [scripts/lib/channel_send.sh]
     time_field: ts
     time_kind: tz
     event_from: "field:event"

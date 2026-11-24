@@ -15,7 +15,10 @@ CHANNEL_REPLY_YELLOW_FROM, а также при CHANNEL_REPLY_STRICT=0 — на�
 Пропускает без траты антиповтора: ход начат служебным сообщением (помощник,
 перезапуск, пинок сторожа — channel_reply.turn_started_by_service) и законную
 дверь — метку DOOR_FILE с причиной в LOG_DIR, новее сообщения и не старше
-DOOR_MAX_AGE_S. Каждое решение по безответному сообщению — строка журнала
+DOOR_MAX_AGE_S. Молчит и для дорабатывающей смены (ротация с преемником, спека 14.3 п. 7): канал у
+преемника, а `guard_bash` закрыл ей `tg_send.sh` — требовать ответа значило бы
+петлю с отказом. Флаг «дорабатывает» хук только читает, не снимает.
+Каждое решение по безответному сообщению — строка журнала
 «ответы-в-канал», по ней следующий замер считает блоки без стенограмм.
 """
 import json
@@ -28,6 +31,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts" / "lib"))
 import channel_reply  # noqa: E402
+import rotation_flag  # noqa: E402
 
 SRC = "scripts/hooks/channel_reply_guard.py"
 STATE_FILE = "channel-reply-guard.state"
@@ -83,6 +87,9 @@ def main():
         return 0
     moment, name = found
     session = payload.get("session_id")
+    if session and rotation_flag.finishing_flag(str(session)):
+        record("skipped", "finishing", name, session)
+        return 0
     note = channel_reply.closed_by_door(log_dir, moment, time.time(), max_age=DOOR_MAX_AGE_S)
     if note:
         record("skipped", "door", name, session, note)

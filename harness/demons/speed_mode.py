@@ -3,8 +3,8 @@
 
 Владелец выбирает режим (slow/medium/fast/ultra), судья каждые 2 минуты считает
 ЭФФЕКТИВНЫЙ: выбранный, ограниченный действующими блокерами (пауза, лимит, выкат,
-ротация, мощность, авария, мало задач, файлы, расход лимита подписки). Блокер с
-«действует: нет» в данных считается и пишется («не_действуют»), но потолок не режет.
+ротация, мощность, авария, мало задач, файлы). Блокер с «действует: нет» в данных
+считается и пишется («не_действуют»), но потолок не режет.
 Сторож и launch-plan читают итог, а не пересчитывают: судья один.
 
     speed_mode.py --замер                       один проход: замер, решение, запись состояния
@@ -17,7 +17,7 @@
 
 Коды: 0 — готово; 1 — ошибка данных или аргументов; 2 — замер упал, либо состояния
 нет / оно битое / старше 10 минут («судья скорости не отвечает»).
-Публичные функции для импорта: in_work, ceiling_alive, effective, read_limit.
+Публичные функции для импорта: in_work, ceiling_alive, effective.
 
 Двери стенда: SPEED_MODE_DATA, SPEED_PROC_DIR, SPEED_AFFINITY (число доступных ядер), SPEED_DISK_PATH, WORK_QUEUE_BIN,
 HARNESS_PANEL_STATE, HARNESS_DEVMAP, HARNESS_LOG_DIR, CLAUDE_PROJECTS_DIR, SPEED_TG_SEND
@@ -60,13 +60,7 @@ SRC = "harness/demons/speed_mode.py"
 JOURNAL = "режим-скорости"
 STALE_S = 600
 FUTURE_SLACK_S = 5      # допуск часов между писателем состояния и читателем
-RESET_FAR_DAYS = 8      # resets_at дальше — не секунды (миллисекунды, мусор): «сброса нет»
-RESET_SHIFT_S = 60      # сброс окна сместился больше — это новое окно (другой аккаунт, сброс)
 PULSE_S = 600
-WINDOWS = ("пять_часов", "неделя")
-FILE_KEYS = {"пять_часов": "five_hour", "неделя": "seven_day"}
-WINDOW_NAMES = {"пять_часов": "5 часов", "неделя": "неделя"}
-FULL_WINDOW_H = {"пять_часов": 5, "неделя": 168}
 SELECTORS = ("панель", "бот", "чат", "руки")
 OPEN_STATUSES_OFF = ("test", "done", "принято")
 NOT_ANSWERING = "судья скорости не отвечает"
@@ -452,183 +446,22 @@ def deploy_running() -> bool:
 def facts() -> dict:
     pause = load_script("pause_script", "pause.py")
     limit = load_script("limit_mark", "limit_mark.py")
+    # Блокер «ротация»: флаг живой и роль ещё не передана преемнику (этапы ждёт/идёт — минуты передачи).
+    # На этапе «дорабатывает» задачи берёт преемник, старая лишь доводит помощников: блокер держал бы потолок
+    # на 0 часами (замер 21.11: 41 % времени). ROTATE_SUCCESSOR=0 — как до преемника: любой живой флаг блокирует.
+    # Единственное место цепочки скорости, где читается флаг: план запуска и бюджет судят по этому ответу.
+    flag_kind, flag = rotation_flag.state()
+    # Флаг без разобранного этапа (оборванная запись) блокирует: молчаливая смена не получает зелёный свет.
+    rotation = flag_kind == "живой" and (flag.get("этап") != rotation_flag.FINISHING
+                                         or not rotation_flag.successor_enabled())
     return {"пауза": pause.стоит() is not None, "лимит": limit.лимит_держится(),
-            "выкат": deploy_running(), "ротация": rotation_flag.state()[0] == "живой"}
+            "выкат": deploy_running(), "ротация": rotation}
 
 
 def file_warnings(now: float) -> int:
     rows = read_tail_rows(Path(events.log_dir()) / "заявки-на-файлы.jsonl", ("file.claim.warn",))
     return sum(1 for r in rows if r.get("event") == "file.claim.warn"
                and 0 <= now - (parse_ts(r.get("ts")) or 0) <= 1800)
-
-
-# ───────────────────────── лимит подписки (4.5, 4.6) ─────────────────────────
-
-def finite_number(value) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
-
-
-def reset_epoch(value, now: float, far_days: float):
-    """Секунды epoch; дальше far_days вперёд (миллисекунды и мусор) — «сброса нет»."""
-    if isinstance(value, str):
-        value = parse_ts(value)
-    if not finite_number(value):
-        return None
-    return float(value) if 0 < value <= now + far_days * 86400 else None
-
-
-def read_limit_file(data: dict, now: float) -> dict:
-    refused = {w: {"процент": None, "сброс": None, "точность": "отказ"} for w in WINDOWS}
-    settings = data["лимит_подписки"]
-    if settings["адаптер"] != "claude":
-        return refused
-    try:
-        raw = json.loads(Path(settings["файл_claude"]).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return refused
-    stamp = raw.get("ts") if isinstance(raw, dict) else None
-    stamp = parse_ts(stamp) if isinstance(stamp, str) else stamp
-    rates = raw.get("rate_limits") if isinstance(raw, dict) else None
-    if (not finite_number(stamp) or not isinstance(rates, dict) or not rates
-            or not 0 <= now - stamp <= settings["устарел_мин"] * 60):
-        return refused
-    found = {}
-    for window in WINDOWS:
-        # Claude Code убирает окно после сброса — в свежем файле его отсутствие значит 0 %.
-        cell = rates.get(FILE_KEYS[window], {"used_percentage": 0})
-        percent = cell.get("used_percentage") if isinstance(cell, dict) else None
-        if not finite_number(percent):
-            found[window] = dict(refused[window])
-            continue
-        reset = reset_epoch(cell.get("resets_at"), now, RESET_FAR_DAYS)
-        found[window] = {"процент": percent, "сброс": reset,
-                         "точность": "точно" if reset is not None else "оценка"}
-    return found
-
-
-def after_last_gap(points: list, percent: float, reset) -> list:
-    """Точки после последнего разрыва ряда вместе с текущим чтением; разрыв — падение процента
-    или сдвиг сброса больше RESET_SHIFT_S. Наклон прошлого окна к новому проценту не относится."""
-    series = points + [(None, 0, percent, reset)]
-    start = 0
-    known = series[0][3]
-    for i in range(1, len(series)):
-        shifted = (series[i][3] is not None and known is not None
-                   and abs(series[i][3] - known) > RESET_SHIFT_S)
-        if series[i][2] < series[i - 1][2] or shifted:
-            start = i
-        known = series[i][3] if series[i][3] is not None else known
-    return series[start:-1]
-
-
-def limit_points(now: float, window: str, settings: dict, percent_now: float, reset_now) -> list:
-    """Точки скорости (t, задач, процент, сброс) текущего окна — mode.decision судьи в журнале."""
-    found = []
-    for row in read_tail_rows(Path(events.log_dir()) / f"{JOURNAL}.jsonl", ("mode.decision",)):
-        if row.get("src") != SRC or row.get("event") != "mode.decision":
-            continue
-        point = (row.get("data") or {}).get("лимит") or {}
-        at = parse_ts(point.get("ts"))
-        percent = (point.get(window) or {}).get("процент")
-        if (at is None or not finite_number(percent) or not isinstance(point.get("задач"), int)
-                or not now - settings["окно_расхода_мин"][window] * 60 <= at < now):
-            continue
-        reset = parse_ts((point.get(window) or {}).get("сброс"))
-        found.append((at, point["задач"], percent, reset))
-    return after_last_gap(sorted(found, key=lambda p: p[0]), percent_now, reset_now)
-
-
-def window_speed(points: list, now: float, percent: float, window: str, settings: dict):
-    """(%/ч на задачу, консервативна ли): Σ Δp / Σ n·Δt по интервалам с n ≥ 1
-    (точки уже без разрывов).
-
-    Строка состояния отдаёт ЦЕЛЫЙ процент, и рост на пункт бывает ростом на сотую: шаг округления
-    вычитается из роста. Иначе пункт сразу после разрыва (смена аккаунта, новое окно), делённый на
-    час работы и умноженный на неделю до сброса, режет ultra при 1 % лимита (bkb, Content-Factory 18.11)."""
-    series = points + [(now, 0, percent, None)]
-    rise = hours = 0.0
-    for (t1, n1, p1, _), (t2, _, p2, _) in zip(series, series[1:]):
-        if n1 >= 1:
-            rise += p2 - p1
-            hours += n1 * (t2 - t1) / 3600
-    step = 1 if all(float(p).is_integer() for _, _, p, _ in series) else 0
-    speed = max(rise - step, 0) / hours if hours else 0.0
-    if hours < settings["мин_задача_часов"][window]:
-        return max(speed, settings["скорость_без_данных_pct_ч_на_задачу"][window]), True
-    return speed, False
-
-
-def window_ceiling(percent: float, speed: float, hours_left: float, tasks: int,
-                   threshold: float, stop: float) -> int:
-    if percent >= stop and hours_left > 0:
-        return 0
-    burn = speed * hours_left
-    return tasks if burn <= 0 else max(1, math.floor(min(tasks, (threshold - percent) / burn)))
-
-
-def limit_pass(prev: dict, now: float, data: dict, tasks: int) -> dict:
-    """Блокер «лимит по расходу»: потолок окон, итог = худшее окно; «отказ» — не действует."""
-    settings = data["лимит_подписки"]
-    read = read_limit_file(data, now)
-    before = prev.get("лимит") or {}
-    result = {"точность": "отказ", "потолок": None, "выбранный_задач": tasks}
-    inexact = False
-    ceilings = []
-    for window in WINDOWS:
-        cell = read[window]
-        if cell["процент"] is None:
-            inexact = True
-            continue
-        percent, reset = cell["процент"], cell["сброс"]
-        inexact = inexact or reset is None
-        hours_left = (max(reset - now, 0) / 3600) if reset is not None else FULL_WINDOW_H[window]
-        speed, conservative = window_speed(limit_points(now, window, settings, percent, reset),
-                                           now, percent, window, settings)
-        inexact = inexact or conservative
-        was = before.get(window) or {}
-        was_reset = parse_ts(was.get("сброс"))
-        fresh_window = (
-            before.get("выбранный_задач") != tasks
-            or (was_reset is not None and was_reset <= now)
-            or (was_reset is not None and reset is not None and reset > was_reset + RESET_SHIFT_S)
-            or (isinstance(was.get("процент"), (int, float))
-                and was["процент"] - percent >= settings["сброс_падение_pct"]))
-        # Порог у окна свой: упор в 5 часов — пауза до сброса, упор в неделю — потеря недели.
-        threshold = settings["порог_прогноза_pct"][window]
-        down = window_ceiling(percent, speed, hours_left, tasks, threshold, settings["стоп_pct"])
-        up = window_ceiling(percent, speed, hours_left, tasks,
-                            threshold - settings["запас_подъёма_pct"], settings["стоп_pct"])
-        old = was.get("потолок")
-        changed_at = parse_ts(was.get("сменён_ts"))
-        may_rise = changed_at is None or now - changed_at >= settings["подъём_не_чаще_мин"] * 60
-        if fresh_window or old is None or down < old:
-            ceiling = down
-        else:
-            ceiling = up if up > old and may_rise else old
-        # Скорость по догадке, а не по замеру, ниже выбранного не режет: скорость режут пауза
-        # и 429 (владелец 11.11 и 19.11), а догадка с потолком «в работе» держала одну задачу
-        # часами, пока копились данные (bkb 14.11). Стоп сильнее этой границы.
-        if conservative and percent < settings["стоп_pct"]:
-            ceiling = tasks
-        ceilings.append(ceiling)
-        burn_now = ceiling if ceiling else tasks
-        result[window] = {"процент": percent, "сброс": None if reset is None else to_iso(reset),
-                          "скорость_на_задачу": round(speed, 4), "потолок": ceiling,
-                          "сменён_ts": was.get("сменён_ts") if ceiling == old and was.get("сменён_ts")
-                          else to_iso(now),
-                          "прогноз": round(percent + speed * burn_now * hours_left, 1),
-                          "прогноз_выбранный": round(percent + speed * tasks * hours_left, 1),
-                          "порог": threshold,
-                          "снижение_при": round(threshold - speed * tasks * hours_left, 1)}
-    if ceilings:
-        result["потолок"] = min(ceilings)
-        result["точность"] = "оценка" if inexact else "точно"
-    return result
-
-
-def read_limit(window: str, now: float | None = None) -> dict:
-    """Слой источников: {процент, сброс (epoch), точность}; остальной код адаптера не знает."""
-    return read_limit_file(load_data(), time.time() if now is None else now)[window]
 
 
 # ───────────────────────── блокеры и решение ─────────────────────────
@@ -739,10 +572,6 @@ def decide(prev: dict | None, now: float, data: dict, snap: dict, meas: dict, fa
     if fact["ротация"]:
         immediate("ротация", work_count, "ротация смены, новых задач нет")
 
-    limit = limit_pass(prev, now, data, tasks)
-    if limit["потолок"] is not None and limit["потолок"] < tasks:
-        immediate("лимит_расход", limit["потолок"], "расход лимита подписки")
-
     few = work_count + len(snap["take"])
     if few < tasks:
         why = (f"{snap['waiting_count']} {plural(snap['waiting_count'], 'спека ждёт', 'спеки ждут', 'спек ждут')}"
@@ -808,7 +637,7 @@ def decide(prev: dict | None, now: float, data: dict, snap: dict, meas: dict, fa
     eff = max(0, min([tasks] + [ceiling for name, ceiling in ceilings.items() if name in acting]))
     binding = min(block.items(), key=lambda item: item[1]["потолок"], default=None)
     reason = short_reason(*binding) if binding and binding[1]["потолок"] < tasks else "блокеров нет"
-    return {"tasks": tasks, "eff": eff, "block": block, "muted": muted, "cand": cand, "limit": limit,
+    return {"tasks": tasks, "eff": eff, "block": block, "muted": muted, "cand": cand,
             "reason": reason, "raised_at": raised_at}
 
 
@@ -832,12 +661,9 @@ def fill_quota(eff: int, work_count: int, take: list, raw: dict, data: dict) -> 
 
 # ───────────────────────── сообщения владельцу (7.2) ─────────────────────────
 
-LIMIT_BLOCKER = "лимит_расход"
-WINDOW_FOR = {"пять_часов": "за 5 часов", "неделя": "за неделю"}
 # Техническое «почему» блокера владельцу надо обернуть в простые слова.
 WHY_PREFIX = {"мощность": "сервер загружен", "авария": "авария на сервере"}
-BACK_WORDS = {"мощность": "сервер разгрузился", "авария": "сервер разгрузился",
-              LIMIT_BLOCKER: "лимит обновился"}
+BACK_WORDS = {"мощность": "сервер разгрузился", "авария": "сервер разгрузился"}
 SEND_TIMEOUT_S = 30
 
 
@@ -851,43 +677,11 @@ def binding_blocker(verdict: dict):
     return name if rec and rec["потолок"] < verdict["tasks"] else None
 
 
-def clock_phrase(moment: float, now: float) -> str:
-    """«в 15:10», а если не сегодня — «05.11 в 15:10»: 24-часовой формат, как просил владелец."""
-    at, today = dt.datetime.fromtimestamp(moment), dt.datetime.fromtimestamp(now)
-    day = "" if at.date() == today.date() else f"{at:%d.%m} "
-    return f"{day}в {at:%H:%M}"
-
-
-def limit_cell(limit: dict):
-    """Ячейка окна, которое держит потолок: меньший потолок, при равных — больший расход."""
-    cells = [(w, limit[w]) for w in WINDOWS if limit.get(w)]
-    return min(cells, key=lambda item: (item[1]["потолок"], -item[1]["процент"]))
-
-
-def limit_text(eff: int, tasks: int, limit: dict, now: float) -> str:
-    window, cell = limit_cell(limit)
-    guess = "по оценке " if limit.get("точность") == "оценка" else ""
-    reset = parse_ts(cell.get("сброс"))
-    when = "время обновления не знаю" if reset is None else f"лимит обновится {clock_phrase(reset, now)}"
-    used = f"{guess}использовано {round(cell['процент'])} % лимита {WINDOW_FOR[window]}"
-    if eff == 0:
-        return f"Скорость: стою — {used}, {when}. После обновления продолжу сам."
-    # Владелец читал прогноз ПОСЛЕ снижения как причину не снижать (bkb 11.11: «объясни в чём логика»):
-    # сначала то, что было бы при выбранном режиме, и порог, потом — при новом потолке.
-    ahead = "до конца окна" if reset is None else f"к обновлению ({clock_phrase(reset, now)})"
-    return (f"Скорость: работаю по {tasks_dative(eff)} вместо {tasks} — {used}. Если работать "
-            f"без перерыва {ahead}, по {tasks_dative(tasks)} было бы {round(cell['прогноз_выбранный'])} %, "
-            f"выше порога {round(cell['порог'])} %; по {tasks_dative(eff)} — {round(cell['прогноз'])} %. "
-            f"После обновления верну {tasks} сам.")
-
-
 def message_text(changes: int, old_blocker, eff: int, mode: str, data: dict, verdict: dict, now: float) -> str:
     tasks, binding = verdict["tasks"], binding_blocker(verdict)
     if binding is None:
         back = BACK_WORDS.get(old_blocker, "помехи ушли")
         text = f"Скорость: вернул «{data['режимы'][mode]['имя']}», {tasks_word(tasks)} — {back}."
-    elif binding == LIMIT_BLOCKER:
-        text = limit_text(eff, tasks, verdict["limit"], now)
     else:
         detail = verdict["block"][binding]["причина"].rsplit(" — потолок", 1)[0]
         why = f"{WHY_PREFIX[binding]} ({detail})" if binding in WHY_PREFIX else detail
@@ -919,24 +713,18 @@ def plan_message(prev: dict, now: float, data: dict, mode: str, verdict: dict, w
         return {**told, "эфф": eff, "блокер": None, "смен": 0}, None, "нет"
     if binding is not None and data["блокеры"][binding]["говорить"] != "да":
         return told, None, "нет"
-    if binding == LIMIT_BLOCKER and told["блокер"] == LIMIT_BLOCKER:
-        # Про лимит — одно сообщение со временем обновления, дальше тишина до самого обновления.
-        return {**told, "смен": 0}, None, "нет"
     sent_at = parse_ts(told["ts"])
     if sent_at is not None and now - sent_at < window_s:
         return told, None, "подавлено: окно"
     return told, {**told, "эфф": eff, "ts": to_iso(now), "блокер": binding, "смен": 0}, "да"
 
 
-def deliver(text: str, over_limit: bool) -> tuple[str, bool]:
+def deliver(text: str) -> tuple[str, bool]:
     """(исход для журнала, доставлено ли). Стенд без своей двери владельцу не пишет."""
     door = os.environ.get("SPEED_TG_SEND")
     if not door and os.environ.get("HARNESS_PANEL_STATE"):
         return "skipped", True
     command = ["bash", door or str(ROOT / "scripts" / "tg_send.sh")]
-    if over_limit:
-        # Весть о самом лимите и об обновлении лимит не придерживает.
-        command.append("--несмотря-на-лимит")
     try:
         done = subprocess.run(command + [text], capture_output=True, text=True, timeout=SEND_TIMEOUT_S)
     except (OSError, subprocess.SubprocessError):
@@ -952,7 +740,7 @@ def tell_owner(prev: dict, now: float, data: dict, mode: str, verdict: dict):
         return told, said
     old_blocker = told["блокер"]
     text = message_text(told["смен"], old_blocker, verdict["eff"], mode, data, verdict, now)
-    outcome, delivered = deliver(text, LIMIT_BLOCKER in (old_blocker, announce["блокер"]))
+    outcome, delivered = deliver(text)
     record("owner.told", outcome, {"текст": text}, now)
     # Недоставленное остаётся несказанным: следующий проход попробует снова.
     return (announce, said) if delivered else (told, "ошибка отправки")
@@ -1047,18 +835,13 @@ def judge_pass(now: float, who: str | None, data: dict, path: Path) -> int:
         "блокеры": verdict["block"], "не_действуют": verdict["muted"], "кандидаты": verdict["cand"],
         "поднят_ts": verdict["raised_at"],
         "выбор_ts": to_iso(now) if chose else (prev or {}).get("выбор_ts"),
-        "добор": quota, "добор_почему": quota_why, "лимит": verdict["limit"],
+        "добор": quota, "добор_почему": quota_why,
         "замер": meas["state"], "cpu_прошлый": meas["cpu"], "причина": verdict["reason"],
         "сказано": told,
     }
     outcome = "ok" if known else "error"
-    point = {"ts": to_iso(now), "задач": len(work)}
-    for window in WINDOWS:
-        if (state["лимит"].get(window) or {}).get("процент") is not None:
-            point[window] = {k: state["лимит"][window][k] for k in ("процент", "сброс")}
-    fingerprint = json.dumps([mode, eff, work, sorted(verdict["block"]), state["лимит"].get("потолок"),
-                              {w: (state["лимит"].get(w) or {}).get("процент") for w in WINDOWS},
-                              state["готовых"], quota, outcome], ensure_ascii=False)
+    fingerprint = json.dumps([mode, eff, work, sorted(verdict["block"]), state["готовых"], quota, outcome],
+                             ensure_ascii=False)
     due = (not prev or prev.get("решение_отпечаток") != fingerprint
            or now - (parse_ts(prev.get("решение_ts")) or 0) >= PULSE_S or not known)
     state["решение_ts"] = to_iso(now) if due else prev.get("решение_ts")
@@ -1082,8 +865,6 @@ def judge_pass(now: float, who: str | None, data: dict, path: Path) -> int:
                 "блокеры": {name: rec.get("замер") or rec["причина"] for name, rec in verdict["block"].items()},
                 "не_действуют": {name: rec["причина"] for name, rec in verdict["muted"].items()},
                 "замер": meas["state"], "добор": quota, "причина": verdict["reason"]}
-        if state["лимит"]["точность"] != "отказ":
-            body["лимит"] = point
         record("mode.decision", outcome, body if known else {**body, "ошибка": "незнакомый SPEED_MODE"}, now)
     return 0
 
@@ -1129,27 +910,6 @@ def effective(now: float | None = None):
     return None if st is None else st["эффективный"]
 
 
-def limit_line(st: dict) -> str:
-    lim = st.get("лимит") or {}
-    if lim.get("точность") in (None, "отказ"):
-        return "лимит: данных нет, работает путь по факту 429"
-    parts, forecasts, starts = [], [], []
-    stamp = parse_ts(st.get("ts")) or 0
-    for window in WINDOWS:
-        cell = lim.get(window)
-        if not cell:
-            continue
-        reset = parse_ts(cell.get("сброс"))
-        tail = "сброса нет" if reset is None else f"сброс через {num(max(reset - stamp, 0) / 3600, 1)} ч"
-        parts.append(f"{WINDOW_NAMES[window]} {num(cell['процент'], 1)} % ({tail})")
-        forecasts.append(cell["прогноз"])
-        starts.append(cell["снижение_при"])
-    accuracy = "по оценке" if lim["точность"] == "оценка" else "точно"
-    cap = lim.get("потолок")
-    return (f"лимит: {accuracy}; {', '.join(parts)}; прогноз к сбросу {num(max(forecasts), 0)} % "
-            f"при {tasks_word(cap)}; снижение для выбранного при p > {num(min(starts), 0)} %")
-
-
 def pinned_lines(st: dict) -> list:
     gauge = st.get("замер") or {}
     if "ядер_доступно" not in gauge:
@@ -1166,8 +926,6 @@ def show(st: dict, data: dict, short: bool) -> list:
         lines.append(f"Режим «{name}»: {tasks_word(st['выбранный_задач'])} одновременно. "
                      f"Сейчас могу {st['эффективный']}{why}.")
         lines.append(f"В работе {len(work)}, {st['добор_почему']}.")
-        if (st.get("лимит") or {}).get("точность") not in (None, "отказ"):
-            lines.append(limit_line(st))
         return lines + pinned_lines(st)
     lines += [f"выбранный: {st['выбранный']} ({st['выбранный_задач']})",
               f"эффективный: {st['эффективный']}",
@@ -1178,7 +936,6 @@ def show(st: dict, data: dict, short: bool) -> list:
     lines += [f"блокер {n}: {rec['причина']}" for n, rec in st["блокеры"].items()]
     lines += [f"кандидат {n}: {rec['причина']} — жду {wait_minutes(n, rec, data, st)} мин"
               for n, rec in st["кандидаты"].items()]
-    lines.append(limit_line(st))
     lines += pinned_lines(st)
     lines.append(f"зависимостей в карте: {st['зависимостей']}")
     lines += [f"битая зависимость: {line}" for line in st["битые"]]
