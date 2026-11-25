@@ -21,7 +21,9 @@ union для журнала правок) и git-пакет; дерево пом
 worktree-agent-<x> <проект>/.claude/worktrees/agent-<x>`. Заглушка ворот пишет, какое дерево
 и какие файлы видела, краснеет по файлу GATE_RED в дереве, по MQ_STUB_SLEEP спит, по
 MQ_STUB_MOVE делает пустой коммит в master основного (master ушёл).
-Механизм — рядом или HARNESS_MERGE_QUEUE (дверь для мутаций копии).
+Механизм — рядом или HARNESS_MERGE_QUEUE (дверь для мутаций копии). Копию класть в каталог,
+где её соседи — символьные ссылки на scripts/* (`ln -s scripts/* <каталог>/`, кроме самого
+merge-queue.py): механизм грузит их от своего HERE.
 
 Ворота по изменённым файлам (спека поезда выпусков §7, фаза 4): после
 pre-commit-gate.sh очередь берёт выбор `select-checks.py` (рядом с механизмом, как
@@ -50,6 +52,10 @@ import time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+# Дверь мутаций копии. Копии нужен каталог с соседями-ссылками: механизм берёт их от своего
+# HERE — lib/ (LIB_DIR), select-checks.py (выбор ворот), compare-with-package.py (сверка с
+# пакетом), install-new.py (перенос в пакет), git-commit-locked.sh (коммит карты). Голая копия
+# вне scripts/ краснеет и без мутации (20 неудач из 29 на lq1), и мутант «убит» ложно.
 QUEUE = Path(os.environ.get("HARNESS_MERGE_QUEUE") or HERE / "merge-queue.py")
 HEAL_HOOK = HERE / "post-commit-heal-index.sh"
 JOURNAL = "docs/ИЗМЕНЕНИЯ-ПАКЕТА.md"
@@ -788,6 +794,28 @@ def case_r_key_unwritable(tmp: Path) -> None:
     check("r: слито — master ушёл вперёд", True, s.sha() != before and s.sha() == data.get("sha_после"))
     check("r: отказ называет NEW и конфиг", True, "NEW" in out and str(s.conf) in out)
     check("r: конфиг не тронут", machine, s.conf.read_text(encoding="utf-8"))
+
+
+def case_r2_key_root_dir(tmp: Path) -> None:
+    # Поломка: каталог конфига чужой (root), файл свой — очередь судит каталог и
+    # отдаёт код 10, хотя ключ дописать можно (23.11: 11 ключей не дошли до машины).
+    print("r2) каталог конфига закрыт, файл свой — ключ дописан")
+    s, branch, machine = keys_stand(tmp, "r2")
+    closed = s.base / "etc-root"
+    closed.mkdir()
+    s.conf = s.conf.rename(closed / "harness.conf")
+    closed.chmod(0o555)
+    try:
+        code, data, _ = s.queue(branch, "--json")
+        after = s.conf.read_text(encoding="utf-8")
+    finally:
+        closed.chmod(0o755)
+    check("r2: код 0", 0, code)
+    check("r2: дописан NEW, прежнее цело", (True, True),
+          (after.startswith(machine), after.endswith('# предел патча, байт\nNEW="5"\n')))
+    check("r2: отчёт называет ключ", ["NEW"], data.get("ключи_машины"))
+    check("r2: копия снята вне закрытого каталога", 1,
+          len(list((s.logs / "панель-копии").glob("harness.conf.*"))))
 
 
 MAP_TEXT = ("lines:\n- id: l1\n  tasks:\n  - id: t1\n    status: plan\n"
@@ -2837,11 +2865,332 @@ def case_queue_own_files(tmp: Path) -> None:
     check("М4-2: правка своего файла проверки — проба-вторая выбрана", ["проба-вторая"], data2.get("выбор"))
 
 
+# ───────────── lq1: отказ не по вине ветки ─────────────
+# Красные до кода: очередь не пересобирает собранные документы при конфликте и не держит заявку с кодом 3 по вине master.
+
+BUILT_DOC = "docs/список.md"
+BUILD_STUB = "scripts/build_stub.py"
+# Генератор стенда: документ из data/*.txt; --проверить — совпадает ли; каждый зов — в журнал.
+BUILD_STUB_TEXT = """import os
+import sys
+from pathlib import Path
+
+root = Path(__file__).resolve().parent.parent
+with open(os.path.join(os.environ["LOG_DIR"], "stub-build.log"), "a", encoding="utf-8") as log:
+    log.write(" ".join(sys.argv[1:]) + "\\n")
+text = "".join(f"{p.stem}: {p.read_text(encoding='utf-8').strip()}\\n"
+               for p in sorted((root / "data").glob("*.txt")))
+target = root / "docs" / "список.md"
+if "--проверить" in sys.argv[1:]:
+    sys.exit(0 if target.exists() and target.read_text(encoding="utf-8") == text else 1)
+target.parent.mkdir(parents=True, exist_ok=True)
+target.write_text(text, encoding="utf-8")
+"""
+# Список «файл → генератор» — данные реестра (поле собирает:, как у update.py), не код очереди.
+BUILT_MECHANISMS = f"механизмы:\n- файл: {BUILD_STUB}\n  собирает: {BUILT_DOC}\n"
+HELD = "держатся"
+RED_NODE = "def verdict():\n    return 1\n"
+
+
+def commit_files(root: Path, files: dict, message: str) -> str:
+    """Несколько файлов одним коммитом: собранный документ едет вместе со своим источником."""
+    for rel, text in files.items():
+        Stand.write(root, rel, text)
+    git(root, "add", "--", *files)
+    git(root, "commit", "-qm", message)
+    return git(root, "rev-parse", "HEAD").strip()
+
+
+def built_doc(a: str, b: str) -> str:
+    return f"a: {a}\nb: {b}\n"
+
+
+def built_stand(tmp: Path, name: str, plain_conflict: bool, generator: str = BUILD_STUB_TEXT) -> tuple:
+    """Ветка двумя коммитами правит data/a.txt и пересобранный документ, master — data/b.txt и
+    документ: смежные строки документа конфликтуют на КАЖДОМ коммите rebase. plain_conflict —
+    ветка и master ещё и правят обычный c.txt по-разному. generator — текст генератора стенда.
+    → (стенд, ветка, вершина ветки)."""
+    s = Stand(tmp / name)
+    commit_files(s.proj, {BUILD_STUB: generator, "harness/config/mechanisms.yaml": BUILT_MECHANISMS,
+                          "data/a.txt": "a0\n", "data/b.txt": "b0\n", BUILT_DOC: built_doc("a0", "b0")},
+                 "собранный документ стенда")
+    commit_files(s.pkg, {"harness/" + BUILD_STUB: generator}, "генератор стенда")
+    branch, wt = s.tree("built")
+    first = {"data/a.txt": "a1\n", BUILT_DOC: built_doc("a1", "b0")}
+    if plain_conflict:
+        first["c.txt"] = "помощник\n"
+    commit_files(wt, first, "ветка: a1")
+    tip = commit_files(wt, {"data/a.txt": "a2\n", BUILT_DOC: built_doc("a2", "b0")}, "ветка: a2")
+    master_side = {"data/b.txt": "b1\n", BUILT_DOC: built_doc("a0", "b1")}
+    if plain_conflict:
+        master_side["c.txt"] = "master\n"
+    commit_files(s.proj, master_side, "master: b1")
+    return s, branch, tip
+
+
+def case_lq1_built_conflict_rebuilt(tmp: Path) -> None:
+    """lq1-а: конфликт только в собранном документе — очередь пересобирает его генератором на
+    каждом коммите rebase и сливает."""
+    # Поломка: код 1 как сегодня; взята одна сторона без пересборки (в документе нет строки
+    # второй стороны); пересобран только последний коммит (у первого документ разошёлся с
+    # данными); генератор не из данных реестра (собирает:), а из списка в коде.
+    print("lq1-а) конфликт только в собранном документе — пересборка, слито")
+    s, branch, _ = built_stand(tmp, "lq1а", plain_conflict=False)
+    code, data, _ = s.queue(branch, "--json")
+    check("lq1-а: код 0", 0, code)
+    check("lq1-а: документ master равен выводу генератора на обеих сторонах", built_doc("a2", "b1"),
+          s.read(BUILT_DOC))
+    first = git(s.proj, "log", "--format=%H", "--grep=ветка: a1", "master").strip()
+    check("lq1-а: и на первом коммите ветки документ пересобран", built_doc("a1", "b1"),
+          git(s.proj, "show", f"{first}:{BUILT_DOC}", ok=False) if first else "нет коммита")
+    proc = subprocess.run([sys.executable, str(s.proj / BUILD_STUB), "--проверить"],
+                          env=s.env(), cwd=s.proj, capture_output=True)
+    check("lq1-а: генератор --проверить на master = 0", 0, proc.returncode)
+    check("lq1-а: отчёт называет пересобранный документ", [BUILT_DOC], data.get("пересобрано"))
+
+
+def case_lq1_built_and_plain_conflict(tmp: Path) -> None:
+    """lq1-б: конфликт в собранном и в обычном файле — прежний код 1. Проба сохранности:
+    сегодня зелёная; живость — мутацией «пересобирать, если собранный есть среди конфликтных»."""
+    # Поломка: пересборка снимает конфликт собранного и молча берёт сторону обычного файла.
+    print("lq1-б) конфликт в собранном и обычном — код 1")
+    s, branch, tip = built_stand(tmp, "lq1б", plain_conflict=True)
+    master = s.sha()
+    code, data, _ = s.queue(branch, "--json")
+    check("lq1-б: код 1", 1, code)
+    check("lq1-б: конфликт называет оба файла", ["c.txt", BUILT_DOC], sorted(data.get("конфликт") or []))
+    check("lq1-б: master и ветка на прежних sha", (master, tip), (s.sha(), s.sha(branch)))
+    check("lq1-б: пересборки нет в отчёте", [], data.get("пересобрано") or [])
+
+
+# Генератор, чей документ расходится с данными: --проверить всегда 1.
+BUILD_STUB_CHECK_FAILS = BUILD_STUB_TEXT.replace(
+    'sys.exit(0 if target.exists() and target.read_text(encoding="utf-8") == text else 1)', "sys.exit(1)")
+# Генератор, который сам оставляет маркер конфликта, а --проверить у него честно 0.
+BUILD_STUB_MARKER = BUILD_STUB_TEXT.replace('text = "".join(', 'text = "<<<<<<< стенд\\n" + "".join(')
+
+
+def case_lq1_bad_generator(tmp: Path) -> None:
+    """lq1-а2: генератор отказал проверкой или оставил маркер — прежний код 1, rebase снят."""
+    # Поломка: --проверить не зовётся (документ, расходящийся с данными, влит); маркер
+    # «<<<<<<<» в пересобранном документе не ищется (маркер влит в master).
+    print("lq1-а2) генератор: --проверить = 1 или маркер в документе — код 1")
+    for label, generator in (("проверить", BUILD_STUB_CHECK_FAILS), ("маркер", BUILD_STUB_MARKER)):
+        s, branch, tip = built_stand(tmp, f"lq1а2-{label}", plain_conflict=False, generator=generator)
+        master = s.sha()
+        code, data, _ = s.queue(branch, "--json")
+        check(f"lq1-а2: {label} — код 1, конфликт [документ], пересборки нет", (1, [BUILT_DOC], []),
+              (code, data.get("конфликт"), data.get("пересобрано") or []))
+        check(f"lq1-а2: {label} — master и ветка на прежних sha", (master, tip), (s.sha(), s.sha(branch)))
+
+
+def master_change(s: Stand, rel: str, text: str, message: str) -> None:
+    """Правка scripts/ в master и в пакете: без пакета подача упала бы кодом 7 до ворот."""
+    s.change(s.proj, rel, text, message)
+    s.change(s.pkg, "harness/" + rel, text, message)
+
+
+def held_stand(tmp: Path, name: str, **conf: str) -> tuple:
+    """master красен на проба-узла; ветка трогает node_lib.py, не ломая ничего сверх master:
+    все красные подачи — «красны_на_master». → (стенд, ветка, дерево, --json подачи, код)."""
+    s = Stand(tmp / name)
+    if conf:
+        set_conf(s, **conf)
+    master_change(s, "scripts/node_lib.py", RED_NODE, "master красный")
+    branch, wt = s.tree("held")
+    s.change(wt, "scripts/node_lib.py", "# правка ветки\n" + RED_NODE)
+    code, data, _ = s.queue(branch, "--json")
+    return s, branch, wt, data, code
+
+
+def held_names(s: Stand) -> list:
+    return [read_json(mq_dir(s, HELD) / n).get("ветка") for n in mq_names(s, HELD)]
+
+
+def held_request(s: Stand) -> dict:
+    """Единственная держимая заявка стенда ({} — нет ни одной или их несколько)."""
+    names = mq_names(s, HELD)
+    return read_json(mq_dir(s, HELD) / names[0]) if len(names) == 1 else {}
+
+
+def queued_names(s: Stand) -> list:
+    return [read_json(mq_dir(s, "заявки") / n).get("ветка") for n in mq_names(s, "заявки")]
+
+
+# Починка проба-узла: проба зовёт узел, но итог — 0. Правит файл пробы, не node_lib.py ветки.
+FIXED_PROBE = GRAPH_FILES["scripts/probe_node.py"].replace(
+    "sys.exit(node_lib.verdict())", "node_lib.verdict()\nsys.exit(0)")
+
+
+def trigger(s: Stand, name: str) -> int:
+    """Подача зелёной ветки (правит a.txt: выбор пуст) — слиятель встаёт и судит держимые."""
+    branch, wt = s.tree(name)
+    s.change(wt, "a.txt", f"{name}\n")
+    return s.queue(branch, "--json")[0]
+
+
+def case_lq1_blameless_held(tmp: Path) -> None:
+    """lq1-в: код 3, все красные красны и на master, — заявка держится, одна строка события."""
+    # Поломка: заявка теряется (сегодня: итог 3 и всё); держится и при своей красной;
+    # событие пишется в канал или дважды.
+    print("lq1-в) код 3 только по красной master — заявка держится")
+    s, branch, wt, data, code = held_stand(tmp, "lq1в")
+    check("lq1-в: код 3, красны_на_master [проба-узла]", (3, ["проба-узла"]),
+          (code, data.get("красны_на_master")))
+    check("lq1-в: отчёт — держится", True, data.get("держится"))
+    check("lq1-в: заявка ветки в хранилище держимых", [branch], held_names(s))
+    check("lq1-в: одна строка mq.держится в журнале очереди", 1, len(rows_of(s, branch, "mq.держится")))
+    check("lq1-в: ветка не влита, дерево на месте", (False, True), (in_master(s, s.sha(branch)), wt.exists()))
+
+
+def case_lq1_held_resubmitted(tmp: Path) -> None:
+    """lq1-г: master позеленел по этим воротам — держимая заявка подаётся снова сама и сливается."""
+    # Поломка: держимая не возвращается в очередь; возвращается, но мимо ворот; ждёт подачи
+    # самой ветки, а не следующего слияния.
+    print("lq1-г) master позеленел — держимая подаётся снова и сливается")
+    s, branch, _, _, _ = held_stand(tmp, "lq1г")
+    # Починка трогает файл пробы, а не node_lib.py ветки: без конфликта rebase.
+    master_change(s, "scripts/probe_node.py", FIXED_PROBE, "master: проба-узла починена")
+    check("lq1-г: подача-триггер слита", 0, trigger(s, "lq1g-trigger"))
+    check("lq1-г: правка держимой ветки в master", True,
+          s.read("scripts/node_lib.py").startswith("# правка ветки"))
+    check("lq1-г: строка mq.слито держимой ветки", 1, len(rows_of(s, branch, "mq.слито")))
+    check("lq1-г: хранилище держимых пусто", [], held_names(s))
+
+
+def removed_reasons(s: Stand, branch: str) -> list:
+    return [(r.get("data") or {}).get("причина") for r in rows_of(s, branch, "mq.держание-снято")]
+
+
+def case_lq1_held_expired(tmp: Path) -> None:
+    """lq1-д: срок MERGE_QUEUE_BLAMELESS_TTL_H и потолок MERGE_QUEUE_BLAMELESS_RETRIES — заявка
+    снимается со строкой события, ветка не влита."""
+    # Поломка: держится вечно; ключи не читаются из harness.conf; снята молча; снятая влита.
+    print("lq1-д) срок и потолок повторов — держание снято с событием")
+    s, branch, _, _, _ = held_stand(tmp, "lq1д-срок", MERGE_QUEUE_BLAMELESS_TTL_H="0.0001")
+    check("lq1-д: срок — заявка сначала держится", [branch], held_names(s))
+    time.sleep(1)
+    code = trigger(s, "lq1d-trigger")
+    check("lq1-д: срок — триггер слит, держимых нет", (0, []), (code, held_names(s)))
+    check("lq1-д: срок — одна строка mq.держание-снято с причиной «срок»", ["срок"],
+          removed_reasons(s, branch))
+    check("lq1-д: срок — ветка не влита", False, in_master(s, s.sha(branch)))
+
+    s, branch, _, _, _ = held_stand(tmp, "lq1д-потолок", MERGE_QUEUE_BLAMELESS_RETRIES="1")
+    check("lq1-д: потолок — заявка сначала держится", [branch], held_names(s))
+    # Сдвиг master по входам проба-узла, она по-прежнему красна: повтор тратится и снова красный.
+    master_change(s, "scripts/probe_node.py", "# сдвиг\n" + GRAPH_FILES["scripts/probe_node.py"],
+                  "master: сдвиг пробы, красна")
+    code = trigger(s, "lq1d-trigger2")
+    check("lq1-д: потолок — триггер слит, держимых нет", (0, []), (code, held_names(s)))
+    check("lq1-д: потолок — держалась один раз, снята с причиной «потолок»", (1, ["потолок"]),
+          (len(rows_of(s, branch, "mq.держится")), removed_reasons(s, branch)))
+    check("lq1-д: потолок — ветка не влита", False, in_master(s, s.sha(branch)))
+
+    # Повторное держание после повтора слиятеля: срок идёт на всё держание, «держится_с» прежний.
+    s, branch, _, _, _ = held_stand(tmp, "lq1д-с")
+    since = held_request(s).get("держится_с")
+    time.sleep(1.1)
+    master_change(s, "scripts/probe_node.py", "# сдвиг\n" + GRAPH_FILES["scripts/probe_node.py"],
+                  "master: сдвиг пробы, красна")
+    check("lq1-д: повтор — триггер слит", 0, trigger(s, "lq1d-trigger3"))
+    request = held_request(s)
+    check("lq1-д: повтор — держится снова, повторов_держания 1, держится_с прежний",
+          ([branch], 1, True, since), (held_names(s), request.get("повторов_держания"),
+                                       bool(since), request.get("держится_с")))
+
+
+def case_lq1_own_fault_not_held(tmp: Path) -> None:
+    """lq1-е: код 3 по вине ветки (своя красная, в том числе рядом с красной master) — не
+    держится. Проба сохранности: сегодня не держится ничего; живость — мутацией «держать при
+    непустом пересечении» вместо «все красные красны на master»."""
+    print("lq1-е) код 3 по вине ветки — не держится")
+    s = Stand(tmp / "lq1е")
+    branch, wt = s.tree("own")
+    s.change(wt, "scripts/node_lib.py", "# своя поломка\n" + RED_NODE)
+    code, data, _ = s.queue(branch, "--json")
+    check("lq1-е: своя красная — код 3, красны_на_master [], не держится", (3, [], None, []),
+          (code, data.get("красны_на_master"), data.get("держится") or None, held_names(s)))
+
+    s = Stand(tmp / "lq1е-смесь")
+    master_change(s, "scripts/node_lib.py", RED_NODE, "master красный")
+    branch, wt = s.tree("mixed")
+    s.change(wt, "scripts/node_lib.py", "# правка\n" + RED_NODE)
+    s.change(wt, "scripts/probe_other.py", "import sys\nsys.exit(1)\n")
+    code, data, _ = s.queue(branch, "--json")
+    check("lq1-е: смесь — код 3, на master красна только проба-узла", (3, ["проба-узла"]),
+          (code, data.get("красны_на_master")))
+    check("lq1-е: смесь — не держится, строки mq.держится нет", (None, [], 0),
+          (data.get("держится") or None, held_names(s), len(rows_of(s, branch, "mq.держится"))))
+
+
+def case_lq1_unrelated_shift_keeps_held(tmp: Path) -> None:
+    """lq1-ж: master сдвинут мимо входов проба-узла, запомненный итог master по ней всё ещё
+    красный — держимая не подаётся (горячий круг: тот же отказ на каждой подаче)."""
+    # Поломка: возврат при любом сдвиге master — повтор тратит потолок и снова краснеет.
+    print("lq1-ж) master сдвинут мимо входов пробы — держимая не подаётся")
+    s, branch, _, _, _ = held_stand(tmp, "lq1ж")
+    s.change(s.proj, "docs/заметка.md", "сдвиг master документом\n", "документ")
+    check("lq1-ж: триггер слит", 0, trigger(s, "lq1zh-trigger"))
+    check("lq1-ж: держимая на месте, повторов_держания 0, одна строка mq.держится",
+          ([branch], 0, 1), (held_names(s), held_request(s).get("повторов_держания"),
+                             len(rows_of(s, branch, "mq.держится"))))
+
+
+def case_lq1_helper_resubmits_held(tmp: Path) -> None:
+    """lq1-з: помощник подаёт держимую ветку снова — её заявка забрана из держатся/ (не вторая),
+    прогон новый, потолок не тратится."""
+    # Поломка: find_request не смотрит держатся/ — вторая заявка той же ветки; старый итог 3 не
+    # снят — подача читает его без прогона; подача помощника растит счётчик повторов.
+    print("lq1-з) помощник подаёт держимую ветку — заявка та же, потолок цел")
+    s, branch, _, _, _ = held_stand(tmp, "lq1з")
+    name = mq_names(s, HELD)
+    code, data, _ = s.queue(branch, "--json")
+    check("lq1-з: код 3, держится", (3, True), (code, data.get("держится")))
+    check("lq1-з: держится та же заявка, повторов_держания 0", (name, 0),
+          (mq_names(s, HELD), held_request(s).get("повторов_держания")))
+    check("lq1-з: прогон новый — две строки mq.держится", 2, len(rows_of(s, branch, "mq.держится")))
+
+
+def case_lq1_fix_merged_releases_held(tmp: Path) -> None:
+    """lq1-и: master чинится слиянием через очередь — держимая возвращается в заявки/ сразу после
+    пачки; подача её ветки не читает старый итог 3, а сливает."""
+    # Поломка: возврат только в начале следующей подачи (после пачки не смотрят); старый итог 3
+    # при возврате не снят — подача читает «держится» вместо слияния.
+    print("lq1-и) починка master через очередь — держимая возвращается и сливается")
+    s, branch, _, _, _ = held_stand(tmp, "lq1и")
+    fix, wt = s.tree("lq1i-fix")
+    s.change(wt, "scripts/probe_node.py", FIXED_PROBE, "ветка: проба-узла починена")
+    code, _, _ = s.queue(fix, "--json")
+    check("lq1-и: починка слита", 0, code)
+    check("lq1-и: держимая сразу после пачки — в заявках, держатся/ пуст", ([branch], []),
+          (queued_names(s), held_names(s)))
+    code, data, _ = s.queue(branch, "--json")
+    check("lq1-и: подача ветки — код 0, не старый итог 3", (0, None), (code, data.get("держится")))
+    check("lq1-и: правка держимой ветки в master", True,
+          s.read("scripts/node_lib.py").startswith("# правка ветки"))
+
+
+def case_lq1_tidy_merges_released(tmp: Path) -> None:
+    """lq1-к: `--убрать` при починенном master возвращает держимую и сам её сливает: ждать
+    вернувшуюся некому (ночное задание)."""
+    # Поломка: --убрать только возвращает в заявки/ — ветка ждёт чужой подачи.
+    print("lq1-к) --убрать сливает вернувшуюся держимую")
+    s, branch, _, _, _ = held_stand(tmp, "lq1к")
+    master_change(s, "scripts/probe_node.py", FIXED_PROBE, "master: проба-узла починена")
+    code, _, _ = s.queue("--убрать")
+    check("lq1-к: --убрать код 0", 0, code)
+    check("lq1-к: держимая влита, одна строка mq.слито", (True, 1),
+          (s.read("scripts/node_lib.py").startswith("# правка ветки"), len(rows_of(s, branch, "mq.слито"))))
+    check("lq1-к: ни в держатся/, ни в заявках", ([], []), (held_names(s), queued_names(s)))
+
+
 CASES = (case_a_fast_forward, case_b_master_moved, case_c_conflict, case_d_red_gate,
          case_e_dirty_helper, case_f_dirty_main, case_g_locked, case_h_package,
          case_p_package_superset,
          case_i_two_queues, case_j_union, case_k_heal_hook, case_l_retries, case_m_cleanup,
          case_n_rollback, case_bad_call, case_q_new_sample_key, case_r_key_unwritable,
+         case_r2_key_root_dir,
          case_s_package_carried, case_t_dirty_map, case_map_moved_master,
          case_other_moved_master, case_map_moved_branch_map, case_map_moved_branch_map_red,
          case_u_broken_map,
@@ -2873,7 +3222,13 @@ CASES = (case_a_fast_forward, case_b_master_moved, case_c_conflict, case_d_red_g
          case_regate_shift_red, case_regate_race, case_regate_rules_moved,
          case_regate_rules_list_shrunk, case_regate_no_selection,
          case_red_names,
-         case_master_red, case_master_green_remembered, case_queue_own_files)
+         case_master_red, case_master_green_remembered, case_queue_own_files,
+         # отказ не по вине ветки (lq1): красные до кода
+         case_lq1_built_conflict_rebuilt, case_lq1_built_and_plain_conflict,
+         case_lq1_blameless_held, case_lq1_held_resubmitted, case_lq1_held_expired,
+         case_lq1_own_fault_not_held, case_lq1_bad_generator,
+         case_lq1_unrelated_shift_keeps_held, case_lq1_helper_resubmits_held,
+         case_lq1_fix_merged_releases_held, case_lq1_tidy_merges_released)
 
 
 def main() -> int:

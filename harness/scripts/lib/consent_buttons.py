@@ -16,17 +16,22 @@ consent-buttons.jsonl пишет только этот модуль и толь�
   judge   <log> <chat_id> [<secrets_dir> [<owner_id>]] → callback_query на stdin; пишет «да»/«нет»,
                                   если нажатие прошло: chat.id = канал (TG_CHAT_ID), from.id = владелец
                                   (TG_OWNER_ID; пусто — равен каналу, как в личке)
-  sender  <chat_id> [<owner_id>] → .message на stdin; {} — пишет владелец, иначе {answer, log, tell}:
-                                  тот же судья, что у нажатия, для текста в канале-группе
+  sender  <chat_id> [<owner_id> [<speakers>]] → .message на stdin; {} — пишет владелец, {speaker, name} —
+                                  собеседник группы из <speakers> (from.id через запятую), иначе {answer, log, tell}
+                                  (в группе от незнакомца ещё и {stranger, name}): тот же судья, что у нажатия
+  Решение «да»/«нет» на вид «собеседник» отдаёт вердикт {speaker: id} / {speaker_no: id} —
+                                  запись ключа за диспетчером
 """
 from __future__ import annotations
 
 import datetime as dt
+import fcntl
 import json
 import os
 import re
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -42,6 +47,8 @@ EVENT_OF = {name: event for event, name in owner_word.СОБЫТИЯ_СОГЛА�
 CALLBACK_RE = re.compile(r"^c:([A-Za-z0-9_-]{22}):(y|n)$")
 WHY_LIMIT = 200
 DECISIONS = {"y": "да", "n": "нет"}
+# Вид согласия «добавить from.id в собеседники группы»: единственный, чьё «да» исполняет диспетчер.
+SPEAKER_KIND = "собеседник"
 GIT_TIMEOUT_SEC = 5
 LIST_LIMIT = 5
 SUBJECT_LIMIT = 60
@@ -301,10 +308,18 @@ def net_key_text(request: dict, secrets_dir: str, ttl: int) -> str:
             f"{why}\nКнопка действует {ttl_phrase(ttl)}.")
 
 
+def speaker_text(request: dict, secrets_dir: str, ttl: int) -> str:
+    who = str(request.get("почему") or "")[:WHY_LIMIT]
+    return (f"В группе пишет {who} (id {request['цель']}), его нет среди собеседников. Добавить? Его слова "
+            f"пойдут во входящие с подписью «от:», а кнопки и «да» останутся только твоими.\n"
+            f"Кнопка действует {ttl_phrase(ttl)}.")
+
+
 # Текст по виду: ключи — ВИДЫ_СОГЛАСИЯ.
 TEXT = {"удаление": delete_text, "пуш": push_text, "выкат": deploy_text,
         "публикация": publish_text, "спека": spec_text, "снос-базы": drop_text,
-        "перепись": rewrite_text, "слой-человека": layer_text, "ключ-сети": net_key_text}
+        "перепись": rewrite_text, "слой-человека": layer_text, "ключ-сети": net_key_text,
+        "собеседник": speaker_text}
 
 
 def message_text(request: dict, secrets_dir: str, ttl: int) -> str:
@@ -458,19 +473,36 @@ def decide(log: Path, callback: dict, sender, message: dict) -> dict:
     append_row(log, event, {"nonce": nonce, "вид": sent.get("вид", owner_word.ВИД_ПО_УМОЛЧАНИЮ),
                             "цель": sent["цель"],
                             "message_id": message_id, "from_id": sender})
-    return {"answer": "Принято" if event == "да" else "Отказ записан",
-            "log": f"решение «{event}» записано, nonce {nonce[:8]}",
-            "edit": f"Ответ записан: {event}.",
-            "nonce": nonce, "sent": sent, "decision": event}
+    verdict = {"answer": "Принято" if event == "да" else "Отказ записан",
+               "log": f"решение «{event}» записано, nonce {nonce[:8]}",
+               "edit": f"Ответ записан: {event}.",
+               "nonce": nonce, "sent": sent, "decision": event}
+    if sent.get("вид") == SPEAKER_KIND:
+        # Ключ паспорта пишет диспетчер (write-key.py): судья только решает.
+        verdict["speaker" if event == "да" else "speaker_no"] = sent["цель"]
+    return verdict
 
 
-def sender_verdict(chat_id: str, owner_id: str, message: dict) -> dict:
-    """Текст в канале: {} — слово владельца; отказ — чужому участнику группы бот не отвечает;
+def speaker_ids(speakers: str) -> set[str]:
+    """TG_GROUP_SPEAKERS: from.id через запятую, пробелы вокруг — как впишет человек."""
+    return {part.strip() for part in speakers.split(",") if part.strip()}
+
+
+def sender_verdict(chat_id: str, owner_id: str, message: dict, speakers: str = "") -> dict:
+    """Текст в канале: {} — слово владельца; {speaker} — собеседник группы (его текст — во входящие
+    с подписью, мимо слова владельца); отказ — остальным участникам бот не отвечает;
     без ключа владельца — unverified: о паспорте говорит очередь «не проверено» диспетчера."""
-    refusal = sender_refusal(chat_id, owner_id, (message.get("from") or {}).get("id"),
-                             (message.get("chat") or {}).get("id"))
+    sender = (message.get("from") or {}).get("id")
+    chat = (message.get("chat") or {}).get("id")
+    refusal = sender_refusal(chat_id, owner_id, sender, chat)
     if refusal is None:
         return {}
+    name = str((message.get("from") or {}).get("first_name") or "")
+    if refusal[0] != NO_OWNER_KEY and str(chat) == chat_id and sender is not None:
+        # Список действует только в самой группе канала и не даёт ни нажатия, ни согласия.
+        if str(sender) in speaker_ids(speakers):
+            return {"speaker": sender, "name": name}
+        return {"answer": refusal[0], "log": refusal[1], "stranger": sender, "name": name}
     verdict = {"answer": refusal[0], "log": refusal[1]}
     if refusal[0] == NO_OWNER_KEY:
         # Без ключа слово не отличить от чужого: диспетчер кладёт его в очередь сессии с пометкой
@@ -479,14 +511,66 @@ def sender_verdict(chat_id: str, owner_id: str, message: dict) -> dict:
     return verdict
 
 
+# fullmatch, не match: «$» у match пропускает id с переводом строки в конце.
+SPEAKER_ID = re.compile(r"[0-9]{1,15}")
+
+
+def roster_ids(roster: Path) -> list[str]:
+    """Строки списка собеседников: битые (не 1-15 цифр после strip) отбрасываются, файла нет — пусто.
+    Симлинк не читается: каталог общий с учёткой панели, она подсунула бы файл агента."""
+    try:
+        with open(os.open(roster, os.O_RDONLY | os.O_NOFOLLOW), encoding="utf-8") as fh:
+            lines = fh.read().splitlines()
+    except OSError:
+        return []
+    return [line.strip() for line in lines if SPEAKER_ID.fullmatch(line.strip())]
+
+
+def speaker_add(roster: Path, speaker: str) -> int:
+    """Дописать id в список собеседников атомарно: flock, tmp со случайным именем (O_EXCL),
+    0640 до os.replace. Каталог 2770 с группой панели: заранее подложенный симлинк на месте
+    .lock или .tmp не должен вести запись агента в его же файл вне каталога."""
+    if not SPEAKER_ID.fullmatch(speaker):
+        print(f"id «{speaker[:40]}» — не 1-15 цифр")
+        return 3
+    try:
+        lock_fd = os.open(roster.parent / (roster.name + ".lock"), os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o640)
+        with os.fdopen(lock_fd, "w") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            known = roster_ids(roster)
+            if speaker in known:
+                print(f"{speaker} уже в списке")
+                return 0
+            fd, tmp = tempfile.mkstemp(dir=roster.parent, prefix=roster.name + ".")
+            try:
+                os.fchmod(fd, 0o640)
+                with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                    fh.write("".join(f"{one}\n" for one in [*known, speaker]))
+                os.replace(tmp, roster)
+            except OSError:
+                os.unlink(tmp)
+                raise
+    except OSError as why:
+        print(f"список не записан: {why.strerror or why}")
+        return 5
+    print(f"{speaker} добавлен")
+    return 0
+
+
 def main(argv: list[str]) -> int:
+    if argv[1] == "speaker-add":
+        return speaker_add(Path(argv[2]), argv[3])
+    if argv[1] == "speakers":
+        print(",".join(sorted(speaker_ids(argv[2]) | set(roster_ids(Path(argv[3]))))))
+        return 0
     if argv[1] == "sender":
         try:
             message = json.loads(sys.stdin.read())
         except ValueError:
             message = {}
         print(json.dumps(sender_verdict(argv[2], argv[3] if len(argv) > 3 else "",
-                                        message if isinstance(message, dict) else {}), ensure_ascii=False))
+                                        message if isinstance(message, dict) else {},
+                                        argv[4] if len(argv) > 4 else ""), ensure_ascii=False))
         return 0
     command, log = argv[1], Path(argv[2])
     if command == "unsent":

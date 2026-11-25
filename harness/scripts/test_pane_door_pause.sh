@@ -181,7 +181,7 @@ door_stand() {  # $1 = имя; готовит пустой стенд двери
 door_call() {  # $1 = функция двери, $2 = текст
     stand_env PROBA_TMUX_LOG="$D/tmux-calls" TMUX_SESSION="$STAMP-door" \
         HARNESS_PANEL_STATE="$D/panel" LOG_DIR="$D/log" \
-        HARNESS_CONF="$D/harness.conf" HARNESS_INSTALL_CONF="$D/harness.conf" \
+        HARNESS_CONF="$D/harness.conf" HARNESS_INSTALL_CONF="$D/harness.conf" CLAUDE_PROJECTS_DIR="$D/projects" \
         ROTATE_FINISH_TIMEOUT_SEC=900 PANE_ENTER_DELAY=0 PANE_TMUX_TIMEOUT=3 \
         bash -c 'source "$1" || exit 3
                  declare -F "$2" >/dev/null || { echo "НЕТ ДВЕРИ $2"; exit 0; }
@@ -261,6 +261,38 @@ if want дверь; then
     case_check "метка blocked (не лимит) — дверь пропускает" "пропустила" \
         "$(passed "$(door_call "$OWNER" "проба: сообщение владельца")")"
 
+    # БОЛЬНОЙ СЛУЧАЙ 25.11.2026 01:20–02:03 (tg-dispatcher.log, 17 раз «лимит:
+    # толчок отложен»): метка limit стоит, /login был ДО неё, а смена ОТВЕЧАЕТ —
+    # работает на аккаунте, которого account-switch.py не знает. Работа — успешный
+    # ответ модели в транскрипте смены после метки. Транскрипт смены дверь находит
+    # сама, как в жизни: каталог проекта (PROJECT_DIR) в CLAUDE_PROJECTS_DIR, запись cli.
+    door_shift() {  # $1.. = строки транскрипта смены стенда двери
+        printf 'PROJECT_DIR="%s"\n' "$D/project" >> "$D/harness.conf"
+        mkdir -p "$D/projects/${D//\//-}-project"
+        printf '%s\n' "$@" > "$D/projects/${D//\//-}-project/smena.jsonl"
+    }
+    door_rec() {  # $1 = тип записи, $2 = секунд назад, $3 = поля сверх (JSON-хвост)
+        printf '{"type":"%s","entrypoint":"cli","timestamp":"%s"%s}' "$1" \
+            "$(date -u -d "@$(( $(date +%s) - $2 ))" +%Y-%m-%dT%H:%M:%SZ)" "$3"
+    }
+    door_login() { door_rec user "$1" ',"message":{"role":"user","content":"<local-command-stdout>Login successful</local-command-stdout>"}'; }
+    door_answer() { door_rec assistant "$1" ',"message":{"role":"assistant","content":[{"type":"text","text":"ответ модели"}]}'; }
+    door_refusal() { door_rec assistant "$1" ',"error":"rate_limit","apiErrorStatus":429,"isApiErrorMessage":true,"message":{"model":"<synthetic>","role":"assistant","content":[{"type":"text","text":"You have hit your session limit"}]}'; }
+    limit_at() {  # $1 = секунд назад поставлена метка limit; сброс через час
+        printf '%s limit %s\n' "$(( $(date +%s) - $1 ))" "$(( $(date +%s) + 3600 ))" > "$D/log/лимит-подписки.состояние"
+    }
+    door_stand limwork; limit_at 300
+    door_shift "$(door_login 600)" "$(door_answer 60)"
+    case_check "БОЛЬНОЙ 25.11: метка limit, вход ДО неё, смена ответила ПОСЛЕ — дверь пропускает" "пропустила" \
+        "$(passed "$(door_call "$OWNER" "проба: сообщение владельца")")"
+    case_check "БОЛЬНОЙ 25.11: смена отвечает — текст и Enter ушли в панель" "1/1" \
+        "$(texts "$D/tmux-calls")/$(enters "$D/tmux-calls")"
+    # Контроль: тот же стенд, но после метки только отказ 429 — лимит держит дверь.
+    door_stand limrefused; limit_at 300
+    door_shift "$(door_login 600)" "$(door_answer 400)" "$(door_refusal 60)"
+    case_check "метка limit, после неё только отказ 429 — отказ словом «лимит»" "отказ лимит" \
+        "$(refused_with "$(door_call "$OWNER" "проба: сообщение владельца")" лимит)"
+
     # Порядок гейтов из спеки §4.0: пауза → ротация → лимит.
     door_stand order; pause_on "$D/panel"; limit_on "$D/log" limit
     case_check "пауза и лимит сразу — причина «пауза» (первый гейт)" "отказ пауза" \
@@ -317,7 +349,7 @@ for A in "\$@"; do
     case "\$A" in --*) flags="\$flags \$A" ;; *) [ -n "\$text" ] && flags="\$flags \$A" || text="\$A" ;; esac
 done
 case "\$flags" in *--несмотря-на-лимит*) ;; *)
-    if LOG_DIR="$W/log" python3 "$W/project/scripts/limit_mark.py" --лимит-держится >/dev/null 2>&1; then
+    if LOG_DIR="$W/log" HARNESS_CONF="$W/harness.conf" HARNESS_INSTALL_CONF="$W/harness.conf" CLAUDE_PROJECTS_DIR="$W/projects" python3 "$W/project/scripts/limit_mark.py" --лимит-держится >/dev/null 2>&1; then
         printf '%s\t%s\n' "\$flags" "\$text" >> "$W/kanal-held.txt"; exit 3
     fi ;;
 esac
@@ -373,7 +405,8 @@ CONF
     # Ф0 решение 6а — «пинок» без всякой срочности).
     ts_ago() { date -u -d "-$1 min" +%Y-%m-%dT%H:%M:%SZ; }
     tr_ok() {  # стенограмма работающей смены: успешный ответ $1 мин назад
-        printf '{"type":"assistant","timestamp":"%s"}\n' "$(ts_ago "$1")" > "$TRANSCRIPT"
+        # entrypoint cli — транскрипт СМЕНЫ: его ищет судья лимита (shift_transcript).
+        printf '{"type":"assistant","entrypoint":"cli","timestamp":"%s"}\n' "$(ts_ago "$1")" > "$TRANSCRIPT"
         touch -d "-$1 min" "$TRANSCRIPT"
     }
     # Запись отказа — форма снята с живого журнала сессии 27.10 (ключи
@@ -392,7 +425,9 @@ CONF
         tr_ok 60; tr_refusal 10
         printf '{"type":"assistant","timestamp":"%s"}\n' "$(ts_ago 0)" >> "$TRANSCRIPT"
     }
-    limit_held() { LOG_DIR="$W/log" python3 "$LIMIT_MARK" --лимит-держится >/dev/null 2>&1 && echo да || echo нет; }
+    # Судья лимита читает транскрипт СМЕНЫ (ответ после метки снимает лимит): без
+    # конфига и каталога транскриптов стенда он судил бы живую смену проекта.
+    limit_held() { LOG_DIR="$W/log" HARNESS_CONF="$W/harness.conf" HARNESS_INSTALL_CONF="$W/harness.conf" CLAUDE_PROJECTS_DIR="$W/projects" python3 "$LIMIT_MARK" --лимит-держится >/dev/null 2>&1 && echo да || echo нет; }
 
     w_stand() {
         WRUN=0; W_UNREACHED=0

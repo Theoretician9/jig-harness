@@ -207,6 +207,29 @@ def board() -> dict:
                 устарела=age is None or age > BOARD_STALE_MINUTES)
 
 
+def live_map() -> dict:
+    """Снимок живой карты плюс «устарел». Нет файла — «нет данных» с причиной.
+
+    Порог — три периода самого снимка: сборщик сам решает, как часто пишет,
+    и постоянная секунд здесь устарела бы вместе с его ритмом.
+    """
+    path = Path(os.environ.get("PANEL_LIVE_MAP") or settings.состояние_дир() / "live-map.json")
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {"нет данных": "Карта ещё не собрана: сборщик не запускался"}
+    except (OSError, ValueError) as error:
+        return {"нет данных": f"Карта ещё не собрана: снимок не прочитан ({error})"}
+    taken = datetime.datetime.fromisoformat(data["снято"])
+    age = (datetime.datetime.now(taken.tzinfo) - taken).total_seconds()
+    return dict(data, устарел=age > 3 * data["период_с"])
+
+
+def mark_viewer() -> None:
+    """Отметка «карту смотрят»: по её свежести сборщик ускоряет ритм."""
+    (settings.состояние_дир() / "live-map.viewer").touch()
+
+
 def find_task(snapshot: dict, task_id: str) -> dict | None:
     """Задача по id — сверкой с id снимка, а не разбором символов пути."""
     return next((task for task in snapshot.get("задачи") or []

@@ -559,17 +559,19 @@ print("── задание, выключенное пустым ключом (
 # Замер О7 28.10.2026: сторож продукта без продукта — 2 016 пустых запусков в
 # неделю. Выключенное задание не стоит в кроне и не имеет срока: его метку
 # сверка не требует, а включённое (ключ задан) — требует, как прежде.
-def switch_stand(value: str, period_in_conf: bool):
+def switch_stand(value: str, period_in_conf: bool, equals: str = None):
     stand = двор([паспорт("harness/demons/probe-product.sh", "Сторож продукта",
                           повод("крон", "*/5 * * * *", метка("probe-product", 5)))],
                  {"probe-product": 5} if period_in_conf else {})
     with open(stand[РУЧКА_КОНФИГ], "a", encoding="utf-8") as conf:
         conf.write(f'PROBE_URL="{value}"\n')
     jobs = stand["каталог"] / "system-jobs.yaml"
-    jobs.write_text(yaml.safe_dump({"задания": [{
-        "имя": "probe-product", "расписание": "*/5 * * * *",
-        "команда": "harness/demons/probe-product.sh", "журнал": "p.log",
-        "если_задан": "PROBE_URL"}]}, allow_unicode=True), encoding="utf-8")
+    job = {"имя": "probe-product", "расписание": "*/5 * * * *",
+           "команда": "harness/demons/probe-product.sh", "журнал": "p.log",
+           "если_задан": "PROBE_URL"}
+    if equals is not None:
+        job["равно"] = equals
+    jobs.write_text(yaml.safe_dump({"задания": [job]}, allow_unicode=True), encoding="utf-8")
     try:
         return прогон(("--проверить",), ручки={
             РУЧКА_РЕЕСТР: stand[РУЧКА_РЕЕСТР], РУЧКА_КОНФИГ: stand[РУЧКА_КОНФИГ],
@@ -586,6 +588,16 @@ rc_sw, out_sw = switch_stand("http://127.0.0.1:1/health", period_in_conf=False)
                    rc_sw, out_sw, НЕТ_В_КОНФИГЕ, "probe-product")
 rc_sw, out_sw = switch_stand("", period_in_conf=True)
 красный_с_причиной("ключ пуст, а срок стоит — сторож меток звал бы его мёртвым",
+                   rc_sw, out_sw, НЕТ_В_РЕЕСТРЕ, "probe-product")
+# Выключатель «выбор» с явным «0» (LIVE_MAP_ENABLED): решает `равно`, не непустота.
+rc_sw, out_sw = switch_stand("0", period_in_conf=False, equals="1")
+сошлось("равно \"1\", ключ \"0\" — метку выключенного сверка не требует",
+        rc_sw, out_sw, СОШЛОСЬ)
+rc_sw, out_sw = switch_stand("1", period_in_conf=False, equals="1")
+красный_с_причиной("равно \"1\", ключ \"1\", срока нет — сверка требует метку",
+                   rc_sw, out_sw, НЕТ_В_КОНФИГЕ, "probe-product")
+rc_sw, out_sw = switch_stand("0", period_in_conf=True, equals="1")
+красный_с_причиной("равно \"1\", ключ \"0\", а срок стоит — лишний срок",
                    rc_sw, out_sw, НЕТ_В_РЕЕСТРЕ, "probe-product")
 
 print("── свой механизм копии: паспорт в поле «механизмы» слоя установки ──")

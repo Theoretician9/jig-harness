@@ -9,7 +9,8 @@
     status_widget.py --caption   подпись одной строкой
     status_widget.py --send      один виджет в чате: есть сохранённое сообщение — editMessageWidgetData,
                                  нет или пропало — sendWidget. Токен из файла TG_TOKEN_FILE, чат из
-                                 TG_CHAT_ID, состояние — STATUS_WIDGET_STATE (окружение, не argv)
+                                 TG_CHAT_ID, состояние — STATUS_WIDGET_STATE, адрес панели для кнопки
+                                 «Живая карта» — STATUS_WIDGET_PANEL_URL (окружение, не argv)
 
 Коды: 0 — готово; 2 — на stdin не тот JSON; 3 — не влезло; 5 — Telegram не принял.
 Правку виджета по кнопке делает lib/widget_buttons.py через edit_view() отсюда.
@@ -326,8 +327,22 @@ def edit_view(chat_id: str, message_id: int, data_json: str) -> bool:
     return True
 
 
+def live_map_button() -> dict | None:
+    """Кнопка «Живая карта» на <панель>/puls; панели нет или она не на https — None.
+    Telegram принимает web_app в инлайн-клавиатуре только по HTTPS и только в личном чате,
+    иначе отказал бы весь sendWidget. Без callback_data: нажатие открывает страницу, а не идёт в кнопки."""
+    panel = os.environ.get("STATUS_WIDGET_PANEL_URL", "").strip()
+    if not panel.startswith("https://"):
+        return None
+    return {"text": "Живая карта", "web_app": {"url": panel.rstrip("/") + "/puls"}}
+
+
 def send_widget(chat_id: str, page: str, line: str, data_json: str) -> int:
-    markup = {"inline_keyboard": [[{"text": text, "callback_data": code} for code, text in BUTTONS]]}
+    rows = [[{"text": text, "callback_data": code} for code, text in BUTTONS]]
+    # Отдельным рядом: четыре кнопки в один ряд на экране 360 px не читаются.
+    if (live_map := live_map_button()) is not None:
+        rows.append([live_map])
+    markup = {"inline_keyboard": rows}
     result = api_call("sendWidget", {"chat_id": chat_id, "html": page, "caption": line, "chat_data": data_json,
                                      "reply_markup": json.dumps(markup, ensure_ascii=False)})
     if result.get("message_id") is None:
@@ -360,8 +375,19 @@ def send(data: dict, page: str) -> int:
     return 0
 
 
+def live_map_markup() -> str:
+    """JSON клавиатуры для текстового статуса; пусто, если кнопки нет или чат не личный (web_app — только в личном)."""
+    button = live_map_button()
+    if button is None or os.environ.get("TG_CHAT_ID", "").startswith("-"):
+        return ""
+    return json.dumps({"inline_keyboard": [[button]]}, ensure_ascii=False)
+
+
 def main(argv: list) -> int:
     mode = argv[1] if len(argv) > 1 else ""
+    if mode == "--live-map-markup":
+        print(live_map_markup())
+        return 0
     try:
         data = json.load(sys.stdin)
         if mode == "--caption":

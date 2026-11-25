@@ -16,6 +16,9 @@ set -uo pipefail
 
 ZDES="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SBORSHCHIK="$ZDES/nginx-panel.sh"
+# Дверь пробы: шаблон рубежа. Мутации судятся на КОПИИ шаблона, живой
+# файл не трогается.
+SHABLON="${NGINX_PANEL_TEMPLATE:-$ZDES/../harness/panel/nginx-panel.conf.in}"
 HOST_STENDA="panel.stend.example"
 PORT_STENDA=8787
 
@@ -30,7 +33,7 @@ proba() {  # $1 = имя, $2 = ждём, $3 = вышло
 stend() {  # $1 = каталог, $2 = PANEL_URL, $3 = порт юнита; печатает пути
     local T="$1" url="$2" port="$3"
     mkdir -p "$T/nginx/sites-available" "$T/nginx/sites-enabled" "$T/bin" "$T/proekt/harness/panel"
-    cp "$ZDES/../harness/panel/nginx-panel.conf.in" "$T/proekt/harness/panel/"
+    cp "$SHABLON" "$T/proekt/harness/panel/nginx-panel.conf.in"
     printf 'PROJECT_DIR="%s/proekt"\n' "$T" > "$T/install.conf"
     printf 'PANEL_URL="%s"\n' "$url" > "$T/harness.conf"
     # В ФАЙЛЕ юнита нарочно другой порт: работает УСТАНОВЛЕННЫЙ юнит, и проба
@@ -327,6 +330,50 @@ VYVOD=$(zvat "$T" --показать); RC=$?
 proba "БОЛЬНОЙ: PANEL_URL с портом — отказ" "1" "$RC"
 proba "БОЛЬНОЙ: порт назван в отказе" "да" \
       "$(printf '%s' "$VYVOD" | grep -q 'с портом' && echo да || echo нет)"
+rm -rf "$T"
+
+# ── 17. location /puls: обрамление Telegram Web без X-Frame-Options ──────
+# Спека живой карты §6, К-6, ревью Н-3. add_header уровня server в location со
+# своим add_header НЕ наследуется — поэтому /puls повторяет всё, кроме
+# X-Frame-Options. Комментарии вырезаны до разбора: слово «X-Frame-Options»
+# в пояснении не должно ни зеленить, ни краснить пробу.
+T=$(mktemp -d); stend "$T" "https://$HOST_STENDA" "$PORT_STENDA"
+VYVOD=$(zvat "$T" --показать | sed 's/#.*//')
+blok() {  # $1 = точный путь location; печатает тело его блока
+    printf '%s\n' "$VYVOD" | awk -v want="$1" '
+        !inside && $1 == "location" && $2 == want && $3 == "{" { inside = 1; depth = 0 }
+        inside { print; depth += gsub(/\{/, "{"); depth -= gsub(/\}/, "}"); if (depth == 0) exit }'
+}
+PULS=$(blok /puls)
+KOREN=$(blok /)
+# Строка подаётся here-string, а не трубой: grep -q выходит на первом
+# совпадении, printf ловит SIGPIPE, и при pipefail «да» становится «нет».
+est() {  # $1 = текст, $2 = шаблон grep -E; печатает да/нет
+    grep -qE -- "$2" <<< "$1" && echo да || echo нет
+}
+proba "location /puls есть в собранном шаблоне, ровно один" "1" \
+      "$(printf '%s\n' "$VYVOD" | grep -cE '^[[:space:]]*location /puls \{')"
+proba "БОЛЬНОЙ: у /puls нет X-Frame-Options (Telegram Web открывает во фрейме)" "нет" \
+      "$(est "$PULS" 'X-Frame-Options')"
+proba "у /puls nosniff с always" "да" \
+      "$(est "$PULS" 'add_header X-Content-Type-Options "nosniff" always;')"
+proba "у /puls X-Robots-Tag с always" "да" \
+      "$(est "$PULS" 'add_header X-Robots-Tag "noindex, nofollow" always;')"
+proba "у /puls proxy_set_header X-Real-IP (адрес гостя для лимита)" "да" \
+      "$(est "$PULS" 'proxy_set_header X-Real-IP \$remote_addr;')"
+proba "у /puls proxy_pass на порт панели" "да" \
+      "$(est "$PULS" "proxy_pass http://127.0.0.1:$PORT_STENDA;")"
+for stroka in 'proxy_http_version 1\.1;' 'proxy_set_header Host \$host;' \
+              'proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;' \
+              'proxy_set_header X-Forwarded-Proto \$scheme;' 'proxy_read_timeout 60s;'; do
+    proba "у /puls повторено: $stroka" "да" "$(est "$PULS" "$stroka")"
+done
+proba "у / X-Frame-Options \"DENY\" остался на уровне server" "да" \
+      "$(est "$VYVOD" 'add_header X-Frame-Options "DENY" always;')"
+# Свой add_header в location / отрезал бы наследование DENY для всей панели.
+proba "у location / своего add_header нет — DENY наследуется" "нет" \
+      "$(est "$KOREN" 'add_header')"
+proba "location / на месте (блок разобран)" "да" "$(est "$KOREN" 'proxy_pass')"
 rm -rf "$T"
 
 if [ "$ok" = 1 ]; then

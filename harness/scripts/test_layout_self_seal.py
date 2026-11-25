@@ -25,6 +25,8 @@
   4) правила sudo на self-seal нет (отвечает сам sudo) → строка-предупреждение, код 0;
   5) sudo пишет свою строку («unable to resolve host») перед отказом self-seal → код ≠ 0:
      строка sudo в общем потоке не делает отказ печати предупреждением.
+  6) PROJECT_DIR из окружения вызывающего (поезд выпуска экспортирует его) не уводит
+     раскладку мимо стенда: каталог-приманка не создан.
 В случаях 2–5 раскладка обязана дойти до sudo с self-seal: нет обращения — провал.
 
 Дверь мутаций: LAYOUT_SCRIPT — раскладчик, который кладётся в копию пакета вместо своего.
@@ -41,6 +43,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 LIMIT_SEC = 900
+DECOY = "приманка-вызывающего"
 
 FAKE_SUDO = r"""#!/usr/bin/env bash
 printf '%s\n' "$*" >> "$STAND_SUDO_LOG"
@@ -105,11 +108,22 @@ def make_stand(root: Path) -> dict:
     return {"pkg": pkg, "manifest": pkg / "harness" / "self" / "MANIFEST.sha256"}
 
 
+def stand_keys(root: Path) -> set[str]:
+    """Ключи, которые называют файлы стенда, — разбором общего читателя, а не списком: новый ключ не забыт."""
+    sys.path.insert(0, str(HERE / "lib"))
+    import config
+    return {*config.из_файла(str(root / "install.conf")), *config.из_файла(str(root / "harness.conf"))}
+
+
 def run_layout(root: Path, pkg: Path, mode: str) -> tuple[subprocess.CompletedProcess, list[str], bool]:
     """Код раскладки, доводы вызовов self-seal и было ли обращение к sudo про self-seal вообще."""
     seal_args = root / f"seal-args-{mode}.txt"
     sudo_log = root / f"sudo-{mode}.log"
-    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    # Ключи стенда — только из его файлов: окружение старше конфига, и PROJECT_DIR, унаследованный
+    # от поезда выпуска, уводил раскладку в проверяемое дерево (откладывал там instance.yaml).
+    # Приманка — такой ключ вызывающего: раскладка, которая его послушает, ляжет в неё.
+    inherited = {**os.environ, "PROJECT_DIR": str(root / DECOY)}
+    env = {k: v for k, v in inherited.items() if not k.startswith("GIT_") and k not in stand_keys(root)}
     env.update({
         "PATH": f"{root}/bin:{env.get('PATH', '/usr/bin:/bin')}",
         "TMPDIR": str(root / "tmp"),
@@ -177,10 +191,14 @@ def main() -> int:
         failed += verdict("5) строка sudo перед отказом self-seal → код раскладки ≠ 0",
                           r.returncode != 0 and bool(args),
                           f"код {r.returncode}, вызовов self-seal {len(args)}", r)
+        decoy = root / DECOY
+        print(f"{'ok  ' if not decoy.exists() else 'FAIL'} 6) PROJECT_DIR вызывающего не уводит раскладку "
+              f"мимо стенда: приманка {'тронута' if decoy.exists() else 'не тронута'}")
+        failed += decoy.exists()
     finally:
         subprocess.run(["chmod", "-R", "u+w", str(root)], stderr=subprocess.DEVNULL)
         shutil.rmtree(root, ignore_errors=True)
-    print(f"ЭТАЛОН-РАСКЛАДКИ: случаев 5, упало {failed}")
+    print(f"ЭТАЛОН-РАСКЛАДКИ: случаев 6, упало {failed}")
     return 1 if failed else 0
 
 

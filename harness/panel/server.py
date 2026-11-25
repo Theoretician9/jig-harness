@@ -47,6 +47,7 @@ import state  # noqa: E402
 import vid  # noqa: E402
 import settings  # noqa: E402
 import login  # noqa: E402
+import tg_web_app  # noqa: E402
 
 КОРЕНЬ = Path(__file__).resolve().parent.parent.parent
 РЕЕСТР = Path(os.environ.get("HARNESS_PERECLUCHATELI")
@@ -89,6 +90,13 @@ SECRETS_DIR = Path(settings.конф.secrets_dir())
     # комментарий агенту некому (спека hr.kanban §4).
     "/kommentarij": ("_comment", "опасный"),
 }
+
+# Кто может обрамлять страницу: живая карта открывается и во фрейме Telegram Web,
+# остальные страницы — никому.
+ОБРАМЛЕНИЕ_ПО_ПУТИ = {"/puls": "'self' https://web.telegram.org"}
+ОБРАМЛЕНИЕ_ПО_УМОЛЧАНИЮ = "'none'"
+# Куда можно вернуть человека после входа (довод dalee): только живая карта.
+КУДА_ПОСЛЕ_ВХОДА = {"/puls"}
 
 # Лимиты частоты: вход — редкое действие, чтение состояния — частое.
 ПОПЫТОК_ВХОДА_В_МИНУТУ = 5
@@ -314,10 +322,17 @@ class Панель(BaseHTTPRequestHandler):
         # снимала бы защиту молча (ревью кода 13.09.2026, F3-sec-04).
         self.send_header("Content-Security-Policy",
                          "default-src 'self'; style-src 'self' 'unsafe-inline'; "
-                         "frame-ancestors 'none'")
+                         "frame-ancestors " + self._frame_ancestors())
         self.send_header("Referrer-Policy", "no-referrer")
         self.end_headers()
         self.wfile.write(данные)
+
+    def _frame_ancestors(self) -> str:
+        путь = self.path.partition("?")[0]
+        for начало, кто in ОБРАМЛЕНИЕ_ПО_ПУТИ.items():
+            if путь == начало or путь.startswith(начало + "/"):
+                return кто
+        return ОБРАМЛЕНИЕ_ПО_УМОЛЧАНИЮ
 
     def тело(self) -> dict:
         """Тело запроса: и JSON (наши вызовы), и обычная форма браузера.
@@ -379,7 +394,9 @@ class Панель(BaseHTTPRequestHandler):
                 return self.ответить(200, vid.вход_по_ссылке(False), "text/html")
             записать_в_журнал({"событие": "вход", "адрес": self.адрес})
             self.send_response(303)
-            self.send_header("Location", "/")
+            запрос = urllib.parse.parse_qs(self.path.partition("?")[2])
+            куда = (запрос.get("dalee") or [""])[0]
+            self.send_header("Location", куда if куда in КУДА_ПОСЛЕ_ВХОДА else "/")
             # Lax, а не Strict: переход приходит СО СТОРОНЫ — из клиента
             # Telegram, — и строгая кука на нём не отправится. Тот же довод,
             # что у запасного входа.
@@ -404,6 +421,8 @@ class Панель(BaseHTTPRequestHandler):
                     state.запись(имя), знак(self.пропуск)), "text/html")
             return self.ответить(200, vid.память(
                 state.память(искать), знак(self.пропуск), искать), "text/html")
+        if путь == "/puls" or путь.startswith("/puls/"):
+            return self._puls_route(путь)
         if путь == "/karta" or путь.startswith("/karta/"):
             if not вход().проверить(self.пропуск):
                 return self.ответить(401, {"беда": "нужен пропуск"})
@@ -433,6 +452,36 @@ class Панель(BaseHTTPRequestHandler):
                 return self.ответить(200, self._панель(), "text/html")
             return self.ответить(200, vid.гость(), "text/html")
         return self.ответить(404, {"беда": "нет такой страницы"})
+
+    def _puls_route(self, путь: str):
+        """/puls — страница живой карты; /puls/app.js — её рисунок; /puls/snimok — данные."""
+        if путь == "/puls/app.js":
+            рисунок = (Path(__file__).parent / "live_map.js").read_text(encoding="utf-8")
+            return self.ответить(200, рисунок, "text/javascript")
+        if путь == "/puls":
+            if вход().проверить(self.пропуск):
+                return self.ответить(200, vid.live_map_page(), "text/html")
+            return self.ответить(401, vid.live_map_login(), "text/html")
+        if путь == "/puls/snimok":
+            if not (вход().проверить(self.пропуск) or self._telegram_login()):
+                return self.ответить(401, {"беда": "нужен пропуск"})
+            state.mark_viewer()  # только после входа: чужой не будит сборщик
+            снимок = state.live_map()
+            return self.ответить(503 if "нет данных" in снимок else 200, снимок)
+        return self.ответить(404, {"беда": "нет такой страницы"})
+
+    def _telegram_login(self) -> bool:
+        """Вход мини-приложения: заголовок «Authorization: tma <initData>»."""
+        схема, _, данные = (self.headers.get("Authorization") or "").partition(" ")
+        if схема != "tma":
+            return False
+        харнес = _чит_конфиг(_конфиги()["harness.conf"])
+        установка = _чит_конфиг(_конфиги()["install.conf"])
+        return tg_web_app.verify(
+            данные, bot_id=харнес.get("TG_BOT_ID", ""),
+            pubkey_hex=харнес.get("TG_WEBAPP_PUBKEY", ""),
+            owner_id=установка.get("TG_CHAT_ID", ""),
+            max_age_s=int(харнес.get("LIVE_MAP_TG_AUTH_S", "43200")), now=time.time())
 
     def _board_route(self, path: str):
         """/karta — доска; /karta/<id> — задача; /karta/<id>/fajl?n= — бумага.

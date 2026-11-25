@@ -1,0 +1,49 @@
+# Данные runner прогонов на втором сервере (спека runner прогонов
+# §3.2, §6.2, §6.3). Установщик harness/runner/runner-setup.sh кладёт этот файл в
+# /srv/runner/conf/runner.yaml; runner-entry и runner-job читают оттуда, клиент
+# scripts/remote-run.py — отсюда.
+
+# Ворота берут любое из «всего», мутации и пробы — только из «всего − только_ворота»:
+# два места держатся под ворота, чтобы мутации не стояли на критическом пути (Р-4).
+места:
+  всего: 6
+  только_ворота: 2
+
+# Что из среды клиента уезжает в задание. Шаблоны — имена здешней двери среза;
+# запрет стоит поверх шаблонов: это пути машины и двери конфига, на runner у
+# коробки свои (HARNESS_GIT_HISTORY ставит сам runner-job). Значение с переводом
+# строки не уезжает — им подменили бы следующую строку файла среды.
+среда:
+  шаблоны: [HARNESS_*, MUTATION_*, MUT_*, MUTPROBE_*, CHECKS_*, LC_*, LANG, GATES_RUN_TIMEOUT_SEC]
+  запрет: [HARNESS_HOME, HARNESS_CONF, HARNESS_INSTALL_CONF, HARNESS_STARTER, HARNESS_DOOR_STAND_HOME,
+           HARNESS_GIT_HISTORY, PATH, HOME, TMPDIR, LOG_DIR, VIRTUAL_ENV]
+
+# Ключи паспорта (наши install.conf и harness.conf), которые на runner не едут:
+# токены, ключи, канал и публикация (И-3), и сам REMOTE_RUNNER — runner дальше не
+# шлёт. Ключ *_FILE, называющий файл секрета, сейчас один — TG_TOKEN_FILE, его
+# снимает TG_*; общий *_FILE снял бы и безобидный STACK_CHECKS_FILE.
+паспорт:
+  вычеркнуть: [TG_*, EVOLUTION_*, PUBLIC_REMOTE, '*_TOKEN*', '*_KEY*', REMOTE_RUNNER*, RUNNER_*]
+
+# Проверки, которые идут здесь, а не на runner. У каждой — почему: она судит
+# состояние ЖИВОЙ машины, ей нужен секрет, внешняя сеть или docker.
+здесь:
+  - права секретов   # судит права файлов SECRETS_DIR этой машины; на runner секретов нет
+  - секрет в логах   # читает журналы $LOG_DIR этой машины; у коробки журналы свои и пустые
+
+# Пробы heavy-slot, которые разрешено гнать на runner (белый список, T10).
+пробы: []
+
+# Пути паспорта задания внутри коробки (спека §4.2, Р-6): у коробки свои каталоги
+# под теми же именами, что у машины по умолчанию, а не у этой машины — потому это
+# данные раскладки runner, а не корень установки клиента. SECRETS_DIR — пустой.
+коробка:
+  PROJECT_DIR: /w/project
+  STARTER_DIR: /w/package
+  LOG_DIR: /var/log/harness
+  STATE_DIR: /var/lib/harness
+  SECRETS_DIR: /var/lib/harness/secrets-empty
+
+# Предел файла итога в МиБ: сборщик runner-collect не копирует в results/<id> файл больше.
+# Тот же ключ и то же значение у клиента (harness.conf): больший итог он всё равно отвергнет.
+RUNNER_RESULT_MAX_MB: 200

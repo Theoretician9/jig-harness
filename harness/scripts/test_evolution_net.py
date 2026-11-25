@@ -679,7 +679,40 @@ def judge_cases(st: Stand, keys: Keys, module) -> None:
     # не может убрать из дерева путь, который форме не удовлетворяет (первый якорь так чистит origin)
     ok_as("J24 хозяин удаляет .gitattributes, 100755 и большой блоб → ok", "host", dirty,
           st.build(w, [dirty], {path: None for path in junk}, keys.host))
+    dotted_name_cases(b, ok_as, refused, verdict, C0, keys)
     patch_cases(st, keys, b, ok_as, refused)
+
+
+def dotted_name_cases(b, ok_as, refused, verdict, C0, keys) -> None:
+    """Д1 lcf2: точка в сути имени законна (номер версии), «..» — нет; отказ по форме
+    имени называет ожидаемую форму, а не один путь (копия не знает, что исправлять)."""
+    letter = entry("HarnessX", "вопрос", to="HarnessY")
+    # J27 — краснеет, пока форма имени находки запрещает точку в сути: находка копии
+    # «2026-11-24-update-0.15.0-rollback.md» отвергнута судом хозяина
+    ok_as("J27 находка с точками в сути <дата>-update-0.15.0-rollback.md → ok", "HarnessX",
+          C0, b({"находки/HarnessX/2026-11-24-update-0.15.0-rollback.md": entry("HarnessX")}, keys.x))
+    # J27b — краснеет, пока форма имени письма запрещает точку в сути
+    ok_as("J27b письмо с точками в сути <дата>-HarnessX-update-0.15.0-rollback.md → ok", "HarnessX",
+          C0, b({"почта/HarnessY/2026-11-24-HarnessX-update-0.15.0-rollback.md": letter}, keys.x))
+    # J27c/d — краснеют, если разрешённая точка открыла «..» в имени
+    refused("J27c находка с «..» в сути → отказ", C0,
+            b({"находки/HarnessX/2026-11-24-a..b.md": entry("HarnessX")}, keys.x))
+    refused("J27d письмо с «..» в сути → отказ", C0,
+            b({"почта/HarnessY/2026-11-24-HarnessX-a..b.md": letter}, keys.x))
+    # J27e — краснеет, если суть стала пускать «/»: находка уходит в подкаталог
+    refused("J27e находка с «/» в сути → отказ", C0,
+            b({"находки/HarnessX/2026-11-24-a/b.md": entry("HarnessX")}, keys.x))
+
+    def rule_named(name: str, commit: str, form: str) -> None:
+        ok, why, _signer = verdict(C0, commit)
+        check(name, (False, True), (ok, form in why))
+
+    # J26 — краснеет, пока отказ по форме имени пишет только «путь X»: копия не видит,
+    # какая форма ожидалась, и шлёт то же имя снова
+    rule_named("J26 отказ имени находки называет форму находки/HarnessX/<ГГГГ-ММ-ДД>-<суть>.md",
+               b({"находки/HarnessX/a.md": entry("HarnessX")}, keys.x), "находки/HarnessX/<ГГГГ-ММ-ДД>-<суть>.md")
+    rule_named("J26b отказ имени письма называет форму почта/HarnessY/<ГГГГ-ММ-ДД>-HarnessX-<суть>.md",
+               b({"почта/HarnessY/HarnessX-hi.md": letter}, keys.x), "почта/HarnessY/<ГГГГ-ММ-ДД>-HarnessX-<суть>.md")
 
 
 # Патч копии хозяину — каталог в ящике ЭТОЙ копии: `почта/<эта копия>/<дата>-X-<суть>/…`.
@@ -3293,7 +3326,77 @@ def mail_wake(base: Path, keys: Keys) -> None:
     check("MW5 третий тик: толчков 1, входящих 1", (0, 1, 1), (r.rc, len(st.kicks()), len(b.inbox())))
 
 
+def mail_dots(base: Path, keys: Keys) -> None:
+    """Д1 lcf2: копия шлёт находку и письмо с номером версии в сути — сквозь все звенья
+    (вход --находка/--письмо, дверь копии, ящик адресата, суд хозяина)."""
+    st, a, b = mail_stand(base, keys, "mail-dots")
+    st.tick()
+    gist = "update-0.15.0-rollback"
+    find = a.letter(MAIL_B, gist).with_name(f"{MAIL_DAY}-{gist}-find.md")
+    find.write_bytes(entry(MAIL_A))
+    found = printed_sha(a.run("--находка", str(find)))
+    sent = a.run("--отправить", found or "0" * 40)
+    # MX1 — краснеет, пока вход --находка или дверь копии отвергают точку в сути
+    check("MX1 --находка <дата>-update-0.15.0-rollback-find.md → sha, --отправить код 0",
+          (True, 0, found), (bool(found), sent.rc, st.remote_main()))
+    letter = printed_sha(a.run("--письмо", MAIL_B, str(a.letter(MAIL_B, gist))))
+    sent = a.run("--отправить", letter or "0" * 40)
+    # MX1b — краснеет, пока --письмо или форма отправленного (sent_form) отвергают точку
+    check("MX1b --письмо с точками в сути → sha, --отправить код 0", (True, 0, letter),
+          (bool(letter), sent.rc, st.remote_main()))
+    r = b.run("--читать")
+    # MX1c — краснеет, если ящик адресата (is_incoming) не узнаёт письмо с точкой в сути
+    check("MX1c B --читать: письмо с точками доставлено", (0, [f"письмо от {MAIL_A}"]), (r.rc, b.heads()))
+    host = st.tick()
+    rejected = st.rejected()
+    # MX1d — краснеет, если суд хозяина отвергает находку или письмо с точкой в сути
+    check("MX1d хозяин --читать: находка и письмо с точками приняты", (0, True, True),
+          (host.rc, bool(found) and found not in rejected, bool(letter) and letter not in rejected))
+    r = a.run("--находка", str(a.letter(MAIL_B, "a..b")))
+    # MX1e — краснеет, если точка открыла «..» во входе --находка или отказ не называет форму
+    check("MX1e --находка <дата>-a..b.md → код 2, отказ называет форму", (2, True, "", True),
+          (r.rc, r.clean, printed_sha(r), r.says("<ГГГГ-ММ-ДД>-<суть>.md")))
+
+
+def mail_redeliver(base: Path, keys: Keys) -> None:
+    """Д3 lcf2: доставка не повторяет письмо, если состояние не легло (у копии CF одно
+    письмо легло во входящие 4 раза: файлы писались до save_state, а якорь — заново)."""
+    st, _a, b = mail_stand(base, keys, "mail-redeliver")
+    st.add({mail_path(MAIL_A, MAIL_B, "once"): entry(MAIL_A, "вопрос", to=MAIL_B, body=MAIL_BODY)}, keys.x)
+    state_home = b.state.parent
+    state_home.chmod(0o555)
+    try:
+        first, second = b.run("--читать"), b.run("--читать")
+    finally:
+        state_home.chmod(0o755)
+    # MX2 — краснеет, если каталог состояния судится только mkdir (есть, но закрыт на
+    # запись) или после доставки: письмо легло, состояние — нет, Traceback
+    check("MX2 каталог состояния закрыт на запись → код 4 до доставки, входящих 0",
+          (4, True, 4, 0), (first.rc, first.clean, second.rc, len(b.inbox())))
+    locked = b.state.parent.parent / "locked"
+    locked.mkdir()
+    locked.chmod(0o555)
+    b.state = locked / "sub" / "state.json"
+    try:
+        r = b.run("--читать")
+    finally:
+        locked.chmod(0o755)
+    # MX2b — краснеет, если каталог состояния, который не создать, проверяется после доставки
+    check("MX2b каталог состояния не создать → код 4, входящих 0", (4, True, 0), (r.rc, r.clean, len(b.inbox())))
+    r = b.run("--читать")
+    # MX3 — краснеет, если починенный каталог не даёт доставки (проба слепа к доставке вовсе)
+    check("MX3 каталог доступен → код 0, входящих 1", (0, 1), (r.rc, len(b.inbox())))
+    b.state.unlink()
+    r = b.run("--читать")
+    # MX4 — краснеет, пока доставленное не сверяется по sha: состояние потеряно → якорь
+    # заново → то же письмо ложится вторым файлом
+    check("MX4 состояние потеряно, тик с якоря → код 0, входящих по-прежнему 1, строк журнала 1",
+          (0, 1, 1), (r.rc, len(b.inbox()), len(b.journal())))
+
+
 def section_mail(base: Path, keys: Keys) -> None:
+    mail_dots(base, keys)
+    mail_redeliver(base, keys)
     mail_write(base, keys)
     mail_door(base, keys)
     mail_read(base, keys)

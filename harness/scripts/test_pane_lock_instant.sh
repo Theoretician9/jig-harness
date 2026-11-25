@@ -415,7 +415,7 @@ for A in "\$@"; do
     case "\$A" in --*) flags="\$flags \$A" ;; *) [ -n "\$text" ] && flags="\$flags \$A" || text="\$A" ;; esac
 done
 case "\$flags" in *--несмотря-на-лимит*) ;; *)
-    if LOG_DIR="$W/log" python3 "$W/project/scripts/limit_mark.py" --лимит-держится >/dev/null 2>&1; then
+    if LOG_DIR="$W/log" HARNESS_CONF="$W/harness.conf" HARNESS_INSTALL_CONF="$W/harness.conf" CLAUDE_PROJECTS_DIR="$W/projects" python3 "$W/project/scripts/limit_mark.py" --лимит-держится >/dev/null 2>&1; then
         printf '%s\t%s\n' "\$flags" "\$text" >> "$W/kanal-held.txt"; exit 3
     fi ;;
 esac
@@ -466,7 +466,8 @@ CONF
 
     ts_ago() { date -u -d "-$1 min" +%Y-%m-%dT%H:%M:%SZ; }
     tr_ok() {
-        printf '{"type":"assistant","timestamp":"%s"}\n' "$(ts_ago "$1")" > "$TRANSCRIPT"
+        # entrypoint cli — транскрипт СМЕНЫ: его ищет судья лимита (shift_transcript).
+        printf '{"type":"assistant","entrypoint":"cli","timestamp":"%s"}\n' "$(ts_ago "$1")" > "$TRANSCRIPT"
         touch -d "-$1 min" "$TRANSCRIPT"
     }
     tr_refusal() {
@@ -478,7 +479,9 @@ CONF
         tr_ok 60; tr_refusal 10
         printf '{"type":"assistant","timestamp":"%s"}\n' "$(ts_ago 0)" >> "$TRANSCRIPT"
     }
-    limit_held() { LOG_DIR="$W/log" python3 "$LIMIT_MARK" --лимит-держится >/dev/null 2>&1 && echo да || echo нет; }
+    # Судья лимита читает транскрипт СМЕНЫ (ответ после метки снимает лимит): без
+    # конфига и каталога транскриптов стенда он судил бы живую смену проекта.
+    limit_held() { LOG_DIR="$W/log" HARNESS_CONF="$W/harness.conf" HARNESS_INSTALL_CONF="$W/harness.conf" CLAUDE_PROJECTS_DIR="$W/projects" python3 "$LIMIT_MARK" --лимит-держится >/dev/null 2>&1 && echo да || echo нет; }
 
     w_stand() {
         [ -f "$W/tmux-calls" ] && cat "$W/tmux-calls" >> "$W/all-calls"

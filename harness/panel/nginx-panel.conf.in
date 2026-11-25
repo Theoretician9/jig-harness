@@ -45,6 +45,22 @@ server {
     # перекрытое одним путём из двух, — не правило.
     location /vnutr/ { return 404; }
 
+    # Живая карта открывается и во фрейме Telegram Web, поэтому X-Frame-Options
+    # здесь нет (рубеж обрамления — frame-ancestors службы). add_header уровня
+    # server в location со своим add_header не наследуется, так что остальные
+    # заголовки повторены.
+    location /puls {
+        add_header X-Robots-Tag "noindex, nofollow" always;
+        add_header X-Content-Type-Options "nosniff" always;
+        proxy_pass http://127.0.0.1:@PANEL_PORT@;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 60s;
+    }
+
     location / {
         proxy_pass http://127.0.0.1:@PANEL_PORT@;
         proxy_http_version 1.1;

@@ -96,6 +96,25 @@ def verify_appended(new_text: str, live: dict, package: dict, missing: list) -> 
     return ""
 
 
+def keys_appended(receiver_text: str, source_text: str) -> tuple:
+    """(текст получателя с дописанными верхними ключами источника, их имена).
+
+    Обратный ход раскладки: очередь слияния доносит в ПАКЕТНУЮ версию живой
+    настройки разделы, которые хозяин завёл у себя, — иначе раскладка не донесёт
+    их копиям, а код пакета их читает. Значения получателя не трогаются.
+    Не сошлось — ValueError с причиной."""
+    receiver = yaml.safe_load(receiver_text) or {}
+    source = yaml.safe_load(source_text) or {}
+    missing = [key for key in source if key not in receiver]
+    if not missing:
+        return receiver_text, []
+    new_text = append_missing(receiver_text, source_text, missing)
+    reason = verify_appended(new_text, receiver, source, missing)
+    if reason:
+        raise ValueError(reason)
+    return new_text, missing
+
+
 def write_atomically(path: Path, data: bytes) -> None:
     tmp = path.with_name(path.name + ".layout-tmp")
     try:

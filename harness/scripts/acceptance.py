@@ -463,11 +463,15 @@ def _git_lines(корень: Path, *args: str) -> list[str] | None:
     return answer
 
 
-def mutation_table(корень: Path) -> tuple[set, dict]:
-    """(механизмы с записями мутаций, файл-доказательство -> его механизмы).
+def mutation_table(корень: Path) -> tuple[set, dict, dict]:
+    """(механизмы с записями мутаций, файл-доказательство -> его механизмы,
+    то же по записям без якоря).
 
     Поле «механизм» — файл или список: проба судит несколько файлов
-    (test_limit_silence.sh — четыре), и её правка — шаг каждого из них."""
+    (test_limit_silence.sh — четыре), и её правка — шаг каждого из них.
+    Якорь `x.sh#часть` — доказательство в части файла: правка файла вне неё
+    механизм не задевает, поэтому шаг задачи тянут только записи без якоря,
+    а свежесть бумаги судится по всем."""
     import yaml
 
     def load(name: str, key: str):
@@ -477,10 +481,24 @@ def mutation_table(корень: Path) -> tuple[set, dict]:
         return (yaml.safe_load(путь.read_text(encoding="utf-8")) or {}).get(key)
 
     invariants = [e for e in load("invariants.yaml", "инварианты") or [] if e.get("мутация")]
-    proofs = {п: tuple(з["механизм"] if isinstance(з["механизм"], list) else [з["механизм"]])
-              for п, з in (load("probe-mutations.yaml", "пробы") or {}).items()
-              if з and з.get("мутация")}
-    return {e.get("файл") for e in invariants} | {м for мм in proofs.values() for м in мм}, proofs
+    proofs: dict = {}
+    whole: dict = {}
+    for п, з in (load("probe-mutations.yaml", "пробы") or {}).items():
+        if з and з.get("мутация"):
+            мм = dict.fromkeys(з["механизм"] if isinstance(з["механизм"], list) else [з["механизм"]])
+            proofs.setdefault(proof_path(п), {}).update(мм)
+            if "#" not in п:
+                whole.setdefault(proof_path(п), {}).update(мм)
+    proofs, whole = ({п: tuple(мм) for п, мм in т.items()} for т in (proofs, whole))
+    return {e.get("файл") for e in invariants} | {м for мм in proofs.values() for м in мм}, proofs, whole
+
+
+def proof_path(ключ: str) -> str:
+    """Файл пробы под ключом таблицы мутаций. Ключ YAML уникален, поэтому вторая
+    запись того же файла пишется `scripts/./x.py` или `x.py#якорь`; git и история
+    путей знают только сам файл, и ключ как путь давал ложное «бумага судила
+    другой код» и слепоту к правке пробы."""
+    return os.path.normpath(ключ.split("#", 1)[0])
 
 
 def механизмы_задачи(ид: str, корень: Path) -> list[str] | None:
@@ -493,7 +511,7 @@ def механизмы_задачи(ид: str, корень: Path) -> list[str] 
     файлы = файлы_задачи(ид, корень)
     if файлы is None:
         return None
-    mechanisms, proofs = mutation_table(корень)
+    mechanisms, _, proofs = mutation_table(корень)
     файлы = [ф for ф in файлы
              if (ф in mechanisms or ф in proofs) and task_changed_lines(ид, корень, ф)]
     return sorted({ф for ф in файлы if ф in mechanisms}
@@ -526,7 +544,7 @@ def section_debt(тело: str) -> str | None:
 
 def stale_debts(ид: str, корень: Path, sha: str, mechanisms: list[str]) -> list[str]:
     """Правки задачи после sha бумаги в механизмы, их доказательства и таблицы."""
-    _, proofs = mutation_table(корень)
+    _, proofs, _ = mutation_table(корень)
     watched = {м: м for м in mechanisms}
     watched.update({п: м for п, мм in proofs.items() for м in мм if м in mechanisms})
     watched.update({т: т for т in ТАБЛИЦЫ_МУТАЦИЙ})
@@ -565,10 +583,10 @@ def paper_code_debts(корень: Path, sha: str, mechanisms: list[str]) -> lis
     переживает и rebase, и squash, а сверка sha валила неизменный код (22.11)."""
     if _git_lines(корень, "cat-file", "-e", f"{sha}^{{commit}}") is None:
         return [f"мутации: коммит бумаги {sha[:9]} не найден в репозитории"]
-    _, proofs = mutation_table(корень)
+    _, proofs, _ = mutation_table(корень)
     files = list(mechanisms) + sorted(п for п, мм in proofs.items() if set(мм) & set(mechanisms))
     debts = [f"мутации: бумага судила другой код: {ф} изменился после коммита бумаги {sha[:9]}"
-             for ф in files if not _same_blob(корень, sha, ф)]
+             for ф in dict.fromkeys(files) if not _same_blob(корень, sha, ф)]
     then, now = (judged_entries(корень, rev, mechanisms) for rev in (sha, "HEAD"))
     return debts + [f"мутации: бумага судила другие записи мутаций: {т} изменилась после "
                     f"коммита бумаги {sha[:9]}" for т in ТАБЛИЦЫ_МУТАЦИЙ if then[т] != now[т]]

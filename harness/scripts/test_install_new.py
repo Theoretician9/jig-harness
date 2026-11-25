@@ -161,6 +161,29 @@ if доустановка.дополнить_ключи('# REVIZIA_ENABLED="0" �
 else:
     путь_плохо("комментарий принят за ключ — ключа в конфиге не будет")
 
+# Номер бота: префикс токена до «:» дописывается в пустой TG_BOT_ID, стоящий не трогаем.
+import tempfile
+with tempfile.TemporaryDirectory() as каталог_токена:
+    файл_токена = Path(каталог_токена) / "token"
+    файл_токена.write_text("123456:ABC\n", encoding="utf-8")
+    пустой = доустановка.дописать_номер_бота('TG_BOT_ID=""\nДРУГОЕ="1"\n', str(файл_токена))
+    if 'TG_BOT_ID="123456"' in пустой and 'ДРУГОЕ="1"' in пустой and "ABC" not in пустой:
+        путь_ок("номер бота дописан в пустой ключ, секретной части токена нет")
+    else:
+        путь_плохо(f"номер не дописан: {пустой!r}")
+    if доустановка.дописать_номер_бота('TG_BOT_ID="777"\n', str(файл_токена)) == 'TG_BOT_ID="777"\n':
+        путь_ок("БОЛЬНОЙ СЛУЧАЙ: стоящий номер не перетёрт")
+    else:
+        путь_плохо("стоящий номер бота перетёрт")
+    if доустановка.дописать_номер_бота('X="1"\n', str(файл_токена)).endswith('TG_BOT_ID="123456"\n'):
+        путь_ок("нет ключа — дописан в конец")
+    else:
+        путь_плохо("ключ не дописан")
+    if доустановка.дописать_номер_бота('TG_BOT_ID=""\n', str(Path(каталог_токена) / "нет")) == 'TG_BOT_ID=""\n':
+        путь_ок("токена нет — конфиг не тронут, без исключения")
+    else:
+        путь_плохо("при отсутствии токена конфиг изменён")
+
 print("── данные читаются ──")
 задания, метки_из_данных, ключи_из_данных, снять_из_данных = доустановка.прочитать_данные(
     КОРЕНЬ / "harness" / "config" / "system-jobs.yaml")
@@ -1351,10 +1374,12 @@ print("── выключатель задания ключом конфига 
 # раз в неделю ради строки «адрес не настроен». Задание с `если_задан: КЛЮЧ`
 # ставится в расписание и получает период метки, ТОЛЬКО когда ключ не пуст:
 # иначе строка крона жжёт запуски, а период без строки — ложное «МЁРТВ».
-def run_with_switch(value: str) -> tuple:
+def run_with_switch(value: str, equals: str = None) -> tuple:
     jobs = [{"имя": "продукт", "расписание": "*/5 * * * *",
              "команда": "harness/demons/probe-product.sh", "журнал": "p.log",
              "если_задан": "PROBE_URL"}]
+    if equals is not None:
+        jobs[0]["равно"] = equals
     marks = {"probe-product": 5}
     written = {}
 
@@ -1411,6 +1436,18 @@ try:
         путь_ок("заданный ключ — строка крона и период метки поставлены")
     else:
         путь_плохо(f"заданный ключ, а задания нет: код {code}, крон {cron!r}")
+    # Выключатель «выбор» с явным «0» (LIVE_MAP_ENABLED): непустой «0» не должен
+    # включать задание — решает поле `равно`, а не непустота.
+    code, cron, conf_text = run_with_switch("0", equals="1")
+    if code == 0 and "probe-product.sh" not in cron and "probe-product:" not in conf_text:
+        путь_ок("равно \"1\", ключ \"0\" — ни строки крона, ни периода метки")
+    else:
+        путь_плохо(f"ключ \"0\" при равно \"1\" поставил задание: код {code}, крон {cron!r}")
+    code, cron, conf_text = run_with_switch("1", equals="1")
+    if code == 0 and "probe-product.sh" in cron and "probe-product:5" in conf_text:
+        путь_ок("равно \"1\", ключ \"1\" — строка крона и период метки поставлены")
+    else:
+        путь_плохо(f"ключ \"1\" при равно \"1\" не поставил задание: код {code}, крон {cron!r}")
 except Exception as error:     # noqa: BLE001
     путь_плохо(f"выключатель задания: {type(error).__name__}: {error}")
 
@@ -1702,7 +1739,8 @@ def cron_lines_all_wrapped():
     if not service_yaml or service_yaml != service_json:
         return False, (f"признак служба-проверок: YAML {sorted(service_yaml)}, JSON {sorted(service_json)} — "
                        "пуст или файлы библиотеки разошлись")
-    conf = {job["если_задан"]: "задан" for job in jobs_ if job.get("если_задан")}
+    # Ключ с `равно` включает задание только своим значением, не любой непустотой.
+    conf = {job["если_задан"]: str(job.get("равно", "задан")) for job in jobs_ if job.get("если_задан")}
     lines = library.cron_lines(P, LOGS, conf)
     lines = lines.splitlines() if isinstance(lines, str) else list(lines)
     got = sorted(" ".join(l.split()) for l in lines if l.strip())

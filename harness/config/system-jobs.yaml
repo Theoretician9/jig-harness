@@ -225,6 +225,16 @@
     расписание: '*/5 * * * *'
     команда: scripts/build-board.py
     журнал: build-board.log
+  # Демон живёт до 58-й секунды минуты и сам берёт замок: следующая минута не наложится.
+  # `если_задан`: отдельный выключатель, пустой в образце. Ключи LIVE_MAP_* очередь
+  # дописывает в машинный конфиг при слиянии, а строку крона — нет: выключателем на
+  # заполненном LIVE_MAP_PERIOD_S задание числилось бы «мёртвой записью» до выката.
+  - имя: live-map
+    расписание: '* * * * *'
+    команда: scripts/live-map.py
+    журнал: live-map.log
+    если_задан: LIVE_MAP_ENABLED
+    равно: '1'
   - имя: panel-tunnel
     расписание: '* * * * *'
     команда: harness/demons/panel-tunnel.sh
@@ -273,6 +283,7 @@
   heartbeat-watch: 1440
   check-login-expiry: 30
   build-board: 5
+  live-map: 5
   limit-watch: 5
   dispatcher-stall-watch: 5
   product-health: 5

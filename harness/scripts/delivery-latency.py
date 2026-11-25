@@ -78,6 +78,7 @@ class Marks:
 
     def __init__(self, path):
         self.rec, self.que, self.nok, self.kick, self.ref, self.att, self.done = {}, {}, {}, {}, {}, {}, {}
+        self.stuck = {}  # толчок был, Enter не принят: kick_sent у такого сообщения нет
         try:
             fh = open(path, encoding="utf-8", errors="replace")
         except OSError:
@@ -100,8 +101,8 @@ class Marks:
             table = {"received": self.rec, "queued": self.que, "no_kick": self.nok,
                      "attachment_started": self.att, "attachment_done": self.done}[kind]
             table.setdefault(str(data.get("ts")), data)
-        elif kind in ("kick_sent", "kick_refused"):
-            table = self.kick if kind == "kick_sent" else self.ref
+        elif kind in ("kick_sent", "kick_refused", "kick_stuck"):
+            table = {"kick_sent": self.kick, "kick_refused": self.ref, "kick_stuck": self.stuck}[kind]
             for ts in str(data.get("ts_список") or "").split(","):
                 if ts:
                     table.setdefault(ts, data)
@@ -125,7 +126,7 @@ class Marks:
         return groups
 
     def has_final(self, ts):
-        return ts in self.kick or ts in self.ref or ts in self.nok
+        return ts in self.kick or ts in self.ref or ts in self.nok or ts in self.stuck
 
     def legal_refusal(self, ts):
         return str((self.ref.get(ts) or {}).get("почему")) in LEGAL_REFUSALS

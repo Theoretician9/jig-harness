@@ -10,7 +10,7 @@
 import argparse
 import json
 import sys
-from datetime import date
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 
 import yaml
@@ -118,17 +118,50 @@ def judge_gate(args) -> int:
     return 1
 
 
+def judge_deadlines(args) -> int:
+    """Чек-лист выпуска: запись негодна или её срок кончается в ближайшие --часов — находка.
+
+    Запись годна до полуночи после дня «срок» (defect судит «срок < сегодня»). Ворота поезда идут
+    десятки минут: запись, истёкшая в их середине, сжигает круг, поэтому смотрим вперёд, а не на сейчас."""
+    now = datetime.fromisoformat(args.now) if args.now else datetime.now().astimezone()
+    entries = load_entries(Path(args.quarantine))
+    devmap = yaml.safe_load(Path(args.devmap).read_text(encoding="utf-8")) or {}
+    card_ids, names = cards.task_ids(devmap), [e.get("гейт") for e in entries]
+    found, seen = 0, set()
+    for e in entries:
+        gate = e.get("гейт")
+        if gate in seen:
+            continue
+        seen.add(gate)
+        why = defect(e, now.date(), card_ids, names)
+        if not why:
+            ends = datetime.combine(date.fromisoformat(str(e["срок"])) + timedelta(days=1), time(), now.tzinfo)
+            left = (ends - now).total_seconds() / 3600
+            if left <= args.hours:
+                why = f"истекает {e['срок']} в 24:00, через {left:.0f} ч"
+        if why:
+            found += 1
+            print(f"  ПЛОХО · карантин: {gate} — {why} (карточка {e.get('карточка')})")
+    print(f"=== сроки карантина: находок {found}, запас {args.hours:g} ч ===")
+    return 1 if found else 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
+    ap.add_argument("--сроки", dest="deadlines", action="store_true")
+    ap.add_argument("--сейчас", dest="now")
+    ap.add_argument("--часов", dest="hours", type=float, default=24)
     ap.add_argument("--гейт", dest="gate")
     for flag, dest in (("--карантин", "quarantine"), ("--карта", "devmap"), ("--журнал", "journal"),
                        ("--прогон", "run"), ("--сегодня", "today")):
         ap.add_argument(flag, dest=dest)
     ap.add_argument("--красных", dest="red", type=int)
     args = ap.parse_args()
-    if args.gate is None and args.red is None:
-        ap.error("нужен --красных (суд прогона) или --гейт (суд одного имени)")
+    if args.gate is None and args.red is None and not args.deadlines:
+        ap.error("нужен --красных (суд прогона), --гейт (суд одного имени) или --сроки")
     try:
+        if args.deadlines:
+            return judge_deadlines(args)
         return judge_gate(args) if args.gate else judge(args)
     except Exception as err:  # суд упал — это красный, а не молчание
         print(f"ПЛОХО · суд карантина упал: {err}")

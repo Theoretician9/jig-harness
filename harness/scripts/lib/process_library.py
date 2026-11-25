@@ -43,7 +43,7 @@ from pathlib import Path
 
 WRAPPER = "scripts/run-background.sh"
 # Поле времени cron: цифры, звёздочка, шаг, список, диапазон.
-_ПОЛЯ_ЗАДАНИЯ = ("расписание", "команда", "журнал", "если_задан")
+_ПОЛЯ_ЗАДАНИЯ = ("расписание", "команда", "журнал", "если_задан", "равно")
 _ПОЛЕ_ВРЕМЕНИ = re.compile(r"^[0-9*/,\-]+$")
 # Признак записи JSON: её гонит служба systemd, а не крон, и выключатель её не гасит.
 CHECKS_SIGN = "служба-проверок"
@@ -411,7 +411,8 @@ def checks_units(project: str, logs: str, user: str, conf=None) -> dict:
 
 
 def _выключено_ключом(job: dict, conf: dict) -> bool:
-    return bool(job.get("если_задан")) and not conf.get(job["если_задан"])
+    import config
+    return config.job_gated_off(job, conf)
 
 
 def cron_line(job: dict, project: str, logs: str) -> str:

@@ -13,7 +13,9 @@
 чужим. Двери для этого две, обе ДАННЫЕ: порог долготы (`DEPLOY_BUSY_MIN_SEC`,
 иначе пробе пришлось бы ждать две минуты) и свой владелец (`HARNESS_OWN_UID`,
 иначе чужого пользователя пришлось бы заводить через sudo, которого на машине
-заказчика может не быть).
+заказчика может не быть). Третья дверь — дерево смен (`AGENT_PROC_ROOT`,
+`AGENT_MAINPID`): ворота отказывают «работают два агента» раньше занятости, и
+без своего дерева ОДНОЙ смены проба судила число живых сессий машины.
 """
 import os
 import pathlib
@@ -62,12 +64,40 @@ def стендовый_конфиг(двор: pathlib.Path) -> pathlib.Path:
     return свой
 
 
+# Pid стенда — за pid_max ядра: живого процесса с таким номером быть не может.
+PID_СТЕНДА = int(pathlib.Path("/proc/sys/kernel/pid_max").read_text().strip()) + 1000
+
+
+def дерево_одной_смены(корень: pathlib.Path) -> dict:
+    """Корень /proc стенда для подсчёта смен: точка запуска юнита и ОДИН claude под ней.
+
+    Две смены ворота считают по дереву процессов (agent_processes), а занятость —
+    по живому /proc. Без своего дерева две живые сессии на машине (24.11.2026)
+    давали «работают два агента» раньше занятости, и все четыре случая краснели
+    не по своей логике. Образец — дерево_смен в scripts/hooks/test_guard_bash.py.
+    """
+    uid = os.getuid()
+    процессы = [(PID_СТЕНДА, 0, "bash", "/bin/bash", ["bash", "scripts/start-agent.sh"]),
+                (PID_СТЕНДА + 1, PID_СТЕНДА, "claude",
+                 "/usr/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe", ["claude"])]
+    for pid, ppid, comm, exe, argv in процессы:
+        d = корень / str(pid)
+        d.mkdir(parents=True, exist_ok=True)
+        if not (d / "exe").is_symlink():
+            (d / "exe").symlink_to(exe)
+        (d / "comm").write_text(comm + "\n")
+        (d / "status").write_text(f"PPid:\t{ppid}\nUid:\t{uid}\t{uid}\t{uid}\t{uid}\n")
+        (d / "cmdline").write_bytes(b"\0".join(a.encode() for a in argv) + b"\0")
+    return {"AGENT_PROC_ROOT": str(корень), "AGENT_MAINPID": str(PID_СТЕНДА)}
+
+
 def ворота(двор: pathlib.Path, свой_uid: str | None = None, действие: str = "deploy") -> tuple[int, str]:
     """(код, ответ) ворот. Код судится вместе со словом: незнакомый ключ
     отвечает rc 2 без слова «занято», и случай «чужой не держит» зеленел на
     отказе разбора."""
     среда = dict(os.environ, HARNESS_LOG_DIR=str(двор), DEPLOY_BUSY_MIN_SEC="0",
-                 HARNESS_CONF=str(стендовый_конфиг(двор)))
+                 HARNESS_CONF=str(стендовый_конфиг(двор)),
+                 **дерево_одной_смены(двор / "proc"))
     if свой_uid is not None:
         среда["HARNESS_OWN_UID"] = свой_uid
     готово = subprocess.run([sys.executable, str(ПРИБОР), "--действие", действие],

@@ -928,6 +928,66 @@ before=$(tg_count); bg=$(( $(calls "$KEY_B") + $(calls "$KEY_G") ))
 case_check "А-4 повтор: 4, кандидаты с будущим сбросом без вызова API, вестей 0" "4|0|0" \
     "$(run_v a4r --авто --от демоны)|$(( $(calls "$KEY_B") + $(calls "$KEY_G") - bg ))|$(( $(tg_count) - before ))"
 
+echo "── 1в А-4в: все профили в лимите, но смена ОТВЕЧАЕТ (вход /login на неизвестном аккаунте) → ни метки, ни вести ──"
+# БОЛЬНОЙ СЛУЧАЙ 25.11.2026 01:20–02:03: account-switch.py знал три профиля, все в
+# лимите, и слал «Все аккаунты в лимите. Первым освободится …» (01:20, 01:30, 01:37),
+# ставя метку limit, — а смена работала на четвёртом аккаунте, вошедшем через /login
+# в живую сессию. Метка закрыла дверь толчка: 17 сообщений владельца ждали во
+# входящих. Работа — успешный ответ модели в транскрипте смены (судья
+# stall-in-log.py), не mtime. Транскрипт смены дверь находит сама, как в жизни:
+# каталог PROJECT_DIR в CLAUDE_PROJECTS_DIR, первая запись — entrypoint cli.
+SHIFT_PROJ="$S/shift"
+SHIFT_TR="$S/projects/${SHIFT_PROJ//\//-}"
+mkdir -p "$SHIFT_TR"
+cp "$S/home/install.conf" "$S/home/install-shift.conf"
+printf 'PROJECT_DIR="%s"\n' "$SHIFT_PROJ" >> "$S/home/install-shift.conf"
+shift_rec() {  # $1 = секунд назад, $2 = поля сверх (JSON-хвост): запись ответа модели смены
+    printf '{"type":"assistant","entrypoint":"cli","timestamp":"%s"%s}\n' \
+        "$(date -u -d "@$(( $(date +%s) - $1 ))" +%Y-%m-%dT%H:%M:%SZ)" "$2"
+}
+shift_answer() { shift_rec "$1" ',"message":{"role":"assistant","content":[{"type":"text","text":"ответ модели"}]}'; }
+shift_refusal() { shift_rec "$1" ',"error":"rate_limit","apiErrorStatus":429,"isApiErrorMessage":true,"message":{"model":"<synthetic>","role":"assistant","content":[{"type":"text","text":"You have hit your session limit"}]}'; }
+run_shift_v() {  # как run_v, но дверь видит транскрипт смены стенда
+    HARNESS_INSTALL_CONF="$S/home/install-shift.conf" CLAUDE_PROJECTS_DIR="$S/projects" run_v "$@"
+}
+write_profiles_v; reset_v
+sv "dict(запуск='alpha', идёт='alpha', переключения=[])"
+api_set "{\"A\":$(api_rej "$R3"),\"B\":$(api_rej "$R1" seven_day),\"G\":$(api_rej "$R2")}"
+shift_answer 60 > "$SHIFT_TR/smena.jsonl"
+before=$(tg_count)
+run_shift_v a4w --авто --от демоны >/dev/null
+case_check "БОЛЬНОЙ 25.11: все в лимите, смена ответила минуту назад → метки нет, вести «Все аккаунты в лимите» нет" \
+    "нет-метки|нет" "$(mark_of)|$(tg_has "$before" "Все аккаунты в лимите")"
+# Контроль: смена НЕ отвечает — последний успешный ответ 2 ч назад, после него
+# отказ 429. Метка и весть — как в А-4: судья работы не глушит настоящий лимит.
+write_profiles_v; reset_v
+sv "dict(запуск='alpha', идёт='alpha', переключения=[])"
+{ shift_answer 7200; shift_refusal 60; } > "$SHIFT_TR/smena.jsonl"
+before=$(tg_count)
+case_check "все в лимите, смена молчит (ответ 2 ч назад, затем отказ 429) → 4, метка limit/ближайший, весть одна" \
+    "4|limit/$R1|1|да" \
+    "$(run_shift_v a4s --авто --от демоны)|$(mark_of)|$(( $(tg_count) - before ))|$(tg_has "$before" "Все аккаунты в лимите. Первым освободится BETA в $HR1")"
+# Находка ревью (в): смена на входе /login успешно ответила 45 мин назад и с тех
+# пор простаивает, отказов нет. Простой — не лимит: последний исход смены — успех,
+# лимита у её входа не видно. Метки и вести нет (прежний порог 20 мин их ставил).
+write_profiles_v; reset_v
+sv "dict(запуск='alpha', идёт='alpha', переключения=[])"
+shift_answer 2700 > "$SHIFT_TR/smena.jsonl"
+before=$(tg_count)
+run_shift_v a4i --авто --от демоны >/dev/null
+case_check "все в лимите, смена простаивает (ответ 45 мин назад, отказов нет) → метки нет, вести «Все аккаунты в лимите» нет" \
+    "нет-метки|нет" "$(mark_of)|$(tg_has "$before" "Все аккаунты в лимите")"
+# Контроль к нему: тот же давний успех, но ПОСЛЕ него отказ 429 (тоже давний) —
+# последний исход смены отказ, метка и весть как в А-4.
+write_profiles_v; reset_v
+sv "dict(запуск='alpha', идёт='alpha', переключения=[])"
+{ shift_answer 2700; shift_refusal 2400; } > "$SHIFT_TR/smena.jsonl"
+before=$(tg_count)
+case_check "все в лимите, давний успех, затем давний отказ 429 → 4, метка limit/ближайший, весть одна" \
+    "4|limit/$R1|1" \
+    "$(run_shift_v a4j --авто --от демоны)|$(mark_of)|$(( $(tg_count) - before ))"
+rm -f "$SHIFT_TR/smena.jsonl"
+
 echo "── 1в В-2: все rejected, но часа сброса не назвал никто → 2 (прежний путь со своей вестью), state байт в байт ──"
 # Ревью кода В-2: код 4 без метки и вести — полная тишина: limit-watch при 4
 # молчит, считая, что весть дала дверь. Ловится: 4 при пустом часе; запись

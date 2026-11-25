@@ -2921,11 +2921,38 @@ def main() -> int:
 
 
 # ── юнит-прогоны настоящих ворот deploy_guard.py (Б-1, В-7, К-3) ────────────
-ЧИСЛО_ПУТЕЙ_ВОРОТ = 13
+ЧИСЛО_ПУТЕЙ_ВОРОТ = 14
+
+
+# Поддельные pid выше kernel.pid_max: живых таких нет, дерево стенда не спутать с машиной.
+PID_СТЕНДА = int(pathlib.Path("/proc/sys/kernel/pid_max").read_text().strip()) + 1000
+
+
+def дерево_смен(корень: pathlib.Path, смен: int) -> dict:
+    """Корень /proc стенда: точка запуска юнита и `смен` основных claude под ней.
+
+    Ворота считают смены по дереву процессов (agent_processes, дверь AGENT_PROC_ROOT).
+    Без своего дерева пробы судили живую машину: при двух сменах после ротации
+    (24.11.2026) шесть путей краснели «работают два агента» не по своей логике.
+    """
+    uid = os.getuid()
+    процессы = [(PID_СТЕНДА, 0, "bash", "/bin/bash", ["bash", "scripts/start-agent.sh"])]
+    процессы += [(PID_СТЕНДА + 1 + i, PID_СТЕНДА, "claude",
+                  "/usr/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe", ["claude"])
+                 for i in range(смен)]
+    for pid, ppid, comm, exe, argv in процессы:
+        d = корень / str(pid)
+        d.mkdir(parents=True)
+        (d / "exe").symlink_to(exe)
+        (d / "comm").write_text(comm + "\n")
+        (d / "status").write_text(f"PPid:\t{ppid}\nUid:\t{uid}\t{uid}\t{uid}\t{uid}\n")
+        (d / "cmdline").write_bytes(b"\0".join(a.encode() for a in argv) + b"\0")
+    return {"AGENT_PROC_ROOT": str(корень), "AGENT_MAINPID": str(PID_СТЕНДА)}
 
 
 def dg_scenario(tmp: str, autonomy: str = "full", кнопка_минут_назад: int | None = None,
-                tmux: str = "agent", слово: str | None = None) -> tuple[dict, pathlib.Path]:
+                tmux: str = "agent", слово: str | None = None,
+                смен: int = 1) -> tuple[dict, pathlib.Path]:
     """Временные install.conf + harness.conf + $LOG_DIR/locks/services для ворот.
 
     Дерево выката — свой чистый git-репозиторий (PROJECT_DIR): предмет кнопки считается по нему.
@@ -2965,6 +2992,8 @@ def dg_scenario(tmp: str, autonomy: str = "full", кнопка_минут_наз
         (log / "consent-requests.jsonl").write_text(_просьба_к(нажатие), encoding="utf-8")
     env = dict(os.environ)
     env.pop("HARNESS_LOG_DIR", None)      # дверь запускающего перебила бы LOG_DIR стенда
+    env.pop("AGENT_USER", None)           # смены стенда — под своим uid
+    env.update(дерево_смен(pathlib.Path(tmp, "proc"), смен))
     env["HARNESS_INSTALL_CONF"] = str(pathlib.Path(tmp, "install.conf"))
     env["HARNESS_CONF"] = str(pathlib.Path(tmp, "harness.conf"))
     return env, log
@@ -3091,7 +3120,13 @@ def прогоны_ворот() -> int:
             rc, out = run_dg(env, "--силой")
             итог("В-7: --силой без кнопки — отказ, --силой не снимает отсутствие согласия",
                  rc == 1 and "нет согласия владельца" in out, out)
-        # 12-13. Б-1: интерактивный claude в tmux-сессии агента — не занятость
+        # 12. две смены в дереве стенда → отказ, и «--силой» его не снимает
+        with tempfile.TemporaryDirectory() as t:
+            env, _ = dg_scenario(t, смен=2)
+            rc, out = run_dg(env, "--силой")
+            итог("две смены → отказ даже «--силой»",
+                 rc == 1 and f"pids {PID_СТЕНДА + 1} {PID_СТЕНДА + 2}" in out, out)
+        # 13-14. Б-1: интерактивный claude в tmux-сессии агента — не занятость
         with tempfile.TemporaryDirectory() as t:
             env, _ = dg_scenario(t, tmux="нет-такой-сессии-731")
             rc, out = run_dg(env)

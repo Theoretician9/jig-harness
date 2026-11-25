@@ -968,9 +968,13 @@ sys.exit(rc)
 """
 
 
+# Берутся ВСЕ определения функций publish.sh, а не список имён: опубликовать_сборку зовёт
+# вынесенные замки (lock_secrets, lock_clean…), список отставал от кода, и нехватка функции
+# читалась «command not found» и отказом, а не судом. Код верхнего уровня (конфиг, поезд) не берётся.
 PUBLISH_FN = """set -uo pipefail
+eval "$(awk '/^[^ #=]+\\(\\) *\\{/ { if ($0 ~ /\\}[ \\t]*(#.*)?$/) { print; next } f = 1 }
+             f { print } f && /^}/ { f = 0 }' "$1")"
 say() { printf '%s\\n' "$*"; }
-eval "$(sed -n '/^опубликовать_сборку() {/,/^}/p; /^judge_release_notes() {/,/^}/p; /^next_release_number() {/,/^}/p' "$1")"
 опубликовать_сборку
 """
 
@@ -1286,6 +1290,7 @@ echo ворота >> "$PROBA_GATES_RAN"
 exit "${PROBA_GATES_RC:-0}"
 """
 LOCK2_PASSED = "замок 2 · согласие владельца на публикацию есть"
+CHECKLIST_DONE = "=== чек-лист выпуска: находок"
 
 
 def window_stand(yard: Yard) -> tuple[Stand, dict]:
@@ -1297,6 +1302,14 @@ def window_stand(yard: Yard) -> tuple[Stand, dict]:
     (project / "scripts" / "deploy_guard.py").write_text(CLOCK_GUARD, encoding="utf-8")
     (project / "scripts" / "carrier.json").write_text(s.carrier, encoding="utf-8")
     door_project(project)
+    # Чек-лист выпуска идёт до ворот и судит проект: карта задач (замки 6, 6б, сроки карантина)
+    # и история без трейлеров Dev-Map (замок 3 — непроверенных нет). Без них отказ до ворот.
+    (project / "dev-map.yaml").write_text("version: 1\nmilestones:\n  - id: ms.stand\nlines:\n  - id: ln.stand\n"
+                                          "    tasks:\n      - id: hr.stand-card\n        status: done\n"
+                                          "        title: карточка стенда\n", encoding="utf-8")
+    git("init", "-q", "-b", "master", cwd=project)
+    git("add", "dev-map.yaml", cwd=project)
+    git("commit", "-q", "-m", "проект стенда: карта", cwd=project)
     with open(s.root / "harness.conf", "a", encoding="utf-8") as fh:
         fh.write('PUBLIC_COMMIT_EMAIL="proba@stand.invalid"\nPUBLIC_COMMIT_NAME="proba"\n')
     env = dict(s.env, PROJECT_DIR=str(project), STARTER_DIR=str(s.pkg), PROBA_REAL_SCRIPTS=str(SCRIPTS),
@@ -1310,7 +1323,9 @@ def window_publish(s: Stand, env: dict, check_only: bool, **gates: str) -> tuple
     """→ (код publish.sh, вывод, замок 2 пройден, ворота запускались)."""
     rc, out = s.run(["bash", str(s.root / "project" / "scripts" / "publish.sh"), *(["--проверка"] if check_only else [])],
                     env=dict(env, **gates), timeout=180)
-    return rc, out, LOCK2_PASSED in out, Path(env["PROBA_GATES_RAN"]).exists()
+    # Чек-лист до ворот печатает ту же строку замка 2 — судим только замок 2 ПОСЛЕ чек-листа.
+    after_checklist = out.split(CHECKLIST_DONE, 1)[1] if CHECKLIST_DONE in out else out
+    return rc, out, LOCK2_PASSED in after_checklist, Path(env["PROBA_GATES_RAN"]).exists()
 
 
 def probe_window(yard: Yard) -> None:

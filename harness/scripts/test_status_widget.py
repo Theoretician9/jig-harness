@@ -158,7 +158,8 @@ class Stand:
     def env(self, **extra):
         env = {k: v for k, v in os.environ.items()
                if k not in ("CLAUDE_CODE_SESSION_ID", "HARNESS_REPORT", "HARNESS_TG_FORCE",
-                            "STATUS_WIDGET", "TG_API_BASE", "HARNESS_DIRECTIONS_LOCAL")}
+                            "STATUS_WIDGET", "TG_API_BASE", "HARNESS_DIRECTIONS_LOCAL",
+                            "PANEL_URL", "STATUS_WIDGET_PANEL_URL")}
         env.update(HARNESS_CONF=str(self.root / "harness.conf"), LOG_DIR=str(self.log),
                    PROJECT_DIR=str(self.project), HARNESS_HOME=str(self.root),
                    CLAUDE_PROJECTS_DIR=str(self.root / "projects"),
@@ -223,7 +224,8 @@ def expected_stages(stand: Stand, card_id: str) -> list:
 # ── заглушка Bot API ────────────────────────────────────────────────────────
 
 class StubApi:
-    """Bot API на 127.0.0.1: пишет метод и поля, ответ — по таблице метод → (код, тело)."""
+    """Bot API на 127.0.0.1: пишет метод и поля, ответ — по таблице метод → (код, тело);
+    вместо пары можно дать (None, функция(поля) → (код, тело)) — ответ по содержимому запроса."""
 
     def __init__(self, answers=None):
         self.calls = []
@@ -237,6 +239,8 @@ class StubApi:
                 fields = {k: v[0] for k, v in urllib.parse.parse_qs(body, keep_blank_values=True).items()}
                 stub.calls.append({"method": method, "fields": fields})
                 code, answer = stub.answers.get(method, (200, {"ok": True, "result": {"message_id": 7}}))
+                if callable(answer):   # ответ функцией от полей запроса: (code, функция) → тело
+                    code, answer = answer(fields)
                 raw = json.dumps(answer).encode()
                 self.send_response(code)
                 self.send_header("Content-Type", "application/json")
@@ -877,6 +881,261 @@ class Presses(unittest.TestCase):
     def test_k27_foreign_message_refused(self):
         """К-27. message_id не сохранённый → без правки, только ответ-отказ, строка в журнале."""
         self.refused(self.stand.press(self.stub, "w:refresh", 6), ["answerCallbackQuery"])
+
+
+# ── М-6: кнопка «Живая карта» (web_app на <PANEL_URL>/puls) ─────────────────
+# Владелец 25.11: «Я не понял как открыть» — у виджета нет входа в живую карту.
+# Контракт: tg_send.sh кладёт PANEL_URL паспорта в окружение виджета как
+# STATUS_WIDGET_PANEL_URL (как TG_CHAT_ID и STATUS_WIDGET_STATE — окружением одной команды).
+
+PANEL_DOOR = "STATUS_WIDGET_PANEL_URL"
+PANEL_STAND = "https://panel.stend.example"
+LIVE_MAP_URL = PANEL_STAND + "/puls"
+LIVE_MAP_TEXT = "Живая карта"
+
+
+def keyboard(call: dict) -> list:
+    markup = json.loads(call["fields"].get("reply_markup") or "{}")
+    return [b for row in markup.get("inline_keyboard", []) for b in row]
+
+
+def web_apps(call: dict) -> list:
+    return [b for b in keyboard(call) if "web_app" in b]
+
+
+class LiveMapButton(unittest.TestCase):
+    """М-6: виджет зовёт sendWidget с кнопкой web_app, если панель выведена наружу по https."""
+
+    def setUp(self):
+        self.stand = WidgetV2Stand()
+        self.stub = StubApi({"sendWidget": widget_ok(7)})
+
+    def tearDown(self):
+        self.stub.close()
+        shutil.rmtree(self.stand.root, ignore_errors=True)
+
+    def widget_send(self, panel=None) -> dict:
+        """Прямой status_widget.py --send; panel=None — двери в окружении нет вовсе."""
+        env = self.stand.env(TG_API_BASE=self.stub.base, TG_CHAT_ID=CHAT_ID,
+                             TG_TOKEN_FILE=str(self.stand.root / "klyuch"),
+                             STATUS_WIDGET_STATE=str(self.stand.state_path()))
+        if panel is not None:
+            env[PANEL_DOOR] = panel
+        done = run([sys.executable, str(WIDGET), "--send"], env=env,
+                   stdin=json.dumps(report_data([task(1)]), ensure_ascii=False))
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        sent = self.stub.methods("sendWidget")
+        self.assertEqual(len(sent), 1, [c["method"] for c in self.stub.calls])
+        return sent[0]
+
+    def assert_callbacks_intact(self, call: dict):
+        callbacks = {b.get("callback_data"): b.get("text") for b in keyboard(call) if "callback_data" in b}
+        self.assertEqual(callbacks, BUTTONS)
+
+    def assert_live_map(self, call: dict):
+        apps = web_apps(call)
+        self.assertEqual(len(apps), 1, keyboard(call))
+        self.assertEqual(apps[0].get("text"), LIVE_MAP_TEXT)
+        self.assertEqual((apps[0].get("web_app") or {}).get("url"), LIVE_MAP_URL)
+
+    def fresh(self):
+        """Между подпробами: без файла состояния виджет снова зовёт sendWidget, а не правку."""
+        self.stub.calls.clear()
+        self.stand.state_path().unlink(missing_ok=True)
+
+    def test_m6_1_https_panel_gives_web_app(self):
+        """М-6.1. STATUS_WIDGET_PANEL_URL=https://… → кнопка web_app на <адрес>/puls."""
+        self.assert_live_map(self.widget_send(PANEL_STAND))
+
+    def test_m6_1_trailing_slash_no_double(self):
+        """М-6.1. Хвостовой «/» в адресе не даёт «//puls»."""
+        self.assert_live_map(self.widget_send(PANEL_STAND + "/"))
+
+    def test_m6_1_spaces_trimmed(self):
+        """М-6.1. Пробел или перевод строки вокруг адреса не уходят в url: «https://x /puls» Telegram
+        отверг бы вместе со всем sendWidget."""
+        self.assert_live_map(self.widget_send(f" {PANEL_STAND}/ \n"))
+
+    def test_m6_2_no_panel_no_web_app(self):
+        """М-6.2. Двери нет или она пуста → кнопки web_app нет, три callback-кнопки на месте."""
+        for panel in (None, ""):
+            with self.subTest(panel=panel):
+                self.fresh()
+                call = self.widget_send(panel)
+                self.assertEqual(web_apps(call), [])
+                self.assert_callbacks_intact(call)
+
+    def test_m6_3_not_https_no_web_app(self):
+        """М-6.3. Не https (Telegram берёт web_app только по HTTPS) → кнопки нет, отправка цела."""
+        for panel in ("http://panel.stend.example", "panel.stend.example"):
+            with self.subTest(panel=panel):
+                self.fresh()
+                call = self.widget_send(panel)
+                self.assertEqual(web_apps(call), [])
+                self.assert_callbacks_intact(call)
+
+    def test_m6_4_web_app_has_no_callback_data(self):
+        """М-6.4. Кнопка web_app без callback_data: её нажатие не приходит судье widget_buttons.press."""
+        call = self.widget_send(PANEL_STAND)
+        apps = web_apps(call)
+        self.assertEqual(len(apps), 1, keyboard(call))
+        self.assertEqual(set(apps[0]), {"text", "web_app"})
+        self.assert_callbacks_intact(call)
+
+    def tg_send_with(self, conf_line: str) -> dict:
+        """tg_send.sh --статус со строкой PANEL_URL в harness.conf стенда (окружение её не несёт)."""
+        conf = self.stand.root / "harness.conf"
+        conf.write_text(conf.read_text(encoding="utf-8") + conf_line + "\n", encoding="utf-8")
+        done = self.stand.send(self.stub)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        sent = self.stub.methods("sendWidget")
+        self.assertEqual(len(sent), 1, [c["method"] for c in self.stub.calls])
+        return sent[0]
+
+    def test_m6_5_tg_send_passes_panel_url(self):
+        """М-6.5. tg_send.sh --статус: PANEL_URL из harness.conf доходит до виджета кнопкой."""
+        call = self.tg_send_with(f'PANEL_URL="{PANEL_STAND}"')
+        self.assert_live_map(call)
+        self.assert_callbacks_intact(call)
+
+    def test_m6_5_tg_send_empty_panel_url(self):
+        """М-6.5. PANEL_URL="" в harness.conf → виджет уходит без web_app, три кнопки."""
+        call = self.tg_send_with('PANEL_URL=""')
+        self.assertEqual(web_apps(call), [])
+        self.assert_callbacks_intact(call)
+
+
+# ── М-7: «Живая карта» при статусе ТЕКСТОМ ─────────────────────────────────
+# Telegram отклоняет sendWidget всегда (INPUT_MEDIA_WIDGET_NOT_ALLOWED, 25 из 25 в
+# tg_failures.log), статус уходит текстом — и без кнопки владелец карту не открывает.
+# Контракт: status_widget.py --live-map-markup (без stdin) печатает reply_markup или пусто;
+# tg_send.sh кладёт его последней части sendMessage. web_app Telegram берёт только по https
+# и только в личном чате (положительный TG_CHAT_ID).
+
+OWNER_CHAT = "777123987"              # не-секрет: выдуманный ЛИЧНЫЙ чат стенда (CHAT_ID — групповой)
+LIVE_MAP_MARKUP = {"inline_keyboard": [[{"text": LIVE_MAP_TEXT, "web_app": {"url": LIVE_MAP_URL}}]]}
+BUTTON_REFUSAL = {"ok": False, "error_code": 400, "description": "Bad Request: BUTTON_TYPE_INVALID"}
+
+
+def markup_of(call: dict):
+    raw = call["fields"].get("reply_markup")
+    return None if raw is None else json.loads(raw)
+
+
+def refuse_web_app(fields: dict) -> tuple:
+    """sendMessage с web_app — 400 как у Telegram на кнопку не к месту; без кнопки — доставлено."""
+    if "web_app" in (fields.get("reply_markup") or ""):
+        return 400, BUTTON_REFUSAL
+    return 200, {"ok": True, "result": {"message_id": 9}}
+
+
+class LiveMapText(unittest.TestCase):
+    """М-7: текстовый статус (STATUS_WIDGET=0) несёт кнопку «Живая карта» последней частью."""
+
+    def setUp(self):
+        self.stand = WidgetV2Stand()
+        self.stub = StubApi()
+
+    def tearDown(self):
+        self.stub.close()
+        shutil.rmtree(self.stand.root, ignore_errors=True)
+
+    def text_send(self, chat=OWNER_CHAT, panel=PANEL_STAND, text=None, status=None) -> list:
+        """tg_send.sh текстом; panel=None — PANEL_URL не задан вовсе. Окружение старше паспорта.
+        text — обычное сообщение; status — свой текст статуса вместо собранного сборщиком стенда."""
+        extra = {"STATUS_WIDGET": "0", "TG_CHAT_ID": chat}
+        if panel is not None:
+            extra["PANEL_URL"] = panel
+        if status is not None:
+            self.stand_status(status)
+            extra["HARNESS_TG_FORCE"] = "1"   # потолок статуса у сторожа канала — не предмет пробы
+        if text is None:
+            done = self.stand.send(self.stub, **extra)
+        else:
+            env = self.stand.env(PROJECT_DIR=str(self.stand.tree), TG_API_BASE=self.stub.base,
+                                 HARNESS_INSTALL_CONF=str(self.stand.root / "install.conf"),
+                                 HARNESS_TG_FORCE="1", **extra)
+            done = run(["bash", str(self.stand.tree / "scripts" / "tg_send.sh"), text], env=env)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        sent = self.stub.methods("sendMessage")
+        self.assertTrue(sent, [c["method"] for c in self.stub.calls])
+        self.assertEqual({c["fields"].get("chat_id") for c in sent}, {chat}, "стенд: чат не тот")
+        return sent
+
+    def fresh(self):
+        self.stub.calls.clear()
+
+    def stand_status(self, text: str):
+        """Сборщик стенда отдаёт статус с заданным текстом; метку «показано» принимает молча."""
+        builder = self.stand.tree / "scripts" / "status-report.py"
+        builder.write_text("#!/usr/bin/env python3\nimport json, sys\n"
+                           "if '--отметить' not in sys.argv:\n"
+                           f"    print(json.dumps({{'text': {text!r}}}, ensure_ascii=False))\n",
+                           encoding="utf-8")
+
+    def test_t1_status_text_carries_live_map(self):
+        """Т-1. https PANEL_URL + личный чат → статус текстом с reply_markup web_app …/puls."""
+        sent = self.text_send()
+        self.assertEqual(len(sent), 1, [c["method"] for c in self.stub.calls])
+        self.assertEqual(markup_of(sent[0]), LIVE_MAP_MARKUP)
+        self.assertEqual(sent[0]["fields"].get("text", "").rstrip("\n"),
+                         self.stand.status_text().rstrip("\n"))
+
+    def test_t1_only_last_part(self):
+        """Т-1. Статус на несколько частей → кнопка только у последней; обычный длинный текст → ни у одной."""
+        long_text = "\n".join(f"Строка {i} длинного сообщения владельцу о ходе работы." for i in range(200))
+        sent = self.text_send(status=long_text)
+        self.assertGreater(len(sent), 1, "стенд: статус не разрезан на части")
+        self.assertEqual([markup_of(c) for c in sent[:-1]], [None] * (len(sent) - 1))
+        self.assertEqual(markup_of(sent[-1]), LIVE_MAP_MARKUP)
+        self.fresh()
+        sent = self.text_send(text=long_text)
+        self.assertGreater(len(sent), 1, "стенд: текст не разрезан на части")
+        self.assertEqual([markup_of(c) for c in sent], [None] * len(sent), "кнопка на обычном тексте")
+
+    def test_t2_no_https_panel_or_group_chat_no_markup(self):
+        """Т-2. PANEL_URL не задан / пуст / http, или чат групповой → reply_markup нет вовсе."""
+        cases = {"не задан": (OWNER_CHAT, None), "пуст": (OWNER_CHAT, ""),
+                 "http": (OWNER_CHAT, "http://panel.stend.example"), "групповой чат": (CHAT_ID, PANEL_STAND)}
+        for name, (chat, panel) in cases.items():
+            with self.subTest(name):
+                self.fresh()
+                sent = self.text_send(chat=chat, panel=panel)
+                self.assertEqual([markup_of(c) for c in sent], [None] * len(sent))
+
+    def test_t3_button_refused_part_resent_without_it(self):
+        """Т-3. 400 BUTTON_TYPE_INVALID на часть с web_app → она же без кнопки, доставлено, отказ в журнале."""
+        self.stub.answers["sendMessage"] = (None, refuse_web_app)
+        sent = self.text_send()
+        self.assertEqual(len(sent), 2, [markup_of(c) for c in sent])
+        self.assertEqual(markup_of(sent[0]), LIVE_MAP_MARKUP)
+        self.assertIsNone(markup_of(sent[1]))
+        self.assertEqual(sent[0]["fields"].get("text"), sent[1]["fields"].get("text"))
+        self.assertEqual(self.stand.last_out().get("method"), "text")
+        failures = self.stand.log / "tg_failures.log"
+        self.assertTrue(failures.is_file() and "BUTTON_TYPE_INVALID" in failures.read_text(encoding="utf-8"),
+                        "отказ кнопки не записан в tg_failures.log")
+
+    def markup_mode(self, chat=OWNER_CHAT, panel=PANEL_STAND):
+        env = self.stand.env(TG_CHAT_ID=chat)
+        if panel is not None:
+            env[PANEL_DOOR] = panel
+        return run([sys.executable, str(WIDGET), "--live-map-markup"], env=env, stdin="")
+
+    def test_t4_markup_mode_prints_json(self):
+        """Т-4. --live-map-markup: https-панель + личный чат → JSON reply_markup, код 0, stdin не нужен."""
+        done = self.markup_mode()
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(json.loads(done.stdout), LIVE_MAP_MARKUP)
+
+    def test_t4_markup_mode_empty(self):
+        """Т-4. --live-map-markup: панели нет / пуста / http или чат групповой → пусто, код 0."""
+        cases = {"не задан": (OWNER_CHAT, None), "пуст": (OWNER_CHAT, ""),
+                 "http": (OWNER_CHAT, "http://panel.stend.example"), "групповой чат": (CHAT_ID, PANEL_STAND)}
+        for name, (chat, panel) in cases.items():
+            with self.subTest(name):
+                done = self.markup_mode(chat, panel)
+                self.assertEqual((done.returncode, done.stdout.strip()), (0, ""), done.stderr)
 
 
 class DispatcherBranch(unittest.TestCase):

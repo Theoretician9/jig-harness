@@ -76,8 +76,12 @@ DIRTY_NOTE = "есть незакоммиченное"
 QUEUED_NOTE = "ждёт заявка очереди тяжёлых прогонов"
 IDLE_NOTE = "ещё не простаивает"
 MQ_JOURNAL = "merge-queue"
-QUEUE_DIRS = ("заявки", "взяты", "итоги", "отменены", "битые")
+HELD = "держатся"
+QUEUE_DIRS = ("заявки", "взяты", "итоги", "отменены", "битые", HELD)
 POLL_SECONDS = 0.5
+# Генератор собранного документа гоняется дважды на конфликтный файл; зависший держал бы слиятеля
+# под замком очереди, поэтому предел с запасом на самый тяжёлый генератор.
+GENERATOR_TIMEOUT_SECONDS = 300
 # Итог и отмена живут дольше любого ожидания: оно ограничено пульсом слиятеля.
 RESULT_TTL_SECONDS = 86400
 PAUSE_MAX_SECONDS = 60
@@ -115,7 +119,7 @@ class Report:
                        "повторов": 0, "повторов_без_ворот": 0, "повторов_без_выбора": 0,
                        "повторы_с": 0.0, "выбор": [], "выбор_с": None, "дерево": "", "конфликт": [], "мешают": [], "оставлено": [], "красные": [],
                        "красны_на_master": [],
-                       "ключи_машины": []}
+                       "ключи_машины": [], "пересобрано": []}
 
     def finish(self, code: int) -> dict:
         self.fields.update(код=code, итог=self.success if code == 0 else RESULTS[code])
@@ -134,6 +138,8 @@ class Context:
         self.retries = int(values.get("MERGE_QUEUE_RETRIES") or 3)
         self.batch_max = int(values.get("MERGE_QUEUE_BATCH_MAX") or 4)
         self.bisect_max = int(values.get("MERGE_QUEUE_BISECT_MAX") or 3)
+        self.blameless_retries = int(values.get("MERGE_QUEUE_BLAMELESS_RETRIES") or 3)
+        self.blameless_ttl = float(values.get("MERGE_QUEUE_BLAMELESS_TTL_H") or 24) * HOUR_SECONDS
         self.wait_seconds = (float(values.get("MERGE_QUEUE_WAIT_MIN") or 30)
                              + 2 * selection_ceiling(self.project)) * 60
         self.idle_seconds = float(values.get("WORKTREE_IDLE_H") or 6) * HOUR_SECONDS
@@ -156,9 +162,10 @@ def git_env() -> dict:
     return env
 
 
-def git(where: Path, *args: str, binary: bool = False) -> subprocess.CompletedProcess:
+def git(where: Path, *args: str, binary: bool = False,
+        extra_env: dict | None = None) -> subprocess.CompletedProcess:
     """quotepath=off — путь уходит в вывод подачи и в журнал UTF-8, а не восьмеричными escape."""
-    env = git_env()
+    env = {**git_env(), **(extra_env or {})}
     extra = {} if binary else {"text": True, "encoding": "utf-8", "errors": "surrogateescape"}
     return subprocess.run(["git", "-c", "core.quotepath=off", "-C", str(where), *args],
                           capture_output=True, env=env, **extra)
@@ -330,21 +337,72 @@ def cleanup(ctx: Context, skip_branches: frozenset | set = frozenset()) -> dict:
 
 # ───────────────────────────── шаги слияния ─────────────────────────────
 
-def rebase_onto(where: Path, onto: str) -> None:
-    """Rebase на sha onto (в дереве цепочки), а не на имя master: имя читается заново и могло
-    уйти вперёд, тогда диапазон выбора втянул бы чужие коммиты.
-    Конфликт: файлы и ханки в вывод, rebase снять; ветка помощника не затронута."""
-    proc = git(where, "rebase", onto)
-    if proc.returncode == 0:
-        return
+def built_files(where: Path, onto: str) -> dict[str, str]:
+    """{собранный документ: его генератор} — записи реестра с полем `собирает:`, как их находит
+    update.py. Реестр читается из onto, а не из дерева посреди rebase: там он сам может быть
+    в конфликте."""
+    raw = blob(where, onto, "harness/config/mechanisms.yaml")
+    records = (yaml.safe_load(raw) or {}).get("механизмы", []) if raw else []
+    return {item["собирает"]: item["файл"] for item in records if item.get("собирает")}
+
+
+def run_generator(where: Path, generator: str, *args: str) -> bool:
+    try:
+        proc = subprocess.run([sys.executable, str(where / generator), *args], cwd=where,
+                              capture_output=True, timeout=GENERATOR_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        return False
+    return proc.returncode == 0
+
+
+def rebuild_built(where: Path, onto: str, files: list[str]) -> bool:
+    """Конфликтные файлы — все собранные: сторона любая, документ строится заново по данным
+    дерева, где обе стороны уже сошлись. Любой сбой — False, и rebase снимается как при
+    обычном конфликте."""
+    generators = built_files(where, onto)
+    if not files or not set(files) <= generators.keys():
+        return False
+    for path in files:
+        # Ветка могла удалить собранный документ: «theirs» тогда нет, и молча идти дальше нельзя.
+        if git(where, "checkout", "--theirs", "--", path).returncode:
+            return False
+    for generator in dict.fromkeys(generators[path] for path in files):
+        if not (run_generator(where, generator) and run_generator(where, generator, "--проверить")):
+            return False
+    if any(b"<<<<<<<" in (where / path).read_bytes() for path in files):
+        return False
+    return git(where, "add", "--", *files).returncode == 0
+
+
+def conflicted_files(where: Path) -> list[str]:
     # По NUL: путь с управляющим знаком git закавычивает и при quotepath=off.
     listed = git(where, "diff", "--name-only", "-z", "--diff-filter=U").stdout
-    files = [path for path in listed.split("\0") if path]
+    return [path for path in listed.split("\0") if path]
+
+
+def rebase_onto(where: Path, onto: str) -> list[str]:
+    """Rebase на sha onto (в дереве цепочки), а не на имя master: имя читается заново и могло
+    уйти вперёд, тогда диапазон выбора втянул бы чужие коммиты. Конфликт только в собранных
+    документах очередь разрешает сама на каждом коммите (шагов не больше коммитов ветки);
+    возврат — пересобранные пути. Иной конфликт: rebase снят, ветка помощника не затронута,
+    Stop(1) несёт файлы и ханки."""
+    steps = int(git_out(where, "rev-list", "--count", f"{onto}..HEAD") or 0)
+    proc, rebuilt = git(where, "rebase", onto), []
+    while proc.returncode and steps:
+        files = conflicted_files(where)
+        if not rebuild_built(where, onto, files):
+            break
+        rebuilt += [path for path in files if path not in rebuilt]
+        steps -= 1
+        # GIT_EDITOR из окружения сильнее core.editor, поэтому глушим редактор им же.
+        proc = git(where, "rebase", "--continue", extra_env={"GIT_EDITOR": "true"})
+    if proc.returncode == 0:
+        return rebuilt
+    files = conflicted_files(where)
     hunks = git(where, "diff").stdout.splitlines()[:HUNK_LINES]
     git(where, "rebase", "--abort")
-    say("конфликт rebase, файлы:\n" + "\n".join(files))
-    say("\n".join(hunks) if files else proc.stderr.strip())
-    raise Stop(1, "", files)
+    detail = "\n".join(hunks) if files else proc.stderr.strip()
+    raise Stop(1, "конфликт rebase, файлы:\n" + "\n".join(files) + "\n" + detail, files)
 
 
 def branch_trailers(project: Path, tip: str, base: str = "master") -> str:
@@ -822,19 +880,53 @@ def package_message(ctx: Context, branch: str, before: str, tip: str) -> str:
     return "\n".join([subjects[-1] if subjects else branch, "", *body]) + "\n"
 
 
+def live_keys_carry(ctx: Context, compare, tip: str) -> list[tuple[Path, bytes]]:
+    """[(файл пакета, текст)] — живые настройки, которым в пакете недостаёт верхних ключей вершины.
+
+    Живые настройки (pipeline.yaml и др.) в пакет не переносятся: значения — выбор
+    владельца. Но раскладка доносит копиям только ключи пакетной версии, и раздел,
+    заведённый лишь у хозяина, копиям не приходит никогда, а код пакета его читает
+    (копия business на 0.15.0: нет «зависимости_шагов» и «читатели_шагов»). Поэтому
+    в пакет дописываются только недостающие верхние ключи, значения пакета целы."""
+    live_settings = _load("live_settings", LIB_DIR / "live_settings.py")
+    out = []
+    for path in compare.ЖИВЫЕ:
+        if not (path.startswith("harness/config/") and path.endswith(".yaml")) \
+                or path.endswith("live-check-state.yaml"):
+            continue
+        source = blob(ctx.project, tip, path)
+        target = ctx.package / compare.место_в_пакете(path)
+        if source is None or not target.is_file():
+            continue
+        try:
+            text, missing = live_settings.keys_appended(target.read_text(encoding="utf-8"),
+                                                        source.decode("utf-8"))
+        except (ValueError, yaml.YAMLError) as error:
+            say(f"пакетная {path} не дополнена ключами хозяина: {error}")
+            continue
+        if missing:
+            say(f"в пакетную {path} дописаны ключи хозяина: {', '.join(map(str, missing))}")
+            out.append((target, text.encode("utf-8")))
+    return out
+
+
 def sync_package(ctx: Context, carry: list, branch: str, before: str, tip: str) -> tuple[int, str | None]:
     """Записать файлы ветки в пакет и закоммитить изменённые одним коммитом.
     (файлов в коммите, None — готово, иначе команда доделки)."""
-    if not carry:
-        return 0, None
     compare = _load("compare_with_package", HERE / "compare-with-package.py")
+    live = live_keys_carry(ctx, compare, tip)
+    if not carry and not live:
+        return 0, None
     for path, target in carry:
         mode = git(ctx.project, "ls-tree", tip, "--", path).stdout.split(" ", 1)[0]
         # Пакет держит сравнимый вид: числа замера process-library.json — серверу, не копиям.
         data = compare.сравнимое(path, blob(ctx.project, tip, path) or b"")
         if not target.exists() or target.read_bytes() != data:
             write_atomic(target, data, mode == "100755")
+    for target, data in live:
+        write_atomic(target, data, os.access(target, os.X_OK))
     paths = [str(target.relative_to(ctx.package)) for _, target in carry]
+    paths += [str(target.relative_to(ctx.package)) for target, _ in live]
     message = package_message(ctx, branch, before, tip)
     added = git(ctx.package, "add", "--", *paths)
     staged = git(ctx.package, "diff", "--cached", "--name-only", "-z", "--", *paths).stdout
@@ -1010,7 +1102,7 @@ def queued_branches(ctx: Context) -> set[str]:
 
 def find_request(ctx: Context, branch: str) -> tuple[str, dict] | None:
     """Заявка этой ветки, если прежнюю подачу убили: вторую не пишем, ждём её итог."""
-    for sub in ("заявки", "взяты"):
+    for sub in ("заявки", "взяты", HELD):
         for name in list_names(ctx.queue_dir / sub):
             request = read_request(ctx, sub, name)
             if request and request["ветка"] == branch:
@@ -1055,7 +1147,7 @@ class Entry:
         self.tip = self.before = ""
         self.changes, self.carry, self.deleted = [], [], []
         self.report.fields.update(sha_до=base, sha_после=base, файлов=0, ворота_с=None, выбор=[],
-                                  выбор_с=None, дерево="", конфликт=[], мешают=[])
+                                  выбор_с=None, дерево="", конфликт=[], мешают=[], пересобрано=[])
         self.report.fields.pop("ворота", None)
         self.out.seek(0)
         self.out.truncate()
@@ -1229,9 +1321,9 @@ def conflict_owner(chain: list, entry: Entry, top: str, base: str, where: Path) 
     if top == base:
         return "master"
     git(where, "checkout", "--detach", entry.orig)
-    alone = git(where, "rebase", base)
-    if alone.returncode:
-        git(where, "rebase", "--abort")
+    try:
+        rebase_onto(where, base)
+    except Stop:
         return "master"
     return next(e.branch for e in chain if e.tip == top)
 
@@ -1259,7 +1351,7 @@ def extend_chain(ctx: Context, entry: Entry, chain: list, top: str, base: str, w
     if checkout.returncode:
         raise RuntimeError(f"checkout {entry.orig}: {checkout.stderr.strip()}")
     try:
-        rebase_onto(where, top)
+        entry.report.fields["пересобрано"] = rebase_onto(where, top)
     except Stop as stop:
         entry.report.fields.update(конфликт=stop.files,
                                    конфликт_с=conflict_owner(chain, entry, top, base, where))
@@ -1549,6 +1641,53 @@ def run_pack(ctx: Context, pack: list, info: dict) -> None:
     settle_rest(ctx, pack, result, base, info)
 
 
+def now_iso() -> str:
+    return dt.datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def blameless(fields: dict) -> bool:
+    """Код 3 не по вине ветки: красные выбора есть, и каждая красна и на master. Красные
+    pre-commit и «не дошли» сюда не попадают — их master не объясняет. Ступень нужна: красные
+    pre-commit тоже лежат в «красные», и без неё они сошли бы за красные выбора."""
+    reds = fields.get("красные") or []
+    return (fields.get("ступень") == "выбор" and bool(reds)
+            and set(reds) <= set(fields.get("красны_на_master") or []))
+
+
+def unheld(branch: str, reason: str) -> None:
+    events.emit(SRC, "mq.держание-снято", "skipped", journal=MQ_JOURNAL,
+                data={"ветка": branch, "причина": reason})
+
+
+def hold(ctx: Context, entry: Entry, base: str) -> None:
+    """Заявка ложится в держатся/ с метками, по которым её вернут: помощник уйдёт, ветку
+    доведёт очередь. «держится_с» не обновляется при повторе: срок — на всё держание."""
+    fields = entry.report.fields
+    request = {**entry.request, "слиятель": None, "orig_sha": None, "сирота": 0,
+               "держится_с": entry.request.get("держится_с") or now_iso(),
+               "повторов_держания": int(entry.request.get("повторов_держания") or 0),
+               "красны_на_master": fields["красны_на_master"], "sha_master": base}
+    write_json_atomic(ctx.queue_dir / HELD / entry.name, request)
+    fields["держится"] = True
+    entry.out.write("заявка держится до зелёного master\n")
+    events.emit(SRC, "mq.держится", "skipped", journal=MQ_JOURNAL,
+                data={"ветка": entry.branch, "красны_на_master": fields["красны_на_master"],
+                      "повторов_держания": request["повторов_держания"]})
+
+
+def settle_guilty(ctx: Context, entry: Entry, base: str) -> int:
+    """Код виновной. Красная только по master — заявка держится, пока потолок повторов не
+    исчерпан; иначе отказ прежний."""
+    code = blame(entry)
+    if not blameless(entry.report.fields):
+        return code
+    if int(entry.request.get("повторов_держания") or 0) >= ctx.blameless_retries:
+        unheld(entry.branch, "потолок")
+    else:
+        hold(ctx, entry, base)
+    return code
+
+
 def settle_rest(ctx: Context, pack: list, result: GateResult, base: str, info: dict) -> None:
     """Все, кроме влитых: выпавшие — со своим кодом, виновная — 3, хвост — назад в очередь."""
     guilty = None if result.ceiling or not result.rest else result.rest[0]
@@ -1560,7 +1699,7 @@ def settle_rest(ctx: Context, pack: list, result: GateResult, base: str, info: d
         elif entry.fate in ("in_master", "empty"):
             finish(ctx, entry, deliver_settled(ctx, entry, base), info)
         elif entry is guilty:
-            finish(ctx, entry, blame(entry), info)
+            finish(ctx, entry, settle_guilty(ctx, entry, base), info)
         else:
             send_back(ctx, entry, info, single=result.ceiling and entry in result.rest)
 
@@ -1579,6 +1718,71 @@ def run_pack_safely(ctx: Context, pack: list) -> None:
         raise Stop(6, f"слиятель упал вне шагов ветки, заявки вернулись в очередь:\n{trace}") from exc
 
 
+def requeue_held(ctx: Context, name: str, request: dict, again: bool) -> None:
+    """Держимая — назад в заявки/ под прежним именем (встанет в голову). again — повторная
+    подача слиятеля, она тратит потолок; подача помощником не тратит. Старый итог 3 снимается:
+    иначе ждущий новой подачи прочёл бы его."""
+    # Подача помощника идёт без замка, слиятель — под замком: заявку забирает тот, чей rename
+    # успел. Проигравший видит FileNotFoundError и ждёт итог, как при обычной подаче. Временное
+    # имя `.tmp-` скрыто от list_names, а файл в держатся/ под прежним именем не пишется.
+    held, claim = ctx.queue_dir / HELD / name, ctx.queue_dir / HELD / f".tmp-claim-{name}"
+    try:
+        os.rename(held, claim)
+    except FileNotFoundError:
+        return
+    if again:
+        request["повторов_держания"] = int(request.get("повторов_держания") or 0) + 1
+    request["подано"] = now_iso()
+    write_json_atomic(claim, request)
+    (ctx.queue_dir / "заявки").mkdir(parents=True, exist_ok=True)
+    os.rename(claim, ctx.queue_dir / "заявки" / name)
+    (ctx.queue_dir / "итоги" / name).unlink(missing_ok=True)
+
+
+def master_red_names(ctx: Context) -> set[str]:
+    """Проверки, которые запомненные итоги master числят красными на нынешнем master."""
+    where = ctx.mq_dir / f"mq-{os.getpid()}-held"
+    proc = git(ctx.project, "worktree", "add", "--detach", str(where), "master")
+    if proc.returncode:
+        raise Stop(6, f"временное дерево не создано: {proc.stderr.strip()}")
+    try:
+        return {name for name, verdict in master_verdicts(ctx, where).items() if verdict["красна"]}
+    finally:
+        git(ctx.project, "worktree", "remove", "--force", str(where))
+
+
+def held_expired(ctx: Context, request: dict) -> bool:
+    return time.time() - requested_at({"подано": request.get("держится_с")}) > ctx.blameless_ttl
+
+
+def drop_expired(ctx: Context) -> None:
+    """Вышедшие по сроку снимаются; ветка и дерево не трогаются. Зовётся в начале слиятеля и
+    уборки, а не после пачки: только что удержанную заявку снимать рано."""
+    for name in list_names(ctx.queue_dir / HELD):
+        request = read_request(ctx, HELD, name)
+        if request and held_expired(ctx, request):
+            (ctx.queue_dir / HELD / name).unlink(missing_ok=True)
+            unheld(request["ветка"], "срок")
+
+
+def release_held(ctx: Context) -> int:
+    """Держимые возвращаются, когда master сдвинулся и запомненные итоги больше не числят их
+    красные красными (сдвиг без снятия красной вернул бы заявку на тот же отказ — горячий
+    круг). Возврат — число вернувшихся."""
+    waiting = []
+    for name in list_names(ctx.queue_dir / HELD):
+        request = read_request(ctx, HELD, name)
+        if request and request.get("sha_master") != rev(ctx.project, "master"):
+            waiting.append((name, request))
+    if not waiting:
+        return 0
+    red = master_red_names(ctx)
+    ready = [(n, r) for n, r in waiting if not red & set(r.get("красны_на_master") or [])]
+    for name, request in ready:
+        requeue_held(ctx, name, request, again=True)
+    return len(ready)
+
+
 def release_due(ctx: Context, own: str) -> bool:
     """Замок отпускается, когда заявка слиятеля получила итог или пропала либо очередь пуста:
     иначе его вызывающий простаивал бы, а publish и memory-commit голодали."""
@@ -1590,6 +1794,8 @@ def serve(ctx: Context, own: str) -> None:
     beat(ctx)
     sweep_old_results(ctx)
     resolve_orphans(ctx)
+    drop_expired(ctx)
+    release_held(ctx)
     while True:
         try:
             prepare_pack(ctx)
@@ -1603,6 +1809,8 @@ def serve(ctx: Context, own: str) -> None:
         beat(ctx)
         pause(ctx, "после_забора")
         run_pack_safely(ctx, pack)
+        # Слияние могло починить master: держимые смотрятся сразу, не ждут следующей подачи.
+        release_held(ctx)
         if release_due(ctx, own):
             break
     pause(ctx, "перед_отпуском")
@@ -1705,6 +1913,8 @@ def submit(ctx: Context, target: str, report: Report) -> dict:
     found = find_request(ctx, tree["branch"])
     if found:
         name, request = found
+        if (ctx.queue_dir / HELD / name).exists():
+            requeue_held(ctx, name, request, again=False)
     else:
         name = f"{time.time_ns()}-{os.getpid()}.json"
         request = {"ветка": tree["branch"], "дерево": str(tree["path"]), "pid": os.getpid(),
@@ -1714,7 +1924,25 @@ def submit(ctx: Context, target: str, report: Report) -> dict:
     return await_result(ctx, name, requested_at(request))
 
 
+def merge_released(ctx: Context) -> None:
+    """Вернувшихся держимых ждать некому (--убрать зовёт ночное задание): сливаем сами. Основное
+    не на master — заявки остаются в очереди до следующей подачи."""
+    while True:
+        try:
+            prepare_pack(ctx)
+        except Stop:
+            return
+        pack = claim_pack(ctx)
+        if not pack:
+            return
+        run_pack_safely(ctx, pack)
+        release_held(ctx)
+
+
 def tidy(ctx: Context, report: Report) -> None:
+    drop_expired(ctx)
+    if release_held(ctx):
+        merge_released(ctx)
     found = cleanup(ctx, queued_branches(ctx))
     report.fields["оставлено"] = found["оставлено"]
     say("убрано: " + (", ".join(found["убрано"]) or "ничего"))

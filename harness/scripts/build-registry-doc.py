@@ -13,6 +13,7 @@
 Прогон:
     python3 scripts/build-registry-doc.py            # пересобрать документ
     python3 scripts/build-registry-doc.py --печать   # вывести, не записывая
+    python3 scripts/build-registry-doc.py --проверить  # документ равен сборке? иначе код 1
 """
 import sys
 from pathlib import Path
@@ -229,6 +230,11 @@ def main() -> int:
     if "--печать" in sys.argv:
         sys.stdout.write(текст)
         return 0
+    if "--проверить" in sys.argv:
+        # Очередь слияния судит им пересобранный при конфликте документ: молчаливая сборка
+        # здесь принимала бы любой текст.
+        сейчас = ДОКУМЕНТ.read_text(encoding="utf-8") if ДОКУМЕНТ.exists() else None
+        return 0 if сейчас == текст else 1
     ДОКУМЕНТ.parent.mkdir(parents=True, exist_ok=True)
     было = ДОКУМЕНТ.read_text(encoding="utf-8") if ДОКУМЕНТ.exists() else None
     # Не тронутый документ не переписывается: повтор раскладки той же версии не должен менять mtime.

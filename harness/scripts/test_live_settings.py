@@ -198,6 +198,72 @@ def case_records_never_replaced(module, stand: Path) -> list:
     return troubles
 
 
+HOST_PIPELINE = """\
+шаги:
+  мелкая: [тесты]
+
+# Какой файл в коде судит шаг.
+читатели_шагов:
+  тесты: scripts/check-tests-first.py
+"""
+PACKAGE_PIPELINE = "шаги:\n  мелкая: [тесты, мутации]\n"
+
+
+def case_package_gets_host_keys(module, stand: Path) -> list:
+    """(5) пакетная версия получает верхний ключ хозяина с комментарием, значения пакета целы."""
+    text, missing = module.keys_appended(PACKAGE_PIPELINE, HOST_PIPELINE)
+    data = yaml.safe_load(text)
+    troubles = []
+    if missing != ["читатели_шагов"]:
+        troubles.append(f"названы не те ключи: {missing!r}")
+    if data.get("шаги") != {"мелкая": ["тесты", "мутации"]}:
+        troubles.append(f"значение пакета изменено: {data.get('шаги')!r}")
+    if data.get("читатели_шагов") != {"тесты": "scripts/check-tests-first.py"}:
+        troubles.append("раздел хозяина не дописан")
+    if "# Какой файл в коде судит шаг." not in text:
+        troubles.append("комментарий над разделом потерян")
+    if module.keys_appended(text, HOST_PIPELINE)[1]:
+        troubles.append("повтор снова дописывает")
+    return troubles
+
+
+def load_queue():
+    spec = importlib.util.spec_from_file_location("merge_queue", ROOT / "scripts" / "merge-queue.py")
+    queue = importlib.util.module_from_spec(spec)
+    sys.modules["merge_queue"] = queue
+    spec.loader.exec_module(queue)
+    return queue
+
+
+def case_queue_carries_host_keys(module, stand: Path) -> list:
+    """(6) очередь слияния: пакетной pipeline.yaml недостаёт раздела вершины → он в переносе.
+    Копия business на 0.15.0: раздел жил только у хозяина, и её пробы краснели."""
+    from types import SimpleNamespace
+    queue = load_queue()
+    compare = queue._load("compare_with_package", ROOT / "scripts" / "compare-with-package.py")
+    project = stand / "proj"
+    live_stand(stand, "pipeline.yaml", HOST_PIPELINE)
+    git(project, "init", "-q")
+    git(project, "config", "user.email", "proba@stand")
+    git(project, "config", "user.name", "proba")
+    git(project, "add", "-A")
+    git(project, "commit", "-q", "-m", "v0")
+    package = stand / "pkg" / "harness" / "config" / "pipeline.yaml"
+    package.parent.mkdir(parents=True)
+    package.write_text(PACKAGE_PIPELINE, encoding="utf-8")
+    ctx = SimpleNamespace(project=project, package=stand / "pkg")
+    carried = queue.live_keys_carry(ctx, compare, "HEAD")
+    troubles = []
+    if [target for target, _ in carried] != [package]:
+        troubles.append(f"в переносе не пакетная pipeline.yaml: {carried!r}")
+    elif "читатели_шагов" not in (yaml.safe_load(carried[0][1]) or {}):
+        troubles.append("раздел хозяина не в переносимом тексте")
+    package.write_text(HOST_PIPELINE, encoding="utf-8")
+    if queue.live_keys_carry(ctx, compare, "HEAD"):
+        troubles.append("ключи сошлись, а перенос не пуст")
+    return troubles
+
+
 def main() -> int:
     module = load_module()
     print("── Г3б: досылка ключей в живые YAML-настройки ──")
@@ -206,7 +272,9 @@ def main() -> int:
             ("(2) правка владельца цела, верхний ключ дописан с комментарием, повтор пуст", case_owner_edit_kept),
             ("(3) вложенный шаги.хакатон назван, не дописан", case_nested_named),
             ("(4) вставка ломает YAML → файл не тронут", case_broken_untouched),
-            ("(г) записи установки не заменяются даже равные прошлому пакету", case_records_never_replaced)):
+            ("(г) записи установки не заменяются даже равные прошлому пакету", case_records_never_replaced),
+            ("(5) пакетная версия получает раздел хозяина, значения пакета целы", case_package_gets_host_keys),
+            ("(6) очередь слияния переносит в пакет раздел, которого ему недостаёт", case_queue_carries_host_keys)):
         if module is None:
             report(name, [f"модуля нет: {MODULE}"])
             continue

@@ -16,3 +16,10 @@
   - {журнал: release-train,    события: ["*"],                                   от: release,   к: network}
   - {журнал: deploy-releases,  события: [deploy.release],                        от: release,   к: machine}
   - {журнал: process-runs,     события: [process.start],                         от: machine,   к: "*"}
+# Процесс витрины (process-dispatcher-view) → часть, когда файла-механизма у процесса
+# нет: агенты сессии — главная нагрузка машины, и это работа части executors.
+# Прочие процессы сводятся по файлам записи process-library.json.
+процессы_частей:
+  claude-session: executors
+  claude-session-commands: executors
+  helpers: executors

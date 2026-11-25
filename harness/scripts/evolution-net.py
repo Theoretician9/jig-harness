@@ -72,6 +72,7 @@ import cards  # noqa: E402
 import events  # noqa: E402
 import owner_word  # noqa: E402
 from config import heartbeat_dir, конфиг, путь_harness_conf  # noqa: E402
+from git_redirect import CLONE_REDIRECT  # noqa: E402
 
 SRC = "scripts/evolution-net.py"
 OK, PUSH_REJECTED, DOOR_REFUSED, HISTORY_REWRITTEN, NOT_READY, NO_NETWORK = 0, 1, 2, 3, 4, 5
@@ -80,8 +81,11 @@ OK, PUSH_REJECTED, DOOR_REFUSED, HISTORY_REWRITTEN, NOT_READY, NO_NETWORK = 0, 1
 TEXT_MAX = 200
 DIR_FORM = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 # re.ASCII: без него \d пропускает цифры Unicode (٢٠٢٦-…) — у двери копии и у суда хозяина.
-FILE_FORM = re.compile(r"^\d{4}-\d{2}-\d{2}-[a-z0-9-]{1,80}\.md$", re.ASCII)
-MAIL_FORM = re.compile(r"^\d{4}-\d{2}-\d{2}-[A-Za-z0-9_-]{1,64}-[a-z0-9-]{1,80}\.md$")
+# Суть имени: точка законна (номер версии `0.15.0`), но не в начале и не двойная — «..» и «/»
+# не проходят, скрытым компонентом имя не станет. Двойную точку ловит и стык с расширением.
+GIST = r"(?!\.)(?!.*\.\.)[a-z0-9.-]{1,80}"
+FILE_FORM = re.compile(rf"^\d{{4}}-\d{{2}}-\d{{2}}-{GIST}\.md$", re.ASCII)
+MAIL_FORM = re.compile(rf"^\d{{4}}-\d{{2}}-\d{{2}}-[A-Za-z0-9_-]{{1,64}}-{GIST}\.md$", re.ASCII)
 # Патч копии хозяину — каталог в ящике ЭТОЙ копии: `почта/<эта копия>/<дата>-<от>-<суть>/<путь>`.
 # Внутри каждый компонент без точки в начале (скрытое из обзора и `.git*` не проходят), глубина
 # внутри каталога не больше PATCH_DEPTH.
@@ -93,10 +97,6 @@ PATCH_README = "README.md"
 # Всё прочее отбрасывается: principal хозяина или `*` в чужой строке дал бы чужому
 # ключу права хозяина (факт 4 плана).
 SIGNER_LINE = re.compile(r'^([A-Za-z0-9_-]{1,64}) (?:namespaces="git" )?ssh-ed25519 [A-Za-z0-9+/=]+$')
-# Конфиг клона, который уводит fetch и push по закреплённому адресу в чужой
-# репозиторий или исполняет чужой код. include.* — потому что в подключённом файле
-# лежит то же самое, а `git config --local` без --includes его не видит.
-CLONE_REDIRECT = r"^(include\..*|includeif\..*|url\..*|remote\..*\.pushurl|core\.hookspath)$"
 SHA_FORM = re.compile(r"^[0-9a-f]{40}$")
 KINDS = ("косяк", "задача", "фикс", "вопрос", "ответ", "патч")
 GIT_NAME = "HarnessEvolution"
@@ -405,7 +405,7 @@ def blob_limit(cfg: Settings, path: str) -> int:
 
 def sent_form(signer: str, ext: str = "") -> re.Pattern:
     """Имя отправленного: `<ГГГГ-ММ-ДД>-<подписант>-<суть><ext>`; <от> — подписант, не слово файла."""
-    return re.compile(rf"^\d{{4}}-\d{{2}}-\d{{2}}-{re.escape(signer)}-[a-z0-9-]{{1,80}}{re.escape(ext)}$")
+    return re.compile(rf"^\d{{4}}-\d{{2}}-\d{{2}}-{re.escape(signer)}-{GIST}{re.escape(ext)}$", re.ASCII)
 
 
 def patch_refusal(change: Change, signer: str, accepted: dict) -> str | None:
@@ -433,14 +433,17 @@ def copy_path_refusal(repo: Path, change: Change, signer: str, limit: int, accep
         return patch_refusal(change, signer, accepted)
     parts = change.path.split("/")
     where = f"путь {visible(change.path)}"
-    if len(parts) == 3 and parts[0] == "находки" and parts[1] == signer and FILE_FORM.match(parts[2]):
-        return None
+    if len(parts) == 3 and parts[0] == "находки" and parts[1] == signer:
+        return None if FILE_FORM.match(parts[2]) else f"{where}: ожидается находки/{signer}/<ГГГГ-ММ-ДД>-<суть>.md"
     if len(parts) == 2 and parts[0] == "серверы" and parts[1] == f"{signer}.md":
         return None
     if len(parts) == 3 and parts[0] == "почта" and DIR_FORM.match(parts[1]):
         if parts[1] != signer:
             fresh = change.status == "A" and change.path not in accepted
-            return None if fresh and sent_form(signer, ".md").match(parts[2]) else where
+            if fresh and sent_form(signer, ".md").match(parts[2]):
+                return None
+            return where if not fresh else (
+                f"{where}: ожидается почта/{parts[1]}/<ГГГГ-ММ-ДД>-{signer}-<суть>.md")
         if change.status != "M" or not MAIL_FORM.match(parts[2]) or change.old_blob != accepted.get(change.path):
             return where
         if blob_size(repo, change.old_blob) > limit:
@@ -544,12 +547,17 @@ def load_state(cfg: Settings) -> dict:
 def ensure_state_dir(cfg: Settings) -> None:
     """Каталог состояния создаётся, если родитель доступен на запись (на живой
     машине STATE_DIR принадлежит root, и подкаталог ставит установщик); иначе
-    отказ с путём — до подписи, чтобы не печатать sha без состояния под ним."""
+    отказ с путём — до подписи, чтобы не печатать sha без состояния под ним.
+    Тик зовёт её до доставки писем: каталог, закрытый на запись, иначе узнают
+    после доставки, когда состояние уже не лечь, а письма во входящих лежат."""
     try:
         cfg.state.parent.mkdir(parents=True, exist_ok=True)
     except OSError as err:
         raise Refusal(NOT_READY, f"каталог состояния {cfg.state.parent} не создать ({err.strerror}): "
                                  "его создаёт установщик (шаг 1) или владелец")
+    if not os.access(cfg.state.parent, os.W_OK | os.X_OK):
+        raise Refusal(NOT_READY, f"каталог состояния {cfg.state.parent} закрыт на запись: "
+                                 "его права правит установщик (шаг 1) или владелец")
 
 
 def save_state(cfg: Settings, state: dict) -> None:
@@ -1153,6 +1161,7 @@ def report_additions(cfg: Settings, state: dict) -> None:
 # message_id — слово владельца для дверей согласий.
 
 MAIL_INBOX = "inbox"
+MAIL_JOURNAL = "письма-копий.jsonl"
 
 
 def is_incoming(cfg: Settings, change: Change) -> bool:
@@ -1183,13 +1192,34 @@ def deliver_letter(cfg: Settings, record: dict) -> str:
     target.write_text(f"{head}\n" + blob_bytes(cfg.clone, record["blob"]).decode(errors="replace"),
                       encoding="utf-8")
     events.emit(SRC, "mail.delivered", "ok", journal="письма-копий",
-                data={"text": head, "вид": "письмо", "от": record["from"], "sha": record["sha"]})
+                data={"text": head, "вид": "письмо", "от": record["from"], "sha": record["sha"],
+                      "путь": record["path"]})
     return str(target)
+
+
+def delivered_letters(cfg: Settings) -> set:
+    """(sha коммита, путь) доставленных писем из журнала входящих. Память о доставленном
+    живёт вне state.json: потерянное состояние гонит тик с якоря заново, и без неё те же
+    письма легли бы вторым файлом."""
+    try:
+        lines = (cfg.log_dir / MAIL_JOURNAL).read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return set()
+    seen = set()
+    for line in lines:
+        try:
+            data = json.loads(line).get("data") or {}
+        except ValueError:
+            continue
+        if data.get("sha") and data.get("путь"):
+            seen.add((data["sha"], data["путь"]))
+    return seen
 
 
 def deliver_mail(cfg: Settings, state: dict) -> int:
     """Новые письма — во входящие; пути файлов ждут толчка в `letter_wake`."""
-    letters = state.pop("letters", [])
+    seen = delivered_letters(cfg)
+    letters = [r for r in state.pop("letters", []) if (r["sha"], r["path"]) not in seen]
     for record in letters:
         state.setdefault("letter_wake", []).append({"from": record["from"], "file": deliver_letter(cfg, record)})
     return len(letters)
@@ -1229,6 +1259,7 @@ def read_tick(cfg: Settings) -> int:
 
 
 def read_pass(cfg: Settings) -> tuple[int, bool]:
+    ensure_state_dir(cfg)
     trust = host_line(cfg)
     state = load_state(cfg)
     anchor = "" if state.get("last_seen") else anchor_sha(cfg)

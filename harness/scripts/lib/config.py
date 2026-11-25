@@ -69,6 +69,23 @@ def корень_машины() -> str:
     return str(Path(os.environ.get("HOME") or "/root") / ".harness")
 
 
+def корень_двери(файл_двери: str) -> str:
+    """Корень паспорта ДВЕРИ — то же правило, что `konf_dveri_puti` в config.sh.
+
+    Дверь (клиент runner шлёт код проекта по адресу из паспорта) окружению не верит, кроме одной
+    явной двери стенда: HARNESS_DOOR_STAND_HOME — только если сама дверь (realpath) лежит вне
+    PROJECT_DIR паспорта машины, то есть это копия в стенде, а не настоящее дерево. Без
+    python-половины стенд клиента был бы невозможен, а своя проверка в клиенте разошлась бы с bash.
+    """
+    машина = корень_машины()
+    стенд = os.environ.get("HARNESS_DOOR_STAND_HOME")
+    if стенд:
+        проект = из_файла(f"{машина}/install.conf").get("PROJECT_DIR", "").rstrip("/")
+        if not проект or not (os.path.realpath(файл_двери) + "/").startswith(проект + "/"):
+            return стенд
+    return машина
+
+
 def путь_install_conf() -> str:
     return os.environ.get("HARNESS_INSTALL_CONF") or f"{корень()}/install.conf"
 
@@ -194,8 +211,20 @@ def job_mark(job: dict) -> str:
     return re.sub(r"\.(sh|py)$", "", Path(command[0]).name) if command else str(job.get("имя", ""))
 
 
+def job_gated_off(job: dict, values: dict) -> bool:
+    """Задание выключено своим ключом: `если_задан` пуст, а при `равно` — не равен ему.
+
+    `равно` нужно ключу-выключателю с явным «0»: непустой «0» не должен включать.
+    """
+    key = job.get("если_задан")
+    if not key:
+        return False
+    value = values.get(key)
+    return value != str(job["равно"]) if "равно" in job else not value
+
+
 def switched_off_marks(jobs: list, values: dict) -> set:
-    """Метки заданий, выключенных пустым ключом конфига `если_задан`.
+    """Метки заданий, выключенных ключом конфига `если_задан` (см. job_gated_off).
 
     Такое задание не ставится в расписание и не получает срока метки: сторож
     продукта на машине без продукта запускался 2 016 раз в неделю впустую
@@ -203,7 +232,7 @@ def switched_off_marks(jobs: list, values: dict) -> set:
     одинаково доустановка (что ставить) и сверка сроков (что требовать).
     """
     return {job_mark(job) for job in jobs
-            if job.get("если_задан") and not values.get(job["если_задан"])}
+            if job_gated_off(job, values)}
 
 
 def log_dir() -> str:
@@ -357,8 +386,11 @@ def _selftest() -> int:
           (Path(корень_дерева()) / "harness" / "config").is_dir())
 
     # ── корень установки: python-половина того же правила, что в config.sh ──
+    # Снимаются все ключи, которые судят случаи ниже: окружение старше файла, и
+    # унаследованный ключ (поезд выпуска экспортирует PROJECT_DIR среза) отвечал
+    # бы вместо конфига чужого дома.
     прежние = {к: os.environ.get(к) for к in
-               ("HARNESS_HOME", "HARNESS_INSTALL_CONF", "STATE_DIR", "LOG_DIR")}
+               ("HARNESS_HOME", "HARNESS_INSTALL_CONF", "PROJECT_DIR", *_места("").keys())}
     try:
         for к in прежние:
             os.environ.pop(к, None)
@@ -389,6 +421,31 @@ def _selftest() -> int:
             # Окружение старше файла и для мест — иначе проба играет на боевом.
             os.environ["LOG_DIR"] = "/из/окружения"
             проба("окружение старше файла и для мест", "/из/окружения", log_dir())
+    finally:
+        for к, v in прежние.items():
+            os.environ.pop(к, None)
+            if v is not None:
+                os.environ[к] = v
+
+    # ── корень двери: python-половина konf_dveri_puti (config.sh) ──
+    # Больной случай — дверь в настоящем дереве: HARNESS_DOOR_STAND_HOME увёл бы её паспорт
+    # (адрес runner, ключ) туда, куда назовёт вызывающий.
+    прежние = {к: os.environ.get(к) for к in ("HARNESS_DOOR_STAND_HOME", "HARNESS_HOME")}
+    try:
+        проект_машины = из_файла(f"{корень_машины()}/install.conf").get("PROJECT_DIR", "")
+        with tempfile.TemporaryDirectory() as стенд:
+            os.environ.pop("HARNESS_DOOR_STAND_HOME", None)
+            os.environ["HARNESS_HOME"] = стенд
+            проба("корень двери: HARNESS_HOME не подменяет паспорт машины", корень_машины(),
+                  корень_двери(f"{стенд}/scripts/remote-run.py"))
+            os.environ["HARNESS_DOOR_STAND_HOME"] = стенд
+            проба("корень двери: копия вне PROJECT_DIR машины верит стенду", стенд,
+                  корень_двери(f"{стенд}/scripts/remote-run.py"))
+            проба("БОЛЬНОЙ СЛУЧАЙ корень двери: дверь в дереве машины стенду не верит",
+                  корень_машины() if проект_машины else стенд,
+                  корень_двери(f"{проект_машины.rstrip('/')}/scripts/remote-run.py"))
+            проба("корень двери: соседний каталог с тем же началом имени — вне дерева", стенд,
+                  корень_двери(f"{проект_машины.rstrip('/')}-копия/scripts/remote-run.py"))
     finally:
         for к, v in прежние.items():
             os.environ.pop(к, None)

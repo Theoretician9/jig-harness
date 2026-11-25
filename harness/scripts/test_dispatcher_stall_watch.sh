@@ -312,9 +312,9 @@ door() {  # $1 = сдвиг момента метки «ответ не нуже
     echo "стенд: владелец написал «ок»" > "$OR/log/reply-not-needed"
     touch -d "@$(( OR_NOW + $1 ))" "$OR/log/reply-not-needed"
 }
-or_env() {  # судьи паузы и лимита ставят метки только в каталоги стенда
+or_env() {  # судьи паузы и лимита ставят метки и читают транскрипт смены только в каталогах стенда
     env HARNESS_INSTALL_CONF="$OR/install.conf" HARNESS_CONF="$OR/harness.conf" \
-        HARNESS_PANEL_STATE="$OR/panel" LOG_DIR="$OR/log" "$@"
+        HARNESS_PANEL_STATE="$OR/panel" LOG_DIR="$OR/log" CLAUDE_PROJECTS_DIR="$T/projects" "$@"
 }
 sent() { count "$OR/sent"; }
 sent_has() { grep -qF -- "$1" "$OR/sent" 2>/dev/null && echo да || echo нет; }

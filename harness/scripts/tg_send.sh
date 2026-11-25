@@ -160,13 +160,41 @@ verdict() {  # ответ-api, что-отправляли
     return 0
 }
 
-send_text() {  # кусок текста
-    local resp
-    # URL с токеном — через stdin (curl -K -), не в argv: argv виден любому в ps.
-    resp=$(printf 'url = "%s/sendMessage"\n' "$API" \
+# Клавиатура «Живая карта» для статуса текстом: единственный источник — live_map_button()
+# в status_widget.py. Пусто — кнопки нет (не статус, нет https-панели, групповой чат).
+live_map_markup() {
+    [ "${STATUS_DOOR:-0}" = 1 ] || return 0
+    local widget="$PROJECT_DIR/scripts/status_widget.py"
+    [ -r "$widget" ] || return 0
+    STATUS_WIDGET_PANEL_URL="${PANEL_URL:-}" TG_CHAT_ID="$TG_CHAT_ID" \
+        python3 "$widget" --live-map-markup 2>/dev/null || true
+}
+
+# Токен — через stdin (curl -K -), не в argv: argv виден любому в ps. $2 — reply_markup или пусто.
+post_message() {  # текст, разметка → тело ответа в stdout
+    local -a markup=()
+    [ -n "${2:-}" ] && markup=(--data-urlencode "reply_markup=$2")
+    printf 'url = "%s/sendMessage"\n' "$API" \
         | curl -sS --max-time 30 -K - -X POST \
         --data-urlencode "chat_id=$TG_CHAT_ID" \
-        --data-urlencode "text=$1" 2>&1) || refuse "curl не дошёл до API" "$(printf '%.300s' "$resp")"
+        --data-urlencode "text=$1" "${markup[@]}" 2>&1
+}
+
+button_refused() {  # $1 = тело ответа Bot API → rc=0, если отказ именно из-за кнопки
+    printf '%s' "$1" | jq -e '.error_code == 400
+        and ((.description // "") | test("BUTTON_TYPE_INVALID|web_app"; "i"))' >/dev/null 2>&1
+}
+
+send_text() {  # кусок текста [, reply_markup]
+    local resp
+    resp=$(post_message "$1" "${2:-}") || refuse "curl не дошёл до API" "$(printf '%.300s' "$resp")"
+    # Отказ из-за кнопки не должен терять доставку: часть повторяется без неё.
+    if [ -n "${2:-}" ] && button_refused "$resp"; then
+        jq -cn --arg ts "$(date -Is)" --arg why "кнопка «Живая карта» не принята — часть ушла без неё" \
+            --arg api "$(printf '%.300s' "$resp")" \
+            '{ts:$ts, script:"tg_send", why:$why, api:$api}' >> "$FAIL_LOG" 2>/dev/null || true
+        resp=$(post_message "$1" "") || refuse "curl не дошёл до API" "$(printf '%.300s' "$resp")"
+    fi
     verdict "$resp" "текст ${#1} зн."
 }
 
@@ -177,7 +205,8 @@ send_text() {  # кусок текста
     local widget="$PROJECT_DIR/scripts/status_widget.py" why rc=0
     [ -r "$widget" ] || return 1
     why=$(printf '%s' "$STATUS_JSON" | TG_TOKEN_FILE="$TG_TOKEN_FILE" TG_CHAT_ID="$TG_CHAT_ID" \
-        STATUS_WIDGET_PREFIX="${WIDGET_CAPTION_PREFIX:-}" STATUS_WIDGET_STATE="$LOG_DIR/status-widget.json" python3 "$widget" --send 2>&1 >/dev/null) || rc=$?
+        STATUS_WIDGET_PREFIX="${WIDGET_CAPTION_PREFIX:-}" STATUS_WIDGET_PANEL_URL="${PANEL_URL:-}" \
+        STATUS_WIDGET_STATE="$LOG_DIR/status-widget.json" python3 "$widget" --send 2>&1 >/dev/null) || rc=$?
     [ "$rc" = 0 ] && return 0
     jq -cn --arg ts "$(date -Is)" --arg why "виджет не принят — статус ушёл текстом" \
         --arg api "$(printf '%.300s' "$why")" --argjson code "$rc" \
@@ -205,12 +234,16 @@ send_text() {  # кусок текста
     [ -n "$rest" ] && chunks+=("$rest")
 
     TOTAL_PARTS=${#chunks[@]}
+    local markup part_markup
+    markup=$(live_map_markup)
     for piece in "${chunks[@]}"; do
         n=$((n + 1))
+        part_markup=""
+        [ "$n" = "$TOTAL_PARTS" ] && part_markup="$markup"
         if [ "$TOTAL_PARTS" -gt 1 ]; then
-            send_text "[$n/$TOTAL_PARTS] $piece"
+            send_text "[$n/$TOTAL_PARTS] $piece" "$part_markup"
         else
-            send_text "$piece"
+            send_text "$piece" "$part_markup"
         fi
         SENT_PARTS=$n   # часть подтверждена — отказ на следующей назовёт это число
     done

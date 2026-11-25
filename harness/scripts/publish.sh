@@ -753,12 +753,91 @@ ids_iz_istorii() { # $1=момент ISO (пусто — вся история) 
     IDS="$ids" python3 -I "$SCRIPTS_REAL/vitrina_status.py"
 }
 
+# Момент, на котором стоит публичная ветка (точка отсечки замка 3); пусто — ветки нет.
+# Зовут бой и чек-лист: у них одна точка отсчёта.
+# Удалённый — ДАННЫЕ (PUBLIC_REMOTE в harness.conf). Вшитое имя уже стоило
+# смены 11.09.2026: сверка версий искала «origin», живой пакет звал удалённый
+# иначе. Здесь вшитое «harness» указывало на ПРИВАТНЫЙ репозиторий пакета —
+# замок считал точку отсечки по нему, а публичная ветка живёт в другом.
+# Точка отсчёта берётся ТАМ, где живёт публичная ветка. С переходом на сборку
+# это каталог сборки, а не пакет: в пакете публичного удалённого может уже не
+# быть, и замок 3 считал бы диапазон по пустоте.
+OTKUDA_VETKA=""
+SINCE=""
+public_cutoff_point() { # → OTKUDA_VETKA, SINCE
+    OTKUDA_VETKA="$PACKAGE_DIR"
+    if git -C "${PUBLIC_BUILD_DIR:-/нет}" remote get-url "$PUBLIC_REMOTE" >/dev/null 2>&1; then
+        OTKUDA_VETKA="$PUBLIC_BUILD_DIR"
+    fi
+    git -C "$OTKUDA_VETKA" fetch "$PUBLIC_REMOTE" 2>/dev/null || true
+    SINCE=$(git -C "$OTKUDA_VETKA" log -1 --format=%cI "$PUBLIC_REMOTE/$PUBLIC_BRANCH" 2>/dev/null) || true
+}
+
+# ── Замки сборки одним носителем: их зовут и бой, и чек-лист выпуска ─────────
+# Каждый печатает свою строку (зелёную или «ОТКАЗ: …» с подробностями) и отвечает 0/1.
+lock_secrets() { # $1=сборка
+    local vyvod
+    if ! vyvod=$(bash "$SCRIPTS_REAL/check-secrets.sh" "$1" 2>&1); then
+        say "ОТКАЗ: в сборке похожее на секрет — публикация отменена"
+        printf '%s\n' "$vyvod" | sed 's/^/  /'
+        return 1
+    fi
+    say "замок 5 · секретов в сборке нет"
+}
+
+# Прошлые секции CHANGELOG опубликованы до замка имён копий сети: обезличить их до
+# суда тем же кодом, что и version.py --оформить, иначе замок 6 отказывает по старой истории.
+anonymize_changelog() { # $1=сборка
+    [ -f "$1/CHANGELOG.md" ] || return 0
+    python3 -I - "$SCRIPTS_REAL" "$1/CHANGELOG.md" <<'PY' || { say "ОТКАЗ: прошлый CHANGELOG сборки не обезличен"; return 1; }
+import sys
+sys.path.insert(0, sys.argv[1])
+import version
+журнал = open(sys.argv[2], encoding="utf-8").read()
+журнал = version._судья_чистоты().обезличить_имена_копий(журнал, version._паспорт())
+open(sys.argv[2], "w", encoding="utf-8").write(журнал)
+PY
+}
+
+# Замок следов установки: образцы берутся не из данных сборщика. Зовётся дважды — по дереву
+# без заметок релиза (6) и по дереву с ними (6б); отличаются лишь слова отказа и строки «ок».
+lock_clean() { # $1=сборка $2=пакет $3=паспорт $4=что судится: «сборке» | «заметках релиза» [$5=доп. довод судье]
+    local vyvod
+    if ! vyvod=$(python3 -I "$SCRIPTS_REAL/check-public-clean.py" "$1" \
+                         --пакет "$2" --проект "$PROJECT_DIR" --паспорт "$3" ${5:+"$5"} 2>&1); then
+        if [ "$4" = "сборке" ]; then say "ОТКАЗ: в сборке следы этой установки — публикация отменена"
+        else say "ОТКАЗ: следы установки в $4 — публикация отменена"; fi
+        printf '%s\n' "$vyvod" | sed 's/^/  /'
+        return 1
+    fi
+    if [ "$4" = "сборке" ]; then say "замок 6 · следов установки в сборке нет"
+    else say "замок 6б · в $4 следов установки нет"; fi
+}
+
+# Номер версии, файл VERSION и секция CHANGELOG пишутся в сборку ДО коммита: они едут ТЕМ ЖЕ
+# коммитом, что и сборка. Имя удалённого передаётся ЯВНО: прошлая версия считается по тегам,
+# которые реально опубликованы (локальные пропускали бы номер после упавшей отправки тега).
+# Заметки собраны машиной из ЗАГОЛОВКОВ КОММИТОВ ПАКЕТА, а их пишет смена: назвать продукт в
+# заголовке легко, как и в коде — поэтому после записи судья чистоты зовётся второй раз.
+RELEASE_VERSION=""
+release_version_write() { # $1=сборка $2=пакет → RELEASE_VERSION
+    local otvet
+    otvet=$(python3 -I "$SCRIPTS_REAL/version.py" --оформить --пакет "$2" --сборка "$1" \
+                    --проект "$PROJECT_DIR" --удалённый "$PUBLIC_REMOTE" 2>&1) || {
+        say "ОТКАЗ: версия релиза не посчитана — $otvet"; return 1; }
+    RELEASE_VERSION=$(printf '%s' "$otvet" \
+        | python3 -I -c 'import json,sys; d=json.load(sys.stdin); print(d["следующая"]); sys.stderr.write(d["почему"])' 2>/dev/null)
+    [ -n "$RELEASE_VERSION" ] || { say "ОТКАЗ: ответ version.py не разобран: ${otvet:0:120}"; return 1; }
+    say "версия релиза: v$RELEASE_VERSION"
+}
+
 # ── Замки 4-6 и публикация собранного дерева ────────────────────────────────
 # Наружу уезжает не пакет, а СБОРКА: инструмент без нашей мастерской. Порядок
 # замков — единственное, что здесь своё; сборка, поиск секретов и поиск следов
 # зовутся готовыми.
 # [--сухо] — прогнать замки 4-6 и выйти, ничего не отправляя;
 # [--заметки] — собрать и судить только замок 6в (до кнопки: замки 5-6г тяжелее)
+# [--чек-лист] — замки 5, 6, 6в, 6б без остановки на первом отказе, находки — в CHECKLIST_FINDINGS
 опубликовать_сборку() {
     local sborka="$PUBLIC_BUILD_DIR" paket="${PACKAGE_VIEW:-$PACKAGE_DIR}" itog hesh suho=0 rezhim="${1:-}"
     [ "$rezhim" = "--сухо" ] && suho=1
@@ -813,37 +892,16 @@ ids_iz_istorii() { # $1=момент ISO (пусто — вся история) 
     git -C "$sborka" add -A
     [ "$rezhim" = "--заметки" ] && { judge_release_notes "$sborka" "$paket"; return; }
 
+    if [ "$rezhim" = "--чек-лист" ]; then
+        checklist_sborka_locks "$sborka" "$paket" "$pasport"; return 0
+    fi
+
     # Замок 5 (И-3): у нового репозитория своих хуков нет, и сторож секретов
     # его не сторожит — зовём явно, по временному индексу.
     local vyvod
-    if ! vyvod=$(bash "$SCRIPTS_REAL/check-secrets.sh" "$sborka" 2>&1); then
-        say "ОТКАЗ: в сборке похожее на секрет — публикация отменена"
-        printf '%s\n' "$vyvod" | sed 's/^/  /'
-        return 1
-    fi
-    say "замок 5 · секретов в сборке нет"
-
-    # Прошлые секции CHANGELOG опубликованы до замка имён копий сети: обезличить их до
-    # суда тем же кодом, что и version.py --оформить, иначе замок 6 отказывает по старой истории.
-    if [ -f "$sborka/CHANGELOG.md" ]; then
-        python3 -I - "$SCRIPTS_REAL" "$sborka/CHANGELOG.md" <<'PY' || { say "ОТКАЗ: прошлый CHANGELOG сборки не обезличен"; return 1; }
-import sys
-sys.path.insert(0, sys.argv[1])
-import version
-журнал = open(sys.argv[2], encoding="utf-8").read()
-журнал = version._судья_чистоты().обезличить_имена_копий(журнал, version._паспорт())
-open(sys.argv[2], "w", encoding="utf-8").write(журнал)
-PY
-    fi
-    # Замок 6: следы установки. Образцы берутся не из данных сборщика.
-    if ! vyvod=$(python3 -I "$SCRIPTS_REAL/check-public-clean.py" "$sborka" \
-                         --пакет "$paket" --проект "$PROJECT_DIR" \
-                         --паспорт "$pasport" 2>&1); then
-        say "ОТКАЗ: в сборке следы этой установки — публикация отменена"
-        printf '%s\n' "$vyvod" | sed 's/^/  /'
-        return 1
-    fi
-    say "замок 6 · следов установки в сборке нет"
+    lock_secrets "$sborka" || return 1
+    anonymize_changelog "$sborka" || return 1
+    lock_clean "$sborka" "$paket" "$pasport" "сборке" || return 1
 
     judge_release_notes "$sborka" "$paket" || return 1
 
@@ -897,46 +955,20 @@ PY
     if git -C "$sborka" diff --cached --quiet; then
         say "новых изменений нет, но прошлая отправка не прошла — повторяю отправку"
     else
-        # Номер версии, файл VERSION и секция CHANGELOG считаются и пишутся ДО
-        # коммита: они едут ТЕМ ЖЕ коммитом, что и сборка. Разъедься они —
-        # человек прочитал бы заметки одной версии рядом с кодом другой.
+        # Версия, VERSION и CHANGELOG — ДО коммита (см. release_version_write).
         # Первая строка сообщения НЕ меняется: её разбирает update.py
         # (`бытие_из_своего_пакета`), и новый формат погасил бы извещение об
         # обновлении у всех, кто уже поставил харнес. Версия едет телом и тегом.
-        local otvet_versii nomer_versii
-        # Имя удалённого передаётся ЯВНО: прошлая версия считается по тегам,
-        # которые реально опубликованы. По локальным тегам счёт после упавшей
-        # отправки тега пропускал бы номер, оставляя вышедший релиз без метки
-        # навсегда (ревью кода 12.09.2026, R-2).
-        otvet_versii=$(python3 -I "$SCRIPTS_REAL/version.py" --оформить \
-                       --пакет "$paket" --сборка "$sborka" \
-                       --проект "$PROJECT_DIR" \
-                       --удалённый "$PUBLIC_REMOTE" 2>&1) || {
-            say "ОТКАЗ: версия релиза не посчитана — $otvet_versii"; return 1; }
-        nomer_versii=$(printf '%s' "$otvet_versii" \
-            | python3 -I -c 'import json,sys; d=json.load(sys.stdin); print(d["следующая"]); sys.stderr.write(d["почему"])' 2>/dev/null)
-        [ -n "$nomer_versii" ] || {
-            say "ОТКАЗ: ответ version.py не разобран: ${otvet_versii:0:120}"; return 1; }
-        say "версия релиза: v$nomer_versii"
-        # Заметки релиза собраны машиной из ЗАГОЛОВКОВ КОММИТОВ ПАКЕТА, а их
-        # пишет смена — и назвать продукт в заголовке может так же легко, как в
-        # коде. CHANGELOG появляется ПОСЛЕ замка 6, поэтому судья чистоты
-        # зовётся второй раз: уже по дереву с заметками (замер 13.10.2026 — в
-        # заметки попадало 40 заголовков из 532).
-        if ! vyvod=$(python3 -I "$SCRIPTS_REAL/check-public-clean.py" "$sborka" \
-                             --пакет "$paket" --проект "$PROJECT_DIR" \
-                             --паспорт "$pasport" 2>&1); then
-            say "ОТКАЗ: следы установки в заметках релиза — публикация отменена"
-            printf '%s\n' "$vyvod" | sed 's/^/  /'
-            return 1
-        fi
-        say "замок 6б · в заметках релиза следов установки нет"
+        # CHANGELOG появляется ПОСЛЕ замка 6, поэтому судья чистоты зовётся второй раз
+        # (замер 13.10.2026 — в заметки попадало 40 заголовков из 532).
+        release_version_write "$sborka" "$paket" || return 1
+        lock_clean "$sborka" "$paket" "$pasport" "заметках релиза" || return 1
         # Индекс собран ДО замков — VERSION и CHANGELOG появились после него.
         git -C "$sborka" add -A
         git -C "$sborka" -c user.name="$PUBLIC_COMMIT_NAME" \
             -c user.email="$PUBLIC_COMMIT_EMAIL" \
             commit -q -m "версия от $(date +%F), пакет $hesh" \
-                      -m "версия v$nomer_versii" || {
+                      -m "версия v$RELEASE_VERSION" || {
             say "ОТКАЗ: коммит сборки не прошёл"; return 1; }
     fi
 
@@ -1011,6 +1043,122 @@ build_in_scratch() { # $1=режим опубликовать_сборку → �
     PUBLIC_BUILD_DIR="$kopiya" опубликовать_сборку "$1"; rc=$?
     rm -rf "$kopiya"
     return "$rc"
+}
+
+# ── Чек-лист выпуска: все быстрые замки одним списком, до ворот ────────────
+# Выпуск 0.15.0 шёл пять кругов ворот по ~45 мин, и каждый ловил одну мелочь, видную за
+# минуты. Чек-лист гонит те же замки, что бой (те же функции), но не останавливается на первом
+# отказе: находки копятся и печатаются все сразу под строкой итога. Ворот, типовой копии (6г),
+# канала и общего каталога сборки он не трогает — сборка идёт в копии (build_in_scratch).
+# Запись пропуска ворот должна пережить сами ворота поезда: иначе замок 3 упадёт после них.
+CHECKLIST_FINDINGS=()
+CHECKLIST_WAIVER_MARGIN_SEC=3600
+
+checklist_add() { # $1=метка замка $2=вывод отказа: первая строка — суть, остальное — подробности
+    local first rest
+    # Суть — первая строка «ОТКАЗ…»: перед ней судья мог напечатать справку (номер выпуска).
+    first=$(printf '%s\n' "$2" | grep -m1 '^ОТКАЗ') || first=$(printf '%s\n' "$2" | head -1)
+    rest=$(printf '%s\n' "$2" | grep -vxF -- "$first" | sed '/^$/d')
+    first="${first#ОТКАЗ: }"; first="${first#"$1" · }"
+    CHECKLIST_FINDINGS+=("$1 — $first${rest:+$'\n'$rest}")
+}
+
+checklist_run() { # $1=метка замка $2…=команда: зелёный вывод — строкой, красный — находкой
+    local label="$1" out
+    shift
+    if out=$("$@" 2>&1); then [ -z "$out" ] || printf '%s\n' "$out"; else checklist_add "$label" "$out"; fi
+}
+
+# Замки 5, 6, 6в, 6б в копии сборки (индекс уже собран). Зовётся из опубликовать_сборку --чек-лист.
+checklist_sborka_locks() { # $1=сборка $2=пакет $3=паспорт
+    checklist_run "замок 5" lock_secrets "$1"
+    checklist_run "замок 6" anonymize_changelog "$1"
+    local before=${#CHECKLIST_FINDINGS[@]}
+    # История публичной ветки судится только предупреждением и ищется минуты: чек-листу — дерево.
+    checklist_run "замок 6" lock_clean "$1" "$2" "$3" "сборке" --без-истории
+    local trace_found=$(( ${#CHECKLIST_FINDINGS[@]} - before ))
+    checklist_run "замок 6в" judge_release_notes "$1" "$2"
+    if git -C "$1" diff --cached --quiet; then
+        say "замок 6б · в сборке нового нет — заметки релиза не судятся"
+        return 0
+    fi
+    checklist_run "замок 6б" release_version_write "$1" "$2"
+    # След в дереве сборки красит и второй суд чистоты: та же причина — не вторая находка.
+    if [ "$trace_found" != 0 ]; then
+        say "замок 6б · не судится: след в сборке уже назван замком 6"
+        return 0
+    fi
+    checklist_run "замок 6б" lock_clean "$1" "$2" "$3" "заметках релиза" --без-истории
+}
+
+# Замок 3: непроверенные задачи диапазона; пропуск по записи слова владельца годен, если
+# переживёт ворота поезда. Не пишет в канал и журнал публикации: пропуск здесь не тратится.
+checklist_status_lock() {
+    local pending until_epoch slovo left
+    public_cutoff_point
+    if [ -z "$SINCE" ]; then
+        checklist_add "замок 3" "публичной ветки «$PUBLIC_BRANCH» ещё нет — точку отсечки называет владелец"; return
+    fi
+    pending=$(непроверенные_с "$SINCE")
+    if printf '%s' "$pending" | grep -q "ОТКАЗ-ИСТОРИИ"; then
+        checklist_add "замок 3" "историю проекта прочитать не удалось — судить не по чему"; return
+    fi
+    if printf '%s' "$pending" | grep -q "НЕТ-PyYAML"; then
+        checklist_add "замок 3" "нет PyYAML — статусы задач проверить нечем"; return
+    fi
+    if [ -z "$pending" ]; then say "замок 3 · все задачи диапазона проверены владельцем"; return; fi
+    if slovo=$(proverit_zapis_propuska "$LOG_DIR" 2>/dev/null); then
+        until_epoch=$(python3 -I -c 'import json,sys; print(int(json.load(open(sys.argv[1], encoding="utf-8"))["до"]))' \
+                      "$LOG_DIR/publish-gates-waiver.json")
+        left=$(( until_epoch - $(date +%s) ))
+        if [ "$left" -ge "$CHECKLIST_WAIVER_MARGIN_SEC" ]; then
+            say "замок 3 · статусы пропущены по слову владельца «$slovo», запись годна до $(date -d "@$until_epoch" +%H:%M); непроверенных: $(printf '%s\n' "$pending" | grep -c .)"
+            return
+        fi
+        checklist_add "замок 3" "запись о пропуске ворот истекает в $(date -d "@$until_epoch" +%H:%M) — раньше конца ворот поезда; задачи без проверки владельца:
+$(printf '%s\n' "$pending" | sed 's/^/  • /')"
+        return
+    fi
+    checklist_add "замок 3" "в публичную ветку попали бы задачи, которых владелец не проверял:
+$(printf '%s\n' "$pending" | sed 's/^/  • /')"
+}
+
+# Замок 2: для поезда кнопка просится после ворот, на срез, — до них согласие лишь сведение;
+# проверка без поезда судит согласие на HEAD пакета сразу.
+checklist_consent_lock() { # $1=ход: поезд | проверка | список
+    local out
+    if out=$(HARNESS_LOG_DIR="$LOG_DIR" python3 -I "$SCRIPTS_REAL/deploy_guard.py" --действие публикация \
+             --только-согласие --публикация "$PACKAGE_DIR" 2>&1); then
+        say "замок 2 · согласие владельца на публикацию есть"
+    elif [ "$1" = "проверка" ]; then
+        checklist_add "замок 2" "$out"
+    else
+        say "замок 2 · согласия пока нет — поезд просит кнопку после ворот, на срез"
+    fi
+}
+
+# → 0 находок нет, 1 есть; печатает пройденные пункты, итог и ПОД итогом нумерованные находки.
+release_checklist() { # $1=ход: поезд | проверка | список
+    local t0 rc n=0 f out
+    t0=$(date +%s)
+    CHECKLIST_FINDINGS=()
+    say "=== чек-лист выпуска: быстрые замки до ворот ==="
+    out=$(mktemp -t publish-checklist-XXXXXX) || { say "ОТКАЗ: временный файл чек-листа не создан"; return 1; }
+    CLEANUP_DIRS+=("$out")
+    # Без подоболочки: находки копит та же оболочка, что печатает итог.
+    build_in_scratch --чек-лист > "$out"; rc=$?
+    if [ "$rc" != 0 ]; then checklist_add "замок 4 (сборка)" "$(cat "$out")"; else cat "$out"; fi
+    rm -f "$out"
+    checklist_run "карантин" python3 -I "$SCRIPTS_REAL/gates-quarantine.py" --сроки \
+        --карантин "$PROJECT_DIR/harness/config/gates-quarantine.yaml" --карта "$PROJECT_DIR/dev-map.yaml"
+    checklist_status_lock
+    checklist_consent_lock "$1"
+    say "=== чек-лист выпуска: находок ${#CHECKLIST_FINDINGS[@]}, секунд $(( $(date +%s) - t0 )) ==="
+    for f in "${CHECKLIST_FINDINGS[@]}"; do
+        n=$((n + 1))
+        printf '%s. %s\n' "$n" "$(printf '%s' "$f" | sed '2,$s/^/   /')"
+    done
+    [ "${#CHECKLIST_FINDINGS[@]}" = 0 ]
 }
 
 # ── Дверь переписи публичной истории ───────────────────────────────────────
@@ -1670,8 +1818,10 @@ PY
     proba_proverki() { proba_stend "$1" "$SUDYA_NET" --проверка; }
     proba_dvor "$T/номер" "Выпуск 0.2.0: не тот номер"
     OUT=$(proba_proverki "$T/номер")
-    if printf '%s' "$OUT" | grep -q 'номер выпуска: v0.1.0' && printf '%s' "$OUT" | grep -q 'ОТКАЗ.*0\.2\.0.*v0\.1\.0' \
-       && ! printf '%s' "$OUT" | grep -q 'rc=0' && [ ! -e "$T/номер/согласие-звали" ]; then
+    # Чек-лист идёт первым шагом и спрашивает согласие без просьбы кнопки (судья стенда лишь
+    # оставляет след) — след согласия здесь не судится, судится отказ до ворот с обоими номерами.
+    if printf '%s' "$OUT" | grep -q 'номер выпуска: v0.1.0' && printf '%s' "$OUT" | grep -q 'замок 6в — .*0\.2\.0.*v0\.1\.0' \
+       && ! printf '%s' "$OUT" | grep -q 'rc=0'; then
         echo "  ок    БОЛЬНОЙ СЛУЧАЙ: --проверка: запись называет не тот номер — красный 6в с обоими номерами, до кнопки"
     else echo "  ПЛОХО номер в заметках не сверен до кнопки: $(printf '%s' "$OUT" | tail -4 | tr '\n' ' ')"; ok=0; fi
     # Манифест прошлого выпуска в общем каталоге сборки — опора строки «меняются
@@ -1703,8 +1853,7 @@ PY
     printf 'исключить: [\n' > "$T/несборка/пакет/harness/config/public-build.yaml"
     git -C "$T/несборка/пакет" -c user.name=t -c user.email=t@t commit -qam "сломанный конфиг сборки"
     OUT=$(proba_proverki "$T/несборка")
-    if printf '%s' "$OUT" | grep -q 'ОТКАЗ: сборка не прошла' && printf '%s' "$OUT" | grep -q 'rc=1' \
-       && [ ! -e "$T/несборка/согласие-звали" ]; then
+    if printf '%s' "$OUT" | grep -q 'замок 4 (сборка) — сборка не прошла' && printf '%s' "$OUT" | grep -q 'rc=1'; then
         echo "  ок    БОЛЬНОЙ СЛУЧАЙ: ранняя сборка упала — отказ с причиной до кнопки"
     else echo "  ПЛОХО упавшая ранняя сборка не отказала: $(printf '%s' "$OUT" | tail -3 | tr '\n' ' ')"; ok=0; fi
 
@@ -2211,6 +2360,20 @@ PO_SLOVU=0
 
 say "=== публикация: сборка → $PUBLIC_REMOTE/$PUBLIC_BRANCH ==="
 
+# Чек-лист — первым шагом поезда и проверки, до замка очереди, среза и ворот: находки,
+# видные за минуты, не должны стоить круга ворот. Голый --чек-лист — только он и выход.
+if [ "${1:-}" = "--чек-лист" ]; then
+    release_checklist список; exit $?
+fi
+if [ "$CHECK_ONLY" = 1 ] || [ "$TRAIN" = 1 ]; then
+    if [ "$CHECK_ONLY" = 1 ] && [ "$TRAIN" = 0 ]; then CHECKLIST_MODE=проверка; else CHECKLIST_MODE=поезд; fi
+    release_checklist "$CHECKLIST_MODE" || {
+        say "ОТКАЗ: чек-лист выпуска: находок ${#CHECKLIST_FINDINGS[@]} — ворота не начаты"
+        TRAIN_STATE="чек-лист"
+        exit 1
+    }
+fi
+
 # Замок очереди закрывает окно «кнопка нажата → ворота → push»: слияние в нём сдвинуло
 # бы пакет и сожгло нажатую кнопку. Окно «кнопка прислана → нажата» он не закрывает —
 # слияния до нажатия меняют предмет согласия; его закрывает предмет-срез поезда, и поезд
@@ -2279,21 +2442,9 @@ PREDMET_ZAMKA=$(printf '%s\n' "$REFUSAL" | sed -n 's/^предмет: //p' | tai
 say "замок 2 · согласие владельца на публикацию есть"
 
 # ── Замок 3: на витрину — только проверенное владельцем ────────────────────
-# Момент, на котором стоит публичная ветка. Нет ветки — нет и точки отсчёта:
-# первую выбирает владелец, а не скрипт (вопрос задан 11.09.2026).
-# Удалённый — ДАННЫЕ (PUBLIC_REMOTE в harness.conf). Вшитое имя уже стоило
-# смены 11.09.2026: сверка версий искала «origin», живой пакет звал удалённый
-# иначе. Здесь вшитое «harness» указывало на ПРИВАТНЫЙ репозиторий пакета —
-# замок считал точку отсечки по нему, а публичная ветка живёт в другом.
-# Точка отсчёта берётся ТАМ, где живёт публичная ветка. С переходом на сборку
-# это каталог сборки, а не пакет: в пакете публичного удалённого может уже не
-# быть, и замок 3 считал бы диапазон по пустоте.
-OTKUDA_VETKA="$PACKAGE_DIR"
-if git -C "${PUBLIC_BUILD_DIR:-/нет}" remote get-url "$PUBLIC_REMOTE" >/dev/null 2>&1; then
-    OTKUDA_VETKA="$PUBLIC_BUILD_DIR"
-fi
-git -C "$OTKUDA_VETKA" fetch "$PUBLIC_REMOTE" 2>/dev/null || true
-SINCE=$(git -C "$OTKUDA_VETKA" log -1 --format=%cI "$PUBLIC_REMOTE/$PUBLIC_BRANCH" 2>/dev/null) || true
+# Момент, на котором стоит публичная ветка, даёт public_cutoff_point (выше). Нет ветки — нет и
+# точки отсчёта: первую выбирает владелец, а не скрипт (вопрос задан 11.09.2026).
+public_cutoff_point
 if [ -z "$SINCE" ] && [ "$FIRST" = 0 ]; then
     say "ОТКАЗ: публичной ветки «$PUBLIC_BRANCH» ещё нет — первую точку отсечки называет владелец"
     say "Владелец сказал публиковать как есть? Тогда: bash scripts/publish.sh --первая"

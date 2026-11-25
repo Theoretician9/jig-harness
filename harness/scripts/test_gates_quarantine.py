@@ -337,6 +337,39 @@ def case_u_commit_hook_under_quarantine(stand):
             f"{label}: красный гейт не остановил коммит (код {rc}):\n{out}"
 
 
+def deadlines(stand: Path, entries: list[str] | None, now: str):
+    """Суд сроков для чек-листа выпуска: «--сроки» без журнала и счёта прогона, часы — «--сейчас»."""
+    judge(stand, entries, [], 0, need_summary=False)
+    proc = subprocess.run(
+        [sys.executable, str(JUDGE), "--сроки", "--карантин", str(stand / "gates-quarantine.yaml"),
+         "--карта", str(stand / "dev-map.yaml"), "--сейчас", now],
+        capture_output=True, text=True, timeout=60)
+    return proc.returncode, proc.stdout + proc.stderr
+
+
+def case_v_deadlines_for_release_checklist(stand):
+    # Выпуск 0.15.0: 7 записей истекли в полночь, пока шли ворота поезда, и круг сгорел.
+    # Чек-лист обязан назвать запись, срок которой кончается в ближайшие 24 ч, и просроченную,
+    # — до ворот. Зелёным оставит: суд, судящий «срок < сегодня» без запаса, — ловит запись
+    # со сроком сегодня в 20:00; суд, краснеющий на всякой записи, — ловит свежую.
+    evening = f"{TODAY.isoformat()}T20:00:00+05:00"
+    fresh = entry("свежая", made=day(-1), due=day(3))
+    rc, out = deadlines(stand, [fresh], evening)
+    assert rc == 0 and "сроки карантина" in out, f"свежая запись — находка (код {rc}):\n{out}"
+    rc, out = deadlines(stand, [entry("сегодня", made=day(-3), due=day(0))], evening)
+    assert rc == 1 and "сегодня" in out and "истекает" in out, \
+        f"срок кончается в полночь, а не названо (код {rc}):\n{out}"
+    rc, out = deadlines(stand, [entry("вчера", made=day(-5), due=day(-1))], evening)
+    assert rc == 1 and "вчера" in out and "срок вышел" in out, f"просроченная не названа (код {rc}):\n{out}"
+    rc, out = deadlines(stand, [entry("сегодня", made=day(-3), due=day(0)),
+                                entry("вчера", made=day(-5), due=day(-1)), fresh], evening)
+    assert rc == 1 and "сегодня" in out and "вчера" in out and "находок 2" in out, \
+        f"две находки не названы одним списком (код {rc}):\n{out}"
+    (stand / "без-файла").mkdir()
+    rc, out = deadlines(stand / "без-файла", None, evening)
+    assert rc == 0, f"файла карантина нет — не находка, а код {rc}:\n{out}"
+
+
 CASES = [
     ("а) свежий карантин → зелёный", case_a_fresh_quarantine_green),
     ("б) новый красный вне карантина", case_b_new_red_outside),
@@ -359,6 +392,7 @@ CASES = [
     ("у) перепрогон соло: судит последний вердикт", case_s_solo_recheck_last_verdict),
     ("ф) имя pre-commit под карантином копии", case_t_gate_mode_for_pre_commit),
     ("х) хук pre-commit: красный гейт под карантином копии", case_u_commit_hook_under_quarantine),
+    ("ц) сроки для чек-листа выпуска: истекает за сутки", case_v_deadlines_for_release_checklist),
 ]
 
 

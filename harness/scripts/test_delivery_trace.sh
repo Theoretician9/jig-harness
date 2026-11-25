@@ -421,6 +421,8 @@ for m in json.load(open(spec_path, encoding="utf-8")):
         put(D, "no_kick", "skipped", ts=ts, почему="команда status")
     if "refused" in marks:
         put(P, "kick_refused", "held", ts_список=ts, почему=m.get("why", "пауза"), когда=f"{at + 0.1:.6f}")
+    if "stuck" in marks:
+        put(P, "kick_stuck", "held", ts_список=ts, почему="enter-не-принят", когда=f"{at + 0.5:.6f}")
     if "kick" in marks:
         put(P, "kick_sent", "ok", ts_список=",".join(m.get("cover", [ts])), когда=f"{at + 0.5:.6f}")
 PYEOF
@@ -458,6 +460,11 @@ PYEOF
 
     R=$(run_trace queued-only '[{"uid":1,"age":600,"marks":["queued"]}]' --след "${W[@]}")
     case_check "только queued (толчка нет) — ПРОВАЛ, код 1" "да" "$(verdict "$R" 1 ПРОВАЛ)"
+
+    # Образец настоящей строки журнала 23.11 15:02: толчок был,
+    # Enter не принят — событие delivery.kick_stuck, kick_sent у такого сообщения нет.
+    R=$(run_trace stuck '[{"uid":1,"age":600,"marks":["queued","stuck"]}]' --след "${W[@]}")
+    case_check "БОЛЬНОЙ: толчок был, Enter не принят (kick_stuck) — след есть, ПРОЙДЕН, n=1" "да|n=1" "$(verdict "$R" 0 ПРОЙДЕН)|$(nval "$R")"
 
     R=$(run_trace fresh '[{"uid":1,"age":600,"marks":["queued","kick"]},{"uid":2,"age":10,"marks":["queued"]}]' --след "${W[@]}")
     case_check "свежее без конечной (10 с, зазор 120) — в пути, ПРОЙДЕН" "да" "$(verdict "$R" 0 ПРОЙДЕН)"

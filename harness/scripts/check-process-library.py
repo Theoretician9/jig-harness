@@ -262,8 +262,7 @@ def judge(root: Path, cron_lines: list, unit_lines: list, project_dir: str) -> t
         if rec.get("запуск") == "хук" and not hook_files.intersection(rec.get("файлы", [])):
             violation("мёртвая запись", rec["id"], ".claude/settings.json")
         # «если_задан»: строка крона ставится только при заполненном ключе — без него её отсутствие законно.
-        gate_key = (schedule.get(rec["id"]) or {}).get("если_задан")
-        off_by_conf = bool(gate_key) and not conf.get(gate_key)
+        off_by_conf = config.job_gated_off(schedule.get(rec["id"]) or {}, conf)
         if rec.get("запуск") == "крон" and not off_by_conf and not live_cron.intersection({rec["id"], *rec.get("файлы", [])}):
             violation("мёртвая запись", rec["id"], "crontab")
         # Крон зовёт команду напрямую: без бита исполнения строка стоит, а каждый тик — Permission denied.

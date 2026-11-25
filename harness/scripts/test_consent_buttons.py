@@ -18,7 +18,9 @@ owner_word.ЗАПРОС_КНОПКИ — обёрткой ask-consent с тем 
 отдельным процессом). Диспетчер носителя не получает, его срок кнопки — машинный (machine_ttl).
 
     python3 scripts/test_consent_buttons.py [--случай <имя>]...
-Случаи: запрос да чужой группа группа-текст группа-без-ключа повтор срок битый дверь носитель охрана; виды-1 … виды-11 —
+Случаи: запрос да чужой группа группа-текст группа-без-ключа собеседник-судья группа-собеседник
+собеседник-да собеседник-перезапуск собеседник-отказ-записи
+собеседник-без-ключа собеседник-дверь собеседник-нет собеседник-команды повтор срок битый дверь носитель охрана; виды-1 … виды-11 —
 пробы 1-11 задачи hr.consent-buttons-for-every-yes (виды согласия «удаление» и «пуш»,
 .tasks/hr.consent-buttons-for-every-yes/spec.md §7).
 Код возврата: 0 — «падений 0», 1 — красная (или отказ фикстуры: строка «ФИКСТУРА»).
@@ -54,6 +56,11 @@ from test_consent_push import GIT_ENV, REAL_GIT, GitBench, button, git  # noqa: 
 
 OWNER = 777000
 STRANGER = 555000
+# Собеседник группы (TG_GROUP_SPEAKERS): его текст — во входящие с подписью, нажатие и «да» — нет.
+SPEAKER = 444000
+STRANGER2 = 556000
+# Вид согласия «добавить from.id в собеседники группы» (слово владельца 23.11 15:07).
+SPEAKER_KIND = "собеседник"
 # Канал-группа: chat.id группы отрицательный, from.id нажавшего — личный id человека.
 GROUP = -1001234567
 TTL_MIN = 15
@@ -94,7 +101,9 @@ sys.argv = [ask, *sys.argv[1:]]
 runpy.run_path(ask, run_name="__main__")
 """
 KIND_CASES = tuple(f"виды-{n}" for n in range(1, 12))
-CASE_NAMES = ("запрос", "да", "чужой", "группа", "группа-текст", "группа-без-ключа", "повтор", "срок", "битый", "дверь", "носитель", "охрана",
+CASE_NAMES = ("запрос", "да", "чужой", "группа", "группа-текст", "группа-без-ключа", "собеседник-судья",
+              "группа-собеседник", "собеседник-да", "собеседник-перезапуск", "собеседник-отказ-записи",
+              "собеседник-без-ключа", "собеседник-дверь", "собеседник-нет", "собеседник-команды", "повтор", "срок", "битый", "дверь", "носитель", "охрана",
               *KIND_CASES)
 
 cases = Cases()
@@ -345,7 +354,8 @@ class Stand:
     """Диспетчер на своём LOG_DIR и своём Bot API."""
 
     def __init__(self, yard: Yard, name: str = "disp", chat_id: int = OWNER,
-                 owner_id: int | None = None) -> None:
+                 owner_id: int | None = None, speakers: str | None = None,
+                 panel_files: dict[str, str] | None = None) -> None:
         self.yard = yard
         self.chat_id = chat_id
         s = self.dir = yard.root / name
@@ -355,6 +365,9 @@ class Stand:
         for d in (self.log, self.secrets, self.backups, s / "project" / "scripts", s / "panel", s / "bin"):
             d.mkdir(parents=True, exist_ok=True)
         (s / "project" / "dev-map.yaml").write_text("lines: []\n", encoding="utf-8")
+        # Состояние панели ДО старта диспетчера: так его застаёт перезапуск обновлением.
+        for name_, body in (panel_files or {}).items():
+            (s / "panel" / name_).write_text(body, encoding="utf-8")
         (s / "project" / "scripts" / "pause.py").symlink_to(ROOT / "scripts" / "pause.py")
         (s / "bin" / "tmux").write_text(TMUX_SH, encoding="utf-8")
         (s / "bin" / "tmux").chmod(0o755)
@@ -389,7 +402,8 @@ class Stand:
             f'PROJECT_DIR="{s}/project"\nPROJECT_NAME="стенд"\nLOG_DIR="{self.log}"\n'
             f'TG_CHAT_ID="{chat_id}"\nTG_TOKEN_FILE="{s}/token"\nAGENT_USER="{os.environ.get("USER", "agent")}"\n'
             f'PANEL_STATE_DIR="{s}/panel"\nSECRETS_DIR="{self.secrets}"\nBACKUP_DIR="{self.backups}"\n'
-            + (f'TG_OWNER_ID="{owner_id}"\n' if owner_id is not None else ''),
+            + (f'TG_OWNER_ID="{owner_id}"\n' if owner_id is not None else '')
+            + (f'TG_GROUP_SPEAKERS="{speakers}"\n' if speakers is not None else ''),
             encoding="utf-8")
         (s / "harness.conf").write_text(
             f'TMUX_SESSION="proba-consent-{os.getpid()}"\nSERVICE_LOCKS_SUBDIR="services"\n'
@@ -405,7 +419,10 @@ class Stand:
             PATH=f"{s}/bin:{os.environ.get('PATH', '')}", HARNESS_PANEL_STATE=str(s / "panel"),
             HARNESS_HOME=str(s), HARNESS_INSTALL_CONF=str(s / "install.conf"),
             HARNESS_CONF=str(s / "harness.conf"), HARNESS_SPROSIT_MODEL=str(s / "model.py"),
-            TG_API_BASE=f"http://127.0.0.1:{self.port}", SECRETS_DIR=str(self.secrets))
+            TG_API_BASE=f"http://127.0.0.1:{self.port}", SECRETS_DIR=str(self.secrets),
+            # Ни один писатель стенда не поднимается через sudo: под sudo окружение сброшено,
+            # и запись ушла бы в паспорт машины, а не стенда.
+            PANEL_NO_SUDO="1")
         disp = subprocess.Popen(["bash", str(DISPATCHER)], stdout=open(s / "dispatcher.out", "w"),
                                 stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
                                 env=self.env, start_new_session=True)
@@ -511,12 +528,13 @@ class Stand:
             print(f"    (нажатие {callback['id']} не обработано за {WAIT_S} с)")
         return callback["id"]
 
-    def say_in(self, text: str, from_id: int = OWNER, chat_id: int | None = None, **extra) -> int:
+    def say_in(self, text: str, from_id: int = OWNER, chat_id: int | None = None, name: str = "Проба",
+               **extra) -> int:
         """Сообщение в канал стенда так, как его шлёт Telegram: с from; ждёт обработки."""
         chat_id = self.chat_id if chat_id is None else chat_id
         message = {"message_id": self.next_update + 1, "date": int(time.time()),
                    "chat": {"id": chat_id, "type": "private" if chat_id > 0 else "supergroup"},
-                   "from": {"id": from_id, "is_bot": False, "first_name": "Проба"}, **extra}
+                   "from": {"id": from_id, "is_bot": False, "first_name": name}, **extra}
         if text:
             message["text"] = text
         update_id = self.push({"message": message})
@@ -861,6 +879,422 @@ def probe_group_no_key(yard: Yard) -> None:
           sum("TG_OWNER_ID" in t for t in told))
     if not cases.ok:
         st.show()
+
+# ── 3ж. собеседник группы (TG_GROUP_SPEAKERS): текст — да, кнопка и «да» — только владелец ──
+def lib_cli(*argv: str, stdin: str = "") -> dict:
+    """consent_buttons.py так, как его зовёт диспетчер; ответ — JSON вердикта."""
+    done = subprocess.run(["python3", str(LIB / "consent_buttons.py"), *argv], input=stdin,
+                          capture_output=True, text=True, timeout=30)
+    try:
+        verdict = json.loads(done.stdout)
+    except ValueError:
+        verdict = {"ошибка": (done.stdout + done.stderr)[-300:]}
+    return verdict if isinstance(verdict, dict) else {}
+
+
+def group_message(from_id: int, text: str, chat_id: int = GROUP, name: str = "Партнёр") -> dict:
+    return {"message_id": 7, "date": int(time.time()), "text": text,
+            "chat": {"id": chat_id, "type": "supergroup" if chat_id < 0 else "private"},
+            "from": {"id": from_id, "is_bot": False, "first_name": name}}
+
+
+def probe_speaker_judge(yard: Yard) -> None:
+    """Больной случай копии business 23.11: партнёр владельца написал в группу 25 сообщений, судья
+    отправителя отбросил все («чужой from.id»), тексты не сохранились нигде. Договор: TG_GROUP_SPEAKERS
+    паспорта — from.id через запятую, чьи ТЕКСТЫ в группе идут во входящие; нажатие кнопки и согласие —
+    по-прежнему только TG_OWNER_ID; пустой список — как было."""
+    print("— 3ж. судья: собеседник из TG_GROUP_SPEAKERS — текст принят, нажатие — отказ")
+    speakers = f" 111 , {SPEAKER}"   # пробелы вокруг запятой — так ключ впишет человек
+    chat, owner = str(GROUP), str(OWNER)
+    said = lib_cli("sender", chat, owner, speakers, stdin=json.dumps(group_message(SPEAKER, "проверь видео")))
+    check("ж1) текст собеседника из списка: не отказ (ответа «answer» нет)", False, "answer" in said)
+    check("ж1) вердикт собеседника отличен от вердикта владельца и называет его from.id", (True, True),
+          (said != {}, str(SPEAKER) in json.dumps({k: v for k, v in said.items() if k not in ("answer", "log")})))
+    print(f"    вердикт ж1: {said}")
+    empty = lib_cli("sender", chat, owner, "", stdin=json.dumps(group_message(SPEAKER, "проверь видео")))
+    check("ж2) пустой список: текст собеседника — отказ, как было", True, "answer" in empty)
+    absent = lib_cli("sender", chat, owner, stdin=json.dumps(group_message(SPEAKER, "проверь видео")))
+    check("ж2) ключа нет вовсе (копия до обновления): отказ, как было", True, "answer" in absent)
+    stranger = lib_cli("sender", chat, owner, speakers,
+                       stdin=json.dumps(group_message(STRANGER, "проверь видео", name="Незнакомец")))
+    check("ж3) чужой не из списка: отказ", True, "answer" in stranger)
+    private = lib_cli("sender", chat, owner, speakers,
+                      stdin=json.dumps(group_message(SPEAKER, "проверь видео", chat_id=SPEAKER)))
+    check("ж4) собеседник не из канала (свой chat.id): отказ — список действует только в группе", True,
+          "answer" in private)
+    check("ж5) владелец со списком: как было ({})", {},
+          lib_cli("sender", chat, owner, speakers, stdin=json.dumps(group_message(OWNER, "да", name="Владелец"))))
+    # Нажатие собеседника по живому запросу: «отправлено» есть, отказ не по чужой причине.
+    log = yard.root / "speaker-judge"
+    log.mkdir()
+    nonce = "S" * 22
+    lib_cli("sent", str(log), nonce, f"/tmp/proba-speaker-{os.getpid()}",
+            stdin=json.dumps({"ok": True, "result": {"message_id": 5}}))
+    press = {"id": "cb-sp", "from": {"id": SPEAKER, "first_name": "Партнёр"}, "data": f"c:{nonce}:y",
+             "message": {"message_id": 5, "chat": {"id": GROUP, "type": "supergroup"}}}
+    pressed = lib_cli("judge", str(log), chat, "", owner, speakers, stdin=json.dumps(press))
+    decisions = [r.get("event") for r in read_jsonl(log / "consent-buttons.jsonl") if r.get("event") in (YES, NO)]
+    check("ж6) нажатие «Да» собеседником из списка: отказ, решения нет", ("Это не твой запрос", []),
+          (pressed.get("answer"), decisions))
+    owner_press = dict(press, id="cb-ow", **{"from": {"id": OWNER, "first_name": "Владелец"}})
+    lib_cli("judge", str(log), chat, "", owner, speakers, stdin=json.dumps(owner_press))
+    decisions = [r.get("event") for r in read_jsonl(log / "consent-buttons.jsonl") if r.get("event") in (YES, NO)]
+    check("ж7) контроль: то же нажатие владельца со списком — решение «да» записано", [YES], decisions)
+
+
+def group_notices(st: Stand, needle: str) -> list:
+    return [r["form"].get("text", "") for r in st.calls("sendMessage")
+            if r["form"].get("chat_id") == str(GROUP) and needle in r["form"].get("text", "")]
+
+
+def speaker_questions(st: Stand, who: int) -> list:
+    """Вопрос «добавить в собеседники?» о from.id: сообщение в канал с кнопками, где назван id."""
+    return [r for r in st.calls("sendMessage") if r["form"].get("chat_id") == str(GROUP)
+            and str(who) in r["form"].get("text", "") and keyboard(r["form"])]
+
+
+def speaker_requests(st: Stand, who: int) -> list:
+    return [r for r in read_jsonl(st.requests) if r.get("event") == REQUEST
+            and data_of(r).get("вид") == SPEAKER_KIND and str(who) in str(data_of(r).get("цель"))]
+
+
+def question_button(st: Stand, who: int, answer: str = "y") -> tuple[str | None, object]:
+    """(callback_data, message_id) первого вопроса о from.id, дошедшего до «отправлено»."""
+    questions = speaker_questions(st, who)
+    data = next((d for q in questions[:1] for d in keyboard(q["form"]) if d.endswith(f":{answer}")), None)
+    nonce = data.split(":")[1] if data else None
+    wait_for(lambda: st.sent_id(nonce) is not None)
+    return data, st.sent_id(nonce)
+
+
+def age_stand(st: Stand, seconds: float) -> None:
+    """Сдвинуть прошлое стенда: отметки .told и ts журналов согласия — на seconds назад."""
+    for mark in st.log.rglob("*.told"):
+        past = mark.stat().st_mtime - seconds
+        os.utime(mark, (past, past))
+    for journal in (st.requests, st.buttons):
+        rows = read_jsonl(journal)
+        for row in rows:
+            for holder in (row, data_of(row)):
+                if isinstance(holder.get("ts"), str):
+                    when = dt.datetime.fromisoformat(holder["ts"]) - dt.timedelta(seconds=seconds)
+                    holder["ts"] = when.isoformat(timespec="seconds")
+        journal.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows), encoding="utf-8")
+
+
+def speaker_files(st: Stand, who: int, name: str) -> list:
+    """Файлы входящих, первая строка которых — подпись «от: <имя> <id>»."""
+    return [f for f in queue_files(st)
+            if f.read_text(encoding="utf-8").startswith(f"от: {name} {who}")]
+
+
+def probe_group_speaker(yard: Yard) -> None:
+    """Тот же больной случай на настоящем диспетчере: собеседник — во входящие с подписью «от: имя id»
+    и с «принял», но мимо носителей слова владельца (согласия, машинный журнал входящих); незнакомец —
+    ни файла, ни текста нигде, владельцу одно извещение на id в сутки с именем ключа."""
+    print("— 3з. группа с собеседником: его текст во входящих с подписью, незнакомцу — извещение владельцу")
+    st = Stand(yard, "group-speaker", chat_id=GROUP, owner_id=OWNER, speakers=f"111, {SPEAKER}")
+    before = owner_word_counts(st)
+    st.say_in("партнёр: проверь ролик к пятнице", from_id=SPEAKER, name="Партнёр")
+    files = queue_files(st)
+    body = files[-1].read_text(encoding="utf-8") if files else ""
+    check("з1) текст собеседника лёг во входящие файлом", 1, len(files))
+    check("з2) файл несёт текст, первая строка — подпись «от: Партнёр <id>»", (True, True),
+          ("партнёр: проверь ролик к пятнице" in body, body.startswith(f"от: Партнёр {SPEAKER}")))
+    time.sleep(2)   # квитанция уходит фоном: считать после неё
+    check("з3) собеседнику ушла квитанция «принял», как владельцу", True,
+          any(t.startswith("принял") for t in group_notices(st, "")))
+    check("з4) сессия разбужена и знает, что пишет не владелец (from.id в пинке)", True,
+          str(SPEAKER) in st.text("tmux-calls"))
+    st.say_in("да", from_id=SPEAKER, name="Партнёр")
+    check("з5) текст и «да» собеседника мимо носителей слова владельца: ни согласия, ни inbox.jsonl",
+          before[:2], owner_word_counts(st)[:2])
+    st.say_in("да")
+    check("з6) контроль: «да» владельца в той же группе засчитано", before[0] + 1,
+          owner_word_counts(st)[0])
+
+    # Незнакомец: текст не хранится нигде, владельцу — одно извещение на id в сутки.
+    files_before = len(queue_files(st))
+    secret_words = f"незнакомый-текст-{secrets.token_hex(6)}"
+    st.say_in(f"{secret_words} раз", from_id=STRANGER, name="Незнакомец")
+    st.say_in(f"{secret_words} два", from_id=STRANGER, name="Незнакомец")
+    time.sleep(2)
+    check("з7) текст незнакомца в очередь не лёг", files_before, len(queue_files(st)))
+    # updates.jsonl — вход подставного Telegram, его пишет сама проба.
+    leaked = sorted(str(p.relative_to(st.dir)) for p in st.dir.rglob("*")
+                    if p.is_file() and p.name != "updates.jsonl"
+                    and secret_words in p.read_text(encoding="utf-8", errors="replace"))
+    check("з8) текста незнакомца нет ни в журналах, ни в каталоге стенда, ни в отправленном", [], leaked)
+    asked = wait_for(lambda: speaker_questions(st, STRANGER))
+    questions = speaker_questions(st, STRANGER)
+    check("з9) на два слова незнакомца — ОДИН вопрос владельцу, и только он называет id", (True, 1, 1),
+          (asked, len(questions), len(group_notices(st, str(STRANGER)))))
+    check("з9) вопрос несёт имя, кнопки Да/Нет и запрос вида «собеседник» с from.id", (True, ["n", "y"], 1),
+          (any("Незнакомец" in q["form"].get("text", "") for q in questions),
+           sorted(d.rsplit(":", 1)[-1] for q in questions[:1] for d in keyboard(q["form"])),
+           len(speaker_requests(st, STRANGER))))
+    st.say_in("привет", from_id=STRANGER2, name="Другой")
+    wait_for(lambda: speaker_questions(st, STRANGER2))
+    check("з10) другой незнакомец — свой вопрос (отметка на id, не общая)", 1,
+          len(speaker_questions(st, STRANGER2)))
+    check("з10) собеседник из списка вопроса не вызвал", [], speaker_questions(st, SPEAKER))
+    marks = [p for p in st.log.rglob("*.told") if str(STRANGER) in p.name]
+    check("з11) отметка «сказано» — файл .told с from.id незнакомца в имени", 1, len(marks))
+    age_stand(st, 25 * 3600)
+    st.say_in("снова", from_id=STRANGER, name="Незнакомец")
+    wait_for(lambda: len(speaker_questions(st, STRANGER)) >= 2)
+    check("з12) сутки прошли без ответа — вопрос о том же id задан снова", 2,
+          len(speaker_questions(st, STRANGER)))
+    if not cases.ok:
+        st.show()
+
+
+# ── 3и. вопрос «добавить в собеседники?»: Да/Нет владельца, команды собеседника ──
+# Список собеседников, который пишет «Да» владельца: файл агента в каталоге состояния панели.
+# Паспорт (install.conf) — ручной список владельца, root:root на машине; дверь его не пишет
+# (спека двери собеседника 24.11, вариант 3).
+ROSTER = "group-speakers"
+
+
+def roster_of(st: Stand) -> Path:
+    return st.dir / "panel" / ROSTER
+
+
+def roster_ids(path: Path) -> list:
+    try:
+        return [s.strip() for s in path.read_text(encoding="utf-8").splitlines() if s.strip()]
+    except OSError:
+        return []
+
+
+def answer_text(st: Stand, callback_id: str):
+    return next((r["form"].get("text") for r in st.calls("answerCallbackQuery")
+                 if r["form"].get("callback_query_id") == callback_id), None)
+
+
+def edit_texts(st: Stand, message_id) -> list:
+    return [r["form"].get("text", "") for r in st.calls("editMessageText")
+            if message_id is not None and r["form"].get("message_id") == str(message_id)]
+
+
+def probe_speaker_yes(yard: Yard) -> None:
+    """Больной случай копии business 24.11: паспорт root:root 0644, агент без sudo — «Да» владельца
+    дописывало id в install.conf, запись падала, владелец получал тишину. Прежняя проба писала в
+    свой writable паспорт и была зелёной. Договор: паспорт стенда 0444 (как root-паспорт для
+    агента); «Да» ВЛАДЕЛЬЦА кладёт id в $PANEL_STATE_DIR/group-speakers (0640), паспорт байт в
+    байт прежний; нажатие кого-то другого файла не создаёт (судья)."""
+    print("— 3и. «Да» владельца при паспорте без права записи: id в group-speakers, паспорт цел")
+    st = Stand(yard, "speaker-yes", chat_id=GROUP, owner_id=OWNER, speakers=str(SPEAKER))
+    passport = st.dir / "install.conf"
+    passport.chmod(0o444)
+    before = passport.read_bytes()
+    roster = roster_of(st)
+    st.say_in("здравствуйте, я монтажёр", from_id=STRANGER, name="Незнакомец")
+    check("и1) незнакомцу — вопрос владельцу с кнопками", True,
+          wait_for(lambda: speaker_questions(st, STRANGER)))
+    data, message_id = question_button(st, STRANGER)
+    check("и1) вопрос дошёл до «отправлено» (есть message_id)", True, message_id is not None)
+    by_stranger = st.press(data, message_id, from_id=STRANGER)
+    by_speaker = st.press(data, message_id, from_id=SPEAKER)
+    time.sleep(1)
+    check("и2) «Да» самого незнакомца и собеседника: файла списка нет, паспорт цел", (False, before),
+          (roster.exists(), passport.read_bytes()))
+    check("и2) обоим — отказ судьи «Это не твой запрос»", ["Это не твой запрос"] * 2,
+          [answer_text(st, by_stranger), answer_text(st, by_speaker)])
+    st.press(data, message_id)
+    wait_for(lambda: str(STRANGER) in roster_ids(roster))
+    check("и3) «Да» владельца: id в group-speakers одной строкой", [str(STRANGER)], roster_ids(roster))
+    check("и4) паспорт байт в байт прежний и по-прежнему 0444", (before, "0o444"),
+          (passport.read_bytes(), oct(passport.stat().st_mode & 0o777)))
+    check("и5) файл списка 0640 (агенту и группе панели, не всем)", "0o640",
+          oct(roster.stat().st_mode & 0o777) if roster.exists() else "нет файла")
+    check("и5) владельцу — правка сообщения вопроса без «Не записал»", (True, False),
+          (bool(edit_texts(st, message_id)), any("Не записал" in t for t in edit_texts(st, message_id))))
+    st.say_in("ролик готов, посмотрите", from_id=STRANGER, name="Незнакомец")
+    check("и6) следующее слово того же id — во входящих с подписью «от:»", 1,
+          len(speaker_files(st, STRANGER, "Незнакомец")))
+    check("и6) и второго вопроса о нём нет", 1, len(speaker_questions(st, STRANGER)))
+    st.say_in("а прежний список жив?", from_id=SPEAKER, name="Партнёр")
+    check("и7) собеседник из паспорта по-прежнему собеседник (объединение, не замена)", 1,
+          len(speaker_files(st, SPEAKER, "Партнёр")))
+    if not cases.ok:
+        st.show()
+
+
+def probe_speaker_restart(yard: Yard) -> None:
+    """Обновление перезапускает диспетчер: список из файла обязан действовать С ПЕРВОГО слова после
+    старта, а не только после следующего «Да». Битые строки файла отбрасываются, диспетчер жив."""
+    print("— 3и2. перезапуск: собеседник из group-speakers узнан сразу, битые строки не валят канал")
+    st = Stand(yard, "speaker-restart", chat_id=GROUP, owner_id=OWNER, speakers=str(SPEAKER),
+               panel_files={ROSTER: f"мусор\n12a\n\n {STRANGER} \n1;rm\n"})
+    st.say_in("я из файла списка", from_id=STRANGER, name="Незнакомец")
+    check("и8) id из файла — во входящих с «от:» сразу после старта", 1,
+          len(speaker_files(st, STRANGER, "Незнакомец")))
+    # Запрос пишется в журнал до ответа диспетчера, а сообщение с кнопками уходит позже:
+    # судится журнал запросов, иначе проверка зелена просто раньше отправки.
+    check("и8) и вопроса о нём нет (ни запроса в журнале)", [], speaker_requests(st, STRANGER))
+    st.say_in("я из паспорта", from_id=SPEAKER, name="Партнёр")
+    check("и9) id из паспорта — тоже собеседник (объединение)", 1,
+          len(speaker_files(st, SPEAKER, "Партнёр")))
+    owner_said = st.say_in("да")
+    check("и9) контроль: диспетчер жив, слово владельца обработано", True, st.processed(owner_said))
+    if not cases.ok:
+        st.show()
+
+
+def probe_speaker_refused(yard: Yard) -> None:
+    """Каталог списка без права записи: владелец обязан УЗНАТЬ, что не записано (правка сообщения
+    «Не записал: <причина>»), а не тишина; отметка вопроса старится — следующее слово спросит снова."""
+    print("— 3и3. запись списка не вышла: владельцу «Не записал», отметка .told состарена")
+    st = Stand(yard, "speaker-refused", chat_id=GROUP, owner_id=OWNER, speakers=str(SPEAKER))
+    st.say_in("здравствуйте", from_id=STRANGER, name="Незнакомец")
+    wait_for(lambda: speaker_questions(st, STRANGER))
+    data, message_id = question_button(st, STRANGER)
+    (st.dir / "panel").chmod(0o555)
+    try:
+        st.press(data, message_id)
+        time.sleep(1)
+    finally:
+        (st.dir / "panel").chmod(0o755)
+    texts = edit_texts(st, message_id)
+    check("и10) файла списка нет", False, roster_of(st).exists())
+    check("и11) владельцу — правка сообщения вопроса «Не записал: …»", True,
+          any(t.startswith("Не записал") for t in texts))
+    marks = [p for p in st.log.rglob("*.told") if str(STRANGER) in p.name]
+    check("и12) отметка .told незнакомца состарена (старше суток)", (1, True),
+          (len(marks), all(m.stat().st_mtime < time.time() - 24 * 3600 for m in marks)))
+    if not cases.ok:
+        st.show()
+
+
+def probe_speaker_no_key(yard: Yard) -> None:
+    """Решение лида 24.11 (2): вопрос незнакомцу — по признаку группы (TG_OWNER_ID задан), а не по
+    наличию ключа TG_GROUP_SPEAKERS: обновление ключ в паспорт копии не вносит, и на business
+    вопрос не пришёл бы никогда."""
+    print("— 3и4. паспорт без TG_GROUP_SPEAKERS, TG_OWNER_ID задан: незнакомцу — вопрос владельцу")
+    st = Stand(yard, "speaker-no-key", chat_id=GROUP, owner_id=OWNER, speakers=None)
+    check("и13) стенд: ключа TG_GROUP_SPEAKERS в паспорте нет", False,
+          "TG_GROUP_SPEAKERS" in st.text("install.conf"))
+    st.say_in("здравствуйте", from_id=STRANGER, name="Незнакомец")
+    check("и14) вопрос «добавить в собеседники?» о незнакомце задан", True,
+          wait_for(lambda: speaker_questions(st, STRANGER), 10))
+    if not cases.ok:
+        st.show()
+
+
+def lib_raw(*argv: str) -> subprocess.CompletedProcess:
+    return subprocess.run(["python3", str(LIB / "consent_buttons.py"), *argv],
+                          capture_output=True, text=True, timeout=30)
+
+
+def probe_speaker_door(yard: Yard) -> None:
+    """Дверь списка: consent_buttons.py speaker-add <файл> <id> и speakers <паспорт> <файл>.
+    Отказы — до записи; повтор — без второй строки; чтение отбрасывает битые строки."""
+    print("— 3м. дверь списка собеседников: speaker-add отказы и повтор, speakers — объединение")
+    home = yard.root / "speaker-door"
+    home.mkdir()
+    roster = home / ROSTER
+    for bad, why in (("12a", "буква"), ("", "пусто"), ("1" * 16, "16 цифр"), ("1;rm", "команда"),
+                     ("123\n", "перевод строки")):
+        done = lib_raw("speaker-add", str(roster), bad)
+        shown = bad.replace("\n", r"\n")   # имя случая — одна строка журнала
+        check(f"м1) speaker-add «{shown}» ({why}): код 3, файла нет", (3, False), (done.returncode, roster.exists()))
+    done = lib_raw("speaker-add", str(roster), str(STRANGER))
+    check("м2) speaker-add id: код 0, одна строка, 0640", (0, [str(STRANGER)], "0o640"),
+          (done.returncode, roster_ids(roster), oct(roster.stat().st_mode & 0o777) if roster.exists() else "нет"))
+    done = lib_raw("speaker-add", str(roster), str(STRANGER))
+    check("м3) повтор id: код 0 и по-прежнему одна строка", (0, [str(STRANGER)]),
+          (done.returncode, roster_ids(roster)))
+    lib_raw("speaker-add", str(roster), str(STRANGER2))
+    check("м3) второй id — второй строкой, первый на месте", [str(STRANGER), str(STRANGER2)], roster_ids(roster))
+    done = lib_raw("speaker-add", str(home / "нет-каталога" / ROSTER), str(STRANGER))
+    check("м4) каталога нет: код 5 с причиной, без трассировки", (5, True, False),
+          (done.returncode, bool(done.stdout.strip() or done.stderr.strip()), "Traceback" in done.stderr))
+    with open(roster, "a", encoding="utf-8") as fh:
+        fh.write("мусор\n12a\n\n 333 \n1;rm\n" + "9" * 16 + "\n")
+    done = lib_raw("speakers", f" 111 , {SPEAKER}", str(roster))
+    got = sorted(s for s in done.stdout.strip().split(",") if s)
+    want = sorted(["111", str(SPEAKER), str(STRANGER), str(STRANGER2), "333"])
+    check("м5) speakers: паспорт ∪ файл, битые строки отброшены", (0, want), (done.returncode, got))
+    done = lib_raw("speakers", "111", str(home / "нет-файла"))
+    check("м6) файла нет: speakers отдаёт паспорт", (0, "111"), (done.returncode, done.stdout.strip()))
+    done = lib_raw("speakers", "", str(home / "нет-файла"))
+    check("м6) ни паспорта, ни файла: пусто, код 0", (0, ""), (done.returncode, done.stdout.strip()))
+    probe_speaker_door_links(yard)
+
+
+def probe_speaker_door_links(yard: Yard) -> None:
+    """Каталог списка — 2770 agent:harness-panel: учётка панели может положить симлинк на место
+    файла списка, его .tmp или .lock. Писатель-агент не должен писать или обрезать цель симлинка
+    (файл агента вне каталога), а чтение — тянуть строки чужого файла в список."""
+    home = yard.root / "speaker-links"
+    home.mkdir()
+    roster = home / ROSTER
+    victims = {name: home / f"жертва-{name}" for name in ("tmp", "lock", "list")}
+    for victim in victims.values():
+        victim.write_text("777\nсекрет агента\n", encoding="utf-8")
+    (home / (ROSTER + ".tmp")).symlink_to(victims["tmp"])
+    (home / (ROSTER + ".lock")).symlink_to(victims["lock"])
+    roster.symlink_to(victims["list"])
+    done = lib_raw("speakers", "", str(roster))
+    check("м7) список-симлинк: строки цели в список не попадают", (0, ""), (done.returncode, done.stdout.strip()))
+    lib_raw("speaker-add", str(roster), str(STRANGER))
+    check("м7) speaker-add не пишет и не обрезает цели симлинков .tmp/.lock/списка",
+          ["777\nсекрет агента\n"] * 3, [v.read_text(encoding="utf-8") for v in victims.values()])
+
+
+def probe_speaker_no(yard: Yard) -> None:
+    """«Нет» владельца: ключ не тронут, отметка .told — на сутки от нажатия, вопроса снова нет."""
+    print("— 3к. «Нет» владельца на вопрос о собеседнике: ключ цел, сутки тишины")
+    st = Stand(yard, "speaker-no", chat_id=GROUP, owner_id=OWNER, speakers=str(SPEAKER))
+    passport = st.dir / "install.conf"
+    before = passport.read_text(encoding="utf-8")
+    st.say_in("здравствуйте", from_id=STRANGER, name="Незнакомец")
+    wait_for(lambda: speaker_questions(st, STRANGER))
+    data, message_id = question_button(st, STRANGER, "n")
+    check("к1) вопрос с кнопкой «Нет» дошёл до «отправлено»", (True, True),
+          (data is not None, message_id is not None))
+    # Отметка вопроса старится почти на сутки: «Нет» обязано продлить её от нажатия.
+    past = time.time() - 23 * 3600
+    for mark in st.log.rglob("*.told"):
+        os.utime(mark, (past, past))
+    pressed_at = time.time()
+    st.press(data, message_id)
+    time.sleep(1)
+    check("к2) «Нет» владельца: паспорт не тронут", before, passport.read_text(encoding="utf-8"))
+    marks = [p for p in st.log.rglob("*.told") if str(STRANGER) in p.name]
+    check("к3) отметка .told с id — свежая, от нажатия «Нет»", (1, True),
+          (len(marks), all(m.stat().st_mtime >= pressed_at - 2 for m in marks)))
+    st.say_in("ну пожалуйста", from_id=STRANGER, name="Незнакомец")
+    time.sleep(2)
+    check("к4) незнакомец пишет снова — вопроса нет, запроса нет", (1, 1),
+          (len(speaker_questions(st, STRANGER)), len(speaker_requests(st, STRANGER))))
+    check("к4) его текст по-прежнему не во входящих", [], speaker_files(st, STRANGER, "Незнакомец"))
+    if not cases.ok:
+        st.show()
+
+
+def probe_speaker_commands(yard: Yard) -> None:
+    """Решение лида 23.11: текст собеседника идёт мимо команд бота — «/pause» собеседника паузы
+    не ставит, «/resume» не снимает; оба ложатся во входящие с подписью."""
+    print("— 3л. команды бота от собеседника: не исполняются, текст во входящих с «от:»")
+    st = Stand(yard, "speaker-commands", chat_id=GROUP, owner_id=OWNER, speakers=str(SPEAKER))
+    pause = st.dir / "panel" / "пауза.json"
+    st.say_in("/pause", from_id=SPEAKER, name="Партнёр")
+    files = speaker_files(st, SPEAKER, "Партнёр")
+    check("л1) «/pause» собеседника: пауза не встала", False, pause.exists())
+    check("л2) «/pause» лёг во входящие с подписью", (1, True),
+          (len(files), any("/pause" in f.read_text(encoding="utf-8") for f in files)))
+    st.say_in("/pause")
+    check("л3) контроль: «/pause» владельца в той же группе паузу ставит", True,
+          wait_for(pause.exists, 10))
+    st.say_in("/resume", from_id=SPEAKER, name="Партнёр")
+    files = speaker_files(st, SPEAKER, "Партнёр")
+    check("л4) «/resume» собеседника паузу не снял, текст во входящих", (True, True),
+          (pause.exists(), any("/resume" in f.read_text(encoding="utf-8") for f in files)))
+    if not cases.ok:
+        st.show()
+
 
 # ── 4. повтор и прежнее сообщение ───────────────────────────────────────────
 def probe_repeat(st: Stand) -> None:
@@ -1268,6 +1702,9 @@ for last; do :; done
 exec sh -c "$last"
 """
 HANG = "#!/bin/sh\nexec sleep 30\n"
+# Предел ответа при зависшем git/ssh: подставной висит 30 с, код режет на 5 с; запас
+# под запуск python на нагруженной машине — иначе проба мигает (7.0 с при пределе 7).
+HANG_LIMIT_SEC = 12
 GIT_HANG_LOG = """#!/usr/bin/env bash
 # git стенда: log и rev-list висят, прочее — настоящему git.
 for a in "$@"; do case "$a" in log|rev-list) exec sleep 30 ;; esac; done
@@ -1452,7 +1889,7 @@ def probe_kind_refusals(yard: Yard) -> None:
                 reason="перенаправлен")
     b = bench()
     git("remote", "set-url", "origin", f"ssh://stand.invalid{b.remote}", cwd=b.work)
-    refused("в3к) ls-remote висит", push_args(b), extra_env={"GIT_SSH_COMMAND": str(hang)}, limit=7)
+    refused("в3к) ls-remote висит", push_args(b), extra_env={"GIT_SSH_COMMAND": str(hang)}, limit=HANG_LIMIT_SEC)
     refused("в3л) --вид выкат", ["--вид", "выкат", "--предмет", "x", "--почему", "проба"], parsed=False)
     secret = d.file("v3.txt")
     refused("в3м) --цель вместе с --вид", ["--цель", str(secret), "--вид", "удаление", "--предмет",
@@ -1545,7 +1982,8 @@ def probe_kind_hang(yard: Yard) -> None:
     except subprocess.TimeoutExpired:
         out, err = "", ""
     took = time.time() - start
-    check(f"в7а) unsent() вернулся ≤ 7 с (вышло {took:.1f} с)", True, took <= 7)
+    check(f"в7а) unsent() вернулся ≤ {HANG_LIMIT_SEC} с (вышло {took:.1f} с)", True,
+          took <= HANG_LIMIT_SEC)
     check("в7б) запрос с висящим git не отдан на отправку", False, nonce in out)
     check("в7в) причина — строкой в stderr", True, bool(err.strip()))
 
@@ -1594,13 +2032,14 @@ def probe_kind_tables(yard: Yard) -> None:
     except (ValueError, IndexError):
         found = {"виды": done.stderr.strip()[-160:], "таблицы": {}}
     kinds = found.get("виды")
-    check("в10а) owner_word.ВИДЫ_СОГЛАСИЯ — девять видов (спека §5: + «снос-базы», «перепись»;"
-          " спека стандартов: + «слой-человека»; сеть: + «ключ-сети»)",
+    check("в10а) owner_word.ВИДЫ_СОГЛАСИЯ — десять видов (спека §5: + «снос-базы», «перепись»;"
+          " спека стандартов: + «слой-человека»; сеть: + «ключ-сети»; группа: + «собеседник»)",
           ["удаление", "пуш", "выкат", "публикация", "спека", "снос-базы", "перепись",
-           "слой-человека", "ключ-сети"], kinds)
+           "слой-человека", "ключ-сети", SPEAKER_KIND], kinds)
     # Отзыв текстом — только у необратимых (спека §3). «спека» обратима (m3); «слой-человека»
     # тоже: его «Да» читает self-set.py через согласие_кнопкой, правка слоя откатывается.
-    reversible = {"спека", "слой-человека"}
+    # «собеседник» тоже: «Да» исполняет сам диспетчер при нажатии, отзывать текстом нечего.
+    reversible = {"спека", "слой-человека", SPEAKER_KIND}
     expected = {"ПРЕДМЕТ_ОТЗЫВА": sorted(set(kinds) - reversible)} if isinstance(kinds, list) else {}
     for name in ("owner_word.py", "consent_buttons.py", "ask-consent.py"):
         tables = found["таблицы"].get(name) or {}
@@ -1651,6 +2090,15 @@ def main() -> int:
                                    ("чужой", True, probe_stranger), ("группа", False, probe_group),
                                    ("группа-текст", False, probe_group_text),
                                    ("группа-без-ключа", False, probe_group_no_key),
+                                   ("собеседник-судья", False, probe_speaker_judge),
+                                   ("группа-собеседник", False, probe_group_speaker),
+                                   ("собеседник-да", False, probe_speaker_yes),
+                                   ("собеседник-перезапуск", False, probe_speaker_restart),
+                                   ("собеседник-отказ-записи", False, probe_speaker_refused),
+                                   ("собеседник-без-ключа", False, probe_speaker_no_key),
+                                   ("собеседник-дверь", False, probe_speaker_door),
+                                   ("собеседник-нет", False, probe_speaker_no),
+                                   ("собеседник-команды", False, probe_speaker_commands),
                                    ("повтор", True, probe_repeat),
                                    ("срок", True, probe_ttl), ("битый", True, probe_broken),
                                    ("дверь", False, probe_door), ("носитель", False, probe_carrier),

@@ -516,6 +516,12 @@ journals:
     time_field: ts
     time_kind: tz
     event_from: "field:event"
+  "runner":
+    file: "runner.jsonl"
+    writers: [scripts/remote-run.py]
+    time_field: ts
+    time_kind: tz
+    event_from: "field:event"
   "release-train":
     file: "release-train.jsonl"
     writers: [scripts/publish.sh]
@@ -584,6 +590,12 @@ journals:
   heavy-slots:
     file: heavy-slots.jsonl
     writers: [scripts/heavy-slot.sh]
+    time_field: ts
+    time_kind: tz
+    event_from: "field:event"
+  live-map:
+    file: live-map.jsonl
+    writers: [scripts/live-map.py]
     time_field: ts
     time_kind: tz
     event_from: "field:event"

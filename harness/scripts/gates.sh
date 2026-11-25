@@ -265,6 +265,7 @@ done
 проверка "установщик: шаг 13 до входа" bash scripts/test_installer_demon_probe.sh
 проверка "итог ворот называет sha и чистоту дерева" bash scripts/test_gates_summary_sha.sh
 проверка "публикация берёт итог ворот того же sha" bash scripts/test_publish_gates_reuse.sh
+проверка "чек-лист выпуска" python3 scripts/test_publish_check_list.py
 проверка "журнал хука называет дерево и секунды" bash scripts/test_precommit_journal_tree.sh
 проверка "очередь не гоняет ворота на том же дереве" python3 scripts/test_merge_queue_same_tree.py
 проверка "первый коммит установщика не мимо карты" bash scripts/test_devmap_selfheal_installer_commit.sh
@@ -358,6 +359,8 @@ done
 # Задача, сказанная в канал, обязана дойти до карты: 941 сообщение в очереди,
 # 171 с признаком работы, и связи «сообщение → задача» не было ни одной.
 проверка "задачи из канала" python3 scripts/tasks-from-channel.py
+проверка "слово собеседника группы" python3 scripts/test_tasks_from_channel_speaker.py
+проверка "ключ собеседников группы" python3 scripts/test_group_speakers_key.py
 # Сама приёмка проверок не делает ворота красными — она про содержание работы,
 # а не про здоровье машины. В воротах стоит её САМОТЕСТ: механизм, судящий о
 # доказанности, обязан быть доказан сам.
@@ -365,6 +368,15 @@ done
 # Ускорение мутаций не смеет превратить «нечем проверить» в «всё поймано».
 проверка "ускорение мутаций" python3 scripts/test_mutation_speed.py
 проверка "очередь слияния" python3 scripts/test_merge_queue.py
+# Разбор команд входа runner и задания — единственная граница второго сервера:
+# правка разбора без самотеста в воротах прошла бы зелёной (спека runner §7.7).
+проверка "вход runner"    python3 harness/runner/runner-entry --selftest
+проверка "задание runner" python3 harness/runner/runner-job --selftest
+# Коробка прогона: дерево как у очереди, тело со ступенями, сборщик итога (спека §4.1, §7.5).
+проверка "дерево runner"  python3 harness/runner/runner-prepare --selftest
+проверка "тело runner"    python3 harness/runner/runner-run --selftest
+проверка "сборщик runner" python3 harness/runner/runner-collect --selftest
+проверка "дверь runner" python3 scripts/test_remote_run.py
 проверка "трение коммита" python3 scripts/test_commit_friction.py
 проверка "сверка с пакетом: отложенное" python3 scripts/test_compare_package_deferred.py
 # Оболочка ночному агенту закрыта не списком инструментов, а режимом прав:
@@ -486,10 +498,14 @@ done
 проверка "витрина панели"  python3 harness/panel/test_state.py
 # Канбан: снимок доски, её страницы в панели и приём комментариев с карточки.
 проверка "снимок доски"   python3 scripts/test_build_board.py
+проверка "живая карта: сборщик" python3 scripts/test_live_map.py
 проверка "очередь по статусам" python3 scripts/test_work_queue.py
 проверка "очередь: ждёт внешнего" python3 scripts/test_work_queue_external_wait.py
 проверка "очередь по важности" python3 scripts/test_queue_importance.py
 проверка "доска панели"   python3 harness/panel/test_task_board.py
+проверка "живая карта: страница" python3 harness/panel/test_live_map_page.py
+проверка "живая карта: вход Telegram" python3 harness/panel/test_tg_web_app.py
+проверка "живая карта: рисунок" node harness/panel/test_live_map_js.js
 проверка "приём комментариев" python3 scripts/test_comments_intake.py
 проверка "шаги пайплайна" python3 scripts/test_write_step.py
 проверка "судья безопасности" python3 scripts/test_security_gate.py

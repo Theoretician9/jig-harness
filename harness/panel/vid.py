@@ -80,6 +80,33 @@ def _страница(заголовок: str, тело: str) -> str:
             f'<title>{html.escape(заголовок)}</title><style>{СТИЛЬ}</style>{тело}')
 
 
+_СТИЛЬ_КАРТЫ = """
+#karta{max-width:1200px;margin:0 auto}
+#karta svg{width:100%;height:auto;display:block}
+#karta text{fill:var(--текст);font:12px -apple-system,"Segoe UI",Roboto,sans-serif}
+#karta .тихо{fill:var(--тихо)}
+#karta p{color:var(--тихо);text-align:center;margin:12vh 0}
+#karta p.banner{margin:8px 0;text-align:left}
+#karta svg.stale{filter:grayscale(1);opacity:.55}
+"""
+
+
+def _страница_карты(тело_корня: str) -> str:
+    """Оболочка живой карты: рисует внешний скрипт, а не встроенный (CSP 'self')."""
+    return _страница("Живая карта харнеса", f'<style>{_СТИЛЬ_КАРТЫ}</style>'
+                     f'<div id="karta">{тело_корня}</div>'
+                     '<script src="/puls/app.js"></script>')
+
+
+def live_map_page() -> str:
+    return _страница_карты("")
+
+
+def live_map_login() -> str:
+    """Страница без входа: «Войдите» внутри корня, скрипт его снимет при удачном входе."""
+    return _страница_карты("<p>Войдите: нажмите «Карта» в чате ещё раз</p>")
+
+
 def гость() -> str:
     return _страница("Панель харнеса", f"""
 <div class="вход">
@@ -376,6 +403,7 @@ def панель(снимок: dict, ручки: list[dict], csrf: str, сооб
              '<a href="/karta"><button>Карта работы</button></a>'
              '<a href="/ustrojstvo"><button>Как устроено</button></a>'
              '<a href="/processy"><button>Процессы</button></a>'
+             '<a href="/puls"><button>Живая карта</button></a>'
              '<a href="/pamyat"><button>Память</button></a>'
              '<form method="post" action="/vyjti">'
              f'<input type="hidden" name="csrf" value="{html.escape(csrf)}">'

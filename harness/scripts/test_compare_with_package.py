@@ -16,6 +16,7 @@
   (е) копия (EVOLUTION_ROLE не host): агенты, settings.json и mechanisms.yaml
       раскладки разошлись с пакетом → rc 0 и строка-причина, без «cp … в пакет»;
       хозяин с тем же расхождением → rc 1, как прежде.
+  (ж) код стороны runner (harness/runner/*) — файл харнеса: без двойника в пакете → rc 1.
 Стенды (а)–(д) — хозяин: правило «правка только в проекте умрёт» — его.
 Дверь пробы: COMPARE_WITH_PACKAGE_GATE — путь копии гейта (мутации).
 
@@ -209,6 +210,16 @@ def main() -> int:
             else:
                 check(f"{title}: …назван путь и совет «cp»",
                       "harness/config/mechanisms.yaml" in out and "cp " in out, out)
+
+        # (ж) harness/runner/ едет в пакет: его требуют ворота (самотесты входа и
+        # задания) и клиент remote-run.py. Без пары в СООТВЕТСТВИЯ гейт не считает
+        # его файлом харнеса, правка живёт только в проекте и копия краснеет.
+        prj, pkg, conf = stand(base, "zh")
+        write(prj / "harness/runner/runner-entry", "вход\n")
+        git(prj, "add", "harness/runner/runner-entry")
+        rc, out = run_gate(prj, conf, ["harness/runner/runner-entry"])
+        check("(ж) harness/runner/runner-entry без двойника в пакете — отказ", rc == 1, out)
+        check("(ж) …и назван путь двойника", "harness/runner/runner-entry" in out, out)
 
         # Здоровый: двойник закоммичен и совпадает, пакет чист.
         prj, pkg, conf = stand(base, "ok")

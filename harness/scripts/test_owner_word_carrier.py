@@ -1054,6 +1054,8 @@ def case_publish_exec_paths() -> None:
         runs.append(("пропуск ворот", *stand.run([])))
         stand.reusable_gates_summary()
         runs.append(("итог ворот", *stand.run([])))
+        # Суд сроков карантина зовёт только чек-лист выпуска.
+        runs.append(("чек-лист", *stand.run(["--чек-лист"])))
         # Самотест двери сам называет паспорт своих дворов — паспорт судится по зовам до него.
         door_calls = stand.calls()
         runs.append(("самотест", *stand.run(["--selftest"])))

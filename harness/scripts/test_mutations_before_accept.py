@@ -281,6 +281,87 @@ def probe_hackathon(acc, root: Path) -> None:
           acc.судить(ordinary, root).get("исход"))
 
 
+KEYED_PROBES = f"""пробы:
+  scripts/././test_m.py:
+    механизм: {MECHANISM}
+    доказательство: python3 scripts/test_m.py
+    подмена: HARNESS_M
+    мутация:
+    - 's@a@b@'
+  scripts/test_n.py#якорь:
+    механизм: {MECHANISM}
+    доказательство: python3 scripts/test_n.py
+    подмена: HARNESS_M
+    мутация:
+    - 's@a@b@'
+"""
+
+
+def probe_keyed_paths(acc, root: Path) -> None:
+    """Ключ таблицы — не путь: `scripts/././x.py` (уникальность ключа YAML) и
+    `x.py#якорь` git не знает. Поломка: ключ идёт в git как путь — неизменный
+    файл судится «изменился», а правка доказательства после бумаги не видна."""
+    git(root, "init", "-q")
+    config = root / "harness" / "config"
+    config.mkdir(parents=True)
+    (config / "probe-mutations.yaml").write_text(KEYED_PROBES, encoding="utf-8")
+    for name in ("scripts/test_m.py", "scripts/test_n.py"):
+        (root / name).parent.mkdir(parents=True, exist_ok=True)
+        (root / name).write_text("x = 1\n", encoding="utf-8")
+    git(root, "add", "-A")
+    git(root, "commit", "-q", "-m", "стенд")
+    sha = commit(root)
+    check("ключи ./././ и #якорь, файлы те же — бумага судила тот же код", [],
+          acc.paper_code_debts(root, sha, [MECHANISM]))
+    check("ключи ./././ и #якорь, правок после бумаги нет — долга нет", [],
+          acc.stale_debts(TASK, root, sha, [MECHANISM]))
+    for name in ("scripts/test_m.py", "scripts/test_n.py"):
+        with (root / name).open("a", encoding="utf-8") as fh:
+            fh.write("y = 2\n")
+        git(root, "add", name)
+        git(root, "commit", "-q", "-m", f"правка пробы\n\nDev-Map: {TASK}")
+        check(f"{name} изменён после бумаги — «другой код» по пути файла", True,
+              any(f"{name} изменился" in d for d in acc.paper_code_debts(root, sha, [MECHANISM])))
+        check(f"{name} правлен задачей после бумаги — «бумага старше правки»", True,
+              any(f"правила {name} " in d for d in acc.stale_debts(TASK, root, sha, [MECHANISM])))
+
+
+ANCHORED_PROBES = """пробы:
+  scripts/g.sh#часть:
+    механизм: scripts/a.py
+    доказательство: bash scripts/g.sh
+    подмена: HARNESS_A
+    мутация:
+    - 's@a@b@'
+  scripts/w.sh:
+    механизм: scripts/b.py
+    доказательство: bash scripts/w.sh
+    подмена: HARNESS_B
+    мутация:
+    - 's@a@b@'
+"""
+
+
+def probe_anchor_step(acc, root: Path) -> None:
+    """Якорь `g.sh#часть` — доказательство в части файла: правка файла задачей
+    механизм в её шаг не тянет; доказательство без якоря — тянет. Поломка:
+    якорный ключ судится как целый файл — правка gates.sh тянула в шаг задачи
+    двенадцать чужих механизмов."""
+    git(root, "init", "-q")
+    config = root / "harness" / "config"
+    config.mkdir(parents=True)
+    (config / "probe-mutations.yaml").write_text(ANCHORED_PROBES, encoding="utf-8")
+    git(root, "add", "-A")
+    git(root, "commit", "-q", "-m", "стенд")
+    for name in ("scripts/g.sh", "scripts/w.sh"):
+        (root / name).parent.mkdir(parents=True, exist_ok=True)
+        (root / name).write_text("x = 1\n", encoding="utf-8")
+    git(root, "add", "-A")
+    git(root, "commit", "-q", "-m", f"правка доказательств\n\nDev-Map: {TASK}")
+    check("правка g.sh (ключ g.sh#часть) механизм не тянет; w.sh без якоря — тянет",
+          ["scripts/b.py"], acc.механизмы_задачи(TASK, root))
+
+
 def main() -> int:
     cp = load(CHECK_PIPELINE, "check_pipeline_under_test")
     for name, probe in (("пайплайн", lambda: probe_pipeline(cp)),):
@@ -292,7 +373,8 @@ def main() -> int:
     # Судья пайплайна берёт acceptance.py под пробой, а не своего соседа.
     cp._SIBLINGS["acceptance"] = acc
     for name, probe in (("долг", probe_debt), ("вердикт", lambda a, r: probe_verdict(a, cp, r)),
-                        ("ночь", probe_night), ("хакатон", probe_hackathon)):
+                        ("ночь", probe_night), ("хакатон", probe_hackathon),
+                        ("ключи-пути", probe_keyed_paths), ("якорь-шаг", probe_anchor_step)):
         with tempfile.TemporaryDirectory() as tmp:
             try:
                 probe(acc, Path(tmp))

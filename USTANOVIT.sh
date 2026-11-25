@@ -1012,6 +1012,7 @@ CC_VERSION="$CC_VERSION"           # версия Claude Code, фиксируе�
 SECRETS_DIR="$SECRETS_DIR"         # ВНЕ вебрута и репо
 TG_TOKEN_FILE="$TG_TOKEN_FILE"     # файл с токеном бота
 TG_CHAT_ID="$TG_CHAT_ID"           # chat_id владельца
+TG_GROUP_SPEAKERS=""                # необязательно: from.id собеседников группы через запятую (партнёр владельца); пусто — слушаем только владельца
 AUTONOMY="$AUTONOMY"               # semi | full — режим из 00-ВВОДНЫЕ §1.2; данные, не код
 OWNER_TZ="$OWNER_TZ"               # часовой пояс ВЛАДЕЛЬЦА: по нему живёт сервер и расписания демонов
 STATE_DIR="$STATE_DIR"             # корень состояния: под ним heartbeat, panel-state, secrets
@@ -1153,7 +1154,7 @@ EOF
   уже_сделан шаг_2 && { скажи "[$step] пропуск (--resume)"; return 0; }
   заголовок "$step"
   делай "$APT_UPDATE"
-  делай "apt_поставить git tmux curl jq python3 python3-pip python3-venv python3-yaml shellcheck ripgrep unzip logrotate iproute2"
+  делай "apt_поставить git tmux curl jq python3 python3-pip python3-venv python3-yaml python3-cryptography shellcheck ripgrep unzip logrotate iproute2"
   делай "if command -v node >/dev/null 2>&1 && [ \"\$(node --version | sed 's/v//' | cut -d. -f1)\" -ge 20 ]; then echo 'node уже >=20 — nodesource пропущен'; else curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && DEBIAN_FRONTEND=noninteractive apt-get install -y nodejs; fi"
   # Браузер расширения playwright (базовый набор) скачивает агент без root, а
   # его системные библиотеки (libatk, libgbm, libasound…) — только root: без
